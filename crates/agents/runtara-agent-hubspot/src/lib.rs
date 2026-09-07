@@ -19,22 +19,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-hubspot/agent",
-        // Standard callback bindings let cancellation drop pending I/O.
-        async: ["export:runtara:agent-hubspot/capabilities@0.4.0#invoke"],
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -3294,154 +3278,54 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_hubspot::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            // Brands / Business Units
-            "list-business-units" => __executor_list_business_units(value).await,
-            // Properties / Schemas
-            "list-object-properties" => __executor_list_object_properties(value).await,
-            "get-object-property" => __executor_get_object_property(value).await,
-            // Contacts
-            "list-contacts" => __executor_list_contacts(value).await,
-            "get-contact" => __executor_get_contact(value).await,
-            "create-contact" => __executor_create_contact(value).await,
-            "update-contact" => __executor_update_contact(value).await,
-            "delete-contact" => __executor_delete_contact(value).await,
-            "search-contacts" => __executor_search_contacts(value).await,
-            // Companies
-            "list-companies" => __executor_list_companies(value).await,
-            "get-company" => __executor_get_company(value).await,
-            "create-company" => __executor_create_company(value).await,
-            "update-company" => __executor_update_company(value).await,
-            "delete-company" => __executor_delete_company(value).await,
-            "search-companies" => __executor_search_companies(value).await,
-            // Deals
-            "list-deals" => __executor_list_deals(value).await,
-            "get-deal" => __executor_get_deal(value).await,
-            "create-deal" => __executor_create_deal(value).await,
-            "update-deal" => __executor_update_deal(value).await,
-            "delete-deal" => __executor_delete_deal(value).await,
-            "search-deals" => __executor_search_deals(value).await,
-            // Quotes
-            "list-quotes" => __executor_list_quotes(value).await,
-            "get-quote" => __executor_get_quote(value).await,
-            "create-quote" => __executor_create_quote(value).await,
-            "update-quote" => __executor_update_quote(value).await,
-            "delete-quote" => __executor_delete_quote(value).await,
-            "search-quotes" => __executor_search_quotes(value).await,
-            // Line Items
-            "list-line-items" => __executor_list_line_items(value).await,
-            "get-line-item" => __executor_get_line_item(value).await,
-            "create-line-item" => __executor_create_line_item(value).await,
-            "update-line-item" => __executor_update_line_item(value).await,
-            "delete-line-item" => __executor_delete_line_item(value).await,
-            "search-line-items" => __executor_search_line_items(value).await,
-            // Owners
-            "list-owners" => __executor_list_owners(value).await,
-            "get-owner" => __executor_get_owner(value).await,
-            // Pipelines
-            "list-pipelines" => __executor_list_pipelines(value).await,
-            "get-pipeline" => __executor_get_pipeline(value).await,
-            // Associations
-            "create-association" => __executor_create_association(value).await,
-            "list-associations" => __executor_list_associations(value).await,
-            // Webhook Subscriptions
-            "list-webhook-subscriptions" => __executor_list_webhook_subscriptions(value).await,
-            "create-webhook-subscription" => __executor_create_webhook_subscription(value).await,
-            "update-webhook-subscription" => __executor_update_webhook_subscription(value).await,
-            "delete-webhook-subscription" => __executor_delete_webhook_subscription(value).await,
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("hubspot agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "hubspot",
+    capabilities = [
+        list_business_units,
+        list_object_properties,
+        get_object_property,
+        list_contacts,
+        get_contact,
+        create_contact,
+        update_contact,
+        delete_contact,
+        search_contacts,
+        list_companies,
+        get_company,
+        create_company,
+        update_company,
+        delete_company,
+        search_companies,
+        list_deals,
+        get_deal,
+        create_deal,
+        update_deal,
+        delete_deal,
+        search_deals,
+        list_quotes,
+        get_quote,
+        create_quote,
+        update_quote,
+        delete_quote,
+        search_quotes,
+        list_line_items,
+        get_line_item,
+        create_line_item,
+        update_line_item,
+        delete_line_item,
+        search_line_items,
+        list_owners,
+        get_owner,
+        list_pipelines,
+        get_pipeline,
+        create_association,
+        list_associations,
+        list_webhook_subscriptions,
+        create_webhook_subscription,
+        update_webhook_subscription,
+        delete_webhook_subscription,
+    ],
+);
 
 #[cfg(test)]
 mod tests {

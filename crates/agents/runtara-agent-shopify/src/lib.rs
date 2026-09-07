@@ -24,23 +24,6 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-shopify/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -155,7 +138,7 @@ fn resolve_api_version(connection: &RawConnection) -> String {
 /// Executes a GraphQL query or mutation against the Shopify Admin API via the
 /// runtara proxy. The proxy resolves the connection's `shop_domain` into the
 /// absolute URL and injects `X-Shopify-Access-Token` server-side.
-fn execute_graphql_query(
+async fn execute_graphql_query(
     connection: &RawConnection,
     query: &str,
     variables: Option<Value>,
@@ -179,7 +162,8 @@ fn execute_graphql_query(
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -1529,13 +1513,16 @@ pub struct SetProductInput {
     module_integration_ids = "shopify_access_token,shopify_client_credentials",
     module_secure = true
 )]
-pub fn set_product(input: SetProductInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn set_product(input: SetProductInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
-    let result = set_product_inner(conn, &input)?;
+    let result = set_product_inner(conn, &input).await?;
     Ok(GenericShopifyOutput::from_value(result))
 }
 
-fn set_product_inner(conn: &RawConnection, input: &SetProductInput) -> Result<Value, AgentError> {
+async fn set_product_inner(
+    conn: &RawConnection,
+    input: &SetProductInput,
+) -> Result<Value, AgentError> {
     let mut variant = json!({});
     if let Some(ref sku) = input.sku {
         variant["sku"] = json!(sku);
@@ -1625,7 +1612,7 @@ fn set_product_inner(conn: &RawConnection, input: &SetProductInput) -> Result<Va
     }
 
     let variables = json!({ "synchronous": true, "productSet": product_set });
-    let response = execute_graphql_query(conn, SET_PRODUCT, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_PRODUCT, Some(variables)).await?;
     check_user_errors(&response, "productSet")?;
     extract_graphql_data(response, &["data", "productSet", "product"])
 }
@@ -1708,13 +1695,13 @@ pub struct UpdateProductInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn update_product(input: UpdateProductInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn update_product(input: UpdateProductInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
-    let result = update_product_inner(conn, &input)?;
+    let result = update_product_inner(conn, &input).await?;
     Ok(GenericShopifyOutput::from_value(result))
 }
 
-fn update_product_inner(
+async fn update_product_inner(
     conn: &RawConnection,
     input: &UpdateProductInput,
 ) -> Result<Value, AgentError> {
@@ -1766,7 +1753,7 @@ fn update_product_inner(
         variables["media"] = json!(media);
     }
 
-    let response = execute_graphql_query(conn, UPDATE_PRODUCT, Some(variables))?;
+    let response = execute_graphql_query(conn, UPDATE_PRODUCT, Some(variables)).await?;
     check_user_errors(&response, "productUpdate")?;
     extract_graphql_data(response, &["data", "productUpdate", "product"])
 }
@@ -1798,10 +1785,10 @@ pub struct DeleteProductInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn delete_product(input: DeleteProductInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn delete_product(input: DeleteProductInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({ "input": { "id": input.product_id } });
-    let response = execute_graphql_query(conn, DELETE_PRODUCT, Some(variables))?;
+    let response = execute_graphql_query(conn, DELETE_PRODUCT, Some(variables)).await?;
     check_user_errors(&response, "productDelete")?;
     let result = extract_graphql_data(response, &["data", "productDelete", "deletedProductId"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -1862,7 +1849,7 @@ pub struct ListProductsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn list_products(input: ListProductsInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn list_products(input: ListProductsInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let mut query_parts = vec![];
     if let Some(v) = input.vendor {
@@ -1886,7 +1873,7 @@ pub fn list_products(input: ListProductsInput) -> Result<GenericShopifyOutput, A
     if let Some(cursor) = input.cursor {
         variables["after"] = json!(cursor);
     }
-    let response = execute_graphql_query(conn, LIST_PRODUCTS, Some(variables))?;
+    let response = execute_graphql_query(conn, LIST_PRODUCTS, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "products"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -2066,7 +2053,7 @@ pub struct QueryProductsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn query_products(input: QueryProductsInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn query_products(input: QueryProductsInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let mut query_parts: Vec<String> = vec![];
     if let Some(ref v) = input.title {
@@ -2183,7 +2170,7 @@ pub fn query_products(input: QueryProductsInput) -> Result<GenericShopifyOutput,
         variables["reverse"] = json!(reverse);
     }
 
-    let response = execute_graphql_query(conn, QUERY_PRODUCTS, Some(variables))?;
+    let response = execute_graphql_query(conn, QUERY_PRODUCTS, Some(variables)).await?;
     let mut products = extract_graphql_data(response, &["data", "products"])?;
 
     if input.exact_sku_match.unwrap_or(false)
@@ -2248,7 +2235,9 @@ pub struct GetProductBySkuInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn get_product_by_sku(
+    input: GetProductBySkuInput,
+) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let exact_match = input.exact_match.unwrap_or(true);
     let first = if exact_match {
@@ -2260,7 +2249,7 @@ pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<GenericShopifyO
         "first": first,
         "sku": format!("sku:\"{}\"", input.sku),
     });
-    let response = execute_graphql_query(conn, GET_PRODUCT_BY_SKU, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_PRODUCT_BY_SKU, Some(variables)).await?;
     let products = extract_graphql_data(response, &["data", "products", "edges"])?;
 
     if exact_match {
@@ -2333,12 +2322,14 @@ pub struct SetProductTagsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn set_product_tags(input: SetProductTagsInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn set_product_tags(
+    input: SetProductTagsInput,
+) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({
         "input": { "id": input.product_id, "tags": input.tags }
     });
-    let response = execute_graphql_query(conn, SET_PRODUCT_TAGS, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_PRODUCT_TAGS, Some(variables)).await?;
     check_user_errors(&response, "productUpdate")?;
     let result = extract_graphql_data(response, &["data", "productUpdate", "product"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -2373,12 +2364,13 @@ pub struct ReplaceProductImagesInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn replace_product_images(
+pub async fn replace_product_images(
     input: ReplaceProductImagesInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let get_media_vars = json!({ "productId": input.product_id });
-    let media_response = execute_graphql_query(conn, GET_PRODUCT_MEDIA, Some(get_media_vars))?;
+    let media_response =
+        execute_graphql_query(conn, GET_PRODUCT_MEDIA, Some(get_media_vars)).await?;
     let mut media_ids_to_delete = vec![];
     if let Some(edges) = media_response
         .get("data")
@@ -2399,7 +2391,7 @@ pub fn replace_product_images(
     }
     if !media_ids_to_delete.is_empty() {
         let delete_vars = json!({ "fileIds": media_ids_to_delete });
-        let delete_response = execute_graphql_query(conn, DELETE_FILES, Some(delete_vars))?;
+        let delete_response = execute_graphql_query(conn, DELETE_FILES, Some(delete_vars)).await?;
         check_user_errors(&delete_response, "fileDelete")?;
     }
     let product_input = json!({ "id": input.product_id });
@@ -2415,7 +2407,7 @@ pub fn replace_product_images(
         })
         .collect();
     let update_vars = json!({ "product": product_input, "media": media });
-    let update_response = execute_graphql_query(conn, UPDATE_PRODUCT, Some(update_vars))?;
+    let update_response = execute_graphql_query(conn, UPDATE_PRODUCT, Some(update_vars)).await?;
     check_user_errors(&update_response, "productUpdate")?;
     let result = extract_graphql_data(update_response, &["data", "productUpdate", "product"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -2443,12 +2435,12 @@ pub struct GetProductOptionsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_product_options(
+pub async fn get_product_options(
     input: GetProductOptionsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({ "productId": input.product_id });
-    let response = execute_graphql_query(conn, GET_PRODUCT_OPTIONS, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_PRODUCT_OPTIONS, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "product", "options"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -2490,7 +2482,7 @@ pub struct RenameProductOptionInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn rename_product_option(
+pub async fn rename_product_option(
     input: RenameProductOptionInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -2509,7 +2501,7 @@ pub fn rename_product_option(
             .collect();
         variables["optionValuesToUpdate"] = json!(values_json);
     }
-    let response = execute_graphql_query(conn, RENAME_PRODUCT_OPTION, Some(variables))?;
+    let response = execute_graphql_query(conn, RENAME_PRODUCT_OPTION, Some(variables)).await?;
     check_user_errors(&response, "productOptionUpdate")?;
     let result = extract_graphql_data(response, &["data", "productOptionUpdate", "product"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -2544,7 +2536,7 @@ pub struct SetProductMetafieldsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn set_product_metafields(
+pub async fn set_product_metafields(
     input: SetProductMetafieldsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -2562,7 +2554,7 @@ pub fn set_product_metafields(
         })
         .collect();
     let variables = json!({ "metafields": metafield_inputs });
-    let response = execute_graphql_query(conn, SET_PRODUCT_METAFIELDS, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_PRODUCT_METAFIELDS, Some(variables)).await?;
     check_user_errors(&response, "metafieldsSet")?;
     let result = extract_graphql_data(response, &["data", "metafieldsSet", "metafields"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -2600,7 +2592,7 @@ pub struct GetProductMetafieldsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_product_metafields(
+pub async fn get_product_metafields(
     input: GetProductMetafieldsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -2608,7 +2600,7 @@ pub fn get_product_metafields(
     if let Some(ns) = input.namespace {
         variables["namespace"] = json!(ns);
     }
-    let response = execute_graphql_query(conn, GET_PRODUCT_METAFIELDS, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_PRODUCT_METAFIELDS, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "product", "metafields"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -2652,7 +2644,7 @@ pub struct GetProductVariantBySkuInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_product_variant_by_sku(
+pub async fn get_product_variant_by_sku(
     input: GetProductVariantBySkuInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -2666,7 +2658,7 @@ pub fn get_product_variant_by_sku(
         "first": first,
         "sku": format!("sku:\"{}\"", input.sku),
     });
-    let response = execute_graphql_query(conn, GET_PRODUCT_VARIANT_BY_SKU, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_PRODUCT_VARIANT_BY_SKU, Some(variables)).await?;
     let variants = extract_graphql_data(response, &["data", "productVariants", "edges"])?;
     if exact_match {
         if let Some(edges) = variants.as_array() {
@@ -2768,7 +2760,7 @@ pub struct CreateProductVariantInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn create_product_variant(
+pub async fn create_product_variant(
     input: CreateProductVariantInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -2814,7 +2806,7 @@ pub fn create_product_variant(
         variant["optionValues"] = json!(options);
     }
     let variables = json!({ "productId": input.product_id, "variant": variant });
-    let response = execute_graphql_query(conn, CREATE_PRODUCT_VARIANT, Some(variables))?;
+    let response = execute_graphql_query(conn, CREATE_PRODUCT_VARIANT, Some(variables)).await?;
     check_user_errors(&response, "productVariantCreate")?;
     let result = extract_graphql_data(
         response,
@@ -2881,7 +2873,7 @@ pub struct UpdateProductVariantInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn update_product_variant(
+pub async fn update_product_variant(
     input: UpdateProductVariantInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -2914,7 +2906,7 @@ pub fn update_product_variant(
         "productId": input.product_id,
         "variants": [variant_input]
     });
-    let response = execute_graphql_query(conn, UPDATE_PRODUCT_VARIANT, Some(variables))?;
+    let response = execute_graphql_query(conn, UPDATE_PRODUCT_VARIANT, Some(variables)).await?;
     check_user_errors(&response, "productVariantsBulkUpdate")?;
     let variants = extract_graphql_data(
         response,
@@ -2959,20 +2951,17 @@ pub struct UpdateProductVariantPriceInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn update_product_variant_price(
+pub async fn update_product_variant_price(
     input: UpdateProductVariantPriceInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
-    let result = update_product_variant_price_inner(
-        conn,
-        &input.product_id,
-        &input.variant_id,
-        input.price,
-    )?;
+    let result =
+        update_product_variant_price_inner(conn, &input.product_id, &input.variant_id, input.price)
+            .await?;
     Ok(GenericShopifyOutput::from_value(result))
 }
 
-fn update_product_variant_price_inner(
+async fn update_product_variant_price_inner(
     conn: &RawConnection,
     product_id: &str,
     variant_id: &str,
@@ -2982,7 +2971,8 @@ fn update_product_variant_price_inner(
         "productId": product_id,
         "variants": [{ "id": variant_id, "price": price.to_string() }]
     });
-    let response = execute_graphql_query(conn, UPDATE_PRODUCT_VARIANT_PRICE, Some(variables))?;
+    let response =
+        execute_graphql_query(conn, UPDATE_PRODUCT_VARIANT_PRICE, Some(variables)).await?;
     check_user_errors(&response, "productVariantsBulkUpdate")?;
     extract_graphql_data(
         response,
@@ -3012,12 +3002,12 @@ pub struct DeleteProductVariantInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn delete_product_variant(
+pub async fn delete_product_variant(
     input: DeleteProductVariantInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({ "id": input.variant_id });
-    let response = execute_graphql_query(conn, DELETE_PRODUCT_VARIANT, Some(variables))?;
+    let response = execute_graphql_query(conn, DELETE_PRODUCT_VARIANT, Some(variables)).await?;
     check_user_errors(&response, "productVariantDelete")?;
     let result = extract_graphql_data(
         response,
@@ -3054,7 +3044,7 @@ pub struct SetVariantMetafieldsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn set_variant_metafields(
+pub async fn set_variant_metafields(
     input: SetVariantMetafieldsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -3072,7 +3062,7 @@ pub fn set_variant_metafields(
         })
         .collect();
     let variables = json!({ "metafields": metafield_inputs });
-    let response = execute_graphql_query(conn, SET_PRODUCT_METAFIELDS, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_PRODUCT_METAFIELDS, Some(variables)).await?;
     check_user_errors(&response, "metafieldsSet")?;
     let result = extract_graphql_data(response, &["data", "metafieldsSet", "metafields"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -3103,7 +3093,7 @@ pub struct SetProductVariantCostInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn set_product_variant_cost(
+pub async fn set_product_variant_cost(
     input: SetProductVariantCostInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -3111,7 +3101,8 @@ pub fn set_product_variant_cost(
         conn,
         GET_PRODUCT_VARIANT_INVENTORY_ITEM,
         Some(json!({ "id": input.variant_id })),
-    )?;
+    )
+    .await?;
     let inventory_item_id = item_response
         .get("data")
         .and_then(|d| d.get("productVariant"))
@@ -3129,7 +3120,8 @@ pub fn set_product_variant_cost(
         "id": inventory_item_id,
         "input": { "cost": input.cost }
     });
-    let response = execute_graphql_query(conn, INVENTORY_ITEM_UPDATE_COST, Some(update_vars))?;
+    let response =
+        execute_graphql_query(conn, INVENTORY_ITEM_UPDATE_COST, Some(update_vars)).await?;
     check_user_errors(&response, "inventoryItemUpdate")?;
     let result = extract_graphql_data(response, &["data", "inventoryItemUpdate", "inventoryItem"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -3160,7 +3152,7 @@ pub struct SetProductVariantWeightInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn set_product_variant_weight(
+pub async fn set_product_variant_weight(
     input: SetProductVariantWeightInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -3168,7 +3160,8 @@ pub fn set_product_variant_weight(
         conn,
         GET_PRODUCT_VARIANT_INVENTORY_ITEM,
         Some(json!({ "id": input.variant_id })),
-    )?;
+    )
+    .await?;
     let inventory_item_id = item_response
         .get("data")
         .and_then(|d| d.get("productVariant"))
@@ -3190,7 +3183,8 @@ pub fn set_product_variant_weight(
             }
         }
     });
-    let response = execute_graphql_query(conn, INVENTORY_ITEM_UPDATE_WEIGHT, Some(update_vars))?;
+    let response =
+        execute_graphql_query(conn, INVENTORY_ITEM_UPDATE_WEIGHT, Some(update_vars)).await?;
     check_user_errors(&response, "inventoryItemUpdate")?;
     let result = extract_graphql_data(response, &["data", "inventoryItemUpdate", "inventoryItem"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -3221,13 +3215,13 @@ pub struct GetInventoryItemIdInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_inventory_item_id_by_variant_id(
+pub async fn get_inventory_item_id_by_variant_id(
     input: GetInventoryItemIdInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({ "id": input.variant_id });
     let response =
-        execute_graphql_query(conn, GET_PRODUCT_VARIANT_INVENTORY_ITEM, Some(variables))?;
+        execute_graphql_query(conn, GET_PRODUCT_VARIANT_INVENTORY_ITEM, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "productVariant"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -3262,7 +3256,7 @@ pub struct SetInventoryInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn set_inventory(input: SetInventoryInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn set_inventory(input: SetInventoryInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({
         "input": {
@@ -3276,7 +3270,7 @@ pub fn set_inventory(input: SetInventoryInput) -> Result<GenericShopifyOutput, A
             }]
         }
     });
-    let response = execute_graphql_query(conn, SET_INVENTORY, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_INVENTORY, Some(variables)).await?;
     check_user_errors(&response, "inventorySetQuantities")?;
     let result = extract_graphql_data(
         response,
@@ -3313,7 +3307,7 @@ pub struct SyncInventoryLevelsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn sync_inventory_levels(
+pub async fn sync_inventory_levels(
     input: SyncInventoryLevelsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -3331,7 +3325,7 @@ pub fn sync_inventory_levels(
                 }]
             }
         });
-        match execute_graphql_query(conn, SET_INVENTORY, Some(variables)) {
+        match execute_graphql_query(conn, SET_INVENTORY, Some(variables)).await {
             Ok(response) => match check_user_errors(&response, "inventorySetQuantities") {
                 Ok(()) => match extract_graphql_data(
                     response,
@@ -3386,7 +3380,7 @@ pub struct GetOrderInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_order(input: GetOrderInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn get_order(input: GetOrderInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let order_gid = if input.order_id.starts_with("gid://") {
         input.order_id
@@ -3394,7 +3388,7 @@ pub fn get_order(input: GetOrderInput) -> Result<GenericShopifyOutput, AgentErro
         format!("gid://shopify/Order/{}", input.order_id)
     };
     let variables = json!({ "id": order_gid });
-    let response = execute_graphql_query(conn, GET_ORDER, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_ORDER, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "order"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -3429,13 +3423,13 @@ pub struct GetOrderListInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_order_list(input: GetOrderListInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn get_order_list(input: GetOrderListInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let mut variables = json!({ "first": input.limit });
     if let Some(q) = input.query {
         variables["query"] = json!(q);
     }
-    let response = execute_graphql_query(conn, GET_ORDER_LIST, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_ORDER_LIST, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "orders"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -3466,7 +3460,7 @@ pub struct CreateOrderNoteOrTagInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn create_order_note_or_tag(
+pub async fn create_order_note_or_tag(
     input: CreateOrderNoteOrTagInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -3478,7 +3472,7 @@ pub fn create_order_note_or_tag(
         order_input["tags"] = json!(tags.join(", "));
     }
     let variables = json!({ "input": order_input });
-    let response = execute_graphql_query(conn, CREATE_ORDER_NOTE_OR_TAG, Some(variables))?;
+    let response = execute_graphql_query(conn, CREATE_ORDER_NOTE_OR_TAG, Some(variables)).await?;
     check_user_errors(&response, "orderUpdate")?;
     let result = extract_graphql_data(response, &["data", "orderUpdate", "order"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -3513,13 +3507,13 @@ pub struct CancelOrderInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn cancel_order(input: CancelOrderInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn cancel_order(input: CancelOrderInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let mut variables = json!({ "id": input.order_id });
     if let Some(r) = input.reason {
         variables["reason"] = json!(r.to_uppercase());
     }
-    let response = execute_graphql_query(conn, CANCEL_ORDER, Some(variables))?;
+    let response = execute_graphql_query(conn, CANCEL_ORDER, Some(variables)).await?;
     check_user_errors(&response, "orderCancel")?;
     let result = extract_graphql_data(response, &["data", "orderCancel", "order"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -3550,12 +3544,12 @@ pub struct GetFulfillmentOrdersInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_fulfillment_orders(
+pub async fn get_fulfillment_orders(
     input: GetFulfillmentOrdersInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({ "id": input.order_id });
-    let response = execute_graphql_query(conn, GET_FULFILLMENT_ORDERS, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_FULFILLMENT_ORDERS, Some(variables)).await?;
     let result = extract_graphql_data(response, &["data", "order", "fulfillmentOrders"])?;
     Ok(GenericShopifyOutput::from_value(result))
 }
@@ -3608,7 +3602,7 @@ pub struct FulfillOrderInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn fulfill_order(input: FulfillOrderInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn fulfill_order(input: FulfillOrderInput) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let mut tracking_info = Map::new();
     if let Some(n) = input.tracking_number {
@@ -3630,7 +3624,7 @@ pub fn fulfill_order(input: FulfillOrderInput) -> Result<GenericShopifyOutput, A
         fulfillment["trackingInfo"] = json!(tracking_info);
     }
     let variables = json!({ "fulfillment": fulfillment });
-    let response = execute_graphql_query(conn, FULFILL_ORDER, Some(variables))?;
+    let response = execute_graphql_query(conn, FULFILL_ORDER, Some(variables)).await?;
     check_user_errors(&response, "fulfillmentCreate")?;
     let result = extract_graphql_data(response, &["data", "fulfillmentCreate", "fulfillment"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -3684,7 +3678,7 @@ pub struct FulfillOrderLinesInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn fulfill_order_lines(
+pub async fn fulfill_order_lines(
     input: FulfillOrderLinesInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -3701,11 +3695,12 @@ pub fn fulfill_order_lines(
         input.tracking_company.as_deref(),
         input.tracking_url.as_deref(),
         input.notify_customer,
-    )?;
+    )
+    .await?;
     Ok(GenericShopifyOutput::from_value(result))
 }
 
-fn fulfill_order_lines_inner(
+async fn fulfill_order_lines_inner(
     connection: &RawConnection,
     line_items_by_fo: &[FulfillmentOrderLineItems],
     tracking_number: Option<&str>,
@@ -3745,7 +3740,7 @@ fn fulfill_order_lines_inner(
         fulfillment["trackingInfo"] = json!(tracking_info);
     }
     let variables = json!({ "fulfillment": fulfillment });
-    let response = execute_graphql_query(connection, FULFILL_ORDER, Some(variables))?;
+    let response = execute_graphql_query(connection, FULFILL_ORDER, Some(variables)).await?;
     check_user_errors(&response, "fulfillmentCreate")?;
     extract_graphql_data(response, &["data", "fulfillmentCreate", "fulfillment"])
 }
@@ -3841,7 +3836,7 @@ pub struct FulfillBySkuOutput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutput, AgentError> {
+pub async fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     if input.items.is_empty() {
         return Err(AgentError::permanent(
@@ -3859,7 +3854,8 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutput, Ag
         conn,
         GET_FULFILLMENT_ORDERS,
         Some(json!({ "id": order_gid })),
-    )?;
+    )
+    .await?;
     let fulfillment_orders = fo_response
         .get("data")
         .and_then(|d| d.get("order"))
@@ -4026,7 +4022,9 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutput, Ag
         input.tracking_company.as_deref(),
         input.tracking_url.as_deref(),
         input.notify_customer,
-    ) {
+    )
+    .await
+    {
         Ok(fulfillment) => {
             result.fulfillment = Some(fulfillment);
         }
@@ -4092,7 +4090,7 @@ pub struct CreateDraftOrderInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn create_draft_order(
+pub async fn create_draft_order(
     input: CreateDraftOrderInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4120,7 +4118,7 @@ pub fn create_draft_order(
         draft_input["lineItems"] = json!(mapped);
     }
     let variables = json!({ "input": draft_input });
-    let response = execute_graphql_query(conn, CREATE_DRAFT_ORDER, Some(variables))?;
+    let response = execute_graphql_query(conn, CREATE_DRAFT_ORDER, Some(variables)).await?;
     check_user_errors(&response, "draftOrderCreate")?;
     let result = extract_graphql_data(response, &["data", "draftOrderCreate", "draftOrder"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -4151,12 +4149,12 @@ pub struct GetCustomerByEmailInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_customer_by_email(
+pub async fn get_customer_by_email(
     input: GetCustomerByEmailInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let variables = json!({ "email": format!("email:{}", input.email) });
-    let response = execute_graphql_query(conn, GET_CUSTOMER_BY_EMAIL, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_CUSTOMER_BY_EMAIL, Some(variables)).await?;
     let customers = extract_graphql_data(response, &["data", "customers", "edges"])?;
     if let Some(first_customer) = customers.as_array().and_then(|arr| arr.first()) {
         Ok(GenericShopifyOutput::from_value(
@@ -4208,7 +4206,9 @@ pub struct CreateCollectionInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn create_collection(input: CreateCollectionInput) -> Result<GenericShopifyOutput, AgentError> {
+pub async fn create_collection(
+    input: CreateCollectionInput,
+) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let mut collection_input = json!({ "title": input.title });
     if let Some(v) = input.description_html {
@@ -4218,7 +4218,7 @@ pub fn create_collection(input: CreateCollectionInput) -> Result<GenericShopifyO
         collection_input["handle"] = json!(v);
     }
     let variables = json!({ "input": collection_input });
-    let response = execute_graphql_query(conn, CREATE_COLLECTION, Some(variables))?;
+    let response = execute_graphql_query(conn, CREATE_COLLECTION, Some(variables)).await?;
     check_user_errors(&response, "collectionCreate")?;
     let result = extract_graphql_data(response, &["data", "collectionCreate", "collection"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -4249,7 +4249,7 @@ pub struct AddProductsToCollectionInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn add_products_to_collection(
+pub async fn add_products_to_collection(
     input: AddProductsToCollectionInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4257,7 +4257,7 @@ pub fn add_products_to_collection(
         "id": input.collection_id,
         "productIds": input.product_ids
     });
-    let response = execute_graphql_query(conn, ADD_PRODUCTS_TO_COLLECTION, Some(variables))?;
+    let response = execute_graphql_query(conn, ADD_PRODUCTS_TO_COLLECTION, Some(variables)).await?;
     check_user_errors(&response, "collectionAddProducts")?;
     let result = extract_graphql_data(response, &["data", "collectionAddProducts", "collection"])?;
     Ok(GenericShopifyOutput::from_value(result))
@@ -4288,7 +4288,7 @@ pub struct RemoveProductsFromCollectionInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn remove_products_from_collection(
+pub async fn remove_products_from_collection(
     input: RemoveProductsFromCollectionInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4296,7 +4296,8 @@ pub fn remove_products_from_collection(
         "id": input.collection_id,
         "productIds": input.product_ids
     });
-    let response = execute_graphql_query(conn, REMOVE_PRODUCTS_FROM_COLLECTION, Some(variables))?;
+    let response =
+        execute_graphql_query(conn, REMOVE_PRODUCTS_FROM_COLLECTION, Some(variables)).await?;
     check_user_errors(&response, "collectionRemoveProducts")?;
     let result = extract_graphql_data(
         response,
@@ -4330,11 +4331,11 @@ pub struct GetLocationByNameInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn get_location_by_name(
+pub async fn get_location_by_name(
     input: GetLocationByNameInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
-    let response = execute_graphql_query(conn, GET_LOCATIONS, None)?;
+    let response = execute_graphql_query(conn, GET_LOCATIONS, None).await?;
     let edges = extract_graphql_data(response, &["data", "locations", "edges"])?;
     if let Some(locations_array) = edges.as_array() {
         for location_edge in locations_array {
@@ -4380,7 +4381,7 @@ pub struct BulkCreateProductsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn bulk_create_products(
+pub async fn bulk_create_products(
     input: BulkCreateProductsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4405,7 +4406,7 @@ pub fn bulk_create_products(
             images: None,
             id: None,
         };
-        match set_product_inner(conn, &payload) {
+        match set_product_inner(conn, &payload).await {
             Ok(result) => created_products.push(result),
             Err(e) => errors.push(json!({
                 "product": title,
@@ -4443,7 +4444,7 @@ pub struct BulkUpdateProductsInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn bulk_update_products(
+pub async fn bulk_update_products(
     input: BulkUpdateProductsInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4465,7 +4466,7 @@ pub fn bulk_update_products(
             seo_description: None,
             status: None,
         };
-        match update_product_inner(conn, &payload) {
+        match update_product_inner(conn, &payload).await {
             Ok(result) => updated_products.push(result),
             Err(e) => errors.push(json!({
                 "productId": product_id,
@@ -4503,7 +4504,7 @@ pub struct BulkUpdateVariantPricesInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn bulk_update_variant_prices(
+pub async fn bulk_update_variant_prices(
     input: BulkUpdateVariantPricesInput,
 ) -> Result<GenericShopifyOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4516,7 +4517,9 @@ pub fn bulk_update_variant_prices(
             &upd.product_id,
             &upd.variant_id,
             upd.new_price,
-        ) {
+        )
+        .await
+        {
             Ok(result) => updated_variants.push(result),
             Err(e) => errors.push(json!({
                 "variantId": variant_id,
@@ -4581,7 +4584,7 @@ pub struct CommerceGetProductsOutput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_get_products(
+pub async fn commerce_get_products(
     input: CommerceGetProductsInput,
 ) -> Result<CommerceGetProductsOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4614,7 +4617,7 @@ pub fn commerce_get_products(
         after = after_clause,
         filter = query_filter,
     );
-    let response = execute_graphql_query(conn, &query, None)?;
+    let response = execute_graphql_query(conn, &query, None).await?;
     let products_data = extract_graphql_data(response, &["data", "products"])?;
     let edges = products_data
         .get("edges")
@@ -4675,7 +4678,9 @@ pub struct CommerceGetProductInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_get_product(input: CommerceGetProductInput) -> Result<CommerceProduct, AgentError> {
+pub async fn commerce_get_product(
+    input: CommerceGetProductInput,
+) -> Result<CommerceProduct, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let gid = format!("gid://shopify/Product/{}", input.product_id);
     let query = format!(
@@ -4690,7 +4695,7 @@ pub fn commerce_get_product(input: CommerceGetProductInput) -> Result<CommercePr
         }}"#,
         gid
     );
-    let response = execute_graphql_query(conn, &query, None)?;
+    let response = execute_graphql_query(conn, &query, None).await?;
     let product_data = response
         .get("data")
         .and_then(|d| d.get("product"))
@@ -4735,7 +4740,7 @@ pub struct CommerceCreateProductInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_create_product(
+pub async fn commerce_create_product(
     input: CommerceCreateProductInput,
 ) -> Result<CommerceProduct, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4760,7 +4765,7 @@ pub fn commerce_create_product(
         product_set_input["tags"] = json!(t);
     }
     let variables = json!({ "synchronous": true, "productSet": product_set_input });
-    let response = execute_graphql_query(conn, SET_PRODUCT, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_PRODUCT, Some(variables)).await?;
     if let Some(errors) = response
         .get("data")
         .and_then(|d| d.get("productSet"))
@@ -4812,7 +4817,7 @@ pub struct CommerceUpdateProductInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_update_product(
+pub async fn commerce_update_product(
     input: CommerceUpdateProductInput,
 ) -> Result<CommerceProduct, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4835,7 +4840,7 @@ pub fn commerce_update_product(
         product_set_input["tags"] = json!(tg);
     }
     let variables = json!({ "synchronous": true, "productSet": product_set_input });
-    let response = execute_graphql_query(conn, SET_PRODUCT, Some(variables))?;
+    let response = execute_graphql_query(conn, SET_PRODUCT, Some(variables)).await?;
     if let Some(errors) = response
         .get("data")
         .and_then(|d| d.get("productSet"))
@@ -4897,13 +4902,13 @@ pub struct CommerceDeleteProductOutput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_delete_product(
+pub async fn commerce_delete_product(
     input: CommerceDeleteProductInput,
 ) -> Result<CommerceDeleteProductOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let gid = format!("gid://shopify/Product/{}", input.product_id);
     let variables = json!({ "input": { "id": gid } });
-    let response = execute_graphql_query(conn, DELETE_PRODUCT, Some(variables))?;
+    let response = execute_graphql_query(conn, DELETE_PRODUCT, Some(variables)).await?;
     if let Some(errors) = response
         .get("data")
         .and_then(|d| d.get("productDelete"))
@@ -4961,7 +4966,7 @@ pub struct CommerceGetInventoryInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_get_inventory(
+pub async fn commerce_get_inventory(
     input: CommerceGetInventoryInput,
 ) -> Result<Vec<CommerceInventoryLevel>, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -4972,10 +4977,10 @@ pub fn commerce_get_inventory(
             "variant_id is required to query inventory",
         )
     })?;
-    commerce_get_inventory_inner(conn, &variant_id, input.location_id.as_deref())
+    commerce_get_inventory_inner(conn, &variant_id, input.location_id.as_deref()).await
 }
 
-fn commerce_get_inventory_inner(
+async fn commerce_get_inventory_inner(
     conn: &RawConnection,
     variant_id: &str,
     location_filter: Option<&str>,
@@ -4985,7 +4990,8 @@ fn commerce_get_inventory_inner(
             conn,
             GET_PRODUCT_VARIANT_INVENTORY_ITEM,
             Some(json!({ "id": variant_id })),
-        )?;
+        )
+        .await?;
         extract_graphql_data(response, &["data", "productVariant"])?
     };
     let inventory_item_id = variant_data
@@ -5003,7 +5009,8 @@ fn commerce_get_inventory_inner(
         conn,
         GET_INVENTORY_LEVELS,
         Some(json!({ "inventoryItemId": inventory_item_id })),
-    )?;
+    )
+    .await?;
     let inventory_item = response
         .get("data")
         .and_then(|d| d.get("inventoryItem"))
@@ -5116,7 +5123,7 @@ pub struct CommerceUpdateInventoryInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_update_inventory(
+pub async fn commerce_update_inventory(
     input: CommerceUpdateInventoryInput,
 ) -> Result<CommerceInventoryLevel, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -5126,7 +5133,8 @@ pub fn commerce_update_inventory(
             conn,
             GET_PRODUCT_VARIANT_INVENTORY_ITEM,
             Some(json!({ "id": input.variant_id })),
-        )?;
+        )
+        .await?;
         extract_graphql_data(response, &["data", "productVariant"])?
     };
     let inventory_item_id = inventory_item_result
@@ -5158,14 +5166,15 @@ pub fn commerce_update_inventory(
                 }]
             }
         });
-        let response = execute_graphql_query(conn, SET_INVENTORY, Some(variables))?;
+        let response = execute_graphql_query(conn, SET_INVENTORY, Some(variables)).await?;
         check_user_errors(&response, "inventorySetQuantities")?;
     }
     let levels = commerce_get_inventory_inner(
         conn,
         &input.variant_id,
         Some(&extract_shopify_id(&location_gid)),
-    )?;
+    )
+    .await?;
     levels.into_iter().next().ok_or_else(|| {
         AgentError::permanent(
             "SHOPIFY_INVALID_RESPONSE",
@@ -5224,7 +5233,7 @@ pub struct CommerceGetOrdersOutput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_get_orders(
+pub async fn commerce_get_orders(
     input: CommerceGetOrdersInput,
 ) -> Result<CommerceGetOrdersOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -5256,7 +5265,7 @@ pub fn commerce_get_orders(
     if let Some(c) = input.cursor {
         variables["after"] = json!(c);
     }
-    let response = execute_graphql_query(conn, GET_ORDER_LIST, Some(variables))?;
+    let response = execute_graphql_query(conn, GET_ORDER_LIST, Some(variables)).await?;
     let orders_data = response
         .get("data")
         .and_then(|d| d.get("orders"))
@@ -5312,14 +5321,14 @@ pub struct CommerceGetOrderInput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, AgentError> {
+pub async fn commerce_get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let order_gid = if input.order_id.starts_with("gid://") {
         input.order_id
     } else {
         format!("gid://shopify/Order/{}", input.order_id)
     };
-    let response = execute_graphql_query(conn, GET_ORDER, Some(json!({ "id": order_gid })))?;
+    let response = execute_graphql_query(conn, GET_ORDER, Some(json!({ "id": order_gid }))).await?;
     let order_node = response
         .get("data")
         .and_then(|d| d.get("order"))
@@ -5358,11 +5367,11 @@ pub struct CommerceGetLocationsOutput {
     rate_limited = true,
     tags = "shopify,ecommerce"
 )]
-pub fn commerce_get_locations(
+pub async fn commerce_get_locations(
     input: CommerceGetLocationsInput,
 ) -> Result<CommerceGetLocationsOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
-    let response = execute_graphql_query(conn, GET_LOCATIONS, None)?;
+    let response = execute_graphql_query(conn, GET_LOCATIONS, None).await?;
     let edges = response
         .get("data")
         .and_then(|d| d.get("locations"))
@@ -5682,160 +5691,58 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_shopify::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            // Products
-            "set-product" => __executor_set_product(value),
-            "update-product" => __executor_update_product(value),
-            "delete-product" => __executor_delete_product(value),
-            "list-products" => __executor_list_products(value),
-            "query-products" => __executor_query_products(value),
-            "get-product-by-sku" => __executor_get_product_by_sku(value),
-            "set-product-tags" => __executor_set_product_tags(value),
-            "replace-product-images" => __executor_replace_product_images(value),
-            "get-product-options" => __executor_get_product_options(value),
-            "rename-product-option" => __executor_rename_product_option(value),
-            "set-product-metafields" => __executor_set_product_metafields(value),
-            "get-product-metafields" => __executor_get_product_metafields(value),
-            // Variants
-            "get-product-variant-by-sku" => __executor_get_product_variant_by_sku(value),
-            "create-product-variant" => __executor_create_product_variant(value),
-            "update-product-variant" => __executor_update_product_variant(value),
-            "update-product-variant-price" => __executor_update_product_variant_price(value),
-            "delete-product-variant" => __executor_delete_product_variant(value),
-            "set-variant-metafields" => __executor_set_variant_metafields(value),
-            "set-product-variant-cost" => __executor_set_product_variant_cost(value),
-            "set-product-variant-weight" => __executor_set_product_variant_weight(value),
-            // Inventory
-            "get-inventory-item-id-by-variant-id" => {
-                __executor_get_inventory_item_id_by_variant_id(value)
-            }
-            "set-inventory" => __executor_set_inventory(value),
-            "sync-inventory-levels" => __executor_sync_inventory_levels(value),
-            // Orders
-            "get-order" => __executor_get_order(value),
-            "get-order-list" => __executor_get_order_list(value),
-            "create-order-note-or-tag" => __executor_create_order_note_or_tag(value),
-            "cancel-order" => __executor_cancel_order(value),
-            // Fulfillment
-            "get-fulfillment-orders" => __executor_get_fulfillment_orders(value),
-            "fulfill-order" => __executor_fulfill_order(value),
-            "fulfill-order-lines" => __executor_fulfill_order_lines(value),
-            "fulfill-by-sku" => __executor_fulfill_by_sku(value),
-            // Draft Orders
-            "create-draft-order" => __executor_create_draft_order(value),
-            // Customers
-            "get-customer-by-email" => __executor_get_customer_by_email(value),
-            // Collections
-            "create-collection" => __executor_create_collection(value),
-            "add-products-to-collection" => __executor_add_products_to_collection(value),
-            "remove-products-from-collection" => __executor_remove_products_from_collection(value),
-            // Locations
-            "get-location-by-name" => __executor_get_location_by_name(value),
-            // Bulk
-            "bulk-create-products" => __executor_bulk_create_products(value),
-            "bulk-update-products" => __executor_bulk_update_products(value),
-            "bulk-update-variant-prices" => __executor_bulk_update_variant_prices(value),
-            // Commerce
-            "commerce-get-products" => __executor_commerce_get_products(value),
-            "commerce-get-product" => __executor_commerce_get_product(value),
-            "commerce-create-product" => __executor_commerce_create_product(value),
-            "commerce-update-product" => __executor_commerce_update_product(value),
-            "commerce-delete-product" => __executor_commerce_delete_product(value),
-            "commerce-get-inventory" => __executor_commerce_get_inventory(value),
-            "commerce-update-inventory" => __executor_commerce_update_inventory(value),
-            "commerce-get-orders" => __executor_commerce_get_orders(value),
-            "commerce-get-order" => __executor_commerce_get_order(value),
-            "commerce-get-locations" => __executor_commerce_get_locations(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("shopify agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "shopify",
+    capabilities = [
+        set_product,
+        update_product,
+        delete_product,
+        list_products,
+        query_products,
+        get_product_by_sku,
+        set_product_tags,
+        replace_product_images,
+        get_product_options,
+        rename_product_option,
+        set_product_metafields,
+        get_product_metafields,
+        get_product_variant_by_sku,
+        create_product_variant,
+        update_product_variant,
+        update_product_variant_price,
+        delete_product_variant,
+        set_variant_metafields,
+        set_product_variant_cost,
+        set_product_variant_weight,
+        get_inventory_item_id_by_variant_id,
+        set_inventory,
+        sync_inventory_levels,
+        get_order,
+        get_order_list,
+        create_order_note_or_tag,
+        cancel_order,
+        get_fulfillment_orders,
+        fulfill_order,
+        fulfill_order_lines,
+        fulfill_by_sku,
+        create_draft_order,
+        get_customer_by_email,
+        create_collection,
+        add_products_to_collection,
+        remove_products_from_collection,
+        get_location_by_name,
+        bulk_create_products,
+        bulk_update_products,
+        bulk_update_variant_prices,
+        commerce_get_products,
+        commerce_get_product,
+        commerce_create_product,
+        commerce_update_product,
+        commerce_delete_product,
+        commerce_get_inventory,
+        commerce_update_inventory,
+        commerce_get_orders,
+        commerce_get_order,
+        commerce_get_locations,
+    ],
+);

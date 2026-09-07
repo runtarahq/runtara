@@ -29,22 +29,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-azure-blob-storage/agent",
-        // Callback bindings permit cancellation of awaited component I/O.
-        async: ["export:runtara:agent-azure-blob-storage/capabilities@0.4.0#invoke"],
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -1344,112 +1328,22 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_azure_blob_storage::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "azure-blob-storage",
+    capabilities = [
+        storage_create_bucket,
+        storage_list_buckets,
+        storage_delete_bucket,
+        storage_upload_file,
+        storage_download_file,
+        storage_list_files,
+        storage_get_file_info,
+        storage_delete_file,
+        storage_copy_file,
+        storage_generate_presigned_url,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "storage-create-bucket" => __executor_storage_create_bucket(value).await,
-            "storage-list-buckets" => __executor_storage_list_buckets(value).await,
-            "storage-delete-bucket" => __executor_storage_delete_bucket(value).await,
-            "storage-upload-file" => __executor_storage_upload_file(value).await,
-            "storage-download-file" => __executor_storage_download_file(value).await,
-            "storage-list-files" => __executor_storage_list_files(value).await,
-            "storage-get-file-info" => __executor_storage_get_file_info(value).await,
-            "storage-delete-file" => __executor_storage_delete_file(value).await,
-            "storage-copy-file" => __executor_storage_copy_file(value).await,
-            "storage-generate-presigned-url" => {
-                __executor_storage_generate_presigned_url(value).await
-            }
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("azure_blob_storage agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;

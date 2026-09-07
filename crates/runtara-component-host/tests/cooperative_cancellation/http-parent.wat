@@ -9,8 +9,8 @@
   (import "signal" (func $signal async))
   (import "sibling" (func $sibling async (result u32)))
   (core module $memory
-    (memory (export "memory") 2)
-    (global $heap (mut i32) (i32.const 32768))
+    (memory (export "memory") {{PAGES}})
+    (global $heap (mut i32) (i32.const {{HEAP}}))
     (func (export "realloc") (param i32 i32 i32) (param $size i32) (result i32) (local $p i32)
       (local.set $p (global.get $heap))
       (global.set $heap (i32.and (i32.add (i32.add (global.get $heap) (local.get $size)) (i32.const 15)) (i32.const -16)))
@@ -40,7 +40,7 @@
     (data (i32.const 1024) "{{CAPABILITY}}")
     (data (i32.const 1536) "{{SECOND_CAPABILITY}}")
     (data (i32.const 2048) "{{INPUT}}")
-    (data (i32.const 8192) "{{SECOND_INPUT}}")
+    (data (i32.const {{SECOND_INPUT_OFFSET}}) "{{SECOND_INPUT}}")
     (func $resolve (param $status i32) (local $handle i32) (local $set i32)
       (if (i32.eq (i32.and (local.get $status) (i32.const 15)) (i32.const 2)) (then return))
       (local.set $handle (i32.shr_u (local.get $status) (i32.const 4)))
@@ -61,7 +61,7 @@
       (call $resolve (local.get $sibling))
       (if (i32.ne (i32.load (i32.const 128)) (i32.const 7)) (then unreachable))
       ;; A second capability call in the same real Agent instance must still work.
-      (call $resolve (call $invoke (i32.const 1536) (i32.const {{SECOND_CAPABILITY_LEN}}) (i32.const 8192) (i32.const {{SECOND_INPUT_LEN}}) (i32.const 64)))
+      (call $resolve (call $invoke (i32.const 1536) (i32.const {{SECOND_CAPABILITY_LEN}}) (i32.const {{SECOND_INPUT_OFFSET}}) (i32.const {{SECOND_INPUT_LEN}}) (i32.const 64)))
       ;; Return the actual JSON success bytes to the native assertions.
       (if (i32.ne (i32.load8_u (i32.const 64)) (i32.const 0)) (then unreachable))
       (i32.store (i32.const 96) (i32.load (i32.const 72)))

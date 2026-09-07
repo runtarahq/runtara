@@ -60,6 +60,13 @@ online docs or enable experimental ABI extensions silently.
   `subtask.drop` after resolution. Do not wrap them in a second host task registry.
 - A callee must acknowledge cancellation or return; a request does not force it
   to stop. Follow the ABI's borrowed-resource and subtask-resolution rules.
+- Centralize built-in Agent callback bindings, invocation dispatch and error
+  conversion in `runtara-agent-macro`, reusing existing `#[capability]` metadata.
+  Apply this to earlier migrations too. Keep actual asynchronous helper/I/O calls
+  explicit; an annotation does not make blocking code cooperative. Verify the
+  shared expansion across every built-in Agent and preserve metadata, coercion,
+  input conventions and provider errors. No per-Agent cancellation backend or
+  opt-in annotation is needed.
 - Verify the cancellation-capable callback ABI end to end. A synchronous lift
   or an async-typed export with no cancellation handler is not sufficient proof.
 - Verify whether cancellation itself can block the waiting guest, which async

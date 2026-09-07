@@ -125,15 +125,34 @@ async fn pending(_input: Input) -> Result<Value, String> {
 }
 
 #[test]
-fn dropping_the_dispatch_future_drops_the_pending_capability() {
-    let mut invocation = (__CAPABILITY_EXECUTOR_PENDING.execute)(json!({"count":1}));
-    assert!(
-        invocation
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
+fn uniform_component_adapter_preserves_sync_and_async_results() {
+    let input = json!({"count":"42"});
+    assert_eq!(
+        ready(__invoke_sync_value(input.clone())),
+        ready(__invoke_value(input))
     );
-    assert_eq!(DROPS.load(Ordering::SeqCst), 0);
-    drop(invocation);
-    assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    let error = ready(__invoke_value(json!({"count":1,"mode":"structured"}))).unwrap_err();
+    assert_eq!(
+        serde_json::from_str::<Value>(&error).unwrap()["retry_after_ms"],
+        23
+    );
+}
+
+#[test]
+fn dropping_the_dispatch_future_drops_the_pending_capability() {
+    let calls = [
+        (__CAPABILITY_EXECUTOR_PENDING.execute)(json!({"count":1})),
+        Box::pin(__invoke_pending(json!({"count":1}))),
+    ];
+    for (index, mut invocation) in calls.into_iter().enumerate() {
+        assert!(
+            invocation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), index);
+        drop(invocation);
+        assert_eq!(DROPS.load(Ordering::SeqCst), index + 1);
+    }
 }

@@ -20,22 +20,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-stripe/agent",
-        // Standard callback bindings let cancellation drop a pending I/O future.
-        async: ["export:runtara:agent-stripe/capabilities@0.4.0#invoke"],
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -2080,132 +2064,34 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_stripe::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            // Customers
-            "list-customers" => __executor_list_customers(value).await,
-            "get-customer" => __executor_get_customer(value).await,
-            "create-customer" => __executor_create_customer(value).await,
-            "update-customer" => __executor_update_customer(value).await,
-            // Products
-            "list-products" => __executor_list_products(value).await,
-            "get-product" => __executor_get_product(value).await,
-            "create-product" => __executor_create_product(value).await,
-            // Prices
-            "list-prices" => __executor_list_prices(value).await,
-            "create-price" => __executor_create_price(value).await,
-            // Payment Intents
-            "create-payment-intent" => __executor_create_payment_intent(value).await,
-            "get-payment-intent" => __executor_get_payment_intent(value).await,
-            "list-payment-intents" => __executor_list_payment_intents(value).await,
-            // Invoices
-            "create-invoice" => __executor_create_invoice(value).await,
-            "get-invoice" => __executor_get_invoice(value).await,
-            "list-invoices" => __executor_list_invoices(value).await,
-            "finalize-invoice" => __executor_finalize_invoice(value).await,
-            "send-invoice" => __executor_send_invoice(value).await,
-            // Subscriptions
-            "create-subscription" => __executor_create_subscription(value).await,
-            "get-subscription" => __executor_get_subscription(value).await,
-            "list-subscriptions" => __executor_list_subscriptions(value).await,
-            "cancel-subscription" => __executor_cancel_subscription(value).await,
-            // Refunds
-            "create-refund" => __executor_create_refund(value).await,
-            "get-refund" => __executor_get_refund(value).await,
-            // Balance
-            "get-balance" => __executor_get_balance(value).await,
-            // Charges
-            "list-charges" => __executor_list_charges(value).await,
-            "get-charge" => __executor_get_charge(value).await,
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("stripe agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "stripe",
+    capabilities = [
+        list_customers,
+        get_customer,
+        create_customer,
+        update_customer,
+        list_products,
+        get_product,
+        create_product,
+        list_prices,
+        create_price,
+        create_payment_intent,
+        get_payment_intent,
+        list_payment_intents,
+        create_invoice,
+        get_invoice,
+        list_invoices,
+        finalize_invoice,
+        send_invoice,
+        create_subscription,
+        get_subscription,
+        list_subscriptions,
+        cancel_subscription,
+        create_refund,
+        get_refund,
+        get_balance,
+        list_charges,
+        get_charge,
+    ],
+);

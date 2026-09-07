@@ -19,6 +19,15 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, ItemFn, Type, parse_macro_input};
 
+mod component;
+
+/// Generate a built-in Agent's callback bindings, dispatch, and error envelope.
+/// Capability IDs come from existing `#[capability]` annotations.
+#[proc_macro]
+pub fn agent_component(input: TokenStream) -> TokenStream {
+    component::expand(input)
+}
+
 /// A known error specification for a capability
 #[derive(Debug, Clone)]
 struct KnownErrorSpec {
@@ -298,6 +307,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Derive capability_id from function name if not provided (snake_case -> kebab-case)
     let capability_id = args.id.unwrap_or_else(|| fn_name_str.replace('_', "-"));
+    let capability_id_ident = format_ident!("__CAPABILITY_ID_{}", fn_name_str.to_uppercase());
 
     // Extract input type from first parameter
     let input_type = input_fn
@@ -398,7 +408,15 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // the same coercion and error envelope; guest dispatch awaits directly.
     let asyncness = input_fn.sig.asyncness;
     let await_result = asyncness.map(|_| quote! { .await });
+    let invoke_fn_ident = format_ident!("__invoke_{}", fn_name);
     let executor_wrapper = quote! {
+        // A uniform, directly awaited adapter for component dispatch. Native
+        // executor descriptors retain their existing sync/async types.
+        #[doc(hidden)]
+        async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+            #executor_fn_ident(input)#await_result
+        }
+
         #[doc(hidden)]
         #asyncness fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
             // Helper to create JSON-structured errors matching AgentError format.
@@ -512,11 +530,14 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #known_errors_static
 
+        #[doc(hidden)]
+        pub const #capability_id_ident: &str = #capability_id;
+
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         pub static #meta_ident: runtara_dsl::agent_meta::CapabilityMeta = runtara_dsl::agent_meta::CapabilityMeta {
             module: #module_token,
-            capability_id: #capability_id,
+            capability_id: #capability_id_ident,
             function_name: #fn_name_str,
             input_type: #input_type,
             output_type: #output_type,

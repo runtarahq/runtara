@@ -172,6 +172,12 @@ enum Scenario {
     StorageDownload(&'static str, bool),
     StoragePresign(&'static str),
     Sftp,
+    SharepointDownload,
+    SharepointDownloadBody,
+    SharepointContentAfterMetadata,
+    ShopifyImages,
+    ShopifyImagesBody,
+    ShopifyDeleteAfterRead,
     HubspotRead,
     HubspotReadBody,
     HubspotUpdateAfterRead,
@@ -197,6 +203,20 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_sharepoint(self) -> bool {
+        matches!(
+            self,
+            Self::SharepointDownload
+                | Self::SharepointDownloadBody
+                | Self::SharepointContentAfterMetadata
+        )
+    }
+    fn is_shopify(self) -> bool {
+        matches!(
+            self,
+            Self::ShopifyImages | Self::ShopifyImagesBody | Self::ShopifyDeleteAfterRead
+        )
+    }
     fn is_hubspot(self) -> bool {
         matches!(
             self,
@@ -253,6 +273,8 @@ impl Scenario {
             || self.is_stripe()
             || self.is_quickbooks()
             || self.is_hubspot()
+            || self.is_sharepoint()
+            || self.is_shopify()
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -284,6 +306,8 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             | Scenario::StripeCreateBody
             | Scenario::QuickbooksReadBody
             | Scenario::HubspotReadBody
+            | Scenario::SharepointDownloadBody
+            | Scenario::ShopifyImagesBody
     );
     let fail_signal_read = matches!(
         scenario,
@@ -315,6 +339,8 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 | Scenario::StripeFinalizeAfterCreate
                 | Scenario::QuickbooksUpdateAfterRead
                 | Scenario::HubspotUpdateAfterRead
+                | Scenario::SharepointContentAfterMetadata
+                | Scenario::ShopifyDeleteAfterRead
         )
     {
         2
@@ -382,6 +408,35 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .map(|(key, value)| (key.clone(), immediate(value.clone())))
             .collect::<serde_json::Map<String, Value>>()
             .into();
+    }
+    if scenario.is_sharepoint() || scenario.is_shopify() {
+        let (agent, capability, input, integration) = if scenario.is_sharepoint() {
+            (
+                "sharepoint",
+                "sharepoint-download-file",
+                serde_json::json!({"drive_id":"drive","item_id":"42","as_text":true}),
+                "microsoft_entra_client_credentials",
+            )
+        } else {
+            (
+                "shopify",
+                "replace-product-images",
+                serde_json::json!({"product_id":"42","images":[{"url":"https://image.invalid/new.png"}]}),
+                "shopify",
+            )
+        };
+        graph["steps"]["fetch"]["agentId"] = agent.into();
+        graph["steps"]["fetch"]["capabilityId"] = capability.into();
+        graph["steps"]["fetch"]["inputMapping"] = input
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), immediate(value.clone())))
+            .collect::<serde_json::Map<String, Value>>()
+            .into();
+        graph["steps"]["fetch"]["inputMapping"]["_connection"] = immediate(
+            serde_json::json!({"connection_id":"fixture-connection","integration_id":integration,"parameters":{}}),
+        );
     }
     if scenario.is_hubspot() {
         let connection = immediate(
@@ -668,6 +723,24 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             } else {
                                 assert_eq!(body["connection_id"], "fixture-connection");
                                 match scenario {
+                                    Scenario::SharepointDownload | Scenario::SharepointDownloadBody | Scenario::SharepointContentAfterMetadata => {
+                                        assert_eq!(body["method"],"GET");
+                                        if server_host.requests.load(Ordering::SeqCst) == 0 {
+                                            assert_eq!(body["url"],"https://graph.microsoft.com/v1.0/drives/drive/items/42");
+                                            assert_eq!(body["timeout_ms"],30_000);
+                                        } else {
+                                            assert_eq!(body["url"],"https://graph.microsoft.com/v1.0/drives/drive/items/42/content");
+                                            assert_eq!(body["timeout_ms"],120_000);
+                                        }
+                                    },
+                                    Scenario::ShopifyImages | Scenario::ShopifyImagesBody | Scenario::ShopifyDeleteAfterRead => {
+                                        assert_eq!(body["method"],"POST");
+                                        assert_eq!(body["url"],"/admin/api/2025-01/graphql.json");
+                                        assert_eq!(body["timeout_ms"],60_000);
+                                        let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
+                                        let payload:Value = serde_json::from_slice(&payload)?;
+                                        assert_eq!(payload["variables"], if server_host.requests.load(Ordering::SeqCst)==0 {serde_json::json!({"productId":"42"})} else {serde_json::json!({"fileIds":["old-image"]})});
+                                    },
                                     Scenario::HubspotRead | Scenario::HubspotReadBody | Scenario::HubspotUpdateAfterRead => {
                                         assert_eq!(body["timeout_ms"],30_000);
                                         assert_eq!(body["url"],"https://api.hubapi.com/crm/v3/objects/contacts/42");
@@ -742,6 +815,15 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if matches!(scenario, Scenario::SharepointContentAfterMetadata | Scenario::ShopifyDeleteAfterRead) && started == 1 {
+                            let body = if scenario.is_sharepoint() { serde_json::json!({"id":"42","name":"fixture.txt"}) } else { serde_json::json!({"data":{"product":{"media":{"edges":[{"node":{"id":"old-image"}}]}}}}) };
+                            let bytes=serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":body}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1,Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if scenario == Scenario::HubspotUpdateAfterRead && started == 1 {
                             let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"42","properties":{"name":"fixture"}}}))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
@@ -1087,4 +1169,34 @@ async fn emitted_hubspot_cancel_stops_partial_read_without_update_or_retry() -> 
 #[tokio::test]
 async fn emitted_hubspot_cancel_stops_update_after_read_without_recovery() -> anyhow::Result<()> {
     run(Scenario::HubspotUpdateAfterRead).await
+}
+
+#[tokio::test]
+async fn emitted_workflow_cancel_sharepoint_metadata() -> anyhow::Result<()> {
+    run(Scenario::SharepointDownload).await
+}
+
+#[tokio::test]
+async fn emitted_workflow_cancel_sharepoint_metadata_body() -> anyhow::Result<()> {
+    run(Scenario::SharepointDownloadBody).await
+}
+
+#[tokio::test]
+async fn emitted_workflow_cancel_sharepoint_content_after_metadata() -> anyhow::Result<()> {
+    run(Scenario::SharepointContentAfterMetadata).await
+}
+
+#[tokio::test]
+async fn emitted_workflow_cancel_shopify_media_read() -> anyhow::Result<()> {
+    run(Scenario::ShopifyImages).await
+}
+
+#[tokio::test]
+async fn emitted_workflow_cancel_shopify_media_body() -> anyhow::Result<()> {
+    run(Scenario::ShopifyImagesBody).await
+}
+
+#[tokio::test]
+async fn emitted_workflow_cancel_shopify_delete_after_read() -> anyhow::Result<()> {
+    run(Scenario::ShopifyDeleteAfterRead).await
 }

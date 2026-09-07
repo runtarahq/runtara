@@ -297,3 +297,7 @@ mod real_quickbooks;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_hubspot.rs"]
 mod real_hubspot;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_sharepoint_shopify.rs"]
+mod real_sharepoint_shopify;

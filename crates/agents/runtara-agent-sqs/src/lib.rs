@@ -32,22 +32,6 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-sqs/agent",
-        // Callback bindings permit cancellation of awaited component I/O.
-        async: ["export:runtara:agent-sqs/capabilities@0.4.0#invoke"],
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim (mirrors runtara-agent-s3-storage / -mailgun / -hubspot)
 // ============================================================================
@@ -1863,121 +1847,28 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_sqs::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "queue-send-message" => __executor_queue_send_message(value).await,
-            "queue-send-message-batch" => __executor_queue_send_message_batch(value).await,
-            "queue-receive-messages" => __executor_queue_receive_messages(value).await,
-            "queue-delete-message" => __executor_queue_delete_message(value).await,
-            "queue-delete-message-batch" => __executor_queue_delete_message_batch(value).await,
-            "queue-change-message-visibility" => {
-                __executor_queue_change_message_visibility(value).await
-            }
-            "queue-change-message-visibility-batch" => {
-                __executor_queue_change_message_visibility_batch(value).await
-            }
-            "queue-create-queue" => __executor_queue_create_queue(value).await,
-            "queue-delete-queue" => __executor_queue_delete_queue(value).await,
-            "queue-list-queues" => __executor_queue_list_queues(value).await,
-            "queue-get-queue-url" => __executor_queue_get_queue_url(value).await,
-            "queue-get-queue-attributes" => __executor_queue_get_queue_attributes(value).await,
-            "queue-set-queue-attributes" => __executor_queue_set_queue_attributes(value).await,
-            "queue-purge-queue" => __executor_queue_purge_queue(value).await,
-            "queue-list-queue-tags" => __executor_queue_list_queue_tags(value).await,
-            "queue-tag-queue" => __executor_queue_tag_queue(value).await,
-            "queue-untag-queue" => __executor_queue_untag_queue(value).await,
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("sqs agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "sqs",
+    capabilities = [
+        queue_send_message,
+        queue_send_message_batch,
+        queue_receive_messages,
+        queue_delete_message,
+        queue_delete_message_batch,
+        queue_change_message_visibility,
+        queue_change_message_visibility_batch,
+        queue_create_queue,
+        queue_delete_queue,
+        queue_list_queues,
+        queue_get_queue_url,
+        queue_get_queue_attributes,
+        queue_set_queue_attributes,
+        queue_purge_queue,
+        queue_list_queue_tags,
+        queue_tag_queue,
+        queue_untag_queue,
+    ],
+);
 
 // ============================================================================
 // Tests (host-side; pure request-body builders and response parsers)

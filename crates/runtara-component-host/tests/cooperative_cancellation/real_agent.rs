@@ -32,9 +32,15 @@ pub(super) fn compose_agent(
     second: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
-        input.len() <= 6144 && second.len() <= 24576,
-        "fixture inputs overlap static memory or heap"
+        input.len() <= 16 * 1024 * 1024
+            && second.len() <= 24576
+            && capability.len() <= 512
+            && second_capability.len() <= 512,
+        "fixture input exceeds its bounded memory layout"
     );
+    let second_offset = 8192.max((2048 + input.len() + 15) & !15);
+    let heap = 32768.max((second_offset + second.len() + 15) & !15);
+    let pages = 2.max((heap + 65536).div_ceil(65536));
     let agent = agent_path(agent_id)?;
     let bytes = std::fs::read(&agent)?;
     let mut has_callback_lift = false;
@@ -64,6 +70,9 @@ pub(super) fn compose_agent(
     };
     let parent = include_str!("http-parent.wat")
         .replace("{{AGENT}}", agent_id)
+        .replace("{{SECOND_INPUT_OFFSET}}", &second_offset.to_string())
+        .replace("{{HEAP}}", &heap.to_string())
+        .replace("{{PAGES}}", &pages.to_string())
         .replace("{{CAPABILITY}}", &escape(capability.as_bytes()))
         .replace("{{CAPABILITY_LEN}}", &capability.len().to_string())
         .replace(
@@ -379,6 +388,13 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
 }
 
 pub(super) async fn read_proxy(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Value> {
+    read_proxy_limited(socket, 16_384).await
+}
+
+pub(super) async fn read_proxy_limited(
+    socket: &mut tokio::net::TcpStream,
+    max_bytes: usize,
+) -> anyhow::Result<Value> {
     let headers = String::from_utf8(request_headers(socket).await?)?;
     anyhow::ensure!(
         headers.starts_with("POST /proxy "),
@@ -398,7 +414,7 @@ pub(super) async fn read_proxy(socket: &mut tokio::net::TcpStream) -> anyhow::Re
         .1
         .trim()
         .parse()?;
-    anyhow::ensure!(length < 16_384, "unexpected request size");
+    anyhow::ensure!(length < max_bytes, "unexpected request size");
     let mut bytes = vec![0; length];
     socket.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)

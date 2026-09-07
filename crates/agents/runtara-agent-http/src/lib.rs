@@ -19,7 +19,7 @@
 //! artifact, never hand-edited.
 //!
 //! Routing model:
-//! - Every request goes through the proxy via `runtara-http`'s `call_agent()`,
+//! - Every request goes through the proxy via `runtara-http`'s `call_agent_async().await`,
 //!   which reads `RUNTARA_HTTP_PROXY_URL` and forwards the request as a JSON
 //!   envelope. Routing through the proxy — connection or not — lets the host
 //!   apply its egress filtering uniformly: SSRF/private-IP block, the
@@ -29,7 +29,7 @@
 //!   the request to the connection's base URL. Connectionless requests get the
 //!   same egress filtering minus the base-URL pin.
 //! - When no proxy is configured (SDK/local, no `RUNTARA_HTTP_PROXY_URL`),
-//!   `call_agent()` falls back to a direct call.
+//!   `call_agent_async().await` falls back to a direct call.
 //!
 //! The component itself never sees secrets either way.
 #![allow(clippy::result_large_err)]
@@ -41,17 +41,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use strum::VariantNames;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-http/agent",
-        async: ["export:runtara:agent-http/capabilities@0.4.0#invoke"],
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim
@@ -683,101 +672,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_http::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(agent = "http", capabilities = [http_request,],);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "http-request" => __executor_http_request(value).await,
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("http agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;

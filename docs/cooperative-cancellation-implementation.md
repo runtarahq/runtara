@@ -3,9 +3,10 @@
 Status: sequential/parallel root cancellation and Agent binding migration, 2026-09-07. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
-Sixteen of 27 Agent bindings now use cooperative callback delivery. Nested
-workflow-agent cancellation, timeouts and the remaining plan gates are still
-incomplete.
+All 27 built-in Agent exports now use a shared callback-binding macro. Eighteen
+I/O-capable Agents await cancellable operations; the nine CPU-oriented Agents
+still require cooperation-point qualification. Nested workflow-agent cancellation,
+timeouts and the remaining plan gates are still incomplete.
 
 The public Stop path still calls `Runner::stop` immediately and ignores its
 accepted grace-period field. The emitted-wait proofs below exercise a delivered
@@ -1131,3 +1132,85 @@ bounded cooperation points or an explicit emergency-abort limitation. Nested
 workflow-agent ownership, cooperative deadlines/E128 retirement, public Stop and
 independent grace escalation, terminal races, controlled performance/capacity
 qualification and superseded-path cleanup remain open.
+
+
+## Shared Agent component macro and remaining HTTP migrations (2026-09-07)
+
+`runtara-agent-macro::agent_component!` now owns the callback binding generation,
+async `invoke` export, dispatch and conversion to the WIT error record for **all
+27 built-in Agents**, including earlier migrations. Agents list their annotated
+Rust capability functions; `#[capability]` emits the wire-ID constants and uniform
+async invocation adapters. Generated dispatch uses constant string match arms,
+without a boxed registry or another runtime layer. Native executor descriptor
+types are unchanged. The old per-Agent bindings, handwritten dispatchers and
+error-conversion functions have been removed.
+
+There is no cancellation annotation, product flag, custom task manager or host
+workflow routing. The standard component binding owns cancellation delivery;
+`runtara-http` provides the shared awaitable transport. Agent helpers explicitly
+await it. The macro adapts synchronous capabilities too, but cannot insert safe
+cooperation points into arbitrary blocking code. Compression, crypto, CSV,
+datetime, text, transform, utils, XLSX and XML still need bounded CPU/blocking
+cooperation or explicit emergency-abort qualification. A callback lift alone is
+not proof that an operation can be interrupted while computing.
+
+The shared converter retains explicit retryability, attributes and retry delay,
+and otherwise infers retryability from the transient category. This removes the
+old CPU-shim inconsistency that defaulted missing retryability to false; their
+current permanent errors remain non-retryable. Datetime retains its special
+empty/whitespace-to-null input decoder. A built-component test confirms the
+existing limitation: `get-current-date` rejects that null during typed validation;
+`{}` applies defaults. The refactor does not silently repair this unrelated input
+behavior.
+
+SharePoint's 14 capabilities and Shopify's 50 capabilities now await the shared
+HTTP API throughout their helper chains. Verification concentrates on distinct
+I/O sites and control flow: all nine SharePoint request sites, metadata fallback,
+page-token preservation, simple uploads, copy initiation/monitoring, upload
+session creation and both sides of the existing 4 MiB upload boundary. Shopify
+cases cover GraphQL error envelopes, read/delete/replace mutations and bulk
+updates that continue after an ordinary item failure. Cancellation during any
+of those awaited calls drops the invocation, so ordinary fallback/error-catching
+logic cannot launch another request from it. Successful earlier mutations remain
+external effects; cancellation does not roll them back.
+
+The common WAT parent fixture now lays out larger inputs without overlapping its
+second input or result heap. Limits remain explicit, and only the large-upload
+proxy reader accepts the larger request envelope. Tests cancel both pending
+headers and partial response bodies, require socket closure before the sibling
+finishes, and invoke the same Agent instance again. The large-upload fixture
+checks actual multi-chunk requests. It does not certify SharePoint's provider
+chunk-alignment rule: the pre-existing 4 MiB constant is not a multiple of the
+320 KiB unit described by its own source comment. Chunk HTTP-error handling and
+copy-monitor HTTP-status interpretation also remain provider-specific follow-up
+issues, outside this cancellation/plumbing change.
+
+Six emitted DSL scenarios cancel SharePoint metadata/content requests and
+Shopify media-read/deletion requests, including a completed first request. They
+use normal composition, lifecycle signals and production I/O, and assert cleanup
+before acknowledgement with no retry, recovery or terminal-success publication.
+The shared-macro fixture additionally composes all 27 actual built components,
+checks their callback lifts and error contracts, and exercises synchronous
+random-double and datetime capabilities through the same export.
+
+Validation completed with the pinned toolchain and isolated component/native
+build directories:
+
+- Normal `scripts/build-agent-components.sh`: all 27 Agents plus two shared
+  workflow components. All 27 metadata artifacts, describing 305 capabilities,
+  are byte-identical to the pre-consolidation snapshots; SharePoint/Shopify also
+  match their pre-async metadata snapshots.
+- `cargo test -p 'runtara-agent-*'`: 474 tests/doctests passed on the final source.
+- Component cancellation suite: all 75 tests passed on the final built artifacts.
+  The new provider cases include 50 pending-header/partial-body cancellation
+  points, normal multi-request success and ordinary-error behavior.
+- Full direct workflow suite: 296 passed, three manual benchmarks ignored.
+  After the final constant-pattern dispatch adjustment and rebuild, all 45
+  emitted cooperative-workflow tests were rerun and passed.
+- Feature-gated Clippy for all Agent packages, component host and workflows,
+  `cargo fmt --all -- --check`, and `git diff --check` passed.
+
+No database/server E2E, controlled performance or capacity qualification was run
+for this refactor. This stage does not close the public Stop/grace, nested
+workflow, CPU cooperation, deadline/E128, terminal-race, compatibility, controlled
+performance, capacity or superseded-path-removal gates in the governing plan.
