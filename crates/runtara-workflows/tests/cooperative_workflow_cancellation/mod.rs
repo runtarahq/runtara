@@ -172,6 +172,9 @@ enum Scenario {
     StorageDownload(&'static str, bool),
     StoragePresign(&'static str),
     Sftp,
+    SqsReceive,
+    SqsReceiveBody,
+    SqsDeleteAfterReceive,
     PartialBody,
     SignalReadFailure,
     ParallelSplit,
@@ -185,6 +188,12 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_sqs(self) -> bool {
+        matches!(
+            self,
+            Self::SqsReceive | Self::SqsReceiveBody | Self::SqsDeleteAfterReceive
+        )
+    }
     fn is_storage(self) -> bool {
         matches!(
             self,
@@ -212,6 +221,7 @@ impl Scenario {
             || self.is_ai()
             || self.is_mcp()
             || matches!(self, Self::StorageDownload(..))
+            || self.is_sqs()
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -236,7 +246,7 @@ fn signal(kind: &str) -> RuntimeSignalInfo {
 
 async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let pre_cancel = scenario == Scenario::BeforeLaunch;
-    let partial_body = scenario == Scenario::PartialBody;
+    let partial_body = matches!(scenario, Scenario::PartialBody | Scenario::SqsReceiveBody);
     let fail_signal_read = matches!(
         scenario,
         Scenario::SignalReadFailure | Scenario::ParallelSignalReadFailure
@@ -263,6 +273,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 | Scenario::AiMemorySave
                 | Scenario::TeamsChunks
                 | Scenario::StorageDownload(_, true)
+                | Scenario::SqsDeleteAfterReceive
         )
     {
         2
@@ -330,6 +341,21 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .map(|(key, value)| (key.clone(), immediate(value.clone())))
             .collect::<serde_json::Map<String, Value>>()
             .into();
+    }
+    if scenario.is_sqs() {
+        let queue = immediate("https://sqs.invalid/fixture/queue".into());
+        let connection = immediate(
+            serde_json::json!({"connection_id":"fixture-connection","integration_id":"aws_credentials","parameters":{}}),
+        );
+        graph["steps"]["fetch"]["agentId"] = "sqs".into();
+        graph["steps"]["fetch"]["capabilityId"] = "queue-receive-messages".into();
+        graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({"queue_url":queue,"wait_time_seconds":immediate(20.into()),"_connection":connection});
+        graph["steps"]["delete"] = serde_json::json!({"id":"delete","stepType":"Agent","agentId":"sqs","capabilityId":"queue-delete-message","maxRetries":3,"retryDelay":0,
+            "inputMapping":{"queue_url":queue,"_connection":connection,"receipt_handle":{"valueType":"reference","value":"steps.fetch.outputs.messages.0.receipt_handle"}}});
+        graph["executionPlan"] = serde_json::json!([
+            {"fromStep":"fetch","toStep":"delete"}, {"fromStep":"fetch","toStep":"handled","label":"onError"},
+            {"fromStep":"delete","toStep":"finish"}, {"fromStep":"delete","toStep":"handled","label":"onError"}
+        ]);
     }
     if scenario.is_storage() {
         let (agent, capability) = match scenario {
@@ -558,6 +584,20 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             } else {
                                 assert_eq!(body["connection_id"], "fixture-connection");
                                 match scenario {
+                                    Scenario::SqsReceive | Scenario::SqsReceiveBody | Scenario::SqsDeleteAfterReceive => {
+                                        assert_eq!(body["aws_service"], "sqs");
+                                        assert_eq!(body["url"], "/");
+                                        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
+                                        let payload: Value = serde_json::from_slice(&bytes)?;
+                                        assert_eq!(payload["QueueUrl"], "https://sqs.invalid/fixture/queue");
+                                        if server_host.requests.load(Ordering::SeqCst) == 0 {
+                                            assert_eq!(body["headers"]["X-Amz-Target"], "AmazonSQS.ReceiveMessage");
+                                            assert_eq!(payload["WaitTimeSeconds"], 20);
+                                        } else {
+                                            assert_eq!(body["headers"]["X-Amz-Target"], "AmazonSQS.DeleteMessage");
+                                            assert_eq!(payload["ReceiptHandle"], "fixture-receipt");
+                                        }
+                                    },
                                     Scenario::StorageDownload(_, _) => {
                                         assert_eq!(body["url"], "/bucket/file.txt");
                                         assert_eq!(body["method"], if server_host.requests.load(Ordering::SeqCst) == 0 {"HEAD"} else {"GET"});
@@ -582,6 +622,14 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if scenario == Scenario::SqsDeleteAfterReceive && started == 1 {
+                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Messages":[{"MessageId":"one","ReceiptHandle":"fixture-receipt","Body":"hello"}]}}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if matches!(scenario, Scenario::StorageDownload(_, true)) && started == 1 {
                             let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body_raw":""}))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
@@ -830,4 +878,21 @@ async fn emitted_storage_presign_cancel_bypasses_soft_failure_and_recovery() -> 
 #[tokio::test]
 async fn emitted_sftp_cancel_stops_native_service_wait_without_recovery() -> anyhow::Result<()> {
     run(Scenario::Sftp).await
+}
+
+#[tokio::test]
+async fn emitted_sqs_cancel_stops_long_poll_without_deleting_or_retrying() -> anyhow::Result<()> {
+    run(Scenario::SqsReceive).await
+}
+
+#[tokio::test]
+async fn emitted_sqs_cancel_stops_partial_receive_without_deleting_or_retrying()
+-> anyhow::Result<()> {
+    run(Scenario::SqsReceiveBody).await
+}
+
+#[tokio::test]
+async fn emitted_sqs_cancel_stops_delete_after_received_message_without_recovery()
+-> anyhow::Result<()> {
+    run(Scenario::SqsDeleteAfterReceive).await
 }

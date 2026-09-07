@@ -722,3 +722,55 @@ benchmarks remain ignored. Affected-crate all-target Clippy with the existing
 integration test features, formatting and diff whitespace checks passed. No
 database/server E2E, Linux qualification or fresh performance/capacity measurement
 was run in this stage.
+
+## SQS long polling and queue operations
+
+The existing SQS component now uses its normal callback export and awaits the
+shared SQS HTTP helper across all 17 capabilities. It retains the AWS JSON
+protocol, opaque connection reference, proxy-owned signing and existing 65-second
+request timeout. No product flag, alternate component, host task registry or
+automatic queue cleanup was added.
+
+Five built-component test functions cover every capability with pending headers
+and a partial response body (34 cancellation cases). Each standard cancellation
+must release the local request, let the independent sibling finish and permit a
+fresh ListQueues call in the same Agent instance. The fixture rejects any retry,
+implicit DeleteMessage or visibility adjustment between cancellation and that
+fresh invocation. Request checks cover long-poll and visibility parameters, FIFO
+fields, message attributes, batch entries, queue configuration and tags, AWS
+target/service headers, connection and tenant identity, and the existing timeout.
+
+Additional built-component cases exercise every capability's successful response
+and HTTP 403/503 soft-error behavior. They preserve receive receipt handles and
+message attributes, batch successes alongside per-entry failures, queue metadata
+and pagination. Malformed proxy transport remains a retryable network error;
+missing connection configuration remains a permanent error before I/O.
+
+Three normal emitted workflows exercise a receive-then-delete graph. Cancellation
+while receive headers or its body are pending prevents deletion. A third case
+completes receive, maps the returned receipt into DeleteMessage, then cancels that
+pending delete. Each case requires cleanup before lifecycle acknowledgement and
+bypasses retries, `onError` and workflow completion. These tests do not restore a
+remote message's visibility or undo an accepted send/delete. They use local HTTP
+fixtures only, without an AWS account or real queue.
+
+Thirteen of 27 built-in Agent bindings are migrated. Five network Agents and nine
+CPU-oriented Agents still need qualification, along with nested workflows,
+timeouts, terminal races, emergency abort, artifact cleanup, E2E and performance
+gates. The native HTTP backend remains blocking.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-agent-sqs
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+The normal build regenerated all 27 Agent components and both shared workflow
+components with metadata. All 11 SQS native tests, 49 component cancellation tests
+and 30 focused emitted lifecycle tests passed. The full emitted-workflow suite
+passed 280 tests with four test threads; its two manual release benchmarks remain
+ignored. Affected-crate all-target Clippy with the existing integration test
+features, formatting and diff whitespace checks passed. No real AWS service,
+database/server E2E, Linux qualification or new performance/capacity measurement
+was run in this stage.

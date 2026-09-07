@@ -42,9 +42,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-sqs/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings permit cancellation of awaited component I/O.
+        async: ["export:runtara:agent-sqs/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -155,7 +154,7 @@ impl SqsResp {
 /// POST an AWS JSON-protocol request to SQS via the runtara proxy. Credentials
 /// and SigV4 signing are applied server-side; this component only names the
 /// connection and the AWS service.
-fn sqs_call(target: &str, connection_id: &str, body: &Value) -> Result<SqsResp, AgentError> {
+async fn sqs_call(target: &str, connection_id: &str, body: &Value) -> Result<SqsResp, AgentError> {
     let payload = serde_json::to_vec(body).map_err(|e| {
         AgentError::permanent(
             "SQS_ENCODE_ERROR",
@@ -171,7 +170,8 @@ fn sqs_call(target: &str, connection_id: &str, body: &Value) -> Result<SqsResp, 
         .header("X-Amz-Target", target)
         .header("Content-Type", SQS_CONTENT_TYPE)
         .body_bytes(&payload)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient("SQS_NETWORK_ERROR", format!("{target} request failed: {e}"))
                 .with_attr("integration", "aws_credentials")
@@ -534,10 +534,10 @@ fn send_message_body(input: &SendMessageInput) -> Value {
     module_integration_ids = "aws_credentials",
     module_secure = true
 )]
-pub fn queue_send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
+pub async fn queue_send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = send_message_body(&input);
-    let resp = sqs_call("AmazonSQS.SendMessage", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.SendMessage", &connection.connection_id, &body).await?;
 
     Ok(if resp.ok() {
         SendMessageOutput {
@@ -636,7 +636,7 @@ fn send_message_batch_body(input: &SendMessageBatchInput) -> Value {
     side_effects = true,
     idempotent = false
 )]
-pub fn queue_send_message_batch(
+pub async fn queue_send_message_batch(
     input: SendMessageBatchInput,
 ) -> Result<BatchResultOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -645,7 +645,8 @@ pub fn queue_send_message_batch(
         "AmazonSQS.SendMessageBatch",
         &connection.connection_id,
         &body,
-    )?;
+    )
+    .await?;
 
     Ok(if resp.ok() {
         BatchResultOutput {
@@ -768,12 +769,12 @@ fn receive_messages_body(input: &ReceiveMessagesInput) -> Value {
     side_effects = true,
     idempotent = false
 )]
-pub fn queue_receive_messages(
+pub async fn queue_receive_messages(
     input: ReceiveMessagesInput,
 ) -> Result<ReceiveMessagesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = receive_messages_body(&input);
-    let resp = sqs_call("AmazonSQS.ReceiveMessage", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.ReceiveMessage", &connection.connection_id, &body).await?;
 
     Ok(if resp.ok() {
         let messages = parse_messages(&resp.body);
@@ -826,10 +827,10 @@ pub struct DeleteMessageInput {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_delete_message(input: DeleteMessageInput) -> Result<AckOutput, AgentError> {
+pub async fn queue_delete_message(input: DeleteMessageInput) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = json!({ "QueueUrl": input.queue_url, "ReceiptHandle": input.receipt_handle });
-    let resp = sqs_call("AmazonSQS.DeleteMessage", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.DeleteMessage", &connection.connection_id, &body).await?;
     Ok(ack("DeleteMessage", resp))
 }
 
@@ -874,7 +875,7 @@ fn delete_message_batch_body(input: &DeleteMessageBatchInput) -> Value {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_delete_message_batch(
+pub async fn queue_delete_message_batch(
     input: DeleteMessageBatchInput,
 ) -> Result<BatchResultOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -883,7 +884,8 @@ pub fn queue_delete_message_batch(
         "AmazonSQS.DeleteMessageBatch",
         &connection.connection_id,
         &body,
-    )?;
+    )
+    .await?;
 
     Ok(if resp.ok() {
         BatchResultOutput {
@@ -938,7 +940,7 @@ pub struct ChangeMessageVisibilityInput {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_change_message_visibility(
+pub async fn queue_change_message_visibility(
     input: ChangeMessageVisibilityInput,
 ) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -951,7 +953,8 @@ pub fn queue_change_message_visibility(
         "AmazonSQS.ChangeMessageVisibility",
         &connection.connection_id,
         &body,
-    )?;
+    )
+    .await?;
     Ok(ack("ChangeMessageVisibility", resp))
 }
 
@@ -1002,7 +1005,7 @@ fn change_visibility_batch_body(input: &ChangeMessageVisibilityBatchInput) -> Va
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_change_message_visibility_batch(
+pub async fn queue_change_message_visibility_batch(
     input: ChangeMessageVisibilityBatchInput,
 ) -> Result<BatchResultOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1011,7 +1014,8 @@ pub fn queue_change_message_visibility_batch(
         "AmazonSQS.ChangeMessageVisibilityBatch",
         &connection.connection_id,
         &body,
-    )?;
+    )
+    .await?;
 
     Ok(if resp.ok() {
         BatchResultOutput {
@@ -1138,10 +1142,10 @@ fn create_queue_body(input: &CreateQueueInput) -> Value {
     side_effects = true,
     idempotent = false
 )]
-pub fn queue_create_queue(input: CreateQueueInput) -> Result<QueueUrlOutput, AgentError> {
+pub async fn queue_create_queue(input: CreateQueueInput) -> Result<QueueUrlOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = create_queue_body(&input);
-    let resp = sqs_call("AmazonSQS.CreateQueue", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.CreateQueue", &connection.connection_id, &body).await?;
 
     Ok(if resp.ok() {
         QueueUrlOutput {
@@ -1184,10 +1188,10 @@ pub struct DeleteQueueInput {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_delete_queue(input: DeleteQueueInput) -> Result<AckOutput, AgentError> {
+pub async fn queue_delete_queue(input: DeleteQueueInput) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = json!({ "QueueUrl": input.queue_url });
-    let resp = sqs_call("AmazonSQS.DeleteQueue", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.DeleteQueue", &connection.connection_id, &body).await?;
     Ok(ack("DeleteQueue", resp))
 }
 
@@ -1267,10 +1271,10 @@ fn list_queues_body(input: &ListQueuesInput) -> Value {
     side_effects = false,
     idempotent = true
 )]
-pub fn queue_list_queues(input: ListQueuesInput) -> Result<ListQueuesOutput, AgentError> {
+pub async fn queue_list_queues(input: ListQueuesInput) -> Result<ListQueuesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = list_queues_body(&input);
-    let resp = sqs_call("AmazonSQS.ListQueues", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.ListQueues", &connection.connection_id, &body).await?;
 
     Ok(if resp.ok() {
         let queue_urls = resp
@@ -1330,7 +1334,7 @@ pub struct GetQueueUrlInput {
     side_effects = false,
     idempotent = true
 )]
-pub fn queue_get_queue_url(input: GetQueueUrlInput) -> Result<QueueUrlOutput, AgentError> {
+pub async fn queue_get_queue_url(input: GetQueueUrlInput) -> Result<QueueUrlOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut body = Map::new();
     body.insert("QueueName".into(), json!(input.queue_name));
@@ -1341,7 +1345,8 @@ pub fn queue_get_queue_url(input: GetQueueUrlInput) -> Result<QueueUrlOutput, Ag
         "AmazonSQS.GetQueueUrl",
         &connection.connection_id,
         &Value::Object(body),
-    )?;
+    )
+    .await?;
 
     Ok(if resp.ok() {
         QueueUrlOutput {
@@ -1409,7 +1414,7 @@ pub struct QueueAttributesOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn queue_get_queue_attributes(
+pub async fn queue_get_queue_attributes(
     input: GetQueueAttributesInput,
 ) -> Result<QueueAttributesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1422,7 +1427,8 @@ pub fn queue_get_queue_attributes(
         "AmazonSQS.GetQueueAttributes",
         &connection.connection_id,
         &body,
-    )?;
+    )
+    .await?;
 
     Ok(if resp.ok() {
         QueueAttributesOutput {
@@ -1507,14 +1513,17 @@ fn set_queue_attributes_body(input: &SetQueueAttributesInput) -> Value {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_set_queue_attributes(input: SetQueueAttributesInput) -> Result<AckOutput, AgentError> {
+pub async fn queue_set_queue_attributes(
+    input: SetQueueAttributesInput,
+) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = set_queue_attributes_body(&input);
     let resp = sqs_call(
         "AmazonSQS.SetQueueAttributes",
         &connection.connection_id,
         &body,
-    )?;
+    )
+    .await?;
     Ok(ack("SetQueueAttributes", resp))
 }
 
@@ -1544,10 +1553,10 @@ pub struct PurgeQueueInput {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_purge_queue(input: PurgeQueueInput) -> Result<AckOutput, AgentError> {
+pub async fn queue_purge_queue(input: PurgeQueueInput) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = json!({ "QueueUrl": input.queue_url });
-    let resp = sqs_call("AmazonSQS.PurgeQueue", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.PurgeQueue", &connection.connection_id, &body).await?;
     Ok(ack("PurgeQueue", resp))
 }
 
@@ -1592,10 +1601,12 @@ pub struct ListQueueTagsOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn queue_list_queue_tags(input: ListQueueTagsInput) -> Result<ListQueueTagsOutput, AgentError> {
+pub async fn queue_list_queue_tags(
+    input: ListQueueTagsInput,
+) -> Result<ListQueueTagsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = json!({ "QueueUrl": input.queue_url });
-    let resp = sqs_call("AmazonSQS.ListQueueTags", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.ListQueueTags", &connection.connection_id, &body).await?;
 
     Ok(if resp.ok() {
         ListQueueTagsOutput {
@@ -1644,10 +1655,10 @@ pub struct TagQueueInput {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_tag_queue(input: TagQueueInput) -> Result<AckOutput, AgentError> {
+pub async fn queue_tag_queue(input: TagQueueInput) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = json!({ "QueueUrl": input.queue_url, "Tags": input.tags });
-    let resp = sqs_call("AmazonSQS.TagQueue", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.TagQueue", &connection.connection_id, &body).await?;
     Ok(ack("TagQueue", resp))
 }
 
@@ -1680,10 +1691,10 @@ pub struct UntagQueueInput {
     side_effects = true,
     idempotent = true
 )]
-pub fn queue_untag_queue(input: UntagQueueInput) -> Result<AckOutput, AgentError> {
+pub async fn queue_untag_queue(input: UntagQueueInput) -> Result<AckOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = json!({ "QueueUrl": input.queue_url, "TagKeys": input.tag_keys });
-    let resp = sqs_call("AmazonSQS.UntagQueue", &connection.connection_id, &body)?;
+    let resp = sqs_call("AmazonSQS.UntagQueue", &connection.connection_id, &body).await?;
     Ok(ack("UntagQueue", resp))
 }
 
@@ -1860,29 +1871,31 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "queue-send-message" => __executor_queue_send_message(value),
-            "queue-send-message-batch" => __executor_queue_send_message_batch(value),
-            "queue-receive-messages" => __executor_queue_receive_messages(value),
-            "queue-delete-message" => __executor_queue_delete_message(value),
-            "queue-delete-message-batch" => __executor_queue_delete_message_batch(value),
-            "queue-change-message-visibility" => __executor_queue_change_message_visibility(value),
-            "queue-change-message-visibility-batch" => {
-                __executor_queue_change_message_visibility_batch(value)
+            "queue-send-message" => __executor_queue_send_message(value).await,
+            "queue-send-message-batch" => __executor_queue_send_message_batch(value).await,
+            "queue-receive-messages" => __executor_queue_receive_messages(value).await,
+            "queue-delete-message" => __executor_queue_delete_message(value).await,
+            "queue-delete-message-batch" => __executor_queue_delete_message_batch(value).await,
+            "queue-change-message-visibility" => {
+                __executor_queue_change_message_visibility(value).await
             }
-            "queue-create-queue" => __executor_queue_create_queue(value),
-            "queue-delete-queue" => __executor_queue_delete_queue(value),
-            "queue-list-queues" => __executor_queue_list_queues(value),
-            "queue-get-queue-url" => __executor_queue_get_queue_url(value),
-            "queue-get-queue-attributes" => __executor_queue_get_queue_attributes(value),
-            "queue-set-queue-attributes" => __executor_queue_set_queue_attributes(value),
-            "queue-purge-queue" => __executor_queue_purge_queue(value),
-            "queue-list-queue-tags" => __executor_queue_list_queue_tags(value),
-            "queue-tag-queue" => __executor_queue_tag_queue(value),
-            "queue-untag-queue" => __executor_queue_untag_queue(value),
+            "queue-change-message-visibility-batch" => {
+                __executor_queue_change_message_visibility_batch(value).await
+            }
+            "queue-create-queue" => __executor_queue_create_queue(value).await,
+            "queue-delete-queue" => __executor_queue_delete_queue(value).await,
+            "queue-list-queues" => __executor_queue_list_queues(value).await,
+            "queue-get-queue-url" => __executor_queue_get_queue_url(value).await,
+            "queue-get-queue-attributes" => __executor_queue_get_queue_attributes(value).await,
+            "queue-set-queue-attributes" => __executor_queue_set_queue_attributes(value).await,
+            "queue-purge-queue" => __executor_queue_purge_queue(value).await,
+            "queue-list-queue-tags" => __executor_queue_list_queue_tags(value).await,
+            "queue-tag-queue" => __executor_queue_tag_queue(value).await,
+            "queue-untag-queue" => __executor_queue_untag_queue(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
