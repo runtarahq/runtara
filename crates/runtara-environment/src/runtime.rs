@@ -48,6 +48,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::cleanup_worker::{CleanupWorker, CleanupWorkerConfig};
+use crate::config::{ProcessEnv, Vars, positive};
 use crate::container_registry::ContainerRegistry;
 use crate::db_cleanup_worker::{DbCleanupWorker, DbCleanupWorkerConfig};
 use crate::execution_timeout::ExecutionTimeoutPolicy;
@@ -58,68 +59,41 @@ use crate::launch_dispatcher::{LaunchDispatcher, LaunchLifecycleObservers};
 use crate::runner::Runner;
 use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig, default_wake_concurrency};
 
+// Every setting here follows `crate::config::positive`, which rejects a
+// non-positive or unparseable value rather than honouring it: a zero interval
+// would busy-spin, and a zero batch or concurrency would stop the scheduler
+// entirely. Taking the lookup as an argument is what makes them testable — the
+// alternative is mutating process-global environment state shared by every test
+// in the binary, which is why each of these used to carry a `*_from_raw` twin
+// that was tested while the function actually called was not.
+
 /// Idle poll interval for the wake scheduler, from
 /// `RUNTARA_WAKE_POLL_INTERVAL_MS` (default 5000).
 ///
 /// This is only the wait after a poll that found nothing more to do — a poll
 /// that fills its batch is followed immediately by the next one — so it bounds
 /// wake *latency* for an idle system, not wake throughput.
-fn wake_poll_interval_from_env() -> Duration {
-    wake_poll_interval_from_raw(
-        std::env::var("RUNTARA_WAKE_POLL_INTERVAL_MS")
-            .ok()
-            .as_deref(),
-    )
+fn wake_poll_interval(vars: &dyn Vars) -> Duration {
+    Duration::from_millis(positive(vars, "RUNTARA_WAKE_POLL_INTERVAL_MS", 5_000))
 }
 
 /// Instances claimed per wake poll, from `RUNTARA_WAKE_BATCH_SIZE`
 /// (default 200).
-fn wake_batch_size_from_env() -> i64 {
-    wake_batch_size_from_raw(std::env::var("RUNTARA_WAKE_BATCH_SIZE").ok().as_deref())
+fn wake_batch_size(vars: &dyn Vars) -> i64 {
+    positive(vars, "RUNTARA_WAKE_BATCH_SIZE", 200)
+}
+
+/// How long a wake claim is leased for, from `RUNTARA_WAKE_CLAIM_LEASE_SECS`
+/// (default: 300s). A batch claimed by a process that then dies becomes due
+/// again after this long, which is the recovery path for an interrupted wake.
+fn wake_claim_lease(vars: &dyn Vars) -> Duration {
+    Duration::from_secs(positive(vars, "RUNTARA_WAKE_CLAIM_LEASE_SECS", 300))
 }
 
 /// Concurrent relaunches within a wake batch, from `RUNTARA_WAKE_CONCURRENCY`
 /// (default: eight per core, see [`default_wake_concurrency`]).
-/// How long a wake claim is leased for, from `RUNTARA_WAKE_CLAIM_LEASE_SECS`
-/// (default: 300s). A batch claimed by a process that then dies becomes due
-/// again after this long, which is the recovery path for an interrupted wake.
-fn wake_claim_lease_from_env() -> Duration {
-    std::env::var("RUNTARA_WAKE_CLAIM_LEASE_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(300))
-}
-
-fn wake_concurrency_from_env() -> usize {
-    wake_concurrency_from_raw(std::env::var("RUNTARA_WAKE_CONCURRENCY").ok().as_deref())
-}
-
-// The parsing halves are split out so they can be tested without mutating
-// process-global environment state, which is shared by every test in the
-// binary. Each rejects a non-positive or unparseable value rather than
-// honouring it: a zero interval would busy-spin, and a zero batch or
-// concurrency would stop the scheduler entirely.
-
-fn wake_poll_interval_from_raw(raw: Option<&str>) -> Duration {
-    Duration::from_millis(
-        raw.and_then(|v| v.parse::<u64>().ok())
-            .filter(|ms| *ms > 0)
-            .unwrap_or(5_000),
-    )
-}
-
-fn wake_batch_size_from_raw(raw: Option<&str>) -> i64 {
-    raw.and_then(|v| v.parse::<i64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(200)
-}
-
-fn wake_concurrency_from_raw(raw: Option<&str>) -> usize {
-    raw.and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or_else(default_wake_concurrency)
+fn wake_concurrency(vars: &dyn Vars) -> usize {
+    positive(vars, "RUNTARA_WAKE_CONCURRENCY", default_wake_concurrency())
 }
 
 /// Builder for creating an [`EnvironmentRuntime`].
@@ -149,10 +123,10 @@ impl Default for EnvironmentRuntimeBuilder {
             core_persistence: None,
             runner: None,
             data_dir: PathBuf::from(".data"),
-            wake_poll_interval: wake_poll_interval_from_env(),
-            wake_batch_size: wake_batch_size_from_env(),
-            wake_concurrency: wake_concurrency_from_env(),
-            wake_claim_lease: wake_claim_lease_from_env(),
+            wake_poll_interval: wake_poll_interval(&ProcessEnv),
+            wake_batch_size: wake_batch_size(&ProcessEnv),
+            wake_concurrency: wake_concurrency(&ProcessEnv),
+            wake_claim_lease: wake_claim_lease(&ProcessEnv),
             request_timeout: Duration::from_secs(30),
             execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
@@ -1133,6 +1107,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::FixedVars;
 
     /// A worker its configuration disabled has finished on purpose.
     ///
@@ -1269,51 +1244,70 @@ mod tests {
         assert!(builder.wake_concurrency >= 1);
     }
 
+    /// A value set for one wake setting must not reach another.
+    ///
+    /// These four are read from four keys that differ by one word, through one
+    /// shared helper, so a copied line that left the wrong key behind would be
+    /// easy to write and silent to run: the setting an operator asked for would
+    /// simply not take effect, and the log line would report the default as
+    /// though it had been chosen.
     #[test]
-    fn wake_poll_interval_parsing() {
-        assert_eq!(
-            wake_poll_interval_from_raw(None),
-            Duration::from_secs(5),
-            "unset falls back to the documented default"
-        );
-        assert_eq!(
-            wake_poll_interval_from_raw(Some("250")),
-            Duration::from_millis(250)
-        );
-        // A zero or malformed interval would turn the loop into a busy wait.
-        assert_eq!(
-            wake_poll_interval_from_raw(Some("0")),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            wake_poll_interval_from_raw(Some("not-a-number")),
-            Duration::from_secs(5)
-        );
+    fn each_wake_setting_reads_its_own_key() {
+        let vars = FixedVars::new([
+            ("RUNTARA_WAKE_POLL_INTERVAL_MS", "250"),
+            ("RUNTARA_WAKE_BATCH_SIZE", "50"),
+            ("RUNTARA_WAKE_CLAIM_LEASE_SECS", "60"),
+            ("RUNTARA_WAKE_CONCURRENCY", "7"),
+        ]);
+
+        assert_eq!(wake_poll_interval(&vars), Duration::from_millis(250));
+        assert_eq!(wake_batch_size(&vars), 50);
+        assert_eq!(wake_claim_lease(&vars), Duration::from_secs(60));
+        assert_eq!(wake_concurrency(&vars), 7);
+    }
+
+    /// Every wake setting rejects a value that would break the scheduler.
+    ///
+    /// A zero interval turns the poll into a busy wait, a zero batch claims
+    /// nothing, a zero lease makes every claim instantly expired, and a zero
+    /// concurrency deadlocks the semaphore.
+    #[test]
+    fn no_wake_setting_honours_a_broken_value() {
+        for value in ["0", "-5", "", "not-a-number"] {
+            let vars = FixedVars::new([
+                ("RUNTARA_WAKE_POLL_INTERVAL_MS", value),
+                ("RUNTARA_WAKE_BATCH_SIZE", value),
+                ("RUNTARA_WAKE_CLAIM_LEASE_SECS", value),
+                ("RUNTARA_WAKE_CONCURRENCY", value),
+            ]);
+
+            assert_eq!(
+                wake_poll_interval(&vars),
+                Duration::from_secs(5),
+                "{value:?}"
+            );
+            assert_eq!(wake_batch_size(&vars), 200, "{value:?}");
+            assert_eq!(
+                wake_claim_lease(&vars),
+                Duration::from_secs(300),
+                "{value:?}"
+            );
+            assert_eq!(
+                wake_concurrency(&vars),
+                default_wake_concurrency(),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
-    fn wake_batch_size_parsing() {
-        assert_eq!(wake_batch_size_from_raw(None), 200);
-        assert_eq!(wake_batch_size_from_raw(Some("50")), 50);
-        // Zero or negative would claim nothing, stalling the scheduler.
-        assert_eq!(wake_batch_size_from_raw(Some("0")), 200);
-        assert_eq!(wake_batch_size_from_raw(Some("-5")), 200);
-        assert_eq!(wake_batch_size_from_raw(Some("")), 200);
-    }
+    fn unset_wake_settings_give_the_documented_defaults() {
+        let vars = FixedVars::empty();
 
-    #[test]
-    fn wake_concurrency_parsing() {
-        assert_eq!(wake_concurrency_from_raw(Some("7")), 7);
-        // Zero would deadlock the semaphore; fall back to the cored default.
-        assert_eq!(
-            wake_concurrency_from_raw(Some("0")),
-            default_wake_concurrency()
-        );
-        assert_eq!(
-            wake_concurrency_from_raw(Some("nope")),
-            default_wake_concurrency()
-        );
-        assert_eq!(wake_concurrency_from_raw(None), default_wake_concurrency());
+        assert_eq!(wake_poll_interval(&vars), Duration::from_secs(5));
+        assert_eq!(wake_batch_size(&vars), 200);
+        assert_eq!(wake_claim_lease(&vars), Duration::from_secs(300));
+        assert_eq!(wake_concurrency(&vars), default_wake_concurrency());
     }
 
     #[test]

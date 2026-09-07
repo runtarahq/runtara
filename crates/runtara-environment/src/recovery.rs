@@ -22,6 +22,7 @@
 //! advances between recoveries, so a genuinely long-running workflow survives
 //! any number of restarts.
 
+use crate::config::{ProcessEnv, Vars, parse_enabled, positive};
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use tracing::{error, info, warn};
 
@@ -32,11 +33,12 @@ pub const DEFAULT_MAX_AUTO_RESTARTS: i32 = 5;
 /// Read the configured crash-loop cap (`RUNTARA_MAX_AUTO_RESTARTS`, default
 /// [`DEFAULT_MAX_AUTO_RESTARTS`]). Values below 1 fall back to the default.
 pub fn max_auto_restarts() -> i32 {
-    std::env::var("RUNTARA_MAX_AUTO_RESTARTS")
-        .ok()
-        .and_then(|v| v.parse::<i32>().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(DEFAULT_MAX_AUTO_RESTARTS)
+    max_auto_restarts_from(&ProcessEnv)
+}
+
+/// [`max_auto_restarts`] against a supplied set of values.
+fn max_auto_restarts_from(vars: &dyn Vars) -> i32 {
+    positive(vars, "RUNTARA_MAX_AUTO_RESTARTS", DEFAULT_MAX_AUTO_RESTARTS)
 }
 
 /// Operator-level kill switch for automatic restart recovery. Set
@@ -49,7 +51,12 @@ pub fn max_auto_restarts() -> i32 {
 /// the `*_CLEANUP_ENABLED` opt-outs so every switch in the crate answers to the
 /// same spellings; a hand-rolled parser here used to ignore `off`.
 pub fn auto_recover_enabled() -> bool {
-    crate::config::parse_enabled(std::env::var("RUNTARA_AUTO_RECOVER").ok().as_deref())
+    auto_recover_enabled_from(&ProcessEnv)
+}
+
+/// [`auto_recover_enabled`] against a supplied set of values.
+fn auto_recover_enabled_from(vars: &dyn Vars) -> bool {
+    parse_enabled(vars.get("RUNTARA_AUTO_RECOVER").as_deref())
 }
 
 /// Outcome of a recovery decision.
@@ -201,7 +208,8 @@ pub async fn recover_or_fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, decide};
+    use super::{Decision, auto_recover_enabled_from, decide, max_auto_restarts_from};
+    use crate::config::FixedVars;
 
     #[test]
     fn first_recovery_starts_at_one() {
@@ -250,6 +258,43 @@ mod tests {
         match decide(0, None, 10, 5, false) {
             Decision::Fail { error } => assert!(error.contains("disabled")),
             other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    /// The cap rejects anything that would disable crash-loop protection or
+    /// make it nonsensical, rather than honouring it.
+    ///
+    /// A cap of zero fails every restarted instance on its first attempt, which
+    /// reads as "recovery is broken" rather than as a configured policy; the
+    /// switch for turning recovery off is RUNTARA_AUTO_RECOVER.
+    #[test]
+    fn the_restart_cap_falls_back_on_anything_non_positive() {
+        for value in ["0", "-1", "", "  ", "lots"] {
+            let vars = FixedVars::new([("RUNTARA_MAX_AUTO_RESTARTS", value)]);
+            assert_eq!(max_auto_restarts_from(&vars), 5, "{value:?}");
+        }
+
+        assert_eq!(max_auto_restarts_from(&FixedVars::empty()), 5);
+        assert_eq!(
+            max_auto_restarts_from(&FixedVars::new([("RUNTARA_MAX_AUTO_RESTARTS", "12")])),
+            12
+        );
+    }
+
+    /// The kill switch answers to the same spellings as every other switch in
+    /// the crate; a hand-rolled parser here used to ignore `off`.
+    #[test]
+    fn auto_recovery_is_on_unless_explicitly_disabled() {
+        assert!(auto_recover_enabled_from(&FixedVars::empty()));
+
+        for value in ["false", "0", "no", "off", "disabled", "Off", "  FALSE  "] {
+            let vars = FixedVars::new([("RUNTARA_AUTO_RECOVER", value)]);
+            assert!(!auto_recover_enabled_from(&vars), "{value:?}");
+        }
+
+        for value in ["true", "1", "yes", "on", "typo"] {
+            let vars = FixedVars::new([("RUNTARA_AUTO_RECOVER", value)]);
+            assert!(auto_recover_enabled_from(&vars), "{value:?}");
         }
     }
 }
