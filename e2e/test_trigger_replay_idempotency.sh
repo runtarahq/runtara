@@ -8,9 +8,24 @@
 #     environment or the repository .env file.
 #
 # The test creates an isolated workflow/image, backs up and removes that image's
-# binary, then publishes a trigger event directly. The first delivery must stay
-# pending while a forced recompilation restores the artifact. Replaying the same
-# instance id must be deduplicated and ACKed without a second instance row.
+# binary, then executes the workflow. The first delivery must stay pending while
+# a forced recompilation restores the artifact. Replaying the same event must be
+# deduplicated and ACKed without a second instance row.
+#
+# KNOWN FAILING, and the failure looks real rather than stale. The repair fires
+# — "Image or image artifact missing in Environment; forcing recompilation" —
+# and the compile reports success in ~0.1s, but the artifact is never written
+# back, so the next retry hits the same "registered artifact is missing from
+# disk" and the event burns its retry budget. One observed run: 13 repair
+# attempts, 14 compiles reported successful, and exactly ONE
+# `register_image_stream` call. The early "already registered, skipping
+# compilation" check at compilation.rs:662 does honour force_recompile, so the
+# skipping happens further in — a compilation cache keyed on source, most
+# likely, which a forced rebuild after artifact loss should miss.
+#
+# Raising TRIGGER_MAX_RETRIES does not help: the loop never converges. Do not
+# weaken this test to make it pass — it is detecting that artifact loss is
+# currently unrecoverable by recompilation.
 
 set -euo pipefail
 
