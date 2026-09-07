@@ -98,12 +98,12 @@ impl EnvironmentClient {
     /// something has to cross a socket and not when the caller is linked
     /// against the same crate.
     fn image_registry(&self) -> ImageRegistry {
-        ImageRegistry::new(self.state.pool.clone())
+        self.state.images()
     }
 
     /// The repository that owns the `instances` row.
     fn instances(&self) -> InstanceRepository {
-        InstanceRepository::new(self.state.pool.clone())
+        self.state.instances()
     }
 
     // =========================================================================

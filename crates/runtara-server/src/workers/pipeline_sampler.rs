@@ -469,6 +469,16 @@ impl PipelineLatest {
     }
 }
 
+/// The runtime-database readers the sampler needs, through the repositories
+/// that own those tables.
+#[derive(Clone)]
+pub struct RuntimeReaders {
+    /// Owner of the `instances` row; answers the parked count.
+    pub instances: runtara_environment::instance_repository::InstanceRepository,
+    /// Owner of the durable launch queue; answers the per-stage telemetry.
+    pub launches: runtara_environment::launch_queue::LaunchRepository,
+}
+
 /// What the sampler needs to read the world.
 pub struct SamplerInputs {
     /// Intake counters.
@@ -481,13 +491,15 @@ pub struct SamplerInputs {
     pub valkey: Option<redis::aio::ConnectionManager>,
     /// Trigger stream key and consumer group.
     pub stream: Option<(String, String)>,
-    /// The **runtime** database pool, for durable launch-state and parked
-    /// counts.
+    /// Readers for the two runtime tables this samples, taken from the embedded
+    /// environment rather than built from a pool of our own.
     ///
-    /// Not the server pool: `instances` lives in the runtime database, and
-    /// pointing this at the server one makes every parked count fail silently
-    /// and the stage read as permanently unmeasured.
-    pub pool: Option<sqlx::PgPool>,
+    /// This used to be one `PgPool`, which meant the worker held authority over
+    /// every table in the runtime database in order to run two counts. One
+    /// `Option` around both, not one each: they come from the same embedded
+    /// environment and are absent for the same reason, so a half-configured
+    /// sampler should not be representable.
+    pub runtime: Option<RuntimeReaders>,
     /// Tenant whose instances are counted.
     pub tenant_id: String,
     /// Composed admission cap.
@@ -531,8 +543,8 @@ pub async fn run(
         // carry its last value between slow ticks.
         if last_slow.elapsed() >= SLOW_TICK {
             last_slow = Instant::now();
-            parked = match inputs.pool.as_ref() {
-                Some(pool) => count_parked(pool, &inputs.tenant_id).await,
+            parked = match inputs.runtime.as_ref() {
+                Some(runtime) => count_parked(&runtime.instances, &inputs.tenant_id).await,
                 None => None,
             };
         }
@@ -542,8 +554,8 @@ pub async fn run(
         // with no launch owner at all. Read the durable generation state
         // instead, including its queue deadline outcome and the workflows
         // responsible for the current backlog.
-        let launches = match inputs.pool.as_ref() {
-            Some(pool) => count_launch_telemetry(pool, &inputs.tenant_id).await,
+        let launches = match inputs.runtime.as_ref() {
+            Some(runtime) => count_launch_telemetry(&runtime.launches, &inputs.tenant_id).await,
             None => None,
         };
 
@@ -652,11 +664,10 @@ const TOP_LAUNCH_WORKFLOWS: i64 = 3;
 /// recovery. This query reads only the small actionable state set; `parked`
 /// remains deliberately separate in [`count_parked`].
 async fn count_launch_telemetry(
-    pool: &sqlx::PgPool,
+    launches: &runtara_environment::launch_queue::LaunchRepository,
     tenant_id: &str,
 ) -> Option<LaunchTelemetryReading> {
     let started = Instant::now();
-    let launches = runtara_environment::launch_queue::LaunchRepository::new(pool.clone());
 
     // The SQL lives with the table it reads. This used to be two queries here,
     // carrying their own copies of the launch state names and of three
@@ -744,14 +755,16 @@ fn launch_stage_reading_mut<'a>(
 /// because it only needs to know whether the cap is reached, but a viewer wants
 /// the actual figure. That is why this runs on [`SLOW_TICK`] and never on the
 /// fast one.
-async fn count_parked(pool: &sqlx::PgPool, tenant_id: &str) -> Option<u64> {
+async fn count_parked(
+    instances: &runtara_environment::instance_repository::InstanceRepository,
+    tenant_id: &str,
+) -> Option<u64> {
     let started = Instant::now();
-    let result = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM instances WHERE tenant_id = $1 AND status = 'suspended'",
-    )
-    .bind(tenant_id)
-    .fetch_one(pool)
-    .await;
+    // Both the predicate and the vocabulary live with the table now. This used
+    // to be a raw `SELECT COUNT(*) FROM instances ... status = 'suspended'`
+    // here — the query and the status name both spelled in a crate that owns
+    // neither.
+    let result = instances.count_parked(tenant_id).await;
 
     match result {
         Ok(count) => {
