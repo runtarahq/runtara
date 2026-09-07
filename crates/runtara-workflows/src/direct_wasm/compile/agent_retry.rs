@@ -138,8 +138,7 @@ pub(super) fn emit_agent_retry_sleep(
         // signals and parent cancellation use the same standard wait/cleanup
         // as an outbound Agent call.
         body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-        body.instruction(&Instruction::Call(indices.timer_sleep_async.unwrap()));
-        super::cooperative_wait::emit_await_call(body, indices);
+        super::cooperative_wait::emit_timer_wait(body, indices);
         return;
     }
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));

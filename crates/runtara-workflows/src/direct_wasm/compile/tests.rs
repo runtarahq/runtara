@@ -11096,7 +11096,7 @@ fn abi_is_part_of_the_lowering_tag() {
     );
     assert!(tag.contains("parent-cancel=v1"));
     assert!(tag.contains("loop-cooperation=v1"));
-    assert!(tag.contains("retry-cooperation=v1"));
+    assert!(tag.contains("retry-cooperation=v2"));
     assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"

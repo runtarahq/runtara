@@ -382,3 +382,23 @@ shared-wait import/helper provisioning where an accepted construct requires it. 
 backoff retains a Store and uses the existing one-second lifecycle poll, which
 must be included in the capacity and signal-service cost qualification. This
 expands G4/G7 evidence; it does not retire E128 or complete timeout gate G5.
+
+
+### Composite retry progress (2026-09-07)
+
+Non-durable root Embed/Split backoff now shares the Agent timer/wait/cleanup
+helper. Agent-free graphs derive required timer imports from their existing
+manifest, including nested and preloaded child graphs; zero-retry graphs do not
+add timers. Returned and on-disk scaffolding preserve the timer requirement after
+composition. Tests cover cancellation, zero delay/retries, retry exhaustion,
+nested While/Embed placement and real HTTP errors inside Split. Durable root
+retry parking remains intact.
+
+AUDIT-12 identifies existing formatted-Agent-error incompatibilities: Embed
+fails JSON parsing before backoff, while Split loses rate-limit classification.
+Reference tests reproduce these with the old blocking wait too; preserve their
+current results while separately qualifying a structured error contract. Do not
+count those negative cases as successful cancellation coverage. Publication gates
+for callable Split/Embed retries remain until their full closure is qualified.
+P3 timeout integration, P4 lifecycle/resource/capacity checks, updated interactive
+audit coverage and fresh performance comparisons remain required.

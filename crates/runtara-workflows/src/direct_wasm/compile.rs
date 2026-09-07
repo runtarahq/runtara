@@ -1052,16 +1052,17 @@ pub fn compile_direct_workflow_composed_configured(
     // Re-emit with the EFFECTIVE omit decision (a runtime-needing workflow keeps
     // the import even when omit was requested), so the on-disk world/wac match
     // the module that was actually emitted.
-    result.component_artifacts =
-        super::component::emit_direct_component_artifacts_with_pools_and_connections(
-            &agent_ids,
-            binding,
-            abi,
-            result.omit_runtime,
-            export_agent_id.as_deref(),
-            &result.parallel_pools,
-            result.component_artifacts.has_connections,
-        );
+    result.component_artifacts = super::component::emit_direct_component_artifacts_scoped(
+        &agent_ids,
+        binding,
+        abi,
+        result.omit_runtime,
+        export_agent_id.as_deref(),
+        &result.parallel_pools,
+        result.component_artifacts.has_connections,
+        &Default::default(),
+        result.component_artifacts.has_timers,
+    );
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
         &result.world_wit_path,
@@ -1132,7 +1133,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v2,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1378,6 +1379,7 @@ fn compile_direct_workflow_inner(
         &parallel_pools,
         has_connections,
         &scoped_agents,
+        super::plan::needs_cooperative_timers(&manifest),
     );
 
     let build_dir = input.output_dir.join(format!(
@@ -1569,6 +1571,7 @@ fn emit_direct_component(
         &parallel_pools,
         has_connections,
         scoped_agents,
+        super::plan::needs_cooperative_timers(manifest),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1629,9 +1632,13 @@ fn build_direct_component_resolve_configured(
         parallel_pools,
         has_connections,
         &Default::default(),
+        // Structural tests use a superset world; production derives this from
+        // the actual manifest, including Agent-free composite retry waits.
+        !omit_runtime,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_scoped(
     agents: &[String],
     abi: super::component::WorkflowAbi,
@@ -1640,6 +1647,7 @@ fn build_direct_component_resolve_scoped(
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
+    needs_timers: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
@@ -1681,7 +1689,7 @@ fn build_direct_component_resolve_scoped(
                 .map_err(component_error)?;
         }
     }
-    if !parallel_pools.is_empty() || !agents.is_empty() {
+    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
         resolve
             .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
             .map_err(component_error)?;
@@ -1729,7 +1737,7 @@ fn build_direct_component_resolve_scoped(
     if has_connections {
         workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
     }
-    if !parallel_pools.is_empty() || !agents.is_empty() {
+    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
         workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {

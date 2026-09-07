@@ -2877,6 +2877,45 @@ fn agent_effective_retry_delay_ms(agent: &DirectAgentManifest) -> u64 {
         .unwrap_or(if agent.rate_limited { 2_000 } else { 1_000 })
 }
 
+/// Derive timer imports from the manifest, including inline children and every
+/// nested graph. Keep retry defaults shared with plan lowering. This is an
+/// artifact requirement, not a selectable cancellation mode.
+pub(super) fn needs_cooperative_timers(manifest: &DirectWorkflowManifest) -> bool {
+    if !manifest.feature_summary.agent_ids.is_empty() {
+        return true;
+    }
+    let mut graphs = vec![&manifest.graph];
+    graphs.extend(manifest.child_workflows.iter().map(|child| &child.graph));
+    while let Some(graph) = graphs.pop() {
+        if graph
+            .splits
+            .iter()
+            .any(|split| !split.durable && split_effective_max_retries(split) > 0)
+        {
+            return true;
+        }
+        for step in &graph.steps {
+            if step.step_type == "EmbedWorkflow"
+                && !(graph.durable
+                    && step
+                        .body
+                        .get("durable")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true))
+                && embed_workflow_effective_max_retries(step) > 0
+            {
+                return true;
+            }
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    false
+}
+
 fn embed_workflow_effective_max_retries(step: &DirectStepManifest) -> u32 {
     step.body
         .get("maxRetries")

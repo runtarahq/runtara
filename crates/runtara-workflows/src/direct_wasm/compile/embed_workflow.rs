@@ -484,9 +484,9 @@ fn emit_embed_workflow_child_with_retry(
         body.instruction(&Instruction::End);
         body.instruction(&Instruction::End);
     } else {
-        // Legacy export shapes have no wake result and retain the historic
-        // in-run sleep lowering. Current direct workflow images always take
-        // the lifecycle arm above.
+        // Non-durable invocations keep their stack through a cooperative
+        // timer wait. Legacy durable export shapes retain their existing
+        // in-run sleep because they cannot return a lifecycle wake.
         emit_embed_retry_before_attempt(
             body,
             indices,

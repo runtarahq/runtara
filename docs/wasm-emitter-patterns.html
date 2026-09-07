@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
-<meta name="description" content="Explore tested Runtara DSL to WASM patterns, seven audit findings, and proposed emitter fixes with illustrated execution traces.">
+<meta name="description" content="Explore tested Runtara DSL to WASM patterns, twelve audit findings, and proposed emitter fixes with illustrated execution traces.">
 <title>WASM pattern lab · Runtara</title>
 <style>
 :root{--bg:#0b101a;--panel:#121a28;--raised:#182235;--line:#2b374b;--text:#edf2fb;--muted:#a5b3c9;--green:#6de5bb;--red:#ffa18e;--purple:#baacff;--blue:#83baff;--mono:ui-monospace,SFMono-Regular,Consolas,monospace;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:var(--bg);font-size:16px;line-height:1.55}
@@ -14,9 +14,9 @@
 </head>
 <body data-mode="gap">
 <a class="skip" href="#main">Skip to pattern</a>
-<header class="topbar"><div class="brand"><span class="brandmark" aria-hidden="true">r_</span> runtara <span style="font-weight:400;color:var(--muted)">/ pattern lab</span></div><div class="topmeta"><span class="revision mono">DSL → WASM</span><span class="date">Updated · 06 Sep 2026</span><a href="wasm-emitter-audit.md">Read the audit ↗</a></div></header>
+<header class="topbar"><div class="brand"><span class="brandmark" aria-hidden="true">r_</span> runtara <span style="font-weight:400;color:var(--muted)">/ pattern lab</span></div><div class="topmeta"><span class="revision mono">DSL → WASM</span><span class="date">Updated · 07 Sep 2026</span><a href="wasm-emitter-audit.md">Read the audit ↗</a></div></header>
 <div class="layout">
-<aside class="sidebar"><div class="sideheading"><div class="eyebrow">Execution patterns</div><h2>Explore the boundary.</h2><p>Tested controls, known gaps,<br>and possible fixes.</p></div><nav class="catalog" id="catalog" aria-label="Pattern families"></nav><div class="sidebar-foot"><div class="eyebrow">Audit evidence</div><div class="countline"><span>Passing audit tests</span><strong>77</strong></div><div class="countline"><span>Open regressions</span><strong>0</strong></div><p style="margin-top:16px">All seven findings fixed. Plus 42 passing graph, arena, identity, configuration, compiler and save-error unit tests. This is not a complete DSL support matrix.</p><a href="wasm-emitter-audit.md#verification-record-and-remaining-coverage">Verification & scope ↗</a></div></aside>
+<aside class="sidebar"><div class="sideheading"><div class="eyebrow">Execution patterns</div><h2>Explore the boundary.</h2><p>Tested controls, known gaps,<br>and possible fixes.</p></div><nav class="catalog" id="catalog" aria-label="Pattern families"></nav><div class="sidebar-foot"><div class="eyebrow">Audit status</div><div class="countline"><span>Findings covered</span><strong>12</strong></div><div class="countline"><span>Open findings</span><strong>2</strong></div><p style="margin-top:16px">AUDIT-08 and AUDIT-12 remain open. Other findings show tested fixes in this worktree. Passing compatibility tests can document a defect. This is not the full DSL qualification matrix.</p><a href="cooperative-cancellation-implementation.md">Cancellation evidence & scope ↗</a></div></aside>
 <main class="main" id="main" tabindex="-1">
 <div class="breadcrumb"><span id="audit-id"></span><span>/</span><span id="category"></span></div>
 <div class="intro"><div><h1 id="title"></h1><p id="subtitle"></p></div><span id="verdict" class="badge red"></span></div>
@@ -30,8 +30,8 @@
 <div class="detail-tabs" role="group" aria-label="Pattern details"><button data-detail="explanation" aria-pressed="true">Why & possible solution</button><button data-detail="dsl" aria-pressed="false">Example DSL</button><button data-detail="tests" aria-pressed="false">Tests & evidence</button></div>
 <section class="detail" id="explanation"><div class="explanation"><div><h3 id="why-title"></h3><p id="why"></p><h3>Working boundary</h3><p id="boundary"></p><div class="evidence" id="evidence"></div></div><div class="fixbox"><div class="eyebrow">Possible solution</div><h3 id="fix-title" style="margin-top:8px"></h3><ol id="fix-steps"></ol><pre id="pseudocode" class="pseudocode"></pre></div></div></section>
 <section class="detail" id="dsl" hidden><div class="codebar"><span id="dsl-note"></span><div><button id="copy">Copy JSON</button> <button id="download">Download JSON ↓</button></div></div><pre id="dsl-code" class="dsl" tabindex="0"></pre></section>
-<section class="detail" id="tests" hidden><h3>Recorded test coverage</h3><p class="testnote">All 77 audit controls and regressions are enabled and passing. Historical failure views preserve the original evidence; they do not describe the current compiler.</p><ul class="testlist" id="testlist"></ul><p class="testnote">Run all cases in this family:</p><pre class="dsl" id="command"></pre><p class="testnote" id="test-requirements"></p></section>
-<footer class="footer"><span>Illustrated traces, not a WASM runner. Audit: cdcf9ee · 05 Sep. AUDIT-01 through AUDIT-07 fixes verified · 06 Sep 2026.</span><a id="finding-link" href="wasm-emitter-audit.md">Full finding & source references ↗</a></footer>
+<section class="detail" id="tests" hidden><h3>Recorded test coverage</h3><p class="testnote">Tests below record the selected behavior. A passing compatibility test may confirm an open defect. Historical failure views and proposed fixes are labelled separately.</p><ul class="testlist" id="testlist"></ul><p class="testnote">Run all cases in this family:</p><pre class="dsl" id="command"></pre><p class="testnote" id="test-requirements"></p></section>
+<footer class="footer"><span>Illustrated traces, not a WASM runner. Updated 07 Sep 2026. Full cancellation qualification and performance comparisons remain in progress.</span><a id="finding-link" href="wasm-emitter-audit.md">Full finding & source references ↗</a></footer>
 <noscript><p class="noscript">Enable JavaScript to explore the diagrams, or <a href="wasm-emitter-audit.md">read the complete audit</a>.</p></noscript>
 </main></div>
 <script id="pattern-lab">
@@ -46,6 +46,258 @@ const families = [
 {id:'retries',resolved:true,name:'Retry bounds',category:'Compiler arithmetic',risk:'P2',summary:'Fixed: every retry path reserves room for the initial attempt and rejects an overflowing budget.',boundary:'Agent, EmbedWorkflow, Split and both AI Agent paths accept omitted defaults, 0, 1, the signed boundary, and values through 4,294,967,294. A maximum u32 retry count is rejected. Huge accepted budgets are representable; they are not a practical retry recommendation.',why:'The original Agent, EmbedWorkflow and Split lowerers added one in u32 without a bound. AI Agent shares Agent lowering. The original Agent and EmbedWorkflow regressions reproduced debug panics. Rate-limited retries also needed a hard counter ceiling because their separate wait budget may outlive maxRetries.',fixTitle:'Reserve the first attempt, reject overflow',fixSteps:['Validate maxRetries ≤ 4,294,967,294 for Agent, EmbedWorkflow, Split and AI Agent; recurse through nested and preloaded child graphs. Return E129 with the step and field.','Reject retry-count-overflow at the support gate. Defensively validate manifests before planning, and use checked addition during lowering.','Stop every retry predicate at attempt 4,294,967,295, including zero-delay rate limits. Keep unsigned comparisons above i32::MAX.','Use saturating backoff exponentiation before the delay cap. The old power expression could overflow at attempt 66; zero-delay and retry-after behavior remain intact.'],pseudo:'MAX_RETRIES = u32::MAX - 1\nvalidate(max_retries <= MAX_RETRIES)\ntotal_attempts = checked_add(max_retries, 1)\nretry = policy_allows_retry && attempt < u32::MAX',evidence:'12 native boundary/validation tests, 2 defensive planner tests, 3 emitted-WASM predicate tests and 2 stdlib backoff tests pass in debug and release. The predicate tests execute 45 cases, including the unsigned ceiling and rate-limit exceptions; they do not run billions of calls.',tests:["+audit_06_agent_retry_boundaries_below_overflow_compile", "+audit_06_embed_retry_boundaries_below_overflow_compile", "+audit_06_split_retry_boundaries_below_overflow_compile", "+audit_06_ai_retry_boundaries_below_overflow_compile", "+audit_06_ai_tool_loop_retry_boundaries_below_overflow_compile", "+audit_06_agent_retry_overflow_returns_compile_error", "+audit_06_embed_retry_overflow_returns_compile_error", "+audit_06_split_retry_overflow_returns_compile_error", "+audit_06_ai_retry_overflow_returns_compile_error", "+audit_06_ai_tool_loop_retry_overflow_returns_compile_error", "+audit_06_nested_retry_overflow_is_rejected", "+audit_06_child_retry_overflow_is_rejected"],controls:[['agent-0','Agent · 0 retries'],['agent-1','Agent · 1 retry'],['agent-max','Agent · u32::MAX − 1'],['embed-0','EmbedWorkflow · 0 retries'],['embed-1','EmbedWorkflow · 1 retry'],['embed-max','EmbedWorkflow · u32::MAX − 1'],['split-max','Split · u32::MAX − 1'],['ai-max','AI Agent · u32::MAX − 1'],['ai-tools-max','AI tool loop · u32::MAX − 1']],gaps:[['agent','Agent · u32::MAX'],['embed','EmbedWorkflow · u32::MAX'],['split','Split · u32::MAX'],['ai','AI Agent · u32::MAX'],['ai-tools','AI tool loop · u32::MAX']]},
 {id:'identity',resolved:true,name:'Step identity',category:'Validation contract',risk:'P2',summary:'Fixed: graph analysis and manifest construction require the same step identity.',boundary:'Each steps[key].id must equal key exactly. This guarantees unique IDs within that graph. Separate nested graphs and child workflows can reuse local IDs. Punctuation, case and Unicode are preserved; IDs are never silently renamed.',why:'The original validator followed map keys while manifest construction discarded those keys and kept inner IDs. Root and While mismatches, plus duplicate inner IDs, passed validation. The root case then failed during compilation with a missing-entry error.',fixTitle:'Check identity before constructing the manifest',fixSteps:['Compare every map key with step.id, including unreachable declarations, all 14 step variants, Split/While bodies, onWait handlers and preloaded children.','Return E130 / StepIdMismatch with the graph path, map key and declared ID. Escape graph paths as JSON pointers; server errors target the authored key and the id field.','Reject malformed input at the public support gate and manifest builder too. Preserve matching IDs and allow reuse in separate graph scopes. No input is rewritten.'],pseudo:'for (key, step) in graph.steps:\n    if key != step.id:\n        report E130(graph_path, key, step.id)\n    check_nested_graphs(step)\n// Unique map keys + equality imply unique local IDs.',evidence:'14 native audit tests verify validation, support reports, manifest rejection and compilation. They cover all step variants, nested and child graphs, Unicode equality, stable diagnostic order and valid ID reuse. Two browser-validator tests and a server error-mapping test cover the presentation boundaries.',tests:["+audit_07_matching_step_keys_validate_and_compile", "+audit_07_root_key_id_mismatch_is_rejected", "+audit_07_nested_key_id_mismatch_is_rejected", "+audit_07_duplicate_inner_ids_are_rejected", "+audit_07_split_and_on_wait_key_id_mismatches_are_rejected", "+audit_07_nested_paths_escape_json_pointer_segments", "+audit_07_unreachable_and_invalid_entry_graphs_still_report_id_mismatches", "+audit_07_all_step_variants_check_their_declared_id", "+audit_07_ai_tool_declarations_are_checked", "+audit_07_multiple_identity_errors_have_stable_order", "+audit_07_visually_similar_ids_are_not_silently_normalized", "+audit_07_local_ids_can_repeat_in_separate_nested_graphs", "+audit_07_preloaded_child_identity_is_validated_before_manifest_construction", "+audit_07_local_ids_can_repeat_in_separate_children"],controls:[['matching','Matching root identity'],['scoped','Same local ID · nested scopes'],['children','Same local ID · child workflows']],gaps:[['root','Root mismatch'],['nested','While body mismatch'],['duplicate','Duplicate inner IDs'],['split','Split body mismatch'],['onwait','onWait handler mismatch'],['child','Preloaded child mismatch'],['ai-tool','AI tool declaration mismatch']]}
 ];
+families.push(...[
+ {
+  "id": "retry-policy",
+  "resolved": false,
+  "name": "Rate-limit policy",
+  "category": "Retry classification",
+  "risk": "Open",
+  "summary": "Two existing policy gaps: zero retries bypasses rate-limit waits, and HTTP_429 uses the ordinary retry budget.",
+  "boundary": "A recognized Slack rate-limit error with maxRetries: 1 can wait twice and succeed on call three. Ordinary HTTP retries retain their own attempt count.",
+  "why": "The retry loop is emitted only when maxRetries is positive. Inside it, the classifier recognizes RATE_LIMITED codes, while the HTTP agent emits HTTP_429. These behaviors remain unchanged.",
+  "fixTitle": "Define one rate-limit policy",
+  "fixSteps": [
+   "Decide whether zero ordinary retries should still allow the separate rate-limit wait budget.",
+   "Normalize provider rate-limit classification before retry selection.",
+   "Verify sequential and parallel calls, attempt identities, replay and provider errors before changing execution policy."
+  ],
+  "pseudo": "classify(error) → ordinary | rate_limited\nordinary → attempt budget\nrate_limited → accumulated wait budget\n// Define zero-retry semantics explicitly.",
+  "evidence": "Real HTTP/Slack tests cover both root and published workflow agents. Passing compatibility tests confirm the gaps; they do not mean the policy has been fixed.",
+  "tests": [
+   "+nested_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count",
+   "+nested_retry_preserves_success_after_transient_errors",
+   "+nested_retry_zero_retries_routes_rate_limit_error_to_recovery",
+   "+nested_retry_http_429_uses_ordinary_retry_count"
+  ],
+  "controls": [
+   [
+    "recognized",
+    "Recognized rate limit"
+   ],
+   [
+    "ordinary",
+    "Ordinary HTTP retries"
+   ]
+  ],
+  "gaps": [
+   [
+    "zero",
+    "Zero ordinary retries"
+   ],
+   [
+    "http429",
+    "HTTP 429 classification"
+   ]
+  ],
+  "testFile": "nested_retry.rs",
+  "testFilter": "nested_retry::",
+  "anchor": "audit-08",
+  "followup": true
+ },
+ {
+  "id": "loop-cancellation",
+  "resolved": true,
+  "name": "Loop cooperation",
+  "category": "Cancellation boundaries",
+  "risk": "Fixed",
+  "summary": "While and sequential Split cooperate between iterations; callable workflows receive parent cancellation through the standard yield.",
+  "boundary": "Root loops poll lifecycle signals. Published loops yield to their composing parent. Pure hostless loops keep their runtime-free mode; that mode has no root signal import.",
+  "why": "Pure root loops could miss cancellation, published CPU loops had no delivery point, and runtime-free While referenced missing runtime imports. These tested shapes are fixed.",
+  "fixTitle": "Share one iteration boundary",
+  "fixSteps": [
+   "For callable workflows, use the standard cancellable thread yield and unwind pending calls before returning.",
+   "For roots with runtime access, poll without consuming, clean pending work, then acknowledge.",
+   "Skip missing runtime imports in runtime-free While. Bound cooperation by one iteration, not a fixed number of milliseconds."
+  ],
+  "pseudo": "between_iterations():\n  callable → canonical cancellable yield\n  root → poll lifecycle signal\n  cancellation → shared cleanup → return",
+  "evidence": "Tests cover normal counts/results, root and published cancellation, legacy error routing and hostless execution. Arbitrary CPU work inside an iteration still needs separate qualification.",
+  "tests": [
+   "+published_while_without_runtime_preserves_completion",
+   "+published_split_yields_for_parent_cancellation_between_items",
+   "+root_while_observes_cancel_without_an_agent_wait",
+   "+root_split_observes_cancel_without_an_agent_wait",
+   "+hostless_while_invoke_keeps_its_runtime_free_mode",
+   "+hostless_split_invoke_keeps_its_runtime_free_mode"
+  ],
+  "controls": [
+   [
+    "normal",
+    "Normal loop completion"
+   ],
+   [
+    "published",
+    "Published loop cancellation"
+   ]
+  ],
+  "gaps": [
+   [
+    "root",
+    "Root cancellation"
+   ],
+   [
+    "published",
+    "Published Split cancellation"
+   ],
+   [
+    "runtimefree",
+    "Runtime-free While compilation"
+   ]
+  ],
+  "testFile": "loop_boundaries.rs",
+  "testFilter": "loop_boundaries::",
+  "anchor": "audit-09",
+  "followup": true
+ },
+ {
+  "id": "root-backoff",
+  "resolved": true,
+  "name": "Agent backoff cancellation",
+  "category": "Cooperative timer wait",
+  "risk": "Fixed",
+  "summary": "Root Agent retries now accept cancellation during backoff through the shared async timer wait.",
+  "boundary": "Ordinary and recognized rate-limit backoff cancel after one HTTP request, without another retry or onError recovery. Durable retries still checkpoint and park.",
+  "why": "Root non-durable retries synchronously called runtime.blocking-sleep. WASM could not poll its lifecycle signal until the full backoff elapsed.",
+  "fixTitle": "Await the existing timer",
+  "fixSteps": [
+   "Use the same async-lowered host-I/O timer as published workflow agents.",
+   "Reuse standard subtask and waitable-set cleanup; the host supplies a timer, not retry decisions.",
+   "Keep ordinary and rate-limit budgets intact. Root polling uses the existing one-second interval; non-durable waits retain a Store."
+  ],
+  "pseudo": "delay = existing_retry_policy(error)\nawait shared_timer_wait(delay)\n// Cancel: resolve handles, acknowledge, return.\n// Completion: continue the guest retry loop.",
+  "evidence": "Both 60-second backoff cancellation cases reached the five-second watchdog before the change. They now pass, alongside exact request-count, delay and recovery checks.",
+  "tests": [
+   "+root_retry_cancel_interrupts_long_backoff",
+   "+root_retry_cancel_interrupts_rate_limit_backoff",
+   "+root_retry_preserves_success_and_backoff_after_transient_errors",
+   "+root_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count"
+  ],
+  "controls": [
+   [
+    "normal",
+    "Retry to successful result"
+   ],
+   [
+    "cancel",
+    "Cancel during backoff"
+   ]
+  ],
+  "gaps": [
+   [
+    "ordinary",
+    "Ordinary backoff"
+   ],
+   [
+    "rate-limit",
+    "Rate-limit backoff"
+   ]
+  ],
+  "testFile": "nested_retry.rs",
+  "testFilter": "nested_retry::root_retry_",
+  "anchor": "audit-10",
+  "followup": true
+ },
+ {
+  "id": "composite-backoff",
+  "resolved": true,
+  "name": "Embed / Split backoff",
+  "category": "Timer-only workflow",
+  "risk": "Fixed",
+  "summary": "Non-durable composite retries share the Agent timer wait, including graphs without any Agent imports.",
+  "boundary": "Structured child errors can enter cooperative Embed/Split backoff. Nested While and preloaded children are covered. Zero retries adds no timer import; durable retries still park.",
+  "why": "Composite backoff blocked, and canonical wait helpers were provisioned only for Agent graphs. Timer requirements could also disappear when composition regenerated world.wit.",
+  "fixTitle": "Derive imports from the graph",
+  "fixSteps": [
+   "Read retry requirements from the manifest, including nested and preloaded child graphs.",
+   "Provision canonical wait helpers for timer-only graphs and reuse the single timer-wait helper.",
+   "Preserve timer requirements in returned and on-disk WIT. Keep publication gates and durable parking until their own qualification completes."
+  ],
+  "pseudo": "needs_timer = Agent call OR non_durable_composite_retry\nmanifest closure → imports + shared wait helpers\nAgent / Embed / Split → same timer wait\nzero retries → no extra timer import",
+  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. These fixes do not repair the formatted Agent errors described in AUDIT-12.",
+  "tests": [
+   "+agent_free_embed_backoff_cancels_without_recovery",
+   "+agent_free_split_backoff_cancels_without_recovery",
+   "+agent_free_embed_backoff_preserves_attempts_and_recovery",
+   "+agent_free_split_backoff_preserves_attempts_and_recovery",
+   "+agent_free_embed_zero_retries_recovers_immediately",
+   "+agent_free_split_zero_retries_recovers_immediately",
+   "+nested_while_embed_backoff_cancels",
+   "+inline_child_split_backoff_cancels_with_outer_retries_disabled"
+  ],
+  "controls": [
+   [
+    "normal",
+    "Exhaust retries → recover"
+   ],
+   [
+    "zero",
+    "Zero retries → recover"
+   ]
+  ],
+  "gaps": [
+   [
+    "embed",
+    "Embed backoff"
+   ],
+   [
+    "split",
+    "Split backoff"
+   ]
+  ],
+  "testFile": "composite_retry.rs",
+  "testFilter": "composite_retry::",
+  "anchor": "audit-11",
+  "followup": true
+ },
+ {
+  "id": "composite-errors",
+  "resolved": false,
+  "name": "Agent error propagation",
+  "category": "Composite error contract",
+  "risk": "Open",
+  "summary": "Formatted Agent error text breaks Embed parsing and hides rate-limit classification from Split.",
+  "boundary": "Structured Error-step failures reach Embed retry/recovery. Direct Agent retries preserve recognized rate-limit information. The loss occurs when formatted Agent errors cross into composite handling.",
+  "why": "Agent failure lowering returns “Step … failed: Agent …: {…}”. Embed expects a JSON value. Split fails to parse that text and treats it as an ordinary retryable error.",
+  "fixTitle": "Preserve structured errors across scopes",
+  "fixSteps": [
+   "Carry code, category, retryability and retry-after as structured data through Agent and composite propagation.",
+   "Apply human-readable formatting at presentation boundaries. Do not guess a JSON substring inside arbitrary text.",
+   "Qualify nested wrapping, onError payloads and durable attempt replay before changing the error contract."
+  ],
+  "pseudo": "Agent error-info → structured workflow error\nEmbed / Split classify structured fields\npresentation boundary → readable message\n// Proposed; current text-based behavior remains.",
+  "evidence": "The no-cancel failures also reproduced after restoring the original blocking composite sleeps. Compatibility tests assert these existing outcomes; they are not successful cancellation proofs.",
+  "tests": [
+   "+embed_agent_http_error_preserves_existing_parse_failure",
+   "+embed_agent_rate_limit_error_preserves_existing_parse_failure",
+   "+split_agent_rate_limit_error_uses_ordinary_retry_budget",
+   "+root_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count"
+  ],
+  "controls": [
+   [
+    "structured",
+    "Structured child error"
+   ],
+   [
+    "direct",
+    "Direct Agent rate limit"
+   ]
+  ],
+  "gaps": [
+   [
+    "embed",
+    "Agent error inside Embed"
+   ],
+   [
+    "split",
+    "Rate-limit error inside Split"
+   ]
+  ],
+  "testFile": "nested_retry.rs",
+  "testFilter": "nested_retry::",
+  "anchor": "audit-12",
+  "followup": true
+ }
+]);
 const imm=value=>({valueType:'immediate',value});
 const ref=value=>({valueType:'reference',value});
 const cond=b=>({type:'operation',op:'EQ',arguments:[imm(b),imm(true)]});
@@ -54,7 +306,66 @@ const edge=(fromStep,toStep,label)=>({...{fromStep,toStep},...(label?{label}:{})
 const graph=(entryPoint,steps,executionPlan=[])=>({entryPoint,steps,executionPlan});
 const loop=(id,subgraph)=>({id,stepType:'While',condition:cond(true),config:{maxIterations:1},subgraph});
 const leaf=id=>graph(id,{[id]:finish(id)});
+function cancellationDsl(f,mode,v){
+ const control=mode==='control';
+ const nondurable=(entry,steps,edges=[])=>({...graph(entry,steps,edges),durable:false});
+ const agent=(slack,retries,delay)=>({id:'fetch',stepType:'Agent',agentId:slack?'slack':'http',capabilityId:slack?'send-message':'http-request',maxRetries:retries,retryDelay:delay,inputMapping:slack?{channel:imm('C-fixture'),text:imm('fixture'),_connection:imm({connection_id:'fixture',integration_id:'slack_bot',parameters:{}})}:{url:imm('https://example.invalid/retry-fixture'),method:imm('GET'),fail_on_error:imm(true)}});
+ const callGraph=(call,recover=true)=>nondurable('fetch',{fetch:call,finish:finish('finish'),...(recover?{handled:finish('handled',{recovered:imm(true)})}:{})},[edge('fetch','finish'),...(recover?[edge('fetch','handled','onError')]:[])]);
+ const composite=(split,child,retries,delay)=>{
+  const scope=split?{id:'scope',stepType:'Split',config:{value:imm([1]),sequential:true,maxRetries:retries,retryDelay:delay},subgraph:child}:{id:'scope',stepType:'EmbedWorkflow',childWorkflowId:'retry-child',childVersion:1,maxRetries:retries,retryDelay:delay};
+  const root=nondurable('scope',{scope,finish:finish('finish'),handled:finish('handled',{recovered:imm(true)})},[edge('scope','finish'),edge('scope','handled','onError')]);
+  return split?root:{root,childWorkflows:[{stepId:'scope',workflowId:'retry-child',versionRequested:'1',versionResolved:1,executionGraph:child}]};
+ };
+ if(f.id==='loop-cancellation'){
+  const split=v==='published',count=control?3:1000;
+  const body=nondurable('done',{done:finish('done')});
+  const each=split?{id:'each',stepType:'Split',config:{value:imm(Array.from({length:count},(_,i)=>i)),sequential:true},subgraph:body}:{id:'each',stepType:'While',condition:cond(true),config:{maxIterations:count},subgraph:body};
+  return nondurable('each',{each,finish:finish('finish')},[edge('each','finish')]);
+ }
+ if(f.id==='retry-policy')return callGraph(agent(v==='recognized'||v==='zero',v==='zero'?0:v==='ordinary'?2:1,50));
+ if(f.id==='root-backoff')return callGraph(agent(v==='rate-limit',2,control&&v==='normal'?50:60000));
+ if(f.id==='composite-backoff'){
+  const child=nondurable('fail',{fail:{id:'fail',stepType:'Error',code:'RETRY_FIXTURE',category:'transient',severity:'error',message:'retry fixture'}});
+  return composite(v==='split',child,2,control?(v==='zero'?0:50):60000);
+ }
+ if(control&&v==='direct')return callGraph(agent(true,1,50));
+ const child=control?nondurable('fail',{fail:{id:'fail',stepType:'Error',code:'RETRY_FIXTURE',category:'transient',severity:'error',message:'retry fixture'}}):callGraph(agent(v==='split',0,50),false);
+ return composite(v==='split',child,v==='split'?1:2,50);
+}
+function cancellationScenario(f,mode,v){
+ const control=mode==='control',fix=mode==='fix',historical=!control&&!fix&&f.resolved;
+ let labels,texts,expected,observed;
+ if(f.id==='retry-policy'){
+  const recognized=v==='recognized',ordinary=v==='ordinary',zero=v==='zero';
+  labels=[['Provider error',ordinary?'HTTP 503':v==='http429'?'HTTP 429':'RATE_LIMITED'],['Classify error',zero?'maxRetries = 0':'select retry budget'],['Wait / retry','fixture responses'],['Outcome',fix?'proposed policy':'current policy']];
+  expected=control?'The fixture succeeds on request three.':zero?'Define explicitly whether a separate rate-limit budget applies when ordinary retries are disabled.':'Recognize a rate-limit response consistently across providers.';
+  observed=control?(recognized?'Two rate-limit waits preserve the ordinary retry allowance; request three succeeds.':'Two ordinary retries allow request three to succeed.'):fix?'Proposal only: normalize rate-limit errors and apply an explicitly chosen zero-retry policy.':zero?'No retry loop is emitted. The first rate-limit error routes directly to recovery.':'HTTP_429 consumes ordinary retries. It does not use the separate rate-limit wait budget.';
+  texts=['The local fixture returns the selected provider error.',zero?'Zero retries bypasses the retry loop today.':'The current classifier distinguishes RATE_LIMITED from HTTP_429.',control?'The fixture supplies two errors, then success.':'The selected budget determines whether another request is issued.',observed];
+ }else if(f.id==='loop-cancellation'){
+  const published=v==='published',hostless=v==='runtimefree';
+  labels=[['Enter loop',published?'callable workflow':'root workflow'],['Run iteration','guest owns control'],['Boundary',published?'cancellable yield':hostless?'no runtime import':'poll lifecycle signal'],['Return',control?'normal completion':'cooperative outcome']];
+  expected=hostless?'Runtime-free While compiles and completes without acquiring root lifecycle imports.':control?'Normal completion preserves iteration count and output.':'Observe cancellation at an iteration boundary and unwind before returning.';
+  observed=historical?(hostless?'The old runtime-free While emitter referenced missing runtime imports.':'The old loop lacked the required cancellation delivery point.'):hostless?'Hostless execution completes without timer/runtime imports; it cannot observe a root lifecycle signal.':control?'Normal loop results are preserved.':'Root loops poll lifecycle signals; callable loops yield to parent cancellation through the Component Model.';
+  texts=['The graph remains inside the composed workflow binary.','An iteration executes its guest logic; arbitrary CPU work inside it is not preempted.',hostless?'No root signal interface is available in hostless mode.':published?'A standard cancellable yield gives the parent a delivery point.':'The workflow checks its lifecycle notification at the shared boundary.',observed];
+ }else if(f.id==='root-backoff'||f.id==='composite-backoff'){
+  const composite=f.id==='composite-backoff',cancel=!control||v==='cancel';
+  labels=[[composite?'Child error':'Agent error',composite?'structured Error step':'provider response'],['Retry delay',control&&v==='zero'?'zero milliseconds':cancel?'60 seconds':'50 milliseconds'],[cancel?'Cancel arrives':'Wait completes',cancel?'lifecycle signal':'same retry policy'],['Guest outcome',cancel?'cleanup + return':'retry / recovery']];
+  expected=cancel?'Cancel the workflow during backoff without issuing another attempt or entering error recovery.':composite?'Three child errors exhaust two retries and produce {"recovered":true}.':'Transient errors are retried and the third request succeeds.';
+  observed=historical?'The old blocking sleep did not cooperate with lifecycle cancellation during backoff.':cancel?'The shared canonical timer wait observes cancellation, cleans up and acknowledges it; no further attempt runs.':composite?'Normal and zero-delay retries preserve error counts and recovery output.':'The normal retry count and success result are preserved.';
+  texts=[composite?'A structured Error-step failure reaches the enclosing retry loop. Formatted Agent errors have a separate open gap.':'The HTTP or Slack fixture returns a retryable error.',historical?'The old emitter calls the blocking sleep path.':'The emitter uses the shared canonical wait helper. The host supplies a timer; the guest controls retry.',cancel?'The test requests cancellation during the 60-second backoff; its watchdog is five seconds.':'No cancellation is requested; the timer completion permits the next attempt.',observed];
+ }else{
+  const split=v==='split',direct=control&&v==='direct';
+  labels=[['Child result',control&&!direct?'structured Error':'Agent error'],['Scope boundary',direct?'direct Agent':split?'Split':'EmbedWorkflow'],['Retry decision',split?'rate-limit metadata':'error decoding'],['Outcome',fix?'proposed contract':'recorded result']];
+  expected=control?(direct?'Recognized rate-limit waits preserve the ordinary retry count.':'Structured child failures reach composite retry and recovery.'):'Preserve the structured error category and rate-limit metadata across the composite boundary.';
+  observed=control?(direct?'The direct Agent succeeds after two recognized rate-limit waits.':'The Error-step child reaches Embed retry and recovery.'):fix?'Proposal only: carry structured errors through nested scopes and format them at the presentation boundary.':split?'The formatted Agent error is treated as an ordinary retryable error; rate-limit budget semantics are lost.':'Embed expects JSON but receives formatted Agent error text. It fails parsing before retry backoff or recovery.';
+  texts=[control&&!direct?'The Error step returns the structured contract expected by the scope.':'The Agent path formats an error as a human-readable prefix followed by JSON.',direct?'The direct retry path can still classify the recognized provider error.':'The child result crosses the composite scope boundary.',fix?'A future shared error representation must preserve metadata without parsing a presentation string.':split?'The failed JSON classification falls back to ordinary retry handling.':'Embed attempts to decode the child error contract.',observed];
+ }
+ const nodes=labels.map(([label,sub],i)=>n(String(i),label,sub,25+i*210,110));
+ return {nodes,edges:nodes.slice(1).map((_,i)=>e(String(i),String(i+1),'',!control&&!fix&&i===2)),steps:texts.map((text,i)=>s(String(i),`${String(i+1).padStart(2,'0')} / ${labels[i][0]}`,text)),scopes:[],expected,observed,caption:fix&&!f.resolved?'Illustrated proposal, not an implemented or measured result.':'Illustrated behavior from the linked tests. Timing is schematic; publication and cancellation are supplied by the Rust fixture.',dsl:dslFor(f,mode,v)};
+}
+
 function dslFor(f,mode,v){
+ if(f.followup)return cancellationDsl(f,mode,v);
  const control=mode==='control', id=f.id;
  if(id==='branches')return graph('outer',{outer:{id:'outer',stepType:'Conditional',condition:cond(!(control&&v==='outer-false'))},inner:{id:'inner',stepType:'Conditional',condition:cond(!(control&&v==='inner-false'))},early:finish('early',{result:imm('early')}),merge:finish('merge',{result:imm('merge')})},[edge('outer','inner','true'),edge('outer','merge','false'),edge('inner','early','true'),edge('inner','merge','false')]);
  if(id==='state'){const size=control&&v==='small'?32:100000;const inner=leaf('inner_finish');const body=control&&v==='single'?inner:graph('inner',{inner:loop('inner',inner),outer_finish:finish('outer_finish')},[edge('inner','outer_finish')]);return graph('filter',{filter:{id:'filter',stepType:'Filter',config:{value:imm([{large:'x'.repeat(size)}]),condition:cond(true)}},outer:loop('outer',body),finish:finish('finish',{saved:ref('steps.filter.outputs')})},[edge('filter','outer'),edge('outer','finish')]);}
@@ -83,6 +394,7 @@ const n=(id,label,sub,x,y)=>({id,label,sub,x,y});
 const e=(a,b,label='',issue=false)=>({a,b,label,issue});
 const s=(node,title,text)=>({node,title,text});
 function scenarioFor(f,mode,v){
+ if(f.followup)return cancellationScenario(f,mode,v);
  const c=mode==='control',fix=mode==='fix',gap=!c&&!fix;let nodes=[],edges=[],steps=[],scopes=[],expected='',observed='',caption='';
  const sequence=(labels)=>{nodes=labels.map((l,i)=>n(String(i),l[0],l[1],25+i*210,110));edges=nodes.slice(1).map((_,i)=>e(String(i),String(i+1)));};
  if(f.id==='branches'){
@@ -140,7 +452,7 @@ function diagram(){
 }
 function updateStep(){diagram();$('step-title').textContent=current.steps[step].title;$('step-copy').textContent=current.steps[step].text;$('trace-count').textContent=`${String(step+1).padStart(2,'0')} / ${String(current.steps.length).padStart(2,'0')} · illustrated trace`;$('next').disabled=step===current.steps.length-1;$('step-dots').innerHTML=current.steps.map((s,i)=>`<button class="${i<=step?'past':''}" data-step="${i}" aria-label="Step ${i+1}: ${esc(s.title.slice(5))}" ${i===step?'aria-current="step"':''}></button>`).join('');}
 function renderDetails(){
- const fileFor=t=>(['retries','identity'].includes(family.id)||(family.id==='registry'&&t.includes('_step_ids_keep_their_configuration')))?'wasm_emitter_audit.rs':'wasm_emitter_audit/execution.rs';
+ const fileFor=t=>family.followup?'cooperative_workflow_cancellation/'+family.testFile:(['retries','identity'].includes(family.id)||(family.id==='registry'&&t.includes('_step_ids_keep_their_configuration')))?'wasm_emitter_audit.rs':'wasm_emitter_audit/execution.rs';
  $('why-title').textContent=mode==='control'?'Why this case works':mode==='fix'?(family.resolved?'What changed':'What the fix must address'):(family.resolved?'Why the old emitter failed':'Why it fails');$('why').textContent=mode==='control'?family.boundary:family.why;$('boundary').textContent=mode==='control'?family.why:family.boundary;$('explanation').querySelectorAll('h3')[1].textContent=mode==='control'?(family.resolved?'Historical cause':'Where support breaks'):'Verified boundary';$('evidence').textContent=family.evidence;$('fix-title').textContent=family.fixTitle;$('fix-steps').innerHTML=family.fixSteps.map(t=>`<li>${esc(t)}</li>`).join('');$('pseudocode').textContent=family.pseudo;
  const json=JSON.stringify(current.dsl,null,2);$('dsl-code').textContent=json.length>14000?json.slice(0,14000)+'\n\n… Preview shortened. Copy or download for the complete JSON.':json;
  $('dsl-note').textContent=(current.dsl.root?'Compile input bundle: root graph + preloaded children.':'Complete execution graph.')+(mode==='fix'?(family.resolved?' Original reproduction; updated compiler and stdlib now preserve the expected result.':' Same failing DSL; the proposal changes the compiler.'):'')+(family.id==='state'&&json.length>14000?' Includes the full 100,000-character value in export.':'');
@@ -148,6 +460,12 @@ function renderDetails(){
  const num=String(families.indexOf(family)+1).padStart(2,'0'),native=['registry','retries','identity'].includes(family.id);$('command').textContent=native?`RUSTC_WRAPPER= cargo test -p runtara-workflows \\\n  --test wasm_emitter_audit audit_${num} \\\n  -- --include-ignored --nocapture`:`RUSTC_WRAPPER= cargo test -p runtara-workflows \\\n  --features direct-wasm-integration-tests \\\n  --test direct_wasm_execute wasm_emitter_audit::audit_${num} \\\n  -- --include-ignored --nocapture`;
  if(family.id==='registry') $('command').textContent+='\n\nRUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_04';
  $('test-requirements').textContent=(family.id==='registry'?'First command: native tests. Second: composed WASM, requiring rebuilt shared components.':native?'Native tests; no prebuilt components required.':'Requires current shared workflow components. Uses the in-process host; no database or listening sockets.')+(family.resolved?` All ${family.tests.length} tests pass. Unit tests: ${family.id==='state'?'cargo test -p runtara-workflow-stdlib --lib audit_02':family.id==='signals'?'cargo test -p runtara-workflow-stdlib --lib audit_03; cargo test -p runtara-workflows --lib audit_03':family.id==='registry'?'cargo test -p runtara-workflow-stdlib --lib audit_04; cargo test -p runtara-workflows --lib audit_04':family.id==='timeouts'?'cargo test -p runtara-workflow-stdlib --lib audit_05':family.id==='identity'?'cargo test -p runtara-validation-wasm audit_07; cargo test -p runtara-server --lib step_id_mismatch_maps_to_the_authored_key_and_id_field':family.id==='retries'?'cargo test -p runtara-workflows --lib audit_06; cargo test --release -p runtara-workflows audit_06; cargo test -p runtara-workflow-stdlib --lib audit_06; cargo test --release -p runtara-workflow-stdlib --lib audit_06':'cargo test -p runtara-workflows --lib graph_order::tests'}. ${['state','signals','registry','timeouts'].includes(family.id)?'Rebuild the stdlib; agent cases also require the Utils component and its metadata. ':''}See the audit for verification details.`:' Known failures make this command exit nonzero. See the audit for setup and remaining coverage.');
+ if(family.followup){
+  $('command').textContent=`RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute cooperative_workflow_cancellation::${family.testFilter}`;
+  $('test-requirements').textContent='Use current components built with scripts/build-agent-components.sh and set RUNTARA_AGENT_COMPONENTS_DIR to their output directory. Tests create local fixtures; no production credentials or database are needed. Passing compatibility tests confirm open gaps. See the implementation record for exact verification scope.';
+  $('dsl-note').textContent='Illustrative '+(current.dsl.root?'compile bundle (root + preloaded children)':'execution graph')+'. Rust tests supply endpoint responses, publication, and cancellation. This page does not invoke WASM or submit signals.';
+ }
+
 }
 function render(){stop();step=0;document.body.dataset.mode=mode;current=scenarioFor(family,mode,variant);setHash();const num=String(families.indexOf(family)+1).padStart(2,'0');
  $('catalog').innerHTML=families.map((f,i)=>`<button data-family="${f.id}" aria-current="${f===family}"><span class="number">${String(i+1).padStart(2,'0')}</span><span><span class="navtitle">${esc(f.name)}</span><span class="navsub">${esc(f.category)} · ${f.resolved?'Fixed':f.risk}</span></span><span class="riskdot" style="${f.resolved?'background:var(--green)':''}" aria-hidden="true"></span></button>`).join('');
@@ -157,7 +475,9 @@ function render(){stop();step=0;document.body.dataset.mode=mode;current=scenario
  $('proposal').hidden=mode!=='fix';$('proposal').textContent=family.resolved?`Implemented and verified · ${family.id==='state'?'AUDIT-02: outer values, local reclamation, parallel results, replay and memory bounds':family.id==='signals'?'AUDIT-03: independent signals, deadlines, cached values and stable invocation paths':family.id==='registry'?'AUDIT-04: graph-local settings, step types, debug mappings and scope propagation':family.id==='timeouts'?'AUDIT-05: stable deadlines, clamped wakes, final-body checks and completed-loop replay':family.id==='retries'?'AUDIT-06: structured rejection, unsigned retry boundaries and emitted-WASM counter limits':family.id==='identity'?'AUDIT-07: exact local IDs, nested and child diagnostics, manifest rejection and valid scope reuse':'AUDIT-01: regression, route matrix, durable continuation and scoped exits'} pass. Traces illustrate recorded tests; they do not execute WASM.`:'Design proposal · the fix is not implemented. This view illustrates the target behavior for the failing input.';$('explanation').querySelector('.fixbox .eyebrow').textContent=family.resolved?'Implemented solution':'Possible solution';$('scenario-title').textContent=variants().find(x=>x[0]===variant)[1];$('variant').innerHTML=variants().map(([v,label])=>`<option value="${v}" ${v===variant?'selected':''}>${esc(label)}</option>`).join('');$('variant-label').hidden=variants().length===1;
  $('expected').textContent=current.expected;$('observed').textContent=current.observed;$('observed-label').textContent=mode==='fix'?(family.resolved?'Verified after fix':'Target after proposed fix'):(family.resolved&&mode==='gap'?'Historical behavior before fix':'Recorded behavior');$('graph-caption').textContent=current.caption;
  const anchors=families.map((_,i)=>'audit-'+String(i+1).padStart(2,'0'));
- $('finding-link').href='wasm-emitter-audit.md#'+anchors[families.indexOf(family)];renderDetails();updateStep();
+ $('finding-link').href='wasm-emitter-audit.md#'+(family.anchor||anchors[families.indexOf(family)]);
+ if(family.followup && family.resolved)$('proposal').textContent='Implemented in this worktree · the listed behavior tests pass. Full cancellation qualification remains in progress. Traces illustrate recorded behavior; they do not execute WASM.';
+ renderDetails();updateStep();
 }
 document.addEventListener('click',event=>{const b=event.target.closest('button');if(!b)return;
  if(b.dataset.family){family=families.find(f=>f.id===b.dataset.family);variant=variants()[0][0];render();$('catalog').querySelector(`[data-family="${family.id}"]`).focus();}

@@ -947,6 +947,8 @@ not run locally. Earlier verification records above describe their original
 bases; this section records the combined result after integrating upstream.
 
 
+<a id="audit-08"></a>
+
 ### AUDIT-08 · Retry budget inconsistencies found during nested cancellation
 
 **Observed existing behavior; not changed by the cancellation implementation.**
@@ -973,6 +975,8 @@ checkpoint identity depend on the retry path too.
 Tests live in
 [`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).
 
+
+<a id="audit-09"></a>
 
 ### AUDIT-09 · Loop cancellation and runtime-free While emission
 
@@ -1001,6 +1005,8 @@ The standard yield proof is in
 [`cooperative_cancellation.rs`](../crates/runtara-component-host/tests/cooperative_cancellation.rs).
 
 
+<a id="audit-10"></a>
+
 ### AUDIT-10 · Root cancellation during non-durable Agent retry backoff
 
 **Fixed in the cooperative cancellation worktree, 2026-09-07.**
@@ -1022,3 +1028,58 @@ WaitForSignal already parks on a signal. The lower-level non-durable Delay
 emitter blocks, but production rejects that graph to avoid holding a runner.
 This finding does not change that acceptance boundary, establish those paths'
 cancellation behavior or implement per-step timeout support.
+
+
+<a id="audit-11"></a>
+
+### AUDIT-11 · Composite retry waits without Agent imports
+
+**Fixed in the cooperative cancellation worktree, 2026-09-07.**
+
+| Case | Before | Current behavior / tests |
+| --- | --- | --- |
+| Cancel during non-durable Embed/Split backoff | Blocking sleep prevented guest polling; a 60-second backoff reached the five-second watchdog | `agent_free_embed_backoff_cancels_without_recovery`, `agent_free_split_backoff_cancels_without_recovery` require suspension and acknowledgement after one child attempt |
+| No cancellation | Retry, then follow onError after exhaustion | `agent_free_*_backoff_preserves_attempts_and_recovery` check three Error events, elapsed delay and exact recovery output |
+| Zero delay or zero retries | Immediate wait or direct error routing | `agent_free_*_zero_backoff_preserves_attempts`, `agent_free_*_zero_retries_recovers_immediately` retain counts/results; zero retries requires no timer import |
+| Retry inside While or an inline child | Timer need exists below the root graph | `nested_while_*_backoff_cancels`, `inline_child_*_backoff_cancels_with_outer_retries_disabled` prove discovery and cancellation through the nested scope |
+| Agent error reaches a retrying Split | Enclosing backoff blocks after the HTTP response | `split_retry_after_http_error_cancels`, `split_retry_after_rate_limit_error_cancels` stop after one request; `split_retry_after_http_errors_preserves_success` retains normal success |
+| Scaffold regenerated for explicit runtime binding | A new timer requirement could be omitted from the regenerated WIT | Every Agent-free case checks timer presence/absence and equality of returned and on-disk WIT |
+
+The fix uses one shared async timer wait for non-durable Agent/Embed/Split retries.
+Required imports and helper functions are provisioned even without an Agent;
+durable lifecycle retries still park. Tests live in
+[`composite_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/composite_retry.rs)
+and [`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).
+Callable composite publication, per-step deadlines and full resource/capacity
+qualification remain open.
+
+
+<a id="audit-12"></a>
+
+### AUDIT-12 · Formatted Agent errors lose the composite error contract
+
+**Observed existing behavior; not changed by the timer migration.**
+
+`DirectJsonManifest::agent_error` and `agent_error_from_info` produce
+`Step … failed: Agent …: {…}` text. `embed_workflow_error_scoped` expects JSON,
+while `workflow_retry_info` falls back to an ordinary retryable error when JSON
+parsing fails.
+
+| Case | Recorded behavior | Tests |
+| --- | --- | --- |
+| HTTP or Slack Agent fails inside Embed | The child error cannot be parsed; execution fails before Embed enters backoff or its onError recovery | `embed_agent_http_error_preserves_existing_parse_failure`, `embed_agent_rate_limit_error_preserves_existing_parse_failure` |
+| Fixture schedules cancellation after that error response | Existing parse failure prevents entering backoff; no cooperative acknowledgement is reported. This does not qualify post-terminal signal handling | `embed_agent_http_error_fails_before_cancellation_backoff`, `embed_agent_rate_limit_error_fails_before_cancellation_backoff` |
+| Recognized Slack rate-limit error reaches a retrying Split with `maxRetries: 1` | Formatted text loses classification, two requests exhaust ordinary retries and recovery runs despite unused rate-limit budget | `split_agent_rate_limit_error_uses_ordinary_retry_budget` |
+
+The no-cancel Embed and Split cases also failed their intended-success assertions
+with the original blocking composite sleep calls restored temporarily, confirming
+that the new timer did not introduce these behaviors. The final compatibility
+tests assert those existing outcomes explicitly.
+
+A possible correction is a shared structured error representation across Agent
+and composite propagation, with human-readable formatting confined to presentation.
+Qualify code/category/retryability/retry-after preservation, nested wrapping,
+onError payloads and durable attempt replay before changing this contract. Parsing
+an arbitrary substring of a formatted message would be ambiguous and fragile.
+These tests live in
+[`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).

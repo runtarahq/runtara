@@ -557,6 +557,17 @@ pub(super) fn emit_poll_before_call(body: &mut Function, indices: &DirectCoreFun
     }
 }
 
+/// Await a timer duration (milliseconds) already on the stack. Non-durable
+/// Agent, Embed and Split retries share this standard call/wait/cleanup path.
+pub(super) fn emit_timer_wait(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    body.instruction(&Instruction::Call(
+        indices
+            .timer_sleep_async
+            .expect("timer wait requires a timer import"),
+    ));
+    emit_await_call(body, indices);
+}
+
 /// Consume an async-lowered invoke's packed status, preserving its result at 0.
 pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalSet(STATUS));

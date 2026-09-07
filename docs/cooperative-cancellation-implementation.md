@@ -1618,3 +1618,90 @@ Validation with Rust 1.97 and isolated native/component directories:
 No database/full-server E2E or new performance/capacity measurements were run for
 this stage. The component-host cancellation suite was last run for the preceding
 loop stage (77 passed); this stage changes only workflow emission and its tests.
+
+
+## Composite retry waits and timer-only workflows (2026-09-07)
+
+Non-durable EmbedWorkflow and Split retries now call the same
+`cooperative_wait::emit_timer_wait` helper as Agent retries. The helper lowers the
+existing host-I/O timer and delegates to the shared standard call/wait/cleanup
+path. Durable lifecycle retries still park; the remaining blocking retry arms
+serve retained legacy durable export paths. No host task registry, agent-specific
+wrapper, user annotation or backend selector is introduced.
+
+Timer requirements are derived from the existing manifest, including nested
+graphs and statically preloaded children, using the planner's existing retry
+defaults. A graph with Agent calls already needs timers; an Agent-free graph now
+also gets them when a non-durable Embed/Split retry can wait. A zero-retry graph
+adds no timer import. The core provisions canonical subtask/waitable-set imports
+and shared helper functions for timer-only graphs too. The component scaffolding
+retains its `has_timers` requirement when an explicit runtime binding regenerates
+`world.wit`; otherwise the executable could import timers while the returned and
+on-disk WIT omitted them. The tests compare both metadata representations. The
+artifact tag advances to `retry-cooperation=v2`.
+
+The first eight Agent-free cases reproduced two failures with the old emitter:
+root cancellation during Embed and Split backoff reached the five-second watchdog
+while waiting for 60 seconds. All eight now pass: both cancellation paths, normal
+retry exhaustion/recovery with exact attempt counts and elapsed delay, zero delay,
+and zero retries. Four additional cases cover each retry type inside While and
+inside a preloaded child whose outer Embed has retries disabled. They verify
+that timer discovery reaches the inner graph and cancellation bypasses recovery
+and terminal success. Error events establish child entry; cancellation follows a
+250 ms handoff interval, not an instrumented timer-entry timestamp. No durable
+sleep or checkpoint write occurs in these non-durable cases.
+
+The real HTTP/Slack fixture now also exercises Split retries after an Agent
+error. Its capability has zero retries, so the enclosing Split owns backoff.
+Ordinary and rate-limit responses can be cancelled after one request; ordinary
+no-cancel retries reach the successful third request. Existing root and published
+Agent retry cases continue to exercise their own waits.
+
+Real-Agent expansion exposed two **existing error-contract gaps**, recorded as
+AUDIT-12. Agent failure lowering formats a text string containing JSON.
+EmbedWorkflow expects its child error to be JSON and fails before it can retry;
+Split treats the formatted text as an unclassified error and loses the separate
+rate-limit budget. Both failures were reproduced after temporarily restoring the
+original blocking composite sleep calls. That reference overlay was removed;
+there is no selectable path in production. Four Embed tests retain the existing
+HTTP/Slack parse failure (including fixtures scheduling cancellation after the
+response), and one Split
+test retains the existing ordinary-budget exhaustion. They are compatibility
+checks, **not** evidence that Embed can cancel an Agent-error backoff it never
+enters. Those fixtures do not establish post-terminal signal handling. Structured
+Error-step failures do reach the tested Embed backoff.
+
+This stage does not relax workflow-agent publication gates for Split/Embed
+retries, change non-durable Delay rejection, or change root WaitForSignal parking.
+Further published-composite qualification, structured error propagation,
+per-step timeouts and performance/resource measurements remain open. The shared
+root wait uses the existing one-second signal polling interval and holds a Store
+until it returns. Timer-only workflows acquire that import/helper cost only when
+required; fresh paired size/timing measurements must quantify it.
+
+Validation with Rust 1.97 and isolated native/component directories:
+
+- Normal component build: all 27 Agents and two shared workflow components built.
+- Agent-free composite cases: 12 passed; real-Agent/root/published retry cases:
+  20 passed, including the five explicit existing-error-contract checks.
+- Workflow library: 575 passed. Feature-gated all-target Clippy for workflows
+  and component host passed. Formatting and `git diff --check` passed.
+- Full direct-workflow execution suite: 349 passed, three manual benchmarks
+  ignored, including durable retry parking and replay.
+- Strengthened hostless While/Split checks: two passed with no timer import.
+  Native emitter audit: 30 passed.
+
+An initial full-suite run and two follow-up compilations were interrupted by
+filesystem exhaustion. Space subsequently became available externally; no caches
+were removed by this task. The successful runs above are fresh reruns after that
+interruption. No database/full-server E2E or fresh performance/capacity
+measurements were run.
+
+The interactive pattern lab now includes AUDIT-08 through AUDIT-12. It separates
+historical failures, tested current behavior and unimplemented proposals; passing
+compatibility tests are explicitly labelled as evidence of existing defects.
+Node data checks verified all 98 scenarios, new audit anchors and linked Rust
+test names. A headless Chromium pass exercised every route and next/reset
+controls without script errors; desktop and 390-pixel mobile renders were
+inspected, with no page-level horizontal overflow. These are illustrative traces,
+not an in-browser WASM runtime or new performance measurements.

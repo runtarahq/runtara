@@ -18,6 +18,7 @@ struct Host {
     fail_signal_read: bool,
     scenario: Scenario,
     observed: AtomicUsize,
+    events: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl Host {
@@ -47,6 +48,10 @@ impl RuntimeHost for Host {
         self.inner.fail(error).await
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        self.events
+            .lock()
+            .unwrap()
+            .push((kind.clone(), payload.clone()));
         self.inner.custom_event(kind, payload).await
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {
@@ -498,6 +503,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
         fail_signal_read,
         scenario,
         observed: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
@@ -1439,3 +1445,6 @@ async fn emitted_embed_cancel_unwinds_while_body_without_retry() -> anyhow::Resu
 async fn emitted_embed_cancel_cleans_parallel_child_branches() -> anyhow::Result<()> {
     run(Scenario::EmbedParallel).await
 }
+
+#[path = "composite_retry.rs"]
+mod composite_retry;

@@ -194,13 +194,19 @@ pub(super) fn emit_direct_core_module(
         imported_function_count += 1;
     }
 
-    // Standard async calls for every Agent, including sequential calls. Pools
-    // continue to determine component instance count, not cancellation support.
+    // Standard async calls for Agents and in-run retry timers. Timer-only
+    // graphs need the same wait/cleanup helpers even without Agent imports.
+    // Pools continue to determine component instance count.
     let has_agents = world
         .imports
         .keys()
         .any(|name| agent_id_for_import(resolve, Some(name)).is_some());
-    if has_agents {
+    let has_async_calls = has_agents
+        || world
+            .imports
+            .keys()
+            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0");
+    if has_async_calls {
         let builtin = |field: &str,
                        params: &[ValType],
                        results: &[ValType],
@@ -451,7 +457,7 @@ pub(super) fn emit_direct_core_module(
     // Reserve forward references so the entry and its post-return retain their
     // existing positions. Each WIT function adds an export and a post-return;
     // realloc (unless already emitted) and initialize follow them.
-    if has_agents {
+    if has_async_calls {
         let export_count: u32 = world
             .exports
             .values()
@@ -563,7 +569,7 @@ pub(super) fn emit_direct_core_module(
         &mut next_defined_function,
     );
 
-    if has_agents {
+    if has_async_calls {
         use super::cooperative_wait::{HELPER_PARAMS, Helper, helper_body};
         let helper_type = type_count;
         types.ty().function(

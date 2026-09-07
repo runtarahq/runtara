@@ -59,6 +59,7 @@ async fn run_loop_with_scenario(
         fail_signal_read: false,
         scenario,
         observed: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
     });
     let count = if cancel && published {
         if split { 100_000 } else { 1_000_000 }
@@ -107,6 +108,13 @@ async fn run_loop_with_scenario(
     };
     if scenario == Scenario::HostlessLoop {
         anyhow::ensure!(compiled.omit_runtime);
+        anyhow::ensure!(!compiled.component_artifacts.has_timers);
+        anyhow::ensure!(
+            !compiled
+                .component_artifacts
+                .world_wit
+                .contains("host-io/timers")
+        );
         anyhow::ensure!(
             !compiled
                 .component_artifacts
