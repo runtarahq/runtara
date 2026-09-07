@@ -87,6 +87,19 @@ api_duration() { curl -sS "${API}/workflows/instances/$1" | jq -r '.data.executi
 # runtime DB row fields
 db_field() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COALESCE($1::text,'NULL') FROM instances WHERE instance_id='$2'" | tr -d '[:space:]'; }
 db_duration_ms() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COALESCE((EXTRACT(EPOCH FROM (finished_at - started_at))*1000)::text,'NULL') FROM instances WHERE instance_id='$1'" | tr -d '[:space:]'; }
+# status, finished_at and duration from ONE row read.
+#
+# The poll below used to call db_field twice and db_duration_ms a third time,
+# which is three separate connections against a row that is being rewritten. It
+# could pair a status read from before a transition with a finished_at from
+# after it, and report a running row carrying a finished_at that never existed
+# at any instant — the exact thing the loop is watching for. Read the row once.
+db_row() {
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT status::text || '|' || COALESCE(finished_at::text,'NULL') || '|' \
+                || COALESCE((EXTRACT(EPOCH FROM (finished_at - started_at))*1000)::text,'NULL') \
+           FROM instances WHERE instance_id='$1'" | tr -d '[:space:]'
+}
 
 cleanup() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -254,9 +267,11 @@ STALE_FINISHED_WHILE_RUNNING=0
 SAW_RUNNING_AFTER_RELAUNCH=0
 FINAL=""
 for i in {1..60}; do
-    S=$(db_field status "${INSTANCE_ID}")
-    FIN=$(db_field finished_at "${INSTANCE_ID}")
-    DUR=$(db_duration_ms "${INSTANCE_ID}")
+    ROW=$(db_row "${INSTANCE_ID}")
+    S="${ROW%%|*}"
+    REST="${ROW#*|}"
+    FIN="${REST%%|*}"
+    DUR="${REST#*|}"
     ADUR=$(api_duration "${INSTANCE_ID}")
     printf "  t=%02d status=%-9s finished_at=%s db_dur_ms=%s api_dur=%s\n" "$i" "${S}" "${FIN}" "${DUR}" "${ADUR}"
 
