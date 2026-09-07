@@ -758,6 +758,8 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::I32GeU);
         body.instruction(&Instruction::BrIf(1));
 
+        super::cooperative_wait::emit_iteration_boundary(body, indices);
+
         body.instruction(&Instruction::I32Const(split_id as i32));
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));

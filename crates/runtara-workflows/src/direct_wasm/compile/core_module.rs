@@ -179,6 +179,21 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
+    // A pure callable workflow can cooperate between CPU loop iterations
+    // without a runtime or I/O import. This is a canonical intrinsic, not a
+    // host scheduler API, and works with the existing synchronous lift.
+    if config.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+        types.ty().function([], [ValType::I32]);
+        imports.import(
+            "$root",
+            "[cancellable][thread-yield]",
+            wasm_encoder::EntityType::Function(type_count),
+        );
+        type_count += 1;
+        import_indices.thread_yield = Some(imported_function_count);
+        imported_function_count += 1;
+    }
+
     // Standard async calls for every Agent, including sequential calls. Pools
     // continue to determine component instance count, not cancellation support.
     let has_agents = world

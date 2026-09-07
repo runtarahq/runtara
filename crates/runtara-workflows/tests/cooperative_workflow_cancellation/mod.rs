@@ -82,9 +82,23 @@ impl RuntimeHost for Host {
         Ok(Some(signal(kind)))
     }
     async fn is_cancelled(&self) -> Result<bool, String> {
+        assert!(
+            !(self.scenario == Scenario::WhileParallel && self.requested.load(Ordering::SeqCst)),
+            "While consumed cancellation before shared sibling cleanup"
+        );
+        if self.scenario == Scenario::WhileLegacyCancelError {
+            return Err("legacy is-cancelled failed".into());
+        }
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
+        assert!(
+            !(self.scenario == Scenario::WhileParallel && self.requested.load(Ordering::SeqCst)),
+            "While consumed cancellation before shared sibling cleanup"
+        );
+        if self.scenario == Scenario::WhileLegacyCheckError {
+            return Err("legacy check-signals failed".into());
+        }
         Ok(false)
     }
     async fn poll_custom_signal(&self, key: String) -> Result<Option<Vec<u8>>, String> {
@@ -156,6 +170,15 @@ impl RuntimeHost for Host {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     BeforeLaunch,
+    WhileBody,
+    WhileParallel,
+    EmbedBody,
+    EmbedPartialBody,
+    EmbedWhileBody,
+    EmbedParallel,
+    WhileLegacyCancelError,
+    WhileLegacyCheckError,
+    HostlessLoop,
     Headers,
     SlackHeaders,
     Mailgun,
@@ -415,6 +438,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let partial_body = matches!(
         scenario,
         Scenario::PartialBody
+            | Scenario::EmbedPartialBody
             | Scenario::NestedAgentBody
             | Scenario::SqsReceiveBody
             | Scenario::StripeCreateBody
@@ -430,6 +454,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let parallel = matches!(
         scenario,
         Scenario::ParallelSplit
+            | Scenario::EmbedParallel
             | Scenario::NestedParallelBranches
             | Scenario::NestedParallelSplit
             | Scenario::ParallelBranches
@@ -695,6 +720,37 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
         // shared root runtime import inside a published workflow-agent.
         graph["durable"] = false.into();
     }
+    if matches!(scenario, Scenario::WhileBody | Scenario::EmbedWhileBody) {
+        let mut wrapper = loop_boundaries::loop_graph(false, 3);
+        wrapper["steps"]["loop"]["subgraph"] = graph;
+        graph = wrapper;
+    }
+    if scenario == Scenario::WhileParallel {
+        graph = loop_boundaries::parallel_graph(graph["steps"]["fetch"].clone());
+    }
+    let mut children = vec![];
+    if matches!(
+        scenario,
+        Scenario::EmbedBody
+            | Scenario::EmbedPartialBody
+            | Scenario::EmbedWhileBody
+            | Scenario::EmbedParallel
+    ) {
+        for id in ["inner-embed", "outer-embed"] {
+            children.push(runtara_workflows::compile::ChildWorkflowInput {
+                step_id: id.into(),
+                workflow_id: id.into(),
+                version_requested: "latest".into(),
+                version_resolved: 1,
+                execution_graph: serde_json::from_value(graph)?,
+            });
+            graph = serde_json::json!({"durable":true,"entryPoint":id,"steps":{
+                id:{"id":id,"stepType":"EmbedWorkflow","childWorkflowId":id,"childVersion":"latest","maxRetries":3},
+                "finish":{"id":"finish","stepType":"Finish"},
+                "handled":{"id":"handled","stepType":"Finish"}
+            },"executionPlan":[{"fromStep":id,"toStep":"finish"},{"fromStep":id,"toStep":"handled","label":"onError"}]});
+        }
+    }
     let graph = serde_json::from_value(graph)?;
     let compiled = if scenario.nested_depth() > 0 {
         compile_nested_agents(graph, scenario.nested_depth(), dir.path())?
@@ -705,7 +761,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 version: 1,
                 source_checksum: None,
                 execution_graph: graph,
-                child_workflows: vec![],
+                child_workflows: children,
                 output_dir: dir.path().into(),
                 track_events: false,
                 agent_catalog: None,
@@ -1355,3 +1411,31 @@ async fn emitted_nested_agent_cancel_drains_parallel_split() -> anyhow::Result<(
 
 #[path = "nested_retry.rs"]
 mod nested_retry;
+
+#[path = "loop_boundaries.rs"]
+mod loop_boundaries;
+
+#[tokio::test]
+async fn emitted_while_body_cancel_bypasses_recovery() -> anyhow::Result<()> {
+    run(Scenario::WhileBody).await
+}
+#[tokio::test]
+async fn emitted_while_boundary_cancel_cleans_pending_sibling_before_ack() -> anyhow::Result<()> {
+    run(Scenario::WhileParallel).await
+}
+#[tokio::test]
+async fn emitted_embed_cancel_unwinds_two_inline_scopes() -> anyhow::Result<()> {
+    run(Scenario::EmbedBody).await
+}
+#[tokio::test]
+async fn emitted_embed_cancel_cleans_partial_http_body() -> anyhow::Result<()> {
+    run(Scenario::EmbedPartialBody).await
+}
+#[tokio::test]
+async fn emitted_embed_cancel_unwinds_while_body_without_retry() -> anyhow::Result<()> {
+    run(Scenario::EmbedWhileBody).await
+}
+#[tokio::test]
+async fn emitted_embed_cancel_cleans_parallel_child_branches() -> anyhow::Result<()> {
+    run(Scenario::EmbedParallel).await
+}

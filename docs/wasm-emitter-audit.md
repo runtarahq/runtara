@@ -972,3 +972,30 @@ checkpoint identity depend on the retry path too.
 
 Tests live in
 [`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).
+
+
+### AUDIT-09 · Loop cancellation and runtime-free While emission
+
+**Fixed in the cooperative cancellation worktree, 2026-09-07.**
+
+| Case | Before | Current behavior / regression test |
+| --- | --- | --- |
+| Non-durable While published as an agent | Static analysis allowed runtime omission, but emitted heartbeat/cancellation calls referenced a missing runtime index and failed validation | `published_while_without_runtime_preserves_completion` checks compilation, execution and exact iteration/output results without the root runtime import |
+| CPU-only published Split | No cancellable wait between items; parent cancellation remained unresolved until the whole-run watchdog | `published_split_yields_for_parent_cancellation_between_items` checks standard cooperative completion after a completed warmup request |
+| Root While/Split with no Agent wait | Pure-loop boundaries did not use the new non-consuming signal path | `root_{while,split}_observes_cancel_without_an_agent_wait` requires the root receipt and no success publication |
+| While beside a pending HTTP branch | Direct consuming cancellation checks could bypass shared sibling cleanup | `emitted_while_boundary_cancel_cleans_pending_sibling_before_ack` rejects early consuming checks and requires socket closure before acknowledgement |
+| Signal-check error after adding a guard | An unadjusted WASM branch depth could change While recovery | `while_boundary_legacy_{cancel,check}_error_keeps_on_error_routing` checks the final recovery output |
+
+The shared iteration boundary uses standard cancellable `thread.yield` in
+workflow-agents and existing lifecycle polling/cleanup in roots. It introduces
+no authored flag or host task API. Additional tests cover While body cancellation,
+two inline Embed scopes, partial body cleanup and parallel/While child shapes.
+Long operations inside one iteration still need their own cooperation points;
+these tests do not certify arbitrary native or Agent CPU code.
+
+Execution tests:
+[`loop_boundaries.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/loop_boundaries.rs)
+and the existing
+[`cooperative workflow suite`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/mod.rs).
+The standard yield proof is in
+[`cooperative_cancellation.rs`](../crates/runtara-component-host/tests/cooperative_cancellation.rs).

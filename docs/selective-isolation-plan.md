@@ -68,7 +68,7 @@ online docs or enable experimental ABI extensions silently.
   input conventions and provider errors. No per-Agent cancellation backend or
   opt-in annotation is needed.
 - Verify standard cancellation delivery end to end: callback bindings for
-  built-in agents, or cancellable waitable-set waits for emitted workflow-agents.
+  built-in agents, or cancellable waitable-set waits/yields for emitted workflow-agents.
   A synchronous lift or async export type alone is not sufficient proof.
 - Verify whether cancellation itself can block the waiting guest, which async
   cancellation forms the pinned runtime supports, and how the emergency host
@@ -299,7 +299,8 @@ narrower helper state transfers without adding an alternate execution path.
 
 Measure no-cancellation overhead as well as cancellation. Cover Finish-only,
 single random-double, chains of 10/100, sequential/parallel Split, nested Embed,
-small/16-KiB-boundary/MiB payloads, real HTTP header/body waits, replay and root
+CPU-only While/Split at small and large iteration counts (root and published
+workflow-agent forms), small/16-KiB-boundary/MiB payloads, real HTTP header/body waits, replay and root
 abort. Assert concurrent overlap and standard ABI use; no sequential fallback.
 
 Run the baseline and current revisions on the same host with matching dependency,
@@ -350,3 +351,17 @@ unsupported runtime-dependent closures remain rejected. See the implementation
 record for proofs and regression results. G2/G6 have additional coverage, not
 blanket completion: durable/nested Embed/While, targeted cancellation/deadlines,
 blocking cooperation, resource soak and new paired measurements remain open.
+
+
+### Loop and inline-child progress (2026-09-07)
+
+Emitted While and sequential Split now cooperate between iterations: published
+workflow-agents use the standard cancellable yield and root workflows use shared
+lifecycle polling/cleanup. Runtime-free While compilation and normal outputs are
+covered, as are legacy error routing and cleanup before acknowledgement when a
+While has a pending HTTP sibling. Tests also cover two inline Embed scopes,
+partial bodies and While/parallel child shapes. This expands G2/G6 evidence;
+bounded cooperation inside Agent/stdlib/native calls, all construct combinations,
+targeted timeouts, durable callable suspension and fresh size/time/polling-cost
+measurements remain required. A per-iteration cooperation bound is not a fixed
+latency guarantee for a large or blocking iteration.

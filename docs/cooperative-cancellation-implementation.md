@@ -7,7 +7,9 @@ All 27 built-in Agent exports now use a shared callback-binding macro. Eighteen
 I/O-capable Agents await cancellable operations; the nine CPU-oriented Agents
 still require cooperation-point qualification. Non-durable workflow-agents now
 propagate parent cancellation through sequential/parallel calls and local retry
-waits. Durable nested suspension, timeouts and the remaining plan gates are still
+waits. Emitted While and sequential Split loops cooperate between iterations;
+inline Embed/While/parallel cancellation has additional execution coverage.
+Durable nested suspension, timeouts and the remaining plan gates are still
 incomplete.
 
 The server's Stop/cancel methods now use the environment Stop handler to deliver
@@ -1481,3 +1483,78 @@ Validation with Rust 1.97 and the isolated native/component directories:
 No database/full-server E2E was run for this stage. New size/timing and controlled
 capacity comparisons remain pending; earlier measurement reports must not be
 read as measuring this emitter revision.
+
+
+## Loop cooperation and inline Embed cancellation (2026-09-07)
+
+The pinned toolchain exposes the standard cancellable yield as
+`thread.yield cancellable` / `[cancellable][thread-yield]`. It yields the current
+guest execution to the Component Model scheduler and returns true when parent
+cancellation is delivered. It does not create a native thread, another Store or
+a task service. A focused composed fixture receives cancellation through this
+yield (its readiness polling is non-cancellable), resolves a pending child,
+allows its sibling to finish and reuses the cancelled instance. The production
+engine configuration remains unchanged.
+
+`cooperative_wait::emit_iteration_boundary` now provides a common cooperation
+point for emitted While and sequential Split:
+
+- Callable workflows yield to their composing parent, clean the same pending
+  call/window state on cancellation and return directly from the invocation.
+- Root workflows use the existing non-consuming lifecycle poll and shared
+  cleanup/acknowledgement logic. A While only reaches legacy consuming checks
+  when no active sibling window needs cleanup; pause/shutdown still defer to
+  the existing safe boundary.
+- Runtime-free While output no longer emits heartbeat/is-cancelled/check-signals
+  calls to missing runtime indices. The previous feature analysis admitted this
+  shape, but component validation failed before invocation. Its normal result
+  now executes without a root runtime import.
+- Legacy runtime-check errors keep their prior onError routing. The extra guard
+  has an explicit branch-depth adjustment, with tests for both check sites.
+- The artifact tag adds `loop-cooperation=v1`; previously compiled artifacts
+  retain their original behavior until deliberately recompiled.
+
+Before the fix, five of the six initial loop cases failed: runtime-free While
+failed component validation, the root pure loops missed the supplied cancellation,
+and a published CPU-only Split hit the execution watchdog. After the fix, root
+loops observe cancellation without an Agent wait, and published loops accept
+parent cancellation between iterations after a completed HTTP warmup. The latter
+fixture uses a short handoff delay after the warmup response; it does not claim
+an instrumented timestamp of the first CPU iteration. The separate canonical
+fixture proves actual yield-based delivery and resolution.
+
+Eight loop regression cases cover normal iteration counts/results, cancellation
+and legacy error routing. Six additional emitted scenarios cover cancellation
+inside a While HTTP body; a While beside a hanging HTTP branch; two inline Embed
+scopes; partial HTTP body cleanup inside Embed; While inside Embed; and parallel
+branches inside Embed. Root acknowledgement follows HTTP cleanup; nested retries,
+recovery and terminal success do not run after cancellation selection. The
+parallel-While host fixture rejects a consuming legacy check while the root
+command is pending, so it cannot hide an early acknowledgement.
+
+The cooperation bound is **one emitted iteration**, not a fixed wall-clock
+latency. Expensive JSON/stdlib work, blocking native imports and arbitrary loops
+inside the nine CPU-oriented built-in Agents still require separate qualification
+or bounded yields. Sequential-loop polling/yielding adds per-iteration work; raw
+WASM size, prepared execution time and signal/DB polling cost must be included in
+the next paired measurements. Pure runtime-free workflows keep that mode. A
+runtime-free root invoke has no lifecycle notification import; these changes do
+not give that mode root signal delivery. Its whole-run abort remains available.
+Two additional tests execute pure While/Split with `runtime: None` and check
+complete iteration results.
+
+This stage covers the tested inline Embed shapes; it does not authorize durable
+workflow-agent suspension, every nested construct combination, per-step timeout
+recovery or targeted cancellation. G1–G10 remain open where evidence is missing.
+Validation with Rust 1.97 and the isolated native/component directories:
+
+- Normal component build: all 27 Agents and two shared workflow components built.
+- Workflow library: 575 passed. Native emitter audit: 30 passed.
+- Full direct-workflow execution suite: 321 passed, three manual benchmarks
+  ignored. The two hostless loop cases added after that run started passed
+  separately, bringing the tested execution cases to 323.
+- Full component cancellation suite: 77 passed.
+- Feature-gated Clippy for workflows and component host passed.
+
+No database/full-server E2E or new size/timing measurements were run for this
+stage. The paired loop-cost and controlled capacity measurements remain open.

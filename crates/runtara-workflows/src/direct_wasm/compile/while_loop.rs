@@ -298,20 +298,28 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_is_cancelled));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        loop_failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+    if indices.omit_runtime {
+        super::cooperative_wait::emit_iteration_boundary(body, indices);
+    } else {
+        // Keep the legacy consuming check only when no sibling window owns
+        // unresolved calls. The non-consuming poll above cleans first on Cancel.
+        super::cooperative_wait::emit_if_safe_boundary(body, indices);
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_is_cancelled));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target.map(|target| target.nested(1)),
+            route_ptr_local,
+            route_len_local,
+        );
+        push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+        super::abi::emit_entry_suspend_return(body, indices);
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
@@ -403,30 +411,34 @@ pub(super) fn emit_while_plan(
     }
     pop_while_frame(body);
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        loop_failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
+    if !indices.omit_runtime {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        loop_failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+        super::cooperative_wait::emit_if_safe_boundary(body, indices);
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_check_signals));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target.map(|target| target.nested(1)),
+            route_ptr_local,
+            route_len_local,
+        );
+        push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+        super::abi::emit_entry_suspend_return(body, indices);
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));

@@ -152,6 +152,7 @@ pub(super) struct DirectCoreImportIndices {
     // Parallel-split surface (Phase 3): the CM-async
     // builtins and per-agent async-lowered invokes, populated directly by
     // `core_module` (they are extra CORE imports, not WIT world functions).
+    pub(super) thread_yield: Option<u32>,
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
@@ -635,6 +636,7 @@ impl DirectCoreImportIndices {
                 "stdlib.step-debug-error",
             )?,
             agent_invokes: self.agent_invokes,
+            thread_yield: self.thread_yield,
             waitable_set_new: self.waitable_set_new,
             waitable_set_wait: self.waitable_set_wait,
             waitable_set_drop: self.waitable_set_drop,
@@ -790,7 +792,9 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
-    /// Standard async builtins, present when the workflow invokes Agents.
+    /// Canonical yield, including runtime-free workflow-agent loop boundaries.
+    pub(super) thread_yield: Option<u32>,
+    /// Wait/subtask builtins, present when the workflow invokes Agents.
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,

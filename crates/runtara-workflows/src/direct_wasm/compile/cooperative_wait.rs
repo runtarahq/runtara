@@ -641,10 +641,28 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::End);
 }
 
+/// Cooperate at an iteration boundary. A callable workflow receives its
+/// parent's cancellation through the canonical yield; a root observes its
+/// lifecycle signal. Both unwind the same guest-owned pending-call state.
+/// This bounds cooperation by one emitted iteration, not by a native call or
+/// arbitrary loop inside an Agent/stdlib function.
+pub(super) fn emit_iteration_boundary(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if let Some(yield_index) = indices.thread_yield {
+        body.instruction(&Instruction::Call(yield_index));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        close_all(body, indices);
+        emit_entry_cancel_return(body);
+        body.instruction(&Instruction::End);
+    }
+    if !indices.omit_runtime {
+        emit_poll_before_call(body, indices);
+        emit_retained_boundary(body, indices);
+    }
+}
+
 /// Opens an if for a safe consuming legacy poll. Pending windows only observe.
 pub(super) fn emit_if_safe_boundary(body: &mut Function, indices: &DirectCoreFunctionIndices) {
-    emit_poll_before_call(body, indices);
-    emit_retained_boundary(body, indices);
+    emit_iteration_boundary(body, indices);
     body.instruction(&Instruction::LocalGet(DEFER_BOUNDARY));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));

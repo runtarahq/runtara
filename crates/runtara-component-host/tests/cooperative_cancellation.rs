@@ -256,6 +256,37 @@ async fn synchronous_lift_with_cancellable_wait_cleans_up_and_returns_to_parent(
 }
 
 #[tokio::test]
+async fn synchronous_lift_with_cancellable_yield_cleans_up_and_returns_to_parent()
+-> anyhow::Result<()> {
+    let start = COMPOSED.find("  (component $agent").unwrap();
+    let end = COMPOSED.find("  (instance $target").unwrap();
+    let mut source = COMPOSED.to_owned();
+    let agent = include_str!("cooperative_cancellation/cancellable-wait-agent.wat")
+        .replace("(core func $new (canon waitable-set.new))", "(core func $yield (canon thread.yield cancellable))\n(core func $new (canon waitable-set.new))")
+        .replace("(import \"h\" \"new\"", "(import \"h\" \"yield\" (func $yield (result i32)))\n(import \"h\" \"new\"")
+        .replace("(export \"new\"", "(export \"yield\" (func $yield)) (export \"new\"")
+        .replace("canon waitable-set.wait cancellable", "canon waitable-set.poll")
+        .replace("(local.set $event (call $wait (local.get $set) (i32.const 16)))",
+            "(block $done (loop $work (if (call $yield) (then (local.set $event (i32.const 6)) (br $done))) (local.set $event (call $wait (local.get $set) (i32.const 16))) (br_if $work (i32.eqz (local.get $event)))))");
+    assert!(
+        agent.contains("(loop $work"),
+        "fixture must execute the yield loop"
+    );
+    assert!(
+        !agent.contains("canon waitable-set.wait"),
+        "fixture must not receive cancellation through a wait"
+    );
+    source.replace_range(start..end, &agent);
+    // Cancellation may resolve by returning normally after cleanup. The
+    // parent must read RETURNED, not assume the callee used task.cancel.
+    source = source.replace(
+        "(if (i32.ne (call $cancel (local.get $target)) (i32.const 4)) (then unreachable))",
+        "(if (i32.ne (call $cancel (local.get $target)) (i32.const 2)) (then unreachable))\n      (if (i32.ne (i32.load (i32.const 0)) (i32.const 123)) (then unreachable))",
+    );
+    run_proof(&source, None, Arc::new(Notify::new())).await
+}
+
+#[tokio::test]
 async fn cancelling_a_queued_call_resolves_before_entry_and_can_be_dropped() -> anyhow::Result<()> {
     // Hold this component's next entry using standard backpressure. The queued
     // call must never invoke host I/O, increment the agent's counter or disturb
