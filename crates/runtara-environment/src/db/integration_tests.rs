@@ -409,3 +409,126 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
     delete_tenant_instances(&pool, &tenant_id).await;
     delete_tenant_instances(&pool, &other_tenant).await;
 }
+
+// ============================================================================
+// Parked-instance count plan
+//
+// Migration 025 adds a partial index on (tenant_id) WHERE status = 'suspended'
+// so the System page's parked count stops reading the table. Nothing about the
+// count's result changes when that index is missing or unreachable, which is
+// what makes the regression invisible: the number stays right and the query
+// goes back to O(table). The test below asserts the plan instead.
+// ============================================================================
+
+/// Ask the planner which index it can use for a given parked-count SQL.
+///
+/// Sequential scans are off for the duration so the answer is which index the
+/// query *can* reach, not which plan happens to be cheapest on a test table
+/// small enough that reading all of it wins. Reaching the partial index is
+/// exactly the property at issue, and it is not a given: a partial index
+/// applies only where the planner can prove the query's predicate implies the
+/// index's.
+async fn explain_parked_count(pool: &PgPool, sql: &str, tenant_id: &str) -> String {
+    let mut tx = pool.begin().await.expect("begin");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scans for this transaction");
+
+    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {sql}"))
+        .bind(tenant_id)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("explain the parked count");
+    tx.rollback().await.expect("rollback");
+
+    plan.join("\n")
+}
+
+/// Seed parked instances across several tenants, and return the one to count.
+///
+/// Several tenants, not one, because that is what makes the partial index a
+/// distinct answer rather than a coin flip: with a single tenant it and the
+/// plain `idx_instances_status` select the same rows, and which one the planner
+/// names says nothing. Spread the parked rows across twenty and the tenant-keyed
+/// index is genuinely the narrower path.
+///
+/// A couple of hundred rows is enough for that. This deliberately does not try
+/// to reproduce the production table's size or its skew towards `suspended`:
+/// with sequential scans disabled the question is only which index the query can
+/// reach, and that answer does not depend on how big the table is.
+async fn seed_parked_across_tenants(pool: &PgPool, tag: &str) -> String {
+    sqlx::query(
+        "INSERT INTO instances (instance_id, tenant_id, status)
+         SELECT $1 || '-i-' || g, $1 || '-t' || (g % 20), 'suspended'::instance_status
+         FROM generate_series(1, 200) g",
+    )
+    .bind(tag)
+    .execute(pool)
+    .await
+    .expect("seed parked instances");
+
+    // The planner chooses on statistics, so a fixture it has not looked at is a
+    // fixture it will not plan for.
+    sqlx::query("ANALYZE instances")
+        .execute(pool)
+        .await
+        .expect("analyze");
+
+    format!("{tag}-t0")
+}
+
+/// The parked count must be answerable from `idx_instances_suspended_tenant`.
+///
+/// Only the index name is asserted, not the scan type: whether this comes out
+/// as an index-only scan depends on the visibility map, which VACUUM maintains
+/// and which will not be set for rows the test has just inserted.
+#[tokio::test]
+async fn the_parked_count_reaches_its_partial_index() {
+    let pool = crate::test_support::pool().await;
+    let tag = format!("parked-plan-{}", Uuid::new_v4());
+    let tenant_id = seed_parked_across_tenants(&pool, &tag).await;
+
+    let parked = crate::core_types::status_name(runtara_core::domain::InstanceStatus::Suspended);
+    let plan = explain_parked_count(&pool, &super::parked_count_sql(parked), &tenant_id).await;
+    assert!(
+        plan.contains("idx_instances_suspended_tenant"),
+        "the parked count must be served by migration 025's partial index, \
+         otherwise it is a scan whose cost grows with the table; plan was:\n{plan}"
+    );
+
+    // The bound form is what this query used to be, and it is what a reviewer
+    // would reach for to put the two count queries back on one predicate. It
+    // cannot reach the index: sqlx sends the statuses as `text[]`, so the
+    // planner sees a cast through the enum's `stable` input function rather
+    // than a constant and cannot prove the implication. Asserting that here
+    // keeps the reason for the splice from having to be taken on trust.
+    let mut tx = pool.begin().await.expect("begin");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scans for this transaction");
+    let bound: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT COUNT(*) FROM instances \
+         WHERE tenant_id = $1 AND status = ANY($2::instance_status[])",
+    )
+    .bind(&tenant_id)
+    .bind(vec![parked.to_string()])
+    .fetch_all(&mut *tx)
+    .await
+    .expect("explain the bound form");
+    tx.rollback().await.expect("rollback");
+    let bound = bound.join("\n");
+    assert!(
+        !bound.contains("idx_instances_suspended_tenant"),
+        "the bound form reached the partial index, so the splice in \
+         parked_count_sql is no longer buying anything and its comment is \
+         now wrong; plan was:\n{bound}"
+    );
+
+    sqlx::query("DELETE FROM instances WHERE tenant_id LIKE $1")
+        .bind(format!("{tag}-t%"))
+        .execute(&pool)
+        .await
+        .expect("clean up the fixture");
+}

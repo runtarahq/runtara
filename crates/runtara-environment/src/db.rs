@@ -234,36 +234,63 @@ pub async fn count_instances_by_status(
     Ok(count.0)
 }
 
-/// Count a tenant's instances in the given statuses, with no ceiling.
+/// The parked count's query text.
 ///
-/// The sibling above stops at a bound because its caller only needs to know
-/// whether a cap is reached. A viewer wants the real figure and pays for it:
-/// this is O(matching rows), which for `suspended` means the largest set in the
-/// table. It belongs on a slow tick, never on an intake path.
-pub async fn count_instances_by_status_unbounded(
-    pool: &PgPool,
-    tenant_id: &str,
-    statuses: &[String],
-) -> Result<i64, sqlx::Error> {
-    // Same predicate as the capped form minus its LIMIT subquery, so the two
-    // cannot drift apart on which rows they consider. Not the same plan,
-    // though: `idx_instances_status` is a plain index on `status`, and the
-    // caller that wants this asks for `suspended` — the value that dominates
-    // the table — so the planner will reasonably prefer a sequential scan.
-    // That cost is the point of the ceiling on the capped form, and the reason
-    // this one belongs on a slow tick behind a slow-query warning.
-    let count: (i64,) = sqlx::query_as(
+/// Built rather than written inline so the test that asserts on its query plan
+/// can EXPLAIN the statement this function runs, instead of a copy that could
+/// drift away from it.
+///
+/// `parked` is spliced, and that is the whole point of the shape. See
+/// [`count_parked_instances`] for why a bound status cannot work here.
+pub(crate) fn parked_count_sql(parked: &str) -> String {
+    format!(
         r#"
         SELECT COUNT(*)
         FROM instances
         WHERE tenant_id = $1
-          AND status = ANY($2::instance_status[])
-        "#,
+          AND status = '{parked}'
+        "#
     )
-    .bind(tenant_id)
-    .bind(statuses)
-    .fetch_one(pool)
-    .await?;
+}
+
+/// Count a tenant's parked instances, with no ceiling.
+///
+/// The sibling above stops at a bound because its caller only needs to know
+/// whether a cap is reached. A viewer wants the real figure, and this answers it
+/// from `idx_instances_suspended_tenant` (025) instead of by reading the table:
+/// an index-only scan over one tenant's parked rows. Measured over 500k
+/// instances with 350k suspended, counting one tenant's 306k: 15,622 buffers
+/// before that index, 261 after.
+pub async fn count_parked_instances(
+    pool: &PgPool,
+    tenant_id: &str,
+    parked: &str,
+) -> Result<i64, sqlx::Error> {
+    // Why the status is spliced rather than bound, which is the whole reason
+    // this is not just the capped query without its LIMIT.
+    //
+    // 025 is a partial index with the predicate `status = 'suspended'`, and the
+    // planner applies a partial index only when it can prove the query's own
+    // predicate implies it. That proof needs a constant. The obvious form,
+    // `status = ANY($2::instance_status[])` with the statuses bound, does not
+    // give it one: sqlx sends a `Vec<String>` as `text[]`, so what the planner
+    // actually sees is `(('{suspended}'::text[])::instance_status[])` — a cast
+    // through the enum's input function, which is `stable` rather than
+    // `immutable` and therefore not folded to a constant before index matching.
+    // The proof fails, the index is skipped in silence, and the count reverts
+    // to reading the table. Measured, and pinned by
+    // `the_parked_count_reaches_its_partial_index`.
+    //
+    // Splicing is safe because the value is never a caller's input:
+    // `status_name` maps a Rust enum to one of six fixed identifiers, and the
+    // only caller passes `InstanceStatus::Suspended`. It is an argument rather
+    // than a literal written here so the label keeps one spelling — the one the
+    // rest of the crate already uses — and a renamed variant cannot leave this
+    // query silently disagreeing with it.
+    let count: (i64,) = sqlx::query_as(&parked_count_sql(parked))
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0)
 }
