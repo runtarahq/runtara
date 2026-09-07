@@ -25,6 +25,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::container_registry::ContainerRegistry;
 use crate::handlers::DrainController;
+use crate::periodic::PeriodicLoop;
 use crate::runner::{Runner, RunnerHandle};
 
 /// Configuration for the heartbeat monitor.
@@ -126,10 +127,10 @@ impl HeartbeatMonitor {
 
     /// Run the heartbeat monitor loop.
     ///
-    /// On startup, immediately kills any processes from a previous run that
-    /// were not confirmed dead (protects against platform restart edge cases).
-    /// Then periodically checks for stale instances and marks them as failed.
-    /// The loop exits when the shutdown signal is received.
+    /// Waits out a full interval before its first scan, deliberately: an
+    /// instance is only stale relative to `heartbeat_timeout`, and a scan at
+    /// t=0 has nothing to say that a scan one interval later does not. This is
+    /// the one periodic worker in the crate that does not want an eager pass.
     pub async fn run(&self) {
         info!(
             poll_interval_secs = self.config.poll_interval.as_secs(),
@@ -137,30 +138,30 @@ impl HeartbeatMonitor {
             "Heartbeat monitor started"
         );
 
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = self.shutdown.notified() => {
-                    info!("Heartbeat monitor received shutdown signal");
-                    break;
-                }
-
-                _ = tokio::time::sleep(self.config.poll_interval) => {
-                    if self.drain.is_draining() {
-                        // During drain, in-progress instances are racing to
-                        // checkpoint; skip scanning to avoid marking them as failed.
-                        debug!("Heartbeat monitor skipping scan during drain");
-                        continue;
-                    }
-                    if let Err(e) = self.check_stale_instances().await {
-                        error!(error = %e, "Failed to check stale instances");
-                    }
-                }
-            }
+        PeriodicLoop {
+            name: "Heartbeat monitor",
+            poll_interval: self.config.poll_interval,
+            shutdown: &self.shutdown,
+            eager_first_pass: false,
+            pass_error: "Failed to check stale instances",
         }
+        .run(|| self.scan_unless_draining())
+        .await;
+    }
 
-        info!("Heartbeat monitor stopped");
+    /// Scan for stale instances, unless a drain is in progress.
+    ///
+    /// The guard lives with the work rather than in the loop, which is where
+    /// every other worker in this crate keeps it — see `dispatch_once` and
+    /// `process_pending_wakes`. During drain, in-progress instances are racing
+    /// to checkpoint, and a scan that runs anyway sees them as stale and marks
+    /// them failed, turning a graceful drain into spurious failures.
+    async fn scan_unless_draining(&self) -> crate::error::Result<()> {
+        if self.drain.is_draining() {
+            debug!("Heartbeat monitor skipping scan during drain");
+            return Ok(());
+        }
+        self.check_stale_instances().await
     }
 
     /// Check for stale instances and mark them as failed.

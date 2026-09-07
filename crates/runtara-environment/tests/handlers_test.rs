@@ -9,12 +9,13 @@ mod common;
 use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
-use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
-    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_tenant_metrics,
-    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    StartInstanceRequest, StartRejection, StopInstanceRequest, TenantMetricsOptions,
+    handle_get_tenant_metrics, handle_resume_instance, handle_start_instance, handle_stop_instance,
+    spawn_container_monitor,
 };
+use runtara_environment::instance_repository::{InstanceRepository, ListInstancesOptions};
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::MockRunner;
@@ -226,12 +227,13 @@ async fn test_start_instance_success() {
     assert!(!response.instance_id.is_empty());
 
     // Verify instance was created in DB
-    let instance = db::get_instance(&pool, &response.instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&response.instance_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(instance.tenant_id, "test-tenant");
-    assert_eq!(instance.status, "pending");
+    assert_eq!(instance.status, CoreInstanceStatus::Pending);
     assert_eq!(
         active_launch(&pool, &response.instance_id).await.state,
         LaunchState::Queued,
@@ -645,7 +647,8 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
         Some(StartRejection::ImageNotRunnable { .. })
     ));
     assert!(
-        db::get_instance(&pool, &instance_id)
+        InstanceRepository::new(pool.clone())
+            .detail(&instance_id)
             .await
             .unwrap()
             .is_none(),
@@ -735,7 +738,8 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     let failed = handle_start_instance(&state, request())
         .await
         .expect("the handler should report an association error in its response");
-    let after_failed_start = db::get_instance(&pool, &instance_id)
+    let after_failed_start = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("failed to inspect instance after injected association failure");
 
@@ -771,9 +775,11 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     assert!(!retried.deduplicated);
     assert_eq!(retried.instance_id, instance_id);
     assert_eq!(
-        db::get_instance_image_id(&pool, &instance_id)
+        InstanceRepository::new(pool.clone())
+            .image_binding(&instance_id)
             .await
-            .expect("failed to inspect retry image association"),
+            .expect("failed to inspect retry image association")
+            .map(|binding| binding.image_id),
         Some(image_id.clone()),
         "the successful retry must create the immutable image association"
     );
@@ -1004,11 +1010,12 @@ async fn test_stop_instance_with_registered_container() {
     assert!(response.success, "Error: {:?}", response.error);
 
     // Verify instance status was updated
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "cancelled");
+    assert_eq!(instance.status, CoreInstanceStatus::Cancelled);
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
@@ -1169,11 +1176,12 @@ async fn test_resume_instance_success() {
     assert!(response.success, "Error: {:?}", response.error);
 
     // The dispatcher, not the request path, promotes the instance to running.
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "suspended");
+    assert_eq!(instance.status, CoreInstanceStatus::Suspended);
     assert_eq!(
         active_launch(&pool, &instance_id).await.kind,
         LaunchKind::Resume
@@ -1373,11 +1381,13 @@ async fn test_start_instance_stores_env() {
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify env vars were stored in the database
-    let result = db::get_instance_image_with_env(&pool, &response.instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&response.instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    let binding = result.expect("Instance not found");
+    let (retrieved_image_id, retrieved_env) = (binding.image_id, binding.env);
     assert_eq!(retrieved_image_id, image_id);
     assert_eq!(retrieved_env.len(), 2);
     assert_eq!(
@@ -1427,11 +1437,12 @@ async fn test_start_instance_empty_env() {
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify empty env is stored correctly (should return empty HashMap)
-    let result = db::get_instance_image_with_env(&pool, &response.instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&response.instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (_, retrieved_env) = result.expect("Instance not found");
+    let retrieved_env = result.expect("Instance not found").env;
     assert!(
         retrieved_env.is_empty(),
         "Expected empty env, got {:?}",
@@ -2092,9 +2103,9 @@ fn metrics_options(
     tenant_id: &str,
     bucket_seconds: u32,
     span_seconds: i64,
-) -> db::TenantMetricsOptions {
+) -> TenantMetricsOptions {
     let start_time = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
-    db::TenantMetricsOptions {
+    TenantMetricsOptions {
         tenant_id: tenant_id.to_string(),
         start_time,
         end_time: start_time + chrono::Duration::seconds(span_seconds),
@@ -2252,4 +2263,151 @@ async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Every status the column can hold survives both read paths as itself.
+///
+/// These crossed as `String` until the reader turned them back into an enum,
+/// and that reader carried two arms it could never take — a `"sleeping"` alias
+/// belonging to `termination_reason`, and an `_ => Unknown` catch-all. Walking
+/// the real enum against the real column is what says the six labels are the
+/// whole set, which is the fact those arms got wrong.
+#[tokio::test]
+async fn every_stored_status_reads_back_as_itself() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let instances = InstanceRepository::new(pool.clone());
+    let persistence = PostgresPersistence::new(pool.clone());
+    let tenant_id = format!("status-tenant-{}", Uuid::new_v4());
+
+    // Pending is the state `register_instance` establishes; the rest are
+    // reached by moving an instance into them.
+    let statuses = [
+        CoreInstanceStatus::Pending,
+        CoreInstanceStatus::Running,
+        CoreInstanceStatus::Suspended,
+        CoreInstanceStatus::Completed,
+        CoreInstanceStatus::Failed,
+        CoreInstanceStatus::Cancelled,
+    ];
+
+    let mut created = Vec::new();
+    for status in statuses {
+        let instance_id = format!("status-{status:?}-{}", Uuid::new_v4());
+        persistence
+            .register_instance(&instance_id, &tenant_id)
+            .await
+            .expect("register instance");
+        if status != CoreInstanceStatus::Pending {
+            persistence
+                .update_instance_status(&instance_id, status, None)
+                .await
+                .expect("move to status");
+        }
+        created.push((instance_id, status));
+    }
+
+    for (instance_id, expected) in &created {
+        let one = instances
+            .detail(instance_id)
+            .await
+            .expect("status read must succeed")
+            .unwrap_or_else(|| panic!("{instance_id} must exist"));
+        assert_eq!(
+            one.status, *expected,
+            "detail must report the stored status for {instance_id}"
+        );
+    }
+
+    let page = instances
+        .list(&ListInstancesOptions {
+            tenant_id: Some(tenant_id.clone()),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .expect("list must succeed");
+
+    assert_eq!(
+        page.instances.len(),
+        statuses.len(),
+        "the tenant is isolated to this test, so every instance must come back"
+    );
+    for (instance_id, expected) in &created {
+        let listed = page
+            .instances
+            .iter()
+            .find(|i| &i.instance_id == instance_id)
+            .expect("every created instance must be listed");
+        assert_eq!(
+            listed.status, *expected,
+            "list must report the stored status for {instance_id}"
+        );
+    }
+
+    for (instance_id, _) in &created {
+        cleanup(&pool, Some(instance_id), None).await;
+    }
+}
+
+/// The unbounded count reports the real figure; the capped one stops early.
+///
+/// These two exist for different callers and the difference is the whole point:
+/// the admission gate only needs to know whether a ceiling is reached, while a
+/// viewer showing "N parked" needs N. A single implementation would either
+/// throttle intake on a large parked population or display a number that
+/// silently stops climbing.
+#[tokio::test]
+async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let instances = InstanceRepository::new(pool.clone());
+    let persistence = PostgresPersistence::new(pool.clone());
+    let tenant_id = format!("count-tenant-{}", Uuid::new_v4());
+
+    let mut created = Vec::new();
+    for _ in 0..5 {
+        let instance_id = format!("count-{}", Uuid::new_v4());
+        persistence
+            .register_instance(&instance_id, &tenant_id)
+            .await
+            .expect("register instance");
+        persistence
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("park it");
+        created.push(instance_id);
+    }
+
+    let statuses = vec!["suspended".to_string()];
+
+    let capped = instances
+        .count_by_status(Some(&tenant_id), &statuses, 3)
+        .await
+        .expect("capped count");
+    assert_eq!(
+        capped, 3,
+        "the capped count must stop at its ceiling, not report the true total"
+    );
+
+    let unbounded = instances
+        .count_by_status_unbounded(&tenant_id, &statuses)
+        .await
+        .expect("unbounded count");
+    assert_eq!(
+        unbounded, 5,
+        "the unbounded count must report every matching row"
+    );
+
+    // Both must agree on WHICH rows match, so a tenant with none reads zero
+    // rather than picking up another tenant's parked instances.
+    let other = instances
+        .count_by_status_unbounded(&format!("count-tenant-{}", Uuid::new_v4()), &statuses)
+        .await
+        .expect("unbounded count for an empty tenant");
+    assert_eq!(other, 0);
+
+    for instance_id in &created {
+        cleanup(&pool, Some(instance_id), None).await;
+    }
 }

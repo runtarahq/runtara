@@ -4,9 +4,9 @@
 //!
 //! Handles requests from Management SDK and proxies to Core when needed.
 
+use chrono::{DateTime, Utc};
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
-use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -15,13 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence};
+use runtara_core::persistence::{CompleteInstanceParams, PairedRecordStatus, Persistence};
 
 use crate::container_registry::ContainerRegistry;
 use crate::db;
 use crate::error::Result;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::image_registry::{ImageBuilder, ImageRegistry, require_current_workflow_entrypoint};
+use crate::instance_repository::InstanceRepository;
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
     CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
@@ -99,7 +100,14 @@ fn tail_chars(s: &str, max: usize) -> String {
 /// Contains database connection, runner, and configuration shared across all handlers.
 pub struct EnvironmentHandlerState {
     /// PostgreSQL connection pool (for Environment-specific tables: images, containers, etc.).
-    pub pool: PgPool,
+    ///
+    /// Crate-private: a pool is authority over every table in the database, so
+    /// handing one out makes anything reachable from it part of this crate's
+    /// public surface whether or not that was intended. Callers outside the
+    /// crate take a repository instead — see [`Self::instances`],
+    /// [`Self::images`] and [`Self::launches`] — which grant exactly the reads
+    /// and writes their table owner has thought about.
+    pub(crate) pool: PgPool,
     /// Core persistence layer (for instance lifecycle, checkpoints, signals).
     ///
     /// Everything core reasons about — status, termination, sleep — changes
@@ -140,6 +148,21 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const START_GATE_MONITOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl EnvironmentHandlerState {
+    /// The repository that owns the `instances` row.
+    pub fn instances(&self) -> InstanceRepository {
+        InstanceRepository::new(self.pool.clone())
+    }
+
+    /// The registry that owns the `images` table.
+    pub fn images(&self) -> ImageRegistry {
+        ImageRegistry::new(self.pool.clone())
+    }
+
+    /// The repository that owns the durable launch queue.
+    pub fn launches(&self) -> LaunchRepository {
+        LaunchRepository::new(self.pool.clone())
+    }
+
     /// Create a new environment handler state.
     ///
     /// # Arguments
@@ -359,7 +382,11 @@ async fn existing_start_response(
         )));
     }
 
-    match db::get_instance_image_id(&state.pool, instance_id).await? {
+    match InstanceRepository::new(state.pool.clone())
+        .image_binding(instance_id)
+        .await?
+        .map(|binding| binding.image_id)
+    {
         Some(existing_image_id) if existing_image_id == image_id => {}
         Some(existing_image_id) => {
             warn!(
@@ -864,8 +891,9 @@ pub async fn handle_resume_instance(
     info!(instance_id = %request.instance_id, "Resume instance request received");
 
     // Get instance from DB
-    let instance = match db::get_instance(&state.pool, &request.instance_id).await? {
-        Some(inst) => inst,
+    let (status, tenant_id) = match db::instance_identity(&state.pool, &request.instance_id).await?
+    {
+        Some(identity) => identity,
         None => {
             return Ok(ResumeInstanceResponse {
                 success: false,
@@ -878,28 +906,30 @@ pub async fn handle_resume_instance(
     // cancelled instances are terminal; accepting them here used to bypass
     // their terminal lifecycle state by flipping it to running before a
     // detached runner launch.
-    if instance.status != "suspended" {
+    if status != "suspended" {
         return Ok(ResumeInstanceResponse {
             success: false,
             error: Some(format!(
                 "Cannot resume instance in '{}' state (must be suspended)",
-                instance.status
+                status
             )),
         });
     }
 
     // Read only the durable image binding. Artifact and timeout preflight is
     // owned by the dispatcher, after this request has a recoverable queue row.
-    let (image_id, _) =
-        match db::get_instance_image_with_env(&state.pool, &request.instance_id).await? {
-            Some(result) => result,
-            None => {
-                return Ok(ResumeInstanceResponse {
-                    success: false,
-                    error: Some("Instance has no associated image".to_string()),
-                });
-            }
-        };
+    let image_id = match InstanceRepository::new(state.pool.clone())
+        .image_binding(&request.instance_id)
+        .await?
+    {
+        Some(binding) => binding.image_id,
+        None => {
+            return Ok(ResumeInstanceResponse {
+                success: false,
+                error: Some("Instance has no associated image".to_string()),
+            });
+        }
+    };
 
     let repository = LaunchRepository::new(state.pool.clone());
     for released in repository
@@ -916,7 +946,7 @@ pub async fn handle_resume_instance(
     let enqueue = EnqueueRequest::immediate(
         uuid::Uuid::new_v4().to_string(),
         request.instance_id.clone(),
-        instance.tenant_id,
+        tenant_id,
         image_id,
         LaunchKind::Resume,
         DEFAULT_LAUNCH_QUEUE_TIMEOUT,
@@ -1052,6 +1082,417 @@ async fn release_launch_after_monitor(
     }
 }
 
+/// Run one bounded cleanup step for a start-gate handoff that never opened.
+///
+/// Both failure modes are logged and neither aborts the caller: whatever is
+/// left behind is reclaimed by durable expiry or restart recovery, which stay
+/// authoritative precisely so this path can be best-effort. The two callers
+/// carried the same twenty-five line `timeout` / three-way `match` between
+/// them, differing only in these two messages.
+async fn best_effort_start_gate_cleanup<T, E: std::fmt::Display>(
+    instance_id: &str,
+    launch_id: &str,
+    failed: &'static str,
+    timed_out: &'static str,
+    step: impl std::future::Future<Output = std::result::Result<T, E>>,
+) {
+    match tokio::time::timeout(START_GATE_MONITOR_CLEANUP_TIMEOUT, step).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            error = %error,
+            "{}", failed
+        ),
+        Err(_) => warn!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            "{}", timed_out
+        ),
+    }
+}
+
+/// Kill and settle a guest that outlived its execution timeout.
+///
+/// Unlike the exit path there is nothing to collect: the process is still
+/// running and is about to be stopped, so this writes the terminal status
+/// itself rather than reading one the guest reported.
+async fn settle_execution_timeout(
+    pool: &PgPool,
+    runner: &Arc<dyn Runner>,
+    handle: &RunnerHandle,
+    persistence: &Arc<dyn Persistence>,
+    lifecycle_observers: &LaunchLifecycleObservers,
+    instance_id: &str,
+    timeout: Duration,
+) {
+    let container_registry = ContainerRegistry::new(pool.clone());
+    warn!(
+        instance_id = %instance_id,
+        timeout_secs = %timeout.as_secs(),
+        "Execution timed out, killing container"
+    );
+    let _ = runner.stop(handle).await;
+
+    // Update instance status to failed with termination_reason = "timeout"
+    if let Err(e) = persistence
+        .complete_instance(
+            CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Failed)
+                .if_running()
+                .with_termination("timeout", None)
+                .with_error("Execution timed out"),
+        )
+        .await
+    {
+        warn!(
+            instance_id = %instance_id,
+            error = %e,
+            "Failed to update instance status after timeout"
+        );
+    }
+
+    // Clean up container registry, but only the row this monitor
+    // registered: a resume may have replaced it with a live run.
+    let _ = container_registry
+        .cleanup_handle(instance_id, &handle.launch_id, &handle.handle_id)
+        .await;
+
+    release_launch_after_monitor(
+        pool,
+        persistence.as_ref(),
+        &handle.launch_id,
+        instance_id,
+        lifecycle_observers,
+    )
+    .await;
+}
+
+/// Persist what the finished process left behind, and read back the status the
+/// guest reported.
+///
+/// Ordering matters and is the reason this runs before the staleness check: a
+/// monitor that has been superseded still holds the only copy of its own run's
+/// diagnostics, so it writes them before discovering it is stale.
+async fn record_exit_diagnostics(
+    pool: &PgPool,
+    persistence: &Arc<dyn Persistence>,
+    runner: &Arc<dyn Runner>,
+    handle: &RunnerHandle,
+    instance_id: &str,
+) -> (
+    std::result::Result<
+        Option<(CoreInstanceStatus, Option<String>)>,
+        runtara_core::error::CoreError,
+    >,
+    Option<String>,
+) {
+    let (_output, stderr, metrics) = runner.collect_result(handle).await;
+
+    // Store metrics and pick up the status the guest reported in the same
+    // statement: this monitor needs both, and they are the same row. Kept even
+    // when there are no metrics to write, so the crash check the caller runs
+    // always has a status to look at.
+
+    let observed_status = match crate::metrics::record_resources_returning_status(
+        pool,
+        instance_id,
+        metrics.memory_peak_bytes,
+        metrics.cpu_usage_usec,
+    )
+    .await
+    {
+        Ok(observed) => {
+            debug!(
+                instance_id = %instance_id,
+                memory_peak_bytes = ?metrics.memory_peak_bytes,
+                cpu_usage_usec = ?metrics.cpu_usage_usec,
+                "Stored container metrics"
+            );
+            Ok(observed)
+        }
+        Err(e) => {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to store container metrics"
+            );
+            // The status this carries decides crash vs normal exit
+            // below, so a failed metrics write must not be read as a
+            // crash. Fall back to a plain status read, as before.
+            persistence
+                .get_instance_meta(instance_id)
+                .await
+                .map(|found| found.map(|i| (i.status, i.termination_reason)))
+        }
+    };
+
+    // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
+    if let Some(ref stderr_content) = stderr {
+        if let Err(e) =
+            crate::metrics::record_instance_stderr(pool, instance_id, stderr_content).await
+        {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to store container stderr"
+            );
+        } else {
+            debug!(
+                instance_id = %instance_id,
+                stderr_len = stderr_content.len(),
+                "Stored container stderr"
+            );
+        }
+    }
+
+    (observed_status, stderr)
+}
+
+/// Settle a guest that exited without reporting a terminal status.
+///
+/// Two very different situations reach here and the drain flag is what tells
+/// them apart: during a drain this is the expected force-kill, and the instance
+/// is parked for the wake scheduler to relaunch; otherwise the process died on
+/// its own and the run is a crash.
+async fn settle_unreported_exit(
+    persistence: &Arc<dyn Persistence>,
+    drain: &DrainController,
+    instance_id: &str,
+    stderr: Option<&str>,
+) {
+    // Process died without a terminal SDK event. If the environment
+    // is draining, this is the expected force-kill path — mark the
+    // instance as `suspended + shutdown_requested` so restart-time
+    // heartbeat-monitor recovery treats it as a normal suspension
+    // rather than a crash.
+    let draining = drain.is_draining();
+    let (status, termination_reason, default_error) = if draining {
+        (
+            CoreInstanceStatus::Suspended,
+            "shutdown_requested",
+            "Process terminated during graceful shutdown",
+        )
+    } else {
+        (
+            CoreInstanceStatus::Failed,
+            "crashed",
+            "Process terminated without SDK event",
+        )
+    };
+
+    // A crash with no terminal SDK event (e.g. a guest trap such as
+    // the per-instance memory limit being exceeded) leaves its only
+    // diagnostic in the per-run stderr, where the host writes
+    // "workflow failed: <reason>". Fold that reason into the instance
+    // `error` so the failure is visible in the API rather than the
+    // generic "terminated without SDK event" — otherwise the step that
+    // was in flight surfaces as running with a null error.
+    let crash_error: String = match stderr.map(str::trim) {
+        Some(reason) if !draining && !reason.is_empty() => {
+            format!("{default_error}: {}", tail_chars(reason, 2000))
+        }
+        _ => default_error.to_string(),
+    };
+
+    let mut params = CompleteInstanceParams::new(instance_id, status)
+        .if_running()
+        .with_termination(termination_reason, None)
+        .with_error(&crash_error);
+    if let Some(s) = stderr {
+        params = params.with_stderr(s);
+    }
+    match persistence.complete_instance(params).await {
+        Ok(applied) => {
+            if applied {
+                if drain.is_draining() {
+                    // Schedule an immediate wake so the wake
+                    // scheduler relaunches the instance after
+                    // restart — without this a force-stopped
+                    // instance with no checkpoint stays
+                    // suspended forever.
+                    if let Err(e) = persistence
+                        .schedule_wake(
+                            instance_id,
+                            chrono::Utc::now(),
+                            runtara_core::domain::WakeReason::Recovery,
+                        )
+                        .await
+                    {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to schedule post-restart wake"
+                        );
+                    }
+                    info!(
+                        instance_id = %instance_id,
+                        "Process terminated during drain - suspended for shutdown"
+                    );
+                } else {
+                    warn!(
+                        instance_id = %instance_id,
+                        "Process terminated without SDK event - marked as crashed"
+                    );
+                }
+            } else {
+                info!(
+                    instance_id = %instance_id,
+                    "Instance SDK event arrived just in time"
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to mark instance terminal state"
+            );
+        }
+    }
+}
+
+/// What the monitor should do once a start gate has failed to open.
+enum AfterFailedGate {
+    /// The runner's confirmation won the marker race after all, so there is a
+    /// live guest to watch.
+    Watch,
+    /// The handoff is settled, or has been left to durable recovery. Either
+    /// way this monitor has nothing further to do.
+    Done,
+}
+
+/// Terminalize a handoff whose runner never durably crossed the start gate.
+///
+/// Every failure here ends in `Done` rather than an error: the durable expiry
+/// scan and restart recovery own anything this cannot finish, and a monitor
+/// that pressed on regardless would be acting on a generation it no longer
+/// owns. The one path back to `Watch` is the race where the confirmation
+/// committed just as its response was lost — the marker is already cleared, so
+/// there is a running guest and no terminal row to write.
+async fn settle_failed_start_gate(
+    pool: &PgPool,
+    runner: &Arc<dyn Runner>,
+    handle: &RunnerHandle,
+    lifecycle_observers: &LaunchLifecycleObservers,
+    instance_id: &str,
+    attempt_count: i32,
+) -> AfterFailedGate {
+    warn!(
+        instance_id = %instance_id,
+        launch_id = %handle.launch_id,
+        attempt_count,
+        "Start gate did not permit guest execution; terminalizing exact handoff"
+    );
+
+    let repository = LaunchRepository::new(pool.clone());
+    let terminal = match tokio::time::timeout(
+        START_GATE_MONITOR_CLEANUP_TIMEOUT,
+        repository.fail_unconfirmed_running(
+            &handle.launch_id,
+            attempt_count,
+            "runner did not durably cross start gate",
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            warn!(
+                instance_id = %instance_id,
+                launch_id = %handle.launch_id,
+                attempt_count,
+                "Timed out terminalizing failed start-gate handoff; durable expiry will recover it"
+            );
+            return AfterFailedGate::Done;
+        }
+    };
+
+    match terminal {
+        // This monitor owns the generation: stop the runner and drop the
+        // registry row before releasing admission.
+        Ok(Some(failed)) => {
+            best_effort_start_gate_cleanup(
+                instance_id,
+                &handle.launch_id,
+                "Failed to stop runner after failed start-gate confirmation",
+                "Timed out stopping failed start-gate runner; closed gate/lease recovery remains authoritative",
+                runner.stop(handle),
+            )
+            .await;
+            best_effort_start_gate_cleanup(
+                instance_id,
+                &handle.launch_id,
+                "Could not remove failed start-gate runner registry row",
+                "Timed out removing failed start-gate registry row; restart recovery will reconcile it",
+                ContainerRegistry::new(pool.clone()).cleanup_handle(
+                    instance_id,
+                    &handle.launch_id,
+                    &handle.handle_id,
+                ),
+            )
+            .await;
+            lifecycle_observers.notify_released(&failed, "start_gate_failed");
+            AfterFailedGate::Done
+        }
+        // Nothing to terminalize. Either the confirmation beat us to the
+        // marker — a live guest — or someone else already settled this.
+        Ok(None) => match tokio::time::timeout(
+            START_GATE_MONITOR_CLEANUP_TIMEOUT,
+            repository.is_gate_confirmed(&handle.launch_id, attempt_count),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                warn!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    "Start gate was confirmed while monitor observed its deadline"
+                );
+                AfterFailedGate::Watch
+            }
+            Ok(Ok(false)) => {
+                debug!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    "Failed start-gate handoff was already recovered or terminalized"
+                );
+                AfterFailedGate::Done
+            }
+            Ok(Err(error)) => {
+                warn!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    error = %error,
+                    "Could not read failed start-gate handoff; retaining registry for recovery"
+                );
+                AfterFailedGate::Done
+            }
+            Err(_) => {
+                warn!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    "Timed out reading failed start-gate handoff; retaining registry for durable recovery"
+                );
+                AfterFailedGate::Done
+            }
+        },
+        Err(error) => {
+            warn!(
+                instance_id = %instance_id,
+                launch_id = %handle.launch_id,
+                attempt_count,
+                error = %error,
+                "Could not terminalize failed start-gate handoff; retaining registry for recovery"
+            );
+            AfterFailedGate::Done
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Spawn the generation-owned monitor for a runner handoff.
 ///
@@ -1076,165 +1517,29 @@ pub fn spawn_container_monitor(
 
     tokio::spawn(async move {
         if let Some((gate, attempt_count)) = start_gate {
-            // The runner, not this monitor, performs the durable confirmation
-            // immediately before guest preparation. Waiting for that result
-            // prevents monitor ownership from clearing a recoverable marker.
-            match gate.wait_for_runner_confirmation().await {
-                StartGateOutcome::Opened => {}
+            // Matched exhaustively rather than tested for `Opened`: a variant
+            // added later must not silently join the failure set.
+            let next = match gate.wait_for_runner_confirmation().await {
+                StartGateOutcome::Opened => AfterFailedGate::Watch,
                 StartGateOutcome::Cancelled
                 | StartGateOutcome::TimedOut
                 | StartGateOutcome::ConfirmationFailed => {
-                    warn!(
-                        instance_id = %instance_id,
-                        launch_id = %handle.launch_id,
+                    settle_failed_start_gate(
+                        &pool,
+                        &runner,
+                        &handle,
+                        &lifecycle_observers,
+                        &instance_id,
                         attempt_count,
-                        "Start gate did not permit guest execution; terminalizing exact handoff"
-                    );
-                    let repository = LaunchRepository::new(pool.clone());
-                    let terminal = match tokio::time::timeout(
-                        START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                        repository.fail_unconfirmed_running(
-                            &handle.launch_id,
-                            attempt_count,
-                            "runner did not durably cross start gate",
-                        ),
                     )
                     .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(
-                                instance_id = %instance_id,
-                                launch_id = %handle.launch_id,
-                                attempt_count,
-                                "Timed out terminalizing failed start-gate handoff; durable expiry will recover it"
-                            );
-                            return;
-                        }
-                    };
-                    match terminal {
-                        Ok(Some(failed)) => {
-                            // The conditional queue/Core transaction won
-                            // before we touch the runner registry. A
-                            // confirmation that committed just as its
-                            // response was lost clears the marker, making
-                            // this update return `None` instead of killing a
-                            // live guest.
-                            match tokio::time::timeout(
-                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                                runner.stop(&handle),
-                            )
-                            .await
-                            {
-                                Ok(Err(error)) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        error = %error,
-                                        "Failed to stop runner after failed start-gate confirmation"
-                                    );
-                                }
-                                Err(_) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        "Timed out stopping failed start-gate runner; closed gate/lease recovery remains authoritative"
-                                    );
-                                }
-                                Ok(Ok(())) => {}
-                            }
-                            let registry = ContainerRegistry::new(pool.clone());
-                            match tokio::time::timeout(
-                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                                registry.cleanup_handle(
-                                    &instance_id,
-                                    &handle.launch_id,
-                                    &handle.handle_id,
-                                ),
-                            )
-                            .await
-                            {
-                                Ok(Err(error)) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        error = %error,
-                                        "Could not remove failed start-gate runner registry row"
-                                    );
-                                }
-                                Err(_) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        "Timed out removing failed start-gate registry row; restart recovery will reconcile it"
-                                    );
-                                }
-                                Ok(Ok(_)) => {}
-                            }
-                            lifecycle_observers.notify_released(&failed, "start_gate_failed");
-                            return;
-                        }
-                        Ok(None) => {
-                            match tokio::time::timeout(
-                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                                repository.is_gate_confirmed(&handle.launch_id, attempt_count),
-                            )
-                            .await
-                            {
-                                Err(_) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        "Timed out reading failed start-gate handoff; retaining registry for durable recovery"
-                                    );
-                                    return;
-                                }
-                                Ok(Ok(true)) => {
-                                    // Confirmation won the exact marker race.
-                                    // Continue into the normal monitor path.
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        "Start gate was confirmed while monitor observed its deadline"
-                                    );
-                                }
-                                Ok(Ok(false)) => {
-                                    debug!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        "Failed start-gate handoff was already recovered or terminalized"
-                                    );
-                                    return;
-                                }
-                                Ok(Err(error)) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        error = %error,
-                                        "Could not read failed start-gate handoff; retaining registry for recovery"
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                instance_id = %instance_id,
-                                launch_id = %handle.launch_id,
-                                attempt_count,
-                                error = %error,
-                                "Could not terminalize failed start-gate handoff; retaining registry for recovery"
-                            );
-                            return;
-                        }
-                    }
                 }
+            };
+            if matches!(next, AfterFailedGate::Done) {
+                return;
             }
         }
+
         // Brief initial delay to let the process start before we begin watching it.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1252,65 +1557,14 @@ pub fn spawn_container_monitor(
                     "Process terminated, checking Core status"
                 );
 
-                // Collect metrics and stderr from cgroup before container cleanup
-                let (_output, stderr, metrics) = runner.collect_result(&handle).await;
-
-                // Store metrics and pick up the status the SDK reported in the
-                // same statement: this monitor needs both, and they are the
-                // same row. Kept even when there are no metrics to write, so
-                // the crash check below always has a status to look at.
-                let observed_status = match crate::metrics::record_resources_returning_status(
+                let (observed_status, stderr) = record_exit_diagnostics(
                     &pool,
+                    &persistence,
+                    &runner,
+                    &handle,
                     &instance_id,
-                    metrics.memory_peak_bytes,
-                    metrics.cpu_usage_usec,
                 )
-                .await
-                {
-                    Ok(observed) => {
-                        debug!(
-                            instance_id = %instance_id,
-                            memory_peak_bytes = ?metrics.memory_peak_bytes,
-                            cpu_usage_usec = ?metrics.cpu_usage_usec,
-                            "Stored container metrics"
-                        );
-                        Ok(observed)
-                    }
-                    Err(e) => {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to store container metrics"
-                        );
-                        // The status this carries decides crash vs normal exit
-                        // below, so a failed metrics write must not be read as a
-                        // crash. Fall back to a plain status read, as before.
-                        persistence
-                            .get_instance_meta(&instance_id)
-                            .await
-                            .map(|found| found.map(|i| (i.status, i.termination_reason)))
-                    }
-                };
-
-                // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
-                if let Some(ref stderr_content) = stderr {
-                    if let Err(e) =
-                        crate::metrics::record_instance_stderr(&pool, &instance_id, stderr_content)
-                            .await
-                    {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to store container stderr"
-                        );
-                    } else {
-                        debug!(
-                            instance_id = %instance_id,
-                            stderr_len = stderr_content.len(),
-                            "Stored container stderr"
-                        );
-                    }
-                }
+                .await;
 
                 // Guard: check that this monitor is still the active one for this instance.
                 // When an instance is resumed, a NEW monitor is spawned for the new process.
@@ -1365,91 +1619,13 @@ pub fn spawn_container_monitor(
                             );
                         }
                         _ => {
-                            // Process died without a terminal SDK event. If the environment
-                            // is draining, this is the expected force-kill path — mark the
-                            // instance as `suspended + shutdown_requested` so restart-time
-                            // heartbeat-monitor recovery treats it as a normal suspension
-                            // rather than a crash.
-                            let draining = drain.is_draining();
-                            let (status, termination_reason, default_error) = if draining {
-                                (
-                                    CoreInstanceStatus::Suspended,
-                                    "shutdown_requested",
-                                    "Process terminated during graceful shutdown",
-                                )
-                            } else {
-                                (CoreInstanceStatus::Failed, "crashed", "Process terminated without SDK event")
-                            };
-
-                            // A crash with no terminal SDK event (e.g. a guest trap such as
-                            // the per-instance memory limit being exceeded) leaves its only
-                            // diagnostic in the per-run stderr, where the host writes
-                            // "workflow failed: <reason>". Fold that reason into the instance
-                            // `error` so the failure is visible in the API rather than the
-                            // generic "terminated without SDK event" — otherwise the step that
-                            // was in flight surfaces as running with a null error.
-                            let crash_error: String = match stderr.as_deref().map(str::trim) {
-                                Some(reason) if !draining && !reason.is_empty() => {
-                                    format!("{default_error}: {}", tail_chars(reason, 2000))
-                                }
-                                _ => default_error.to_string(),
-                            };
-
-                            let mut params = CompleteInstanceParams::new(&instance_id, status)
-                                .if_running()
-                                .with_termination(termination_reason, None)
-                                .with_error(&crash_error);
-                            if let Some(s) = stderr.as_deref() {
-                                params = params.with_stderr(s);
-                            }
-                            match persistence.complete_instance(params).await {
-                                Ok(applied) => {
-                                    if applied {
-                                        if drain.is_draining() {
-                                            // Schedule an immediate wake so the wake
-                                            // scheduler relaunches the instance after
-                                            // restart — without this a force-stopped
-                                            // instance with no checkpoint stays
-                                            // suspended forever.
-                                            if let Err(e) = persistence
-                                                .schedule_wake(
-                                                    &instance_id,
-                                                    chrono::Utc::now(),
-                                                    runtara_core::domain::WakeReason::Recovery,
-                                                )
-                                                .await
-                                            {
-                                                warn!(
-                                                    instance_id = %instance_id,
-                                                    error = %e,
-                                                    "Failed to schedule post-restart wake"
-                                                );
-                                            }
-                                            info!(
-                                                instance_id = %instance_id,
-                                                "Process terminated during drain - suspended for shutdown"
-                                            );
-                                        } else {
-                                            warn!(
-                                                instance_id = %instance_id,
-                                                "Process terminated without SDK event - marked as crashed"
-                                            );
-                                        }
-                                    } else {
-                                        info!(
-                                            instance_id = %instance_id,
-                                            "Instance SDK event arrived just in time"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        instance_id = %instance_id,
-                                        error = %e,
-                                        "Failed to mark instance terminal state"
-                                    );
-                                }
-                            }
+                            settle_unreported_exit(
+                                &persistence,
+                                &drain,
+                                &instance_id,
+                                stderr.as_deref(),
+                            )
+                            .await;
                         }
                     }
 
@@ -1470,42 +1646,14 @@ pub fn spawn_container_monitor(
 
             }
             _ = tokio::time::sleep_until(sleep_until) => {
-                warn!(
-                    instance_id = %instance_id,
-                    timeout_secs = %timeout.as_secs(),
-                    "Execution timed out, killing container"
-                );
-                let _ = runner.stop(&handle).await;
-
-                // Update instance status to failed with termination_reason = "timeout"
-                if let Err(e) = persistence
-                    .complete_instance(
-                        CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
-                            .if_running()
-                            .with_termination("timeout", None)
-                            .with_error("Execution timed out"),
-                    )
-                    .await
-                {
-                    warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to update instance status after timeout"
-                    );
-                }
-
-                // Clean up container registry, but only the row this monitor
-                // registered: a resume may have replaced it with a live run.
-                let _ = container_registry
-                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
-                    .await;
-
-                release_launch_after_monitor(
+                settle_execution_timeout(
                     &pool,
-                    persistence.as_ref(),
-                    &handle.launch_id,
-                    &instance_id,
+                    &runner,
+                    &handle,
+                    &persistence,
                     &lifecycle_observers,
+                    &instance_id,
+                    timeout,
                 )
                 .await;
             }
@@ -1523,329 +1671,13 @@ pub fn spawn_container_monitor(
 // same reason the lifecycle handlers above are: the HTTP layer should decode,
 // call, and map, and nothing more.
 //
-// The response types are wire-shaped on purpose (`*_ms` timestamps, base64
-// bodies): they are what the management protocol already promises, and keeping
-// them identical is what makes this a move rather than a rewrite.
+// The response types report what the store holds — instants as instants, bodies
+// as the bytes that were written. They used to be wire-shaped (`*_ms`
+// timestamps, base64 bodies, `Serialize` with the absent fields skipped)
+// because a socket used to carry them. Nothing has serialized them since
+// environment became a library the server links, so they are plain structs:
+// the one consumer reads their fields and builds its own types.
 // ============================================================================
-
-/// Image summary as the management protocol reports it.
-#[derive(Debug, Serialize)]
-pub struct ImageSummary {
-    /// Image id.
-    pub image_id: String,
-    /// Owning tenant.
-    pub tenant_id: String,
-    /// Image name.
-    pub name: String,
-    /// Optional description.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
-    /// Free-form metadata recorded at registration.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-}
-
-/// Filters for [`handle_list_images`].
-#[derive(Debug, Default)]
-pub struct ListImagesParams {
-    /// Restrict to one tenant.
-    pub tenant_id: Option<String>,
-    /// Exact name match; only meaningful together with `tenant_id`.
-    pub name: Option<String>,
-    /// Page size.
-    pub limit: i64,
-    /// Page offset.
-    pub offset: i64,
-}
-
-/// List images, optionally scoped to a tenant and an exact name.
-///
-/// A `name` without a `tenant_id` is ignored rather than applied globally —
-/// image names are unique per tenant, so a cross-tenant name lookup has no
-/// well-defined answer.
-pub async fn handle_list_images(
-    state: &EnvironmentHandlerState,
-    params: &ListImagesParams,
-) -> Result<Vec<ImageSummary>> {
-    let image_registry = ImageRegistry::new(state.pool.clone());
-
-    let images = match (&params.tenant_id, &params.name) {
-        (Some(tenant_id), Some(name)) => match image_registry.get_by_name(tenant_id, name).await? {
-            Some(img) => vec![img],
-            None => vec![],
-        },
-        (Some(tenant_id), None) => {
-            image_registry
-                .list_by_tenant(tenant_id, params.limit, params.offset)
-                .await?
-        }
-        (None, _) => image_registry.list_all(params.limit, params.offset).await?,
-    };
-
-    Ok(images.into_iter().map(image_summary).collect())
-}
-
-/// Look up one image, enforcing tenant isolation when a tenant is supplied.
-///
-/// A hit that belongs to another tenant reads as `None`, not as a rejection:
-/// telling a caller "this exists but is not yours" would leak the existence of
-/// another tenant's image.
-pub async fn handle_get_image(
-    state: &EnvironmentHandlerState,
-    image_id: &str,
-    tenant_id: Option<&str>,
-) -> Result<Option<ImageSummary>> {
-    if image_id.is_empty() {
-        return Err(crate::error::Error::InvalidRequest(
-            "image_id is required".to_string(),
-        ));
-    }
-
-    let image_registry = ImageRegistry::new(state.pool.clone());
-    let Some(img) = image_registry.get(image_id).await? else {
-        return Ok(None);
-    };
-
-    if let Some(tenant_id) = tenant_id
-        && img.tenant_id != tenant_id
-    {
-        return Ok(None);
-    }
-
-    Ok(Some(image_summary(img)))
-}
-
-fn image_summary(img: crate::image_registry::Image) -> ImageSummary {
-    ImageSummary {
-        image_id: img.image_id,
-        tenant_id: img.tenant_id,
-        name: img.name,
-        description: img.description,
-        created_at_ms: img.created_at.timestamp_millis(),
-        metadata: img.metadata,
-    }
-}
-
-/// Full instance state as the management protocol reports it.
-#[derive(Debug, Serialize)]
-pub struct InstanceStatusResponse {
-    /// Whether the instance exists.
-    pub found: bool,
-    /// Instance id (echoed even when not found).
-    pub instance_id: String,
-    /// Lifecycle status.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// Owning tenant.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<String>,
-    /// Image the instance was launched from.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_id: Option<String>,
-    /// Image name, resolved at read time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_name: Option<String>,
-    /// Most recent checkpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checkpoint_id: Option<String>,
-    /// Creation time, epoch milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at_ms: Option<i64>,
-    /// First-run start time, epoch milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at_ms: Option<i64>,
-    /// Terminal time, epoch milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at_ms: Option<i64>,
-    /// Base64-encoded output.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    /// Base64-encoded input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
-    /// Failure message, when the instance failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Captured guest stderr.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
-    /// Attempts used so far.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_count: Option<u32>,
-    /// Attempt ceiling.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<u32>,
-    /// Peak guest linear memory.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_peak_bytes: Option<u64>,
-    /// CPU time consumed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_usage_usec: Option<u64>,
-    /// Why the instance stopped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub termination_reason: Option<String>,
-    /// Guest exit code.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-}
-
-impl InstanceStatusResponse {
-    /// The "no such instance" answer, which is a 200 with `found: false` rather
-    /// than an error: absence is a normal reply to a status poll.
-    fn not_found(instance_id: String) -> Self {
-        Self {
-            found: false,
-            instance_id,
-            status: None,
-            tenant_id: None,
-            image_id: None,
-            image_name: None,
-            checkpoint_id: None,
-            created_at_ms: None,
-            started_at_ms: None,
-            finished_at_ms: None,
-            output: None,
-            input: None,
-            error: None,
-            stderr: None,
-            retry_count: None,
-            max_retries: None,
-            memory_peak_bytes: None,
-            cpu_usage_usec: None,
-            termination_reason: None,
-            exit_code: None,
-        }
-    }
-}
-
-/// Read one instance's full state.
-pub async fn handle_get_instance_status(
-    state: &EnvironmentHandlerState,
-    instance_id: &str,
-) -> Result<InstanceStatusResponse> {
-    use base64::Engine;
-
-    let Some(inst) = db::get_instance_full(&state.pool, instance_id).await? else {
-        return Ok(InstanceStatusResponse::not_found(instance_id.to_string()));
-    };
-
-    Ok(InstanceStatusResponse {
-        found: true,
-        status: Some(inst.status),
-        tenant_id: Some(inst.tenant_id),
-        instance_id: inst.instance_id,
-        image_id: inst.image_id,
-        image_name: inst.image_name,
-        checkpoint_id: inst.checkpoint_id,
-        created_at_ms: Some(inst.created_at.timestamp_millis()),
-        started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
-        finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
-        output: inst
-            .output
-            .map(|o| base64::engine::general_purpose::STANDARD.encode(&o)),
-        input: inst
-            .input
-            .map(|i| base64::engine::general_purpose::STANDARD.encode(&i)),
-        error: inst.error,
-        stderr: inst.stderr,
-        retry_count: Some(inst.attempt as u32),
-        max_retries: Some(inst.max_attempts as u32),
-        memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
-        cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
-        termination_reason: inst.termination_reason,
-        exit_code: inst.exit_code,
-    })
-}
-
-/// Instance summary for list responses.
-#[derive(Debug, Serialize)]
-pub struct InstanceSummary {
-    /// Instance id.
-    pub instance_id: String,
-    /// Owning tenant.
-    pub tenant_id: String,
-    /// Image the instance was launched from.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_id: Option<String>,
-    /// Human-readable name of the image the instance was launched from.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_name: Option<String>,
-    /// Lifecycle status.
-    pub status: String,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
-    /// First-run start time, epoch milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at_ms: Option<i64>,
-    /// Terminal time, epoch milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at_ms: Option<i64>,
-    /// Whether a failure message is recorded.
-    pub has_error: bool,
-}
-
-/// A page of instances plus the unpaged total.
-#[derive(Debug)]
-pub struct ListInstancesResult {
-    /// The page.
-    pub instances: Vec<InstanceSummary>,
-    /// Total matching the filter, ignoring limit/offset.
-    pub total_count: i64,
-}
-
-/// Count a tenant's instances in the given statuses.
-///
-/// The admission gate needs a number, not rows. Routing it through
-/// `handle_list_instances` ran the paginated list query too and then discarded
-/// its rows, and that list was by far the more expensive of the two.
-pub async fn handle_count_instances_by_status(
-    state: &EnvironmentHandlerState,
-    tenant_id: Option<&str>,
-    statuses: &[String],
-    ceiling: i64,
-) -> Result<i64> {
-    Ok(db::count_instances_by_status(&state.pool, tenant_id, statuses, ceiling).await?)
-}
-
-/// List instances matching `options`.
-///
-/// A failing count degrades to `0` rather than failing the call: the page is
-/// the answer the caller asked for, and losing it because a second query
-/// stumbled would be the worse outcome.
-pub async fn handle_list_instances(
-    state: &EnvironmentHandlerState,
-    options: &db::ListInstancesOptions,
-) -> Result<ListInstancesResult> {
-    let instances = db::list_instances(&state.pool, options).await?;
-
-    let total_count = match db::count_instances(&state.pool, options).await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Count instances error: {}", e);
-            0
-        }
-    };
-
-    Ok(ListInstancesResult {
-        instances: instances
-            .into_iter()
-            .map(|inst| InstanceSummary {
-                instance_id: inst.instance_id,
-                tenant_id: inst.tenant_id,
-                image_id: inst.image_id,
-                image_name: inst.image_name,
-                status: inst.status,
-                created_at_ms: inst.created_at.timestamp_millis(),
-                started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
-                finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
-                has_error: inst.error.is_some(),
-            })
-            .collect(),
-        total_count,
-    })
-}
 
 /// What happened to a lifecycle signal.
 ///
@@ -1862,19 +1694,25 @@ pub enum SendSignalOutcome {
         /// The status that refused it.
         status: String,
     },
-    /// The signal type is not one of `cancel`, `pause`.
+    /// The signal type is not one of `cancel`, `pause`, `shutdown`.
     UnknownSignalType {
         /// What the caller asked for.
         signal_type: String,
     },
 }
 
-/// Send a lifecycle signal (`cancel`, `pause`) to an instance.
+/// Send a lifecycle signal (`cancel`, `pause`, `shutdown`) to an instance.
+///
+/// `shutdown` is how a draining host asks a guest to checkpoint and exit so it
+/// can be resumed after the restart. The drain that runs today,
+/// [`crate::runtime::EnvironmentRuntime::drain`], writes that signal straight
+/// through `Persistence` and never arrives here — which is how this handler
+/// came to disagree with the rest of the crate about what a signal type is.
 pub async fn handle_send_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
     signal_type: &str,
-    payload: Option<&str>,
+    payload: Option<&[u8]>,
 ) -> Result<SendSignalOutcome> {
     let Some(instance) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(SendSignalOutcome::InstanceNotFound);
@@ -1889,20 +1727,23 @@ pub async fn handle_send_signal(
         });
     }
 
-    let signal_type = match signal_type {
-        "cancel" => runtara_core::domain::SignalType::Cancel,
-        "pause" => runtara_core::domain::SignalType::Pause,
-        _ => {
-            return Ok(SendSignalOutcome::UnknownSignalType {
-                signal_type: signal_type.to_string(),
-            });
-        }
+    // Decoded with the storage layer's own parser rather than a match here, so
+    // the set this accepts is by construction the set the column can hold. The
+    // local match had drifted from it: it never admitted `shutdown`, though
+    // `signal_type_to_str` writes it, the column holds it and `runtime_host`
+    // decodes it. `ShutdownCoordinator::drain_executions` is the caller that
+    // would have hit the refusal; its map is unpopulated today, so this was
+    // latent rather than live.
+    let Ok(signal_type) = runtara_store_postgres::encoding::signal_type_from_str(signal_type)
+    else {
+        return Ok(SendSignalOutcome::UnknownSignalType {
+            signal_type: signal_type.to_string(),
+        });
     };
 
-    let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
     state
         .persistence
-        .insert_signal(instance_id, signal_type, &payload)
+        .insert_signal(instance_id, signal_type, payload.unwrap_or_default())
         .await?;
 
     if signal_type == runtara_core::domain::SignalType::Cancel {
@@ -1938,7 +1779,7 @@ pub async fn handle_send_custom_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
     checkpoint_id: &str,
-    payload: Option<&str>,
+    payload: Option<&[u8]>,
 ) -> Result<SendCustomSignalOutcome> {
     if state
         .persistence
@@ -1955,10 +1796,9 @@ pub async fn handle_send_custom_signal(
         ));
     }
 
-    let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
     let signal_id = state
         .persistence
-        .put_custom_signal(instance_id, checkpoint_id, &payload)
+        .put_custom_signal(instance_id, checkpoint_id, payload.unwrap_or_default())
         .await?;
 
     wake_suspended_on_signal(state.persistence.as_ref(), instance_id).await;
@@ -2006,14 +1846,14 @@ pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id
 }
 
 /// Checkpoint summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct CheckpointSummary {
     /// Checkpoint id.
     pub checkpoint_id: String,
     /// Owning instance.
     pub instance_id: String,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
     /// Size of the stored state.
     pub data_size_bytes: u64,
 }
@@ -2077,7 +1917,7 @@ pub async fn handle_list_checkpoints(
             .map(|cp| CheckpointSummary {
                 checkpoint_id: cp.checkpoint_id,
                 instance_id: cp.instance_id,
-                created_at_ms: cp.created_at.timestamp_millis(),
+                created_at: cp.created_at,
                 data_size_bytes: cp.state.len() as u64,
             })
             .collect(),
@@ -2086,7 +1926,7 @@ pub async fn handle_list_checkpoints(
 }
 
 /// Event summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct EventSummary {
     /// Row id.
     pub id: i64,
@@ -2095,15 +1935,12 @@ pub struct EventSummary {
     /// Event type.
     pub event_type: String,
     /// Checkpoint the event belongs to, when it has one.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
-    /// Base64-encoded payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<String>,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Payload bytes exactly as the emitter wrote them.
+    pub payload: Option<Vec<u8>>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
     /// Event subtype.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub subtype: Option<String>,
 }
 
@@ -2124,8 +1961,6 @@ pub async fn handle_list_events(
     limit: i64,
     offset: i64,
 ) -> Result<ListEventsResult> {
-    use base64::Engine;
-
     let events = state
         .persistence
         .list_events(instance_id, filter, limit, offset)
@@ -2145,10 +1980,8 @@ pub async fn handle_list_events(
                 instance_id: ev.instance_id,
                 event_type: crate::core_types::event_name(ev.event_type).to_owned(),
                 checkpoint_id: ev.checkpoint_id,
-                payload: ev
-                    .payload
-                    .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
-                created_at_ms: ev.created_at.timestamp_millis(),
+                payload: ev.payload,
+                created_at: ev.created_at,
                 subtype: ev.subtype,
             })
             .collect(),
@@ -2157,47 +1990,37 @@ pub async fn handle_list_events(
 }
 
 /// Step summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct StepSummary {
     /// Step id.
     pub step_id: String,
     /// Human-readable step name.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub step_name: Option<String>,
     /// Step type.
     pub step_type: String,
-    /// `running`, `completed` or `failed`.
-    pub status: String,
-    /// Start time, epoch milliseconds.
-    pub started_at_ms: i64,
-    /// Completion time, epoch milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at_ms: Option<i64>,
+    /// Whether the step is still open, closed cleanly, or closed failing.
+    pub status: PairedRecordStatus,
+    /// Start time.
+    pub started_at: DateTime<Utc>,
+    /// Completion time.
+    pub completed_at: Option<DateTime<Utc>>,
     /// Wall-clock duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
     /// Real launch/settle wall-clock (epoch ms) of a parallel branch's async
     /// work — present only for concurrent steps, so the timeline/replay render
     /// the true overlapping interval instead of the sequential assemble cascade.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub launched_at_ms: Option<i64>,
     /// See [`Self::launched_at_ms`].
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_at_ms: Option<i64>,
     /// Resolved step inputs.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inputs: Option<Value>,
     /// Step outputs.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub outputs: Option<Value>,
     /// Failure detail.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
     /// Scope this step ran in.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
     /// Enclosing scope.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_scope_id: Option<String>,
 }
 
@@ -2218,8 +2041,6 @@ pub async fn handle_list_step_summaries(
     limit: i64,
     offset: i64,
 ) -> Result<ListStepSummariesResult> {
-    use runtara_core::persistence::PairedRecordStatus;
-
     if instance_id.is_empty() {
         return Err(crate::error::Error::InvalidRequest(
             "instance_id is required".to_string(),
@@ -2245,17 +2066,12 @@ pub async fn handle_list_step_summaries(
         steps: steps
             .into_iter()
             .map(|step| StepSummary {
-                status: match step.status {
-                    PairedRecordStatus::Running => "running",
-                    PairedRecordStatus::Completed => "completed",
-                    PairedRecordStatus::Failed => "failed",
-                }
-                .to_string(),
+                status: step.status,
                 step_id: step.correlation_id,
                 step_name: step.label,
                 step_type: step.kind,
-                started_at_ms: step.started_at.timestamp_millis(),
-                completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
+                started_at: step.started_at,
+                completed_at: step.completed_at,
                 duration_ms: step.duration_ms,
                 launched_at_ms: step.launched_at_ms,
                 settled_at_ms: step.settled_at_ms,
@@ -2271,25 +2087,22 @@ pub async fn handle_list_step_summaries(
 }
 
 /// One scope in an ancestry chain.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ScopeInfo {
     /// Scope id.
     pub scope_id: String,
     /// Enclosing scope, absent at the root.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_scope_id: Option<String>,
     /// Step that opened the scope.
     pub step_id: String,
     /// Human-readable step name.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub step_name: Option<String>,
     /// Step type.
     pub step_type: String,
     /// Iteration index, for scopes opened per-iteration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Walk a scope's ancestry, innermost first.
@@ -2368,7 +2181,7 @@ pub async fn handle_get_scope_ancestors(
                     .get("index")
                     .and_then(|v| v.as_u64())
                     .map(|i| i as u32),
-                created_at_ms: event.created_at.timestamp_millis(),
+                created_at: event.created_at,
             },
         );
     }
@@ -2388,6 +2201,23 @@ pub async fn handle_get_scope_ancestors(
     }
 
     Ok(ancestors)
+}
+
+/// Options for tenant metrics aggregation.
+#[derive(Debug, Clone)]
+pub struct TenantMetricsOptions {
+    /// Tenant ID.
+    pub tenant_id: String,
+    /// Start of time range.
+    pub start_time: DateTime<Utc>,
+    /// End of time range.
+    pub end_time: DateTime<Utc>,
+    /// Bucket width in seconds.
+    ///
+    /// A plain number rather than an enum: the aggregation query only ever needs
+    /// the width, and the named granularities callers speak in (`hourly`,
+    /// `daily`) belong at the API boundary that has to parse them.
+    pub bucket_seconds: u32,
 }
 
 /// Widest bucket count the aggregation query may be asked to build.
@@ -2414,10 +2244,10 @@ fn bucket_count(
 }
 
 /// One bucket of tenant execution metrics.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct MetricsBucket {
-    /// Bucket start, epoch milliseconds.
-    pub bucket_time_ms: i64,
+    /// Bucket start.
+    pub bucket_time: DateTime<Utc>,
     /// Invocations started in the bucket.
     pub invocation_count: i64,
     /// Invocations that completed successfully.
@@ -2427,22 +2257,16 @@ pub struct MetricsBucket {
     /// Invocations that were cancelled.
     pub cancelled_count: i64,
     /// Mean duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_duration_ms: Option<f64>,
     /// Fastest duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_duration_ms: Option<f64>,
     /// Slowest duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_duration_ms: Option<f64>,
     /// Mean peak memory.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_memory_bytes: Option<i64>,
     /// Highest peak memory.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_memory_bytes: Option<i64>,
     /// Successes as a percentage of terminal invocations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub success_rate_percent: Option<f64>,
 }
 
@@ -2453,7 +2277,7 @@ pub struct MetricsBucket {
 /// terminal yet reports `None` rather than 0%.
 pub async fn handle_get_tenant_metrics(
     state: &EnvironmentHandlerState,
-    options: &db::TenantMetricsOptions,
+    options: &TenantMetricsOptions,
 ) -> Result<Vec<MetricsBucket>> {
     if options.tenant_id.is_empty() {
         return Err(crate::error::Error::InvalidRequest(
@@ -2478,14 +2302,21 @@ pub async fn handle_get_tenant_metrics(
         )));
     }
 
-    let bucket_rows = db::get_tenant_metrics(&state.pool, options).await?;
+    let bucket_rows = db::get_tenant_metrics(
+        &state.pool,
+        &options.tenant_id,
+        options.start_time,
+        options.end_time,
+        options.bucket_seconds,
+    )
+    .await?;
 
     Ok(bucket_rows
         .into_iter()
         .map(|row| {
             let terminal_count = row.success_count + row.failure_count + row.cancelled_count;
             MetricsBucket {
-                bucket_time_ms: row.bucket_time.timestamp_millis(),
+                bucket_time: row.bucket_time,
                 invocation_count: row.invocation_count,
                 success_count: row.success_count,
                 failure_count: row.failure_count,
@@ -2721,6 +2552,193 @@ mod tests {
     use crate::image_registry::Image;
     use chrono::Utc;
     use serde_json::json;
+
+    /// Handler state whose reads and writes all land in memory.
+    ///
+    /// `handle_send_signal` only ever touches `persistence`, so the pool is
+    /// built lazily and never connected — the signal path needs no database.
+    fn in_memory_state() -> (
+        EnvironmentHandlerState,
+        Arc<runtara_core::persistence::memory::InMemoryPersistence>,
+    ) {
+        let persistence = Arc::new(runtara_core::persistence::memory::InMemoryPersistence::new());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .expect("a lazy pool never connects");
+        let state = EnvironmentHandlerState::new(
+            pool,
+            persistence.clone(),
+            Arc::new(crate::runner::MockRunner::new()),
+            std::env::temp_dir(),
+        );
+        (state, persistence)
+    }
+
+    /// Every signal the storage layer can encode must also be one this handler
+    /// accepts.
+    ///
+    /// `shutdown` is the one that regressed: the handler used to match only
+    /// `cancel` and `pause`, so the graceful-drain path
+    /// (`ShutdownCoordinator::drain_executions` via
+    /// `RuntimeClient::signal_shutdown`) had its signal refused as an unknown
+    /// type on every call, logged the refusal as a warning, and then waited out
+    /// the whole grace period having asked no guest to checkpoint.
+    #[tokio::test]
+    async fn every_storable_signal_type_is_accepted() {
+        use runtara_core::domain::SignalType;
+
+        for signal_type in [SignalType::Cancel, SignalType::Pause, SignalType::Shutdown] {
+            let name = runtara_store_postgres::encoding::signal_type_to_str(signal_type);
+            let (state, persistence) = in_memory_state();
+            let instance_id = format!("signal-{name}");
+            persistence
+                .register_instance(&instance_id, "tenant-1")
+                .await
+                .expect("register");
+            persistence
+                .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
+                .await
+                .expect("mark running");
+
+            let outcome = handle_send_signal(&state, &instance_id, name, None)
+                .await
+                .expect("signal send must not error");
+
+            assert_eq!(
+                outcome,
+                SendSignalOutcome::Delivered,
+                "`{name}` is a signal the column can hold, so the handler must take it"
+            );
+
+            let stored = persistence
+                .get_pending_signal(&instance_id)
+                .await
+                .expect("read back the signal")
+                .expect("a delivered signal is pending");
+            assert_eq!(stored.signal_type, signal_type, "stored as sent: {name}");
+        }
+    }
+
+    /// A name the column cannot hold is still refused, rather than everything
+    /// being waved through now that the parse is shared.
+    #[tokio::test]
+    async fn an_unstorable_signal_type_is_still_refused() {
+        let (state, persistence) = in_memory_state();
+        persistence
+            .register_instance("signal-bogus", "tenant-1")
+            .await
+            .expect("register");
+        persistence
+            .update_instance_status("signal-bogus", CoreInstanceStatus::Running, None)
+            .await
+            .expect("mark running");
+
+        let outcome = handle_send_signal(&state, "signal-bogus", "detonate", None)
+            .await
+            .expect("an unknown name is an outcome, not an error");
+
+        assert_eq!(
+            outcome,
+            SendSignalOutcome::UnknownSignalType {
+                signal_type: "detonate".to_string(),
+            }
+        );
+    }
+
+    /// An instant a handler reports must be the instant the store holds,
+    /// down to the microsecond Postgres actually keeps.
+    ///
+    /// These fields used to cross as `created_at_ms: i64` built with
+    /// `timestamp_millis()`, so every timestamp the server read had been
+    /// silently rounded down to the millisecond. Nothing asserted on it, so
+    /// nothing caught it. A time carrying microseconds is the cheapest way to
+    /// pin that the truncation is gone and does not come back.
+    #[tokio::test]
+    async fn instants_survive_the_handler_without_losing_precision() {
+        use chrono::TimeZone;
+        use runtara_core::domain::EventType;
+        use runtara_core::persistence::{EventRecord, ListEventsFilter};
+
+        let (state, persistence) = in_memory_state();
+        // 123_456_000 ns = 123.456 ms. Anything below the millisecond is what
+        // the old `timestamp_millis()` hop discarded.
+        let precise = Utc
+            .timestamp_opt(1_700_000_000, 123_456_000)
+            .single()
+            .expect("a representable instant");
+        assert_ne!(
+            precise.timestamp_subsec_micros() % 1_000,
+            0,
+            "the fixture must carry sub-millisecond detail or it proves nothing"
+        );
+
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: "precision-1".to_string(),
+                event_type: EventType::Custom,
+                checkpoint_id: None,
+                payload: None,
+                created_at: precise,
+                subtype: None,
+            })
+            .await
+            .expect("insert event");
+
+        let page = handle_list_events(&state, "precision-1", &ListEventsFilter::default(), 10, 0)
+            .await
+            .expect("list events");
+
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].created_at, precise,
+            "the handler must report the stored instant, not a rounded copy"
+        );
+    }
+
+    /// A stored body crosses as the bytes that were written, whatever they are.
+    ///
+    /// Bodies used to be base64-encoded here and decoded again by the server
+    /// with `serde_json::from_slice(..).ok()`, so anything that was not JSON
+    /// arrived as `None` — the same answer as "there was no body". Environment
+    /// stores opaque bytes and has no business deciding they are JSON; whether
+    /// they parse is the reader's question to ask, and now it can.
+    #[tokio::test]
+    async fn a_body_that_is_not_json_still_crosses_intact() {
+        use runtara_core::domain::EventType;
+        use runtara_core::persistence::{EventRecord, ListEventsFilter};
+
+        let (state, persistence) = in_memory_state();
+        let raw: Vec<u8> = vec![0x00, 0xff, b'n', b'o', b't', 0x80, b'{'];
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&raw).is_err(),
+            "the fixture must not be JSON or it proves nothing"
+        );
+
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: "opaque-1".to_string(),
+                event_type: EventType::Custom,
+                checkpoint_id: None,
+                payload: Some(raw.clone()),
+                created_at: Utc::now(),
+                subtype: None,
+            })
+            .await
+            .expect("insert event");
+
+        let page = handle_list_events(&state, "opaque-1", &ListEventsFilter::default(), 10, 0)
+            .await
+            .expect("list events");
+
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].payload.as_deref(),
+            Some(raw.as_slice()),
+            "the handler must hand back the bytes it was given"
+        );
+    }
 
     fn make_image(metadata: Option<serde_json::Value>) -> Image {
         Image {

@@ -15,6 +15,7 @@ use runtara_core::persistence::{
     SignalRecord,
 };
 use runtara_environment::container_registry::ContainerRegistry;
+use runtara_environment::handlers::DrainController;
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use runtara_environment::runner::{ContainerMetrics, LaunchOptions, Runner, RunnerHandle};
 use sqlx::PgPool;
@@ -600,6 +601,66 @@ async fn test_heartbeat_monitor_shutdown() {
 // ============================================================================
 // Stale Container Detection Tests
 // ============================================================================
+
+/// A draining monitor must not fail an instance that is racing to checkpoint.
+///
+/// During drain, in-flight guests are being asked to suspend; a scan that runs
+/// anyway sees them as stale and marks them failed, turning a graceful drain
+/// into a batch of spurious failures. `with_drain` is what prevents that, and
+/// until now nothing exercised it — the word "drain" did not appear in this
+/// file, so the guard could have been deleted and every test still passed.
+#[tokio::test]
+async fn a_draining_monitor_does_not_fail_a_stale_instance() {
+    skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
+    let pool = get_test_pool().await;
+
+    let tenant_id = format!("test-tenant-drain-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    // Exactly the fixture test_stale_container_no_heartbeat uses: a registered
+    // container that never heartbeats, which a scanning monitor WILL fail.
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+
+    let persistence = Arc::new(MockPersistence::new());
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(60),
+    };
+
+    let drain = DrainController::new();
+    drain.set();
+
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    )
+    .with_drain(drain);
+    let shutdown = monitor.shutdown_handle();
+
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+
+    // Long enough for several poll intervals to elapse.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    shutdown.notify_one();
+    handle.await.ok();
+
+    assert!(
+        persistence.get_completed_instances().is_empty(),
+        "a draining monitor must not complete any instance; it failed {:?}",
+        persistence.get_completed_instances()
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
 
 #[tokio::test]
 async fn test_stale_container_no_heartbeat() {

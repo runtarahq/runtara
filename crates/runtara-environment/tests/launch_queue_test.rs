@@ -8,9 +8,9 @@ use std::{sync::Arc, time::Duration};
 
 use common::TestContext;
 use runtara_core::persistence::Persistence;
+use runtara_environment::instance_repository::InstanceRepository;
 use runtara_environment::runner::{MockRunner, Runner, RunnerHandle};
 use runtara_environment::{
-    db,
     launch_dispatcher::LaunchDispatcher,
     launch_queue::{
         CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
@@ -891,9 +891,11 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
         "the queue row and Core instance must be visible together"
     );
     assert_eq!(
-        db::get_instance_image_id(&context.pool, &instance_id)
+        InstanceRepository::new(context.pool.clone())
+            .image_binding(&instance_id)
             .await
-            .expect("image binding read must succeed"),
+            .expect("image binding read must succeed")
+            .map(|binding| binding.image_id),
         Some(image_id.clone())
     );
 
