@@ -36,6 +36,26 @@ pub(super) fn compose_agent(
         "fixture inputs overlap static memory or heap"
     );
     let agent = agent_path(agent_id)?;
+    let bytes = std::fs::read(&agent)?;
+    let mut has_callback_lift = false;
+    for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::ComponentCanonicalSection(section) = payload? {
+            for function in section {
+                if let wasmparser::CanonicalFunction::Lift { options, .. } = function? {
+                    has_callback_lift |= options
+                        .iter()
+                        .any(|option| matches!(option, wasmparser::CanonicalOption::Callback(_)));
+                }
+            }
+        }
+    }
+    // This catches an obviously stale synchronous artifact before a fixture
+    // waits for cancellation. Runtime cancellation/reuse remains the real proof.
+    anyhow::ensure!(
+        has_callback_lift,
+        "{} has no callback lift; rebuild this worktree with scripts/build-agent-components.sh in its own CARGO_TARGET_DIR and point RUNTARA_AGENT_COMPONENTS_DIR at that output",
+        agent.display()
+    );
     let escape = |bytes: &[u8]| {
         bytes
             .iter()
@@ -66,7 +86,7 @@ pub(super) fn compose_agent(
         graph.types_mut(),
     )?;
     let socket = graph.register_package(package)?;
-    let package = Package::from_file("test:http", None, agent, graph.types_mut())?;
+    let package = Package::from_bytes("test:http", None, bytes, graph.types_mut())?;
     let plug = graph.register_package(package)?;
     wac_graph::plug(&mut graph, vec![plug], socket)?;
     Ok(graph.encode(EncodeOptions::default())?)

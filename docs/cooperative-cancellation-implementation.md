@@ -1,10 +1,16 @@
 # Cooperative cancellation implementation record
 
-Status: sequential/parallel root cancellation and Agent binding migration, 2026-09-06. Governing contract:
+Status: sequential/parallel root cancellation and Agent binding migration, 2026-09-07. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
 Nested workflow-agent cancellation, timeouts and the remaining plan gates are
 still incomplete.
+
+The public Stop path still calls `Runner::stop` immediately and ignores its
+accepted grace-period field. The emitted-wait proofs below exercise a delivered
+lifecycle Cancel signal; they do not yet qualify cooperative Stop through the
+public API. The existing post-run cancellation backstop can also overwrite a
+completed outcome. Grace/escalation and completion-race semantics remain P3 work.
 
 ## P0: initial ABI inventory
 
@@ -774,3 +780,41 @@ ignored. Affected-crate all-target Clippy with the existing integration test
 features, formatting and diff whitespace checks passed. No real AWS service,
 database/server E2E, Linux qualification or new performance/capacity measurement
 was run in this stage.
+
+## Upstream integration and artifact isolation
+
+The feature branch incorporates upstream `main` at
+`4eff9cdf83342ad45ef89f73181934c5485085a0` (workspace version 8.9.10),
+including the environment worker/repository refactors. The merge required no
+conflict resolution. Public Stop and terminal-race behavior are still the P3
+limitations described at the top of this record.
+
+The first component run after integration loaded stale synchronous artifacts
+from the shared checkout's target directory: 23 tests passed and 26 cancellation
+tests failed. Inspection of the HTTP artifact showed a synchronous lift even
+though this worktree's source declared callback bindings. A fresh normal bundle
+build in a directory dedicated to this worktree restored the callback ABI; all
+49 component cancellation tests then passed. The fixture now rejects an artifact
+without a callback lift before starting cancellation waits. This preflight was
+also run against the stale artifact and failed immediately as intended; runtime
+cancellation, cleanup and instance reuse remain the actual proof.
+
+Use separate output paths for this worktree and each future benchmark baseline:
+
+```sh
+RUSTC_WRAPPER= SQLX_OFFLINE=true CARGO_BUILD_JOBS=4 \
+CARGO_TARGET_DIR=/Users/volodymyrrudyi/work/runtara/target/wasm-emitter-audit-components \
+scripts/build-agent-components.sh
+
+export RUNTARA_AGENT_COMPONENTS_DIR=/Users/volodymyrrudyi/work/runtara/target/wasm-emitter-audit-components/wasm32-wasip2/release
+export CARGO_TARGET_DIR=/Users/volodymyrrudyi/work/runtara/target/selective-isolation-check
+```
+
+The isolated normal build produced all 27 Agents and both shared workflow
+components with metadata. The environment/server unit suites passed 143 and
+1,178 tests respectively. The full emitted-workflow suite passed 280 tests with
+four test threads; the two manual benchmarks remained ignored. All-target Clippy
+passed with the existing environment,
+server, component-host and workflows integration-test features enabled. No
+live-database/server E2E, fresh performance measurements or Linux qualification
+was performed during this integration check.

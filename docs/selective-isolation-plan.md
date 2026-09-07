@@ -268,8 +268,12 @@ small/16-KiB-boundary/MiB payloads, real HTTP header/body waits, replay and root
 abort. Assert concurrent overlap and standard ABI use; no sequential fallback.
 
 Run the baseline and current revisions on the same host with matching dependency,
-compiler, runtime and fixture settings wherever unaffected by the change. Record
-all necessary differences explicitly; no product backend selector is introduced. Record hashes, versions,
+compiler, runtime and fixture settings wherever unaffected by the change. Use
+separate Cargo target and component output directories for each worktree/revision;
+do not share artifact paths even when package versions match. Verify the built
+component ABI before timing so a cached synchronous artifact cannot stand in for
+the cooperative implementation. Document all necessary differences explicitly;
+no product backend selector is introduced. Record hashes, versions,
 machine specifications and actual ABI modes. Keep legacy and candidate runs paired across
 at least three independent sessions, alternating order. Prepared runs require at
 least five warmups and 1,000 measured executions per condition. Declare separate
