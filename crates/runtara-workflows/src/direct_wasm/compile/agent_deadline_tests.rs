@@ -137,6 +137,13 @@ fn executor() -> &'static WorkflowExecutor {
     })
 }
 
+#[derive(Clone, Copy)]
+enum Shape {
+    Root,
+    Published(usize),
+    InlineWhile(usize),
+}
+
 fn compile(
     dir: &Path,
     url: &str,
@@ -145,6 +152,29 @@ fn compile(
     retries: u32,
     delay: u64,
     recover: bool,
+) -> anyhow::Result<DirectCompilationResult> {
+    compile_shaped(
+        dir,
+        url,
+        timeout,
+        durable,
+        retries,
+        delay,
+        recover,
+        Shape::Root,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_shaped(
+    dir: &Path,
+    url: &str,
+    timeout: u64,
+    durable: bool,
+    retries: u32,
+    delay: u64,
+    recover: bool,
+    shape: Shape,
 ) -> anyhow::Result<DirectCompilationResult> {
     let mut graph = json!({"durable":durable,"entryPoint":"fetch","steps":{
         "fetch":{"id":"fetch","stepType":"Agent","agentId":"http","capabilityId":"http-request",
@@ -166,6 +196,25 @@ fn compile(
             .unwrap()
             .retain(|edge| edge["label"] != "onError");
     }
+    if let Shape::InlineWhile(depth) = shape {
+        for _ in 0..depth {
+            graph = json!({"durable":false,"entryPoint":"loop","steps":{
+                "loop":{"id":"loop","stepType":"While","condition":{"type":"operation","op":"EQ",
+                    "arguments":[{"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]},
+                    "config":{"maxIterations":1},"subgraph":graph},
+                "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                    "result":{"valueType":"reference","value":"steps.loop.outputs.outputs"}}}},
+                "executionPlan":[{"fromStep":"loop","toStep":"finish"}]});
+        }
+    }
+    let published = matches!(shape, Shape::Published(_));
+    assert!(!published || !durable);
+    let abi = if published {
+        super::super::component::WorkflowAbi::AgentCapabilities
+    } else {
+        super::super::component::WorkflowAbi::InvokeHostImports
+    };
+    let slug = published.then_some("timed-child");
     let mut compiled = compile_direct_workflow_with_abi(
         DirectCompilationInput {
             workflow_id: "deadline".into(),
@@ -176,12 +225,18 @@ fn compile(
             output_dir: dir.into(),
             track_events: false,
             agent_catalog: None,
-            agent_slug: None,
+            agent_slug: slug.map(str::to_owned),
         },
-        super::super::component::WorkflowAbi::InvokeHostImports,
+        abi,
         false,
     )?;
-    graph["steps"]["fetch"]["timeout"] = timeout.into();
+    let mut scope = &mut graph;
+    if let Shape::InlineWhile(depth) = shape {
+        for _ in 0..depth {
+            scope = &mut scope["steps"]["loop"]["subgraph"];
+        }
+    }
+    scope["steps"]["fetch"]["timeout"] = timeout.into();
     let graph = serde_json::from_value(graph)?;
     // Explicitly prove there is no public gate bypass or hidden product flag.
     compiled.support_report = super::super::support::analyze_direct_wasm_support(&graph);
@@ -195,18 +250,141 @@ fn compile(
         &support,
         false,
         "deadline",
-        super::super::component::WorkflowAbi::InvokeHostImports,
-        false,
-        None,
+        abi,
+        compiled.omit_runtime,
+        slug,
         &Default::default(),
     )?;
     assert!(pools.is_empty());
+    compiled.component_artifacts = super::super::component::emit_direct_component_artifacts_scoped(
+        &manifest.feature_summary.agent_ids,
+        super::super::component::RuntimeBinding::HostImport,
+        abi,
+        compiled.omit_runtime,
+        slug,
+        &pools,
+        false,
+        &Default::default(),
+        true,
+        true,
+    );
     fs::write(&compiled.workflow_logic_wasm_path, bytes)?;
     fs::write(&compiled.manifest_path, manifest_json)?;
+    fs::write(&compiled.support_report_path, support)?;
+    fs::write(
+        &compiled.world_wit_path,
+        &compiled.component_artifacts.world_wit,
+    )?;
+    fs::write(&compiled.wac_path, &compiled.component_artifacts.wac_source)?;
     let components = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
         .expect("build components and set RUNTARA_AGENT_COMPONENTS_DIR");
-    compose_direct_workflow(&mut compiled, components)?;
-    Ok(compiled)
+    compose_direct_workflow(&mut compiled, &components)?;
+    if let Shape::Published(depth) = shape {
+        assert!(compiled.omit_runtime);
+        assert_runtime_free(&compiled)?;
+        wrap_published(compiled, depth, dir, &components)
+    } else {
+        Ok(compiled)
+    }
+}
+
+fn assert_runtime_free(compiled: &DirectCompilationResult) -> anyhow::Result<()> {
+    let wit_component::DecodedWasm::Component(resolve, world) =
+        wit_component::decode(&fs::read(&compiled.wasm_path)?)?
+    else {
+        anyhow::bail!("not a component")
+    };
+    let imports: Vec<_> = resolve.worlds[world]
+        .imports
+        .keys()
+        .map(|key| resolve.name_world_key(key))
+        .collect();
+    assert!(
+        imports
+            .iter()
+            .any(|name| name.starts_with("wasi:clocks/monotonic-clock@0.2.")),
+        "missing standard clock: {imports:?}"
+    );
+    assert!(
+        !imports.iter().any(|name| name.contains("workflow-runtime")),
+        "published child imports runtime: {imports:?}"
+    );
+    assert!(compiled.scoped_agents.is_empty() && compiled.invocation_manifest.is_none());
+    Ok(())
+}
+
+/// Publish the privately emitted child into one or more normal composed Agent
+/// callers. Only the final root imports the runtime and receives user signals.
+fn wrap_published(
+    mut child: DirectCompilationResult,
+    depth: usize,
+    dir: &Path,
+    components: &str,
+) -> anyhow::Result<DirectCompilationResult> {
+    use super::super::component::WorkflowAbi;
+    assert!(depth > 0);
+    let staging = dir.join("published");
+    fs::create_dir(&staging)?;
+    let mut slug = "timed-child".to_string();
+    for level in 0..depth {
+        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+            &slug,
+            &slug,
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+        fs::copy(
+            &child.wasm_path,
+            staging.join(format!("runtara_agent_{}.wasm", slug.replace('-', "_"))),
+        )?;
+        fs::write(
+            staging.join(format!(
+                "runtara_agent_{}.meta.json",
+                slug.replace('-', "_")
+            )),
+            serde_json::to_vec(&info)?,
+        )?;
+        let graph = serde_json::from_value(json!({"durable":false,"entryPoint":"call","steps":{
+            "call":{"id":"call","stepType":"Agent","agentId":slug,"capabilityId":"run","maxRetries":0},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                "result":{"valueType":"reference","value":"steps.call.outputs"}}}},
+            "executionPlan":[{"fromStep":"call","toStep":"finish"}]}))?;
+        let root = level + 1 == depth;
+        slug = format!("timed-layer-{}", char::from(b'a' + u8::try_from(level)?));
+        child = compile_direct_workflow_with_abi(
+            DirectCompilationInput {
+                workflow_id: slug.clone(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph,
+                child_workflows: vec![],
+                output_dir: dir.join(&slug),
+                track_events: false,
+                agent_catalog: Some(Arc::new(
+                    runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]),
+                )),
+                agent_slug: (!root).then(|| slug.clone()),
+            },
+            if root {
+                WorkflowAbi::InvokeHostImports
+            } else {
+                WorkflowAbi::AgentCapabilities
+            },
+            false,
+        )?;
+        compose_direct_workflow_with_extra_dirs(
+            &mut child,
+            components,
+            std::slice::from_ref(&staging),
+        )?;
+        if !root {
+            assert!(child.omit_runtime);
+            assert_runtime_free(&child)?;
+        }
+    }
+    Ok(child)
 }
 
 async fn invoke(compiled: &DirectCompilationResult, host: Arc<Host>) -> anyhow::Result<InvokeExit> {
@@ -235,6 +413,7 @@ enum Response {
     Ok,
     Error,
     RetryThenHang,
+    RollbackThenHang,
     RootCancel,
 }
 
@@ -244,6 +423,17 @@ async fn run(
     durable: bool,
     retries: u32,
     delay: u64,
+) -> anyhow::Result<()> {
+    run_shaped(response, timeout, durable, retries, delay, Shape::Root).await
+}
+
+async fn run_shaped(
+    response: Response,
+    timeout: u64,
+    durable: bool,
+    retries: u32,
+    delay: u64,
+    shape: Shape,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
@@ -268,15 +458,25 @@ async fn run(
             let attempt = req.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
                 *first.lock().unwrap() = Some(Instant::now());
-                if matches!(response, Response::RetryThenHang) {
-                    server_host
-                        .clock_override
-                        .store(server_host.now_ms().unwrap() + 1_800, Ordering::SeqCst);
+                if matches!(
+                    response,
+                    Response::RetryThenHang | Response::RollbackThenHang
+                ) {
+                    server_host.clock_override.store(
+                        if matches!(response, Response::RollbackThenHang) {
+                            1
+                        } else {
+                            server_host.now_ms().unwrap() + 100_000
+                        },
+                        Ordering::SeqCst,
+                    );
                 }
             }
             let response = match response {
-                Response::RetryThenHang if attempt == 0 => Response::Error,
-                Response::RetryThenHang => Response::Hang,
+                Response::RetryThenHang | Response::RollbackThenHang if attempt == 0 => {
+                    Response::Error
+                }
+                Response::RetryThenHang | Response::RollbackThenHang => Response::Hang,
                 Response::RootCancel => {
                     server_host.cancel.store(true, Ordering::SeqCst);
                     Response::Hang
@@ -287,7 +487,11 @@ async fn run(
                 Response::Hang => {
                     assert_eq!(stream.read(&mut buffer).await?, 0);
                 }
-                Response::Ok | Response::Error | Response::RetryThenHang | Response::RootCancel => {
+                Response::Ok
+                | Response::Error
+                | Response::RetryThenHang
+                | Response::RollbackThenHang
+                | Response::RootCancel => {
                     let status = if matches!(response, Response::Ok) {
                         "200 OK"
                     } else {
@@ -304,7 +508,16 @@ async fn run(
     });
     let result = async {
         let dir = tempfile::tempdir()?;
-        let compiled = compile(dir.path(), &url, timeout, durable, retries, delay, true)?;
+        let compiled = compile_shaped(
+            dir.path(),
+            &url,
+            timeout,
+            durable,
+            retries,
+            delay,
+            true,
+            shape,
+        )?;
         let mut exit = invoke(&compiled, host.clone()).await?;
         if matches!(response, Response::RootCancel) {
             anyhow::ensure!(
@@ -363,8 +576,19 @@ async fn run(
         let InvokeExit::Completed(output) = exit else {
             anyhow::bail!("expected recovery/success: {exit:?}")
         };
-        let output: Value = serde_json::from_slice(&output)?;
+        let mut output: Value = serde_json::from_slice(&output)?;
+        let complete_output = output.clone();
         let success = matches!(response, Response::Ok) && timeout != 0;
+        // An onError Finish already terminates the surrounding workflow;
+        // successful body completion instead contributes the While output.
+        let layers = match shape {
+            Shape::Published(depth) => depth,
+            Shape::InlineWhile(depth) if success => depth,
+            _ => 0,
+        };
+        for _ in 0..layers {
+            output = output["result"].take();
+        }
         if success {
             assert_eq!(output, json!({"ok":true}));
             if durable {
@@ -377,27 +601,47 @@ async fn run(
         } else {
             assert_eq!(
                 output,
-                json!({"code":"AGENT_TIMEOUT","retryable":false,"stepId":"fetch"})
+                if matches!(response, Response::Error) && retries == 0 {
+                    json!({"code":"HTTP_5XX","retryable":true,"stepId":"fetch"})
+                } else {
+                    json!({"code":"AGENT_TIMEOUT","retryable":false,"stepId":"fetch"})
+                },
+                "complete output: {complete_output}"
             );
         }
         assert_eq!(
             requests.load(Ordering::SeqCst),
-            if matches!(response, Response::RetryThenHang) {
+            if matches!(
+                response,
+                Response::RetryThenHang | Response::RollbackThenHang
+            ) {
                 2
             } else {
                 usize::from(timeout != 0)
             }
         );
-        if matches!(response, Response::RetryThenHang) {
+        if matches!(
+            response,
+            Response::RetryThenHang | Response::RollbackThenHang
+        ) {
+            let elapsed = first_request.lock().unwrap().unwrap().elapsed();
             assert!(
-                first_request.lock().unwrap().unwrap().elapsed() < Duration::from_secs(1),
-                "a later attempt restarted the two-second budget"
+                elapsed >= Duration::from_millis(1_700),
+                "wall clock jump shortened a live budget: {elapsed:?}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(2_700),
+                "a retry restarted the two-second budget: {elapsed:?}"
             );
         }
         if !durable {
             assert!(host.checkpoints.lock().unwrap().is_empty());
         }
-        if matches!(response, Response::Hang | Response::RetryThenHang) && timeout != 0 {
+        if matches!(
+            response,
+            Response::Hang | Response::RetryThenHang | Response::RollbackThenHang
+        ) && timeout != 0
+        {
             tokio::time::timeout(Duration::from_secs(1), async {
                 while closed.load(Ordering::SeqCst) != requests.load(Ordering::SeqCst) {
                     tokio::task::yield_now().await;
@@ -458,13 +702,41 @@ async fn agent_deadline_success_and_saturating_budget_preserve_output() -> anyho
 
 #[tokio::test]
 async fn agent_deadline_covers_later_attempt_without_resetting_budget() -> anyhow::Result<()> {
-    run(Response::RetryThenHang, 2_000, false, 5, 50).await
+    for response in [Response::RetryThenHang, Response::RollbackThenHang] {
+        run(response, 2_000, false, 5, 1_000).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn agent_deadline_root_cancel_bypasses_step_recovery() -> anyhow::Result<()> {
     for durable in [false, true] {
         run(Response::RootCancel, 60_000, durable, 5, 60_000).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_published_workflows_use_standard_clock_without_runtime()
+-> anyhow::Result<()> {
+    for depth in [1, 2] {
+        for (response, timeout, retries, delay) in [
+            (Response::Hang, 200, 5, 60_000),
+            (Response::Hang, 0, 5, 60_000),
+            (Response::Error, 200, 5, 60_000),
+            (Response::Ok, u64::MAX, 0, 0),
+            (Response::RootCancel, 60_000, 5, 60_000),
+        ] {
+            run_shaped(
+                response,
+                timeout,
+                false,
+                retries,
+                delay,
+                Shape::Published(depth),
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -521,6 +793,16 @@ async fn agent_deadline_rejects_corrupted_durable_budget() -> anyhow::Result<()>
         };
         assert_eq!(error.code, "AGENT_DEADLINE_STATE");
         assert!(!error.retryable);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_inventory_includes_inline_nested_definitions() -> anyhow::Result<()> {
+    for depth in [1, 2] {
+        for response in [Response::Hang, Response::Ok, Response::Error] {
+            run_shaped(response, 200, false, 0, 0, Shape::InlineWhile(depth)).await?;
+        }
     }
     Ok(())
 }

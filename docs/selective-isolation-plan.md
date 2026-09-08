@@ -495,3 +495,24 @@ parallel scoped ownership, preparation interruption, and cleanup grace are still
 required. No feature flag is added. The temporary internal parallel eligibility
 restriction must be removed once scoped window deadlines are qualified. This is
 progress on G5/G7, not completion of either gate or the full G1–G10 plan.
+
+
+### Standard monotonic clock and published budgets · 2026-09-08
+
+Live Agent budgets now use the standard WASI monotonic clock. Durable replay
+retains the epoch deadline and converts its remaining duration at scope entry;
+non-durable published workflows need no lifecycle runtime. The resolved standard
+WIT inputs are reused directly, and clock import requirements come from a shared
+inventory that includes inline nested definitions. There is no product flag.
+
+Composed tests cover one/two published layers, root cancellation, timeout recovery,
+backoff expiry, zero/large budgets, and inline While inventory. Root tests verify
+that forward/backward fixture wall-clock changes do not change a live budget.
+The arithmetic test executes the actual emitter with controlled clock readings.
+Persisted time while parked still follows the existing epoch/scheduler contract.
+
+The next compiler work is inherited deadline ownership and unwind/recovery:
+intersect enclosing budgets without allowing an inner handler to consume an outer
+expiry, then qualify parallel sibling survival and cleanup grace. Keep E128 until
+those contracts pass. This expands G5/G7/G9 evidence; the full G1–G10 gates and
+paired performance/E2E/soak work remain open.

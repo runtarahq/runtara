@@ -1622,6 +1622,33 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
+/// Agent budgets across the complete definition tree, including inline loop
+/// graphs and supplied child workflows. IDs are allocated manifest-wide.
+pub(super) fn agent_timeouts(
+    root: &DirectGraphManifest,
+    children: &[DirectChildWorkflowGraphManifest],
+) -> std::collections::BTreeMap<u32, u64> {
+    let mut graphs = vec![root];
+    graphs.extend(children.iter().map(|child| &child.graph));
+    let mut budgets = std::collections::BTreeMap::new();
+    while let Some(graph) = graphs.pop() {
+        budgets.extend(
+            graph
+                .agents
+                .iter()
+                .filter_map(|agent| agent.timeout.map(|ms| (agent.id, ms))),
+        );
+        for step in &graph.steps {
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    budgets
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

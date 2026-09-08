@@ -9,3 +9,9 @@
 
 /// Source for the canonical `runtara:agent@0.1.0` WIT package.
 pub const RUNTARA_AGENT_WIT: &str = include_str!("../wit/runtara-agent.wit");
+
+/// Resolved standard WASI contracts used by the workflow emitter. Export the
+/// existing dependency inputs rather than maintaining a handwritten subset.
+pub const WASI_IO_POLL_WIT: &str = include_str!("../wit/deps/io/poll.wit");
+pub const WASI_MONOTONIC_CLOCK_WIT: &str = include_str!("../wit/deps/clocks/monotonic-clock.wit");
+pub const WASI_MONOTONIC_CLOCK_INTERFACE: &str = "wasi:clocks/monotonic-clock@0.2.3";

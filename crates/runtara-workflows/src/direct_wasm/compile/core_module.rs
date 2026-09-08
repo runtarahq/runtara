@@ -161,6 +161,12 @@ pub(super) fn emit_direct_core_module(
             }
             WorldItem::Interface { id, .. } => {
                 for function in resolve.interfaces[*id].functions.values() {
+                    if resolve.name_world_key(name)
+                        == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+                        && function.name != "now"
+                    {
+                        continue;
+                    }
                     import_core_function(
                         resolve,
                         mangling,
@@ -821,7 +827,9 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (12, ValType::I32),
     // 158: owned deadline packed status; 159: last await selected timeout.
     (2, ValType::I32),
-    // 160-161: current Agent budget and clock/remaining-duration scratch.
+    // 160-161: durable Agent deadline and remaining-duration scratch.
+    (2, ValType::I64),
+    // 162-163: monotonic start instant (ns) and initial live budget (ms).
     (2, ValType::I64),
 ];
 

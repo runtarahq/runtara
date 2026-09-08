@@ -289,11 +289,7 @@ impl DirectCoreStaticData {
             16,
         );
 
-        let agent_timeouts: BTreeMap<u32, u64> = std::iter::once(graph)
-            .chain(child_workflows.iter().map(|child| &child.graph))
-            .flat_map(|graph| graph.agents.iter())
-            .filter_map(|agent| agent.timeout.map(|timeout| (agent.id, timeout)))
-            .collect();
+        let agent_timeouts = super::manifest::agent_timeouts(graph, child_workflows);
         let timeout_bytes = if agent_timeouts.is_empty() {
             String::new()
         } else {
@@ -411,6 +407,10 @@ impl DirectCoreStaticData {
 
     pub(super) fn invocation_site(&self, target: u32, caller: u32, domain: u32) -> u32 {
         self.invocation_sites[&(target, caller, domain)]
+    }
+
+    pub(super) fn needs_monotonic_clock(&self) -> bool {
+        !self.agent_timeouts.is_empty()
     }
 
     pub(super) fn agent_timeout(&self, agent_id: u32) -> Option<u64> {

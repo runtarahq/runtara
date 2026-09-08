@@ -1217,3 +1217,21 @@ interrupt connection preparation, carry inherited expiry through nested recovery
 or provide parallel scope ownership and cleanup grace. Published runtime-free
 clock lowering, monotonic clock behavior, Embed/AI scope coverage, and the wider
 qualification gates remain open. No new public supported-pattern claim is made.
+
+
+### Standard-clock deadline qualification · 2026-09-08
+
+Agent live budgets now use standard WASI monotonic elapsed time. Non-durable
+published workflows enforce their own budget without a lifecycle runtime import;
+durable scopes reconstruct the live duration from their persisted epoch deadline.
+Forward/backward fixture epoch-clock changes cannot alter an active budget.
+Published one/two-layer timeout/cancel/retry tests and emitted arithmetic boundary
+tests cover this path. The Agent deadline inventory now includes inline nested
+definitions, verified through one/two While levels with timeout and ordinary
+success/error controls. Tests remain in `compile/agent_deadline_tests.rs`, with
+arithmetic coverage in `compile/agent_deadline.rs`.
+
+E128 is unchanged. This does not qualify inherited expiry ownership, recovery
+that continues an enclosing loop, scoped parallel cancellation, preparation,
+cleanup grace, or arbitrary wall-clock correction while parked. Full current
+coverage and verification are recorded in the implementation document.

@@ -161,6 +161,7 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
+    pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -646,6 +647,7 @@ impl DirectCoreImportIndices {
             subtask_cancel: self.subtask_cancel,
             subtask_drop: self.subtask_drop,
             timer_sleep_async: self.timer_sleep_async,
+            monotonic_now: self.monotonic_now,
             agent_invokes_async: self.agent_invokes_async,
         })
     }
@@ -805,6 +807,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
+    pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -988,7 +991,13 @@ pub(super) fn import_core_function(
     );
     imports.import(&module, &name, EntityType::Function(type_index));
 
-    if is_connection_resolver_import(resolve, interface, function, "describe") {
+    if function.name == "now"
+        && interface.is_some_and(|key| {
+            resolve.name_world_key(key) == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+        })
+    {
+        import_indices.monotonic_now = Some(function_index);
+    } else if is_connection_resolver_import(resolve, interface, function, "describe") {
         import_indices.connection_resolver_describe = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "load-input") {
         import_indices.runtime_load_input = Some(function_index);

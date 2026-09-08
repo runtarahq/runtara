@@ -2177,3 +2177,76 @@ Verification:
 
 Server/database E2E, resource soak, and fresh paired measurements were not run
 for this stage. No release or PR completion is claimed.
+
+
+## Standard monotonic clocks and published Agent budgets (2026-09-08)
+
+Running Agent invocation/retry budgets now use
+`wasi:clocks/monotonic-clock.now`. The emitter parses the repository's resolved
+standard clock and poll WIT inputs, exposed by the lightweight `runtara-agent-wit`
+crate; it imports only the clock's `now` function into the core module. No resolved
+WIT dependency files are edited and no parallel handwritten clock contract is
+introduced. Clock requirements are derived from the manifest and retained in
+returned/re-emitted scaffolding. Untimed workflow scaffolding keeps its existing
+imports; there is no authored flag or annotation.
+
+A live scope stores a monotonic start instant in nanoseconds and a budget duration
+in milliseconds. Remaining time subtracts elapsed whole milliseconds from that
+budget with saturation. It does not multiply a u64 millisecond budget into
+nanoseconds or add it to the clock's unspecified origin, which would lose the
+large-duration range. Millisecond timer granularity is retained. Two additional
+i64 locals carry the live clock state; cache identity is `cooperative-waits=shared-v4`.
+
+Non-durable scopes need no lifecycle clock or checkpoint I/O. Durable scopes
+retain their existing eight-byte epoch deadline for replay and scheduler wakes,
+sample its remaining duration when entering a live invocation, and then use the
+monotonic clock for that invocation's remaining budget. A recovered duration is
+capped at the authored timeout. Active clock jumps cannot restart or shorten the
+live timer; elapsed time across a park/restart still depends on the existing
+epoch-clock/scheduler contract. A monotonic origin is not persisted across
+Stores or processes. This does not claim immunity to arbitrary clock corrections
+while an instance is parked.
+
+Deadline metadata now traverses every inline nested graph as well as supplied
+child-workflow graphs. The prior first-stage inventory only inspected the outer
+graph of each supplied definition; an Agent inside a While/Split definition was
+missing. The common inventory feeds both static Agent data and required clock
+imports, so an inline Agent cannot silently lose its timer.
+
+Composed qualification expands to one and two published-workflow layers. Each
+child artifact is decoded to verify standard clock imports, absence of a lifecycle
+runtime import, and absence of an isolation catalog. The final root receives
+signals normally. The test matrix covers hanging HTTP, zero timeout, retry
+backoff expiry, u64::MAX success, and root Cancel traversing the child chain.
+WAC may unify compatible WASI patch versions with the Rust-produced bundle; the
+resolved emitter input is 0.2.3 and the current composed bundle exposes 0.2.9.
+
+Separate root tests move only the fixture's epoch clock forward/backward during a
+failed first request. A later hanging attempt still ends against the original
+two-second live budget. A one-second retry delay makes a per-attempt timer reset
+observable. Actual emitted-arithmetic tests cover near-u64::MAX monotonic origins,
+full u64 millisecond budgets, sub-millisecond elapsed time, equality and expiry.
+One/two inline While levels exercise the missing-inventory fix with timeout,
+success, and ordinary HTTP error. An onError Finish keeps the pre-existing terminal
+workflow behavior; these cases do not claim recovery that continues the enclosing
+loop. The existing CI deadline command also runs the new composed cases.
+
+The public E128 gate remains. Inherited scope ownership/unwind, parallel timers,
+interruptible preparation, Embed/AI scope coverage, and bounded cleanup grace
+remain required before enabling Agent/Embed timeout syntax. No host task manager,
+new cancellation import, lifecycle bookkeeping, or per-call Store was added.
+The existing awaitable timer remains the owned deadline waitable.
+
+Verification on the pinned toolchain and freshly rebuilt components:
+
+- Normal component build: all 27 Agents and both shared components, with metadata.
+- Full feature-gated compiler library suite: 600 passed, including the composed
+  deadline cases and emitted monotonic arithmetic.
+- Full direct workflow suite: 383 passed, three manual benchmarks ignored.
+- All-27-Agent shared callback/export/error contract: passed against the rebuilt
+  bundle.
+- Feature-gated Clippy for `runtara-workflows` and `runtara-agent-wit`, all targets,
+  with warnings denied: passed.
+
+No new latency/size benchmark, resource soak, or server/database E2E is claimed in
+this stage.
