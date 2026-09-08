@@ -8181,6 +8181,107 @@ fn direct_wasm_execute_invoke_embed_workflow_retry_parks_before_second_attempt()
     );
 }
 
+/// A real Agent error must survive the Embed boundary and its durable attempt
+/// checkpoint. An early restart reuses that failure without another side effect.
+#[test]
+fn direct_wasm_execute_embed_agent_error_preserves_durable_retry_replay() {
+    let components_dir = direct_e2e_components_dir();
+    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+        br#"{"status":503,"headers":{},"body":{"error":"unavailable"}}"#.to_vec(),
+        br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec(),
+    ]);
+    let mut child: Value = serde_json::from_str(&lifecycle_retry_http_graph()).unwrap();
+    child["durable"] = serde_json::json!(false);
+    child["steps"]["fetch"]["durable"] = serde_json::json!(false);
+    child["steps"]["fetch"]["maxRetries"] = serde_json::json!(0);
+    let mut parent: Value = serde_json::from_str(LIFECYCLE_RETRY_EMBED_PARENT).unwrap();
+    parent["steps"]["call_child"]["inputMapping"] = serde_json::json!({
+        "url":{"valueType":"reference","value":"data.url"}
+    });
+    parent["steps"]["finish"]["inputMapping"] = serde_json::json!({
+        "status":{"valueType":"reference","value":"steps.call_child.outputs.status"}
+    });
+    let artifact = compile_invoke_abi_artifact_with_children(
+        &components_dir,
+        "embed-agent-error-replay",
+        &parent.to_string(),
+        vec![runtara_workflows::ChildWorkflowInput {
+            step_id: "call_child".into(),
+            workflow_id: "retry-child".into(),
+            version_requested: "latest".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(child).unwrap(),
+        }],
+    );
+    let input =
+        serde_json::to_vec(&serde_json::json!({"url":format!("{proxy_url}/item")})).unwrap();
+    let env = HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), proxy_url)]);
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let first = run_invoke_once_with_env(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        env.clone(),
+    );
+    let deadline = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [runtara_component_host::lifecycle::WorkflowWake::At(deadline)] => *deadline,
+            other => panic!("expected one retry wake, got {other:?}"),
+        },
+        other => panic!("Agent failure must reach Embed retry parking, got {other:?}"),
+    };
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let checkpoints = host.checkpoints.lock().unwrap().clone();
+    let attempt = checkpoints
+        .iter()
+        .find(|(key, _)| key.contains("::attempt::1"))
+        .expect("failed Embed attempt checkpoint");
+    let stored: Value = serde_json::from_slice(attempt.1).expect("structured attempt envelope");
+    // Assert the stored error fields, not a substring of human-readable text.
+    let error = &stored;
+    assert_eq!(error["code"], "HTTP_5XX", "{stored}");
+    assert_eq!(error["category"], "transient");
+    assert_eq!(error["retryable"], true);
+    assert_eq!(error["childError"]["stepId"], "fetch");
+    host.pin_clock_before(deadline, 2_000);
+    let early = run_invoke_once_with_env(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        env.clone(),
+    );
+    assert!(
+        matches!(early, runtara_component_host::InvokeExit::Suspended(ref wakes)
+        if wakes == &vec![runtara_component_host::lifecycle::WorkflowWake::At(deadline)]),
+        "{early:?}"
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "early replay repeated the failed HTTP call"
+    );
+    assert_eq!(
+        *host.checkpoints.lock().unwrap(),
+        checkpoints,
+        "early replay rewrote attempt state"
+    );
+    *host.pinned_clock_ms.lock().unwrap() = None;
+    host.advance_clock_past(deadline);
+    let final_result = run_invoke_once_with_env(&artifact.wasm_path, host.clone(), input, env);
+    let runtara_component_host::InvokeExit::Completed(output) = final_result else {
+        panic!("due retry must complete: {final_result:?}");
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).unwrap(),
+        serde_json::json!({"status":200})
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(host.sleeps.lock().unwrap().is_empty());
+    proxy
+        .join()
+        .expect("proxy finishes after the frontier retry");
+}
+
 /// A cancellation/pause signal delivered while a retry is parked is observed
 /// before its due wake can issue another upstream call.
 #[test]

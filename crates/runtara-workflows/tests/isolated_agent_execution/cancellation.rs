@@ -344,23 +344,10 @@ async fn emitted_agent_unhandled_cancellation_remains_nonretryable() {
     let InvokeExit::Failed(error) = execute_cancelled_http(false, false, false).await else {
         panic!("unhandled cancellation must fail the emitted workflow")
     };
-    // Preserve the established root failure ABI: Agent failures are wrapped
-    // as text, with the structured envelope inside the message. onError sees
-    // the decoded envelope; the root export retains raw text.
-    assert!(error.code.is_empty());
-    assert!(error.category.is_empty());
-    let payload: Value = serde_json::from_str(
-        error
-            .message
-            .strip_prefix("Step fetch failed: Agent http::http-request: ")
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        payload,
-        serde_json::json!({"code":"CANCELLED","category":"cancellation",
-        "message":"isolated invocation cancelled","severity":"error","retryable":false})
-    );
+    assert_eq!(error.code, "CANCELLED");
+    assert_eq!(error.category, "cancellation");
+    assert_eq!(error.message, "isolated invocation cancelled");
+    assert_eq!(error.severity, "error");
     assert!(!error.retryable);
 }
 

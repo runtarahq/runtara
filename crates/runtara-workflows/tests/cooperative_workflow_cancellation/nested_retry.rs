@@ -126,6 +126,14 @@ async fn run_retry_in_scope(
             "executionPlan":[{"fromStep":"scope","toStep":"finish"},
                 {"fromStep":"scope","toStep":"handled","label":"onError"}]});
     }
+    let permanent = http_error == 400;
+    if permanent {
+        graph["steps"]["handled"]["inputMapping"] = serde_json::json!({
+            "code":{"valueType":"reference","value":"steps.__error.code"},
+            "category":{"valueType":"reference","value":"steps.__error.category"},
+            "retryable":{"valueType":"reference","value":"steps.__error.retryable"}
+        });
+    }
     let graph = serde_json::from_value(graph)?;
     let dir = tempfile::tempdir()?;
     let compiled = if depth == 0 {
@@ -193,6 +201,8 @@ async fn run_retry_in_scope(
                 (
                     if attempt > 2 {
                         "200 OK"
+                    } else if http_error == 400 {
+                        "400 Bad Request"
                     } else if http_error == 429 {
                         "429 Too Many Requests"
                     } else {
@@ -247,26 +257,6 @@ async fn run_retry_in_scope(
                 b"{}".to_vec(),
             )
             .await;
-        if composite_scope == Some(RetryScope::Embed) {
-            // Existing error-contract gap, also reproduced with the original
-            // blocking backoff: Agent errors are formatted text, but Embed
-            // expects JSON. It fails before entering its retry wait.
-            let runtara_component_host::InvokeExit::Failed(error) = result.exit else {
-                anyhow::bail!(
-                    "expected existing Embed error-contract failure: {:?}",
-                    result.exit
-                )
-            };
-            anyhow::ensure!(
-                error
-                    .message
-                    .starts_with("failed to parse EmbedWorkflow child error:")
-            );
-            anyhow::ensure!(host.requests.load(Ordering::SeqCst) == 1);
-            anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst));
-            anyhow::ensure!(host.inner.completed.lock().unwrap().is_none());
-            return Ok(());
-        }
         if cancel {
             anyhow::ensure!(
                 matches!(
@@ -294,12 +284,19 @@ async fn run_retry_in_scope(
             let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
                 unreachable!()
             };
-            // Split sees the formatted Agent error as an unclassified string;
-            // unlike direct Agent retries it loses rate-limit classification.
-            let recognized_rate_limit = rate_limited && composite_scope.is_none();
-            let succeeds = retries > 0 && (recognized_rate_limit || retries >= 2);
-            let attempts = if succeeds { 3 } else { retries + 1 };
-            let mut expected = if succeeds {
+            // Every scope preserves the originating structured retry policy.
+            let recognized_rate_limit = rate_limited;
+            let succeeds = !permanent && retries > 0 && (recognized_rate_limit || retries >= 2);
+            let attempts = if permanent {
+                1
+            } else if succeeds {
+                3
+            } else {
+                retries + 1
+            };
+            let mut expected = if permanent {
+                serde_json::json!({"code":"HTTP_4XX","category":"permanent","retryable":false})
+            } else if succeeds {
                 serde_json::json!({"ok":true})
             } else {
                 serde_json::json!({"unexpected_recovery":true})
@@ -327,7 +324,7 @@ async fn run_retry_in_scope(
                 host.requests.load(Ordering::SeqCst),
                 expected_requests
             );
-            if retries > 0 {
+            if retries > 0 && !permanent {
                 anyhow::ensure!(
                     started.elapsed() >= Duration::from_millis(u64::from(attempts - 1) * 50),
                     "backoff delays were skipped"
@@ -420,7 +417,7 @@ async fn root_retry_http_429_uses_ordinary_retry_count() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn embed_agent_http_error_fails_before_cancellation_backoff() -> anyhow::Result<()> {
+async fn embed_retry_after_http_error_cancels() -> anyhow::Result<()> {
     run_retry_in_scope(true, false, 2, 503, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
@@ -428,7 +425,7 @@ async fn split_retry_after_http_error_cancels() -> anyhow::Result<()> {
     run_retry_in_scope(true, false, 2, 503, 0, Some(RetryScope::Split)).await
 }
 #[tokio::test]
-async fn embed_agent_http_error_preserves_existing_parse_failure() -> anyhow::Result<()> {
+async fn embed_retry_after_http_errors_preserves_success() -> anyhow::Result<()> {
     run_retry_in_scope(false, false, 2, 503, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
@@ -436,7 +433,7 @@ async fn split_retry_after_http_errors_preserves_success() -> anyhow::Result<()>
     run_retry_in_scope(false, false, 2, 503, 0, Some(RetryScope::Split)).await
 }
 #[tokio::test]
-async fn embed_agent_rate_limit_error_fails_before_cancellation_backoff() -> anyhow::Result<()> {
+async fn embed_retry_after_rate_limit_error_cancels() -> anyhow::Result<()> {
     run_retry_in_scope(true, true, 1, 429, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
@@ -444,11 +441,13 @@ async fn split_retry_after_rate_limit_error_cancels() -> anyhow::Result<()> {
     run_retry_in_scope(true, true, 1, 429, 0, Some(RetryScope::Split)).await
 }
 #[tokio::test]
-async fn embed_agent_rate_limit_error_preserves_existing_parse_failure() -> anyhow::Result<()> {
+async fn embed_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count() -> anyhow::Result<()>
+{
     run_retry_in_scope(false, true, 1, 429, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
-async fn split_agent_rate_limit_error_uses_ordinary_retry_budget() -> anyhow::Result<()> {
+async fn split_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count() -> anyhow::Result<()>
+{
     run_retry_in_scope(false, true, 1, 429, 0, Some(RetryScope::Split)).await
 }
 
@@ -468,7 +467,8 @@ async fn published_split_retry_after_http_errors_preserves_success() -> anyhow::
 }
 
 #[tokio::test]
-async fn published_split_retry_preserves_rate_limit_classification_gap() -> anyhow::Result<()> {
+async fn published_split_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count()
+-> anyhow::Result<()> {
     run_retry_in_scope(false, true, 1, 429, 2, Some(RetryScope::Split)).await
 }
 
@@ -522,4 +522,26 @@ async fn published_split_retry_requested_parallelism_preserves_sequential_fallba
         Some(RetryScope::SplitWithParallelism),
     )
     .await
+}
+
+#[tokio::test]
+async fn embed_permanent_agent_error_skips_retries_and_preserves_recovery_fields()
+-> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 400, 0, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn split_permanent_agent_error_skips_retries_and_preserves_recovery_fields()
+-> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 400, 0, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_permanent_agent_error_preserves_recovery_fields() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 400, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn embed_zero_retries_preserves_agent_error_recovery() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 0, 503, 0, Some(RetryScope::Embed)).await
 }

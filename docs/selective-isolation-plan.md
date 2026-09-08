@@ -428,3 +428,15 @@ broken race handling. The sibling is fixture I/O. This is G5 contract evidence,
 not a released DSL feature: scoped deadline/reason propagation, inherited/durable
 budgets, recovery routing, root-cancel interaction and emergency grace still need
 compiler and runtime qualification. E128 remains unchanged.
+
+
+### Recovery prerequisite · structured Agent errors (2026-09-08)
+
+Correct AUDIT-12 before routing new scoped timeout outcomes through recovery.
+Newly compiled Agent failures must retain structured policy fields through both
+fresh results and durable attempt replay. Embed retains scope/child diagnostics
+and propagates the originating code and retry fields; composite retry respects
+explicit nonretryability. This deliberate failure-contract correction is an
+exception to the earlier no-cancel parity baseline and requires explicit tests
+for recovery payloads, component error exports and unchanged replay side-effect
+counts. It does not relax E128 or establish scoped deadline/grace support.

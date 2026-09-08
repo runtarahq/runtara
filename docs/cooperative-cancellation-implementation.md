@@ -1840,3 +1840,70 @@ were removed by this task; components were rebuilt under a task-specific
 directory was also rebuilt. No production emitter/runtime behavior or validation
 acceptance changed; no fresh size/timing/capacity measurements or server/database
 E2E were run for this contract stage.
+
+
+## Structured Agent failures before scoped timeout integration (2026-09-08)
+
+AUDIT-12 exposed a prerequisite for timeout recovery: the shared Agent failure
+formatter converted structured WIT fields into a text prefix plus JSON. Embed
+then failed to parse the result before reaching retry or recovery, while Split
+lost the originating retry policy. The producer now emits a JSON object through
+both the fresh-invocation and checkpoint-replay paths. Invocation context is
+recorded as `stepId`, `agentId` and `capabilityId`; provider fields and attributes
+remain structured. Invalid non-object attempt payloads are rejected explicitly.
+
+Embed retains its own step identity, descriptive message and complete `childError`
+context, while propagating the originating code, category, severity, explicit
+retryability, retry delay and attributes. A missing child code still falls back
+to `CHILD_WORKFLOW_FAILED`. The shared workflow retry classifier now respects an
+explicit `retryable: false`, including cancellation-category errors. Root Cancel
+still travels through the lifecycle path and cannot be caught by ordinary
+`onError`. No host orchestration or new authored control is introduced.
+
+This is a deliberate correction to failure behavior, not a claim of byte-for-byte
+error compatibility. Newly compiled root Agent failures expose typed WIT error
+fields instead of an empty code plus prefixed text. Embed handlers see the
+originating code instead of always `CHILD_WORKFLOW_FAILED`. Existing compiled
+artifacts contain their old stdlib and retain that behavior; the
+`structured-agent-errors=v1` lowering identity separates newly compiled images.
+Existing checkpoint key formats and raw Agent attempt envelopes are unchanged.
+Historical text parsing remains only in the existing best-effort onError reader;
+new execution paths do not parse a JSON substring out of an arbitrary message.
+
+Verification covers shared envelope conversion, nested Embed propagation and
+WIT projection, unsigned retry-delay preservation, explicit nonretryability,
+permanent failures, malformed replay payloads, real HTTP/Slack errors through
+composite retry waits, and durable Embed attempt replay.
+
+- Normal component build: all 27 Agents and both shared components with metadata.
+- Stdlib unit tests: 234 passed, one existing manual benchmark ignored, with both
+  default features and `--no-default-features`.
+- Compiler library: 577 passed. Native emitter audit: 30 passed.
+- Real composed retry/cancellation cases: all 33 passed. This includes the four
+  Embed cases that previously terminated at the JSON parse error, plus permanent
+  recovery and zero-retry cases. Published Split still uses its existing
+  sequential fallback when retry policy disallows parallel dispatch.
+- Durable Embed/HTTP test: early restart preserves the exact checkpoint map and
+  original wake with one HTTP request total; the due restart performs precisely
+  one additional request and returns HTTP 200. Its initial fixture failure was
+  a test-clock pin that had not been released; the corrected clock sequence
+  follows the existing durable Agent replay fixture.
+- Component cancellation suite: all 86 passed.
+- Feature-gated all-target Clippy passed. All 98 illustration scenarios generated;
+  the updated error-propagation view was inspected in the in-app browser.
+
+- Full emitted-workflow suite: 363 passed, three manual benchmarks ignored.
+  This includes existing Agent retry replay, onError routing, root cancellation,
+  all audit execution cases and the newly reachable Embed retry paths.
+- Formatting and diff checks passed. The mandatory commit hook additionally
+  enforces workspace all-target Clippy and formatting before accepting the commit.
+
+No new server/database E2E, resource soak or controlled performance comparison
+was run for this stage. The existing WIT error-info fields carry the code,
+message, category, severity, retryability, retry delay and provider attributes;
+additional top-level invocation/child diagnostics remain in guest error context
+and debug payloads rather than extending the WIT interface.
+
+Agent/Embed step timeouts remain rejected by E128. This change provides their
+shared error/recovery prerequisite; it does not implement deadline scheduling,
+scoped timeout outcomes, cleanup grace, or complete the remaining plan gates.

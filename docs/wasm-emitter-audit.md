@@ -1058,23 +1058,23 @@ qualification remain open.
 
 ### AUDIT-12 · Formatted Agent errors lose the composite error contract
 
-**Observed existing behavior; not changed by the timer migration.**
+**Original finding (the timer migration retained this behavior).**
 
 `DirectJsonManifest::agent_error` and `agent_error_from_info` produce
 `Step … failed: Agent …: {…}` text. `embed_workflow_error_scoped` expects JSON,
 while `workflow_retry_info` falls back to an ordinary retryable error when JSON
 parsing fails.
 
-| Case | Recorded behavior | Tests |
+| Case | Original behavior before correction | Regression tests (now assert corrected behavior) |
 | --- | --- | --- |
-| HTTP or Slack Agent fails inside Embed | The child error cannot be parsed; execution fails before Embed enters backoff or its onError recovery | `embed_agent_http_error_preserves_existing_parse_failure`, `embed_agent_rate_limit_error_preserves_existing_parse_failure` |
-| Fixture schedules cancellation after that error response | Existing parse failure prevents entering backoff; no cooperative acknowledgement is reported. This does not qualify post-terminal signal handling | `embed_agent_http_error_fails_before_cancellation_backoff`, `embed_agent_rate_limit_error_fails_before_cancellation_backoff` |
-| Recognized Slack rate-limit error reaches a retrying Split with `maxRetries: 1` | Formatted text loses classification, two requests exhaust ordinary retries and recovery runs despite unused rate-limit budget | `split_agent_rate_limit_error_uses_ordinary_retry_budget` |
+| HTTP or Slack Agent fails inside Embed | The child error cannot be parsed; execution fails before Embed enters backoff or its onError recovery | `embed_retry_after_http_errors_preserves_success`, `embed_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count` |
+| Fixture schedules cancellation after that error response | Existing parse failure prevents entering backoff; no cooperative acknowledgement is reported. This does not qualify post-terminal signal handling | `embed_retry_after_http_error_cancels`, `embed_retry_after_rate_limit_error_cancels` |
+| Recognized Slack rate-limit error reaches a retrying Split with `maxRetries: 1` | Formatted text loses classification, two requests exhaust ordinary retries and recovery runs despite unused rate-limit budget | `split_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count` |
 
 The no-cancel Embed and Split cases also failed their intended-success assertions
 with the original blocking composite sleep calls restored temporarily, confirming
 that the new timer did not introduce these behaviors. The final compatibility
-tests assert those existing outcomes explicitly.
+tests originally asserted those outcomes; the correction below replaces those assertions.
 
 A possible correction is a shared structured error representation across Agent
 and composite propagation, with human-readable formatting confined to presentation.
@@ -1083,6 +1083,16 @@ onError payloads and durable attempt replay before changing this contract. Parsi
 an arbitrary substring of a formatted message would be ambiguous and fragile.
 These tests live in
 [`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).
+
+**Correction · 2026-09-08.** Shared Agent failure conversion
+now emits a JSON object; Embed propagates the originating error code and retry
+fields, and composite retry honors explicit nonretryability. The original parse
+failure assertions are replaced by real retry/cancellation outcomes. Added tests
+cover permanent errors reaching onError without retries and durable Embed replay
+without another failed HTTP request. Root Agent failure exports now have typed
+fields, and Embed no longer always masks the originating code with
+`CHILD_WORKFLOW_FAILED`. See the implementation record for compatibility scope
+and final validation. E128 and the separate AUDIT-08 policy gap remain unchanged.
 
 ### AUDIT-11 publication update · 2026-09-07
 

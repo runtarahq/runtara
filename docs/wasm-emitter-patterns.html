@@ -14,9 +14,9 @@
 </head>
 <body data-mode="gap">
 <a class="skip" href="#main">Skip to pattern</a>
-<header class="topbar"><div class="brand"><span class="brandmark" aria-hidden="true">r_</span> runtara <span style="font-weight:400;color:var(--muted)">/ pattern lab</span></div><div class="topmeta"><span class="revision mono">DSL → WASM</span><span class="date">Updated · 07 Sep 2026</span><a href="wasm-emitter-audit.md">Read the audit ↗</a></div></header>
+<header class="topbar"><div class="brand"><span class="brandmark" aria-hidden="true">r_</span> runtara <span style="font-weight:400;color:var(--muted)">/ pattern lab</span></div><div class="topmeta"><span class="revision mono">DSL → WASM</span><span class="date">Updated · 08 Sep 2026</span><a href="wasm-emitter-audit.md">Read the audit ↗</a></div></header>
 <div class="layout">
-<aside class="sidebar"><div class="sideheading"><div class="eyebrow">Execution patterns</div><h2>Explore the boundary.</h2><p>Tested controls, known gaps,<br>and possible fixes.</p></div><nav class="catalog" id="catalog" aria-label="Pattern families"></nav><div class="sidebar-foot"><div class="eyebrow">Audit status</div><div class="countline"><span>Findings covered</span><strong>12</strong></div><div class="countline"><span>Open findings</span><strong>2</strong></div><p style="margin-top:16px">AUDIT-08 and AUDIT-12 remain open. Other findings show tested fixes in this worktree. Passing compatibility tests can document a defect. This is not the full DSL qualification matrix.</p><a href="cooperative-cancellation-implementation.md">Cancellation evidence & scope ↗</a></div></aside>
+<aside class="sidebar"><div class="sideheading"><div class="eyebrow">Execution patterns</div><h2>Explore the boundary.</h2><p>Tested controls, known gaps,<br>and possible fixes.</p></div><nav class="catalog" id="catalog" aria-label="Pattern families"></nav><div class="sidebar-foot"><div class="eyebrow">Audit status</div><div class="countline"><span>Findings covered</span><strong>12</strong></div><div class="countline"><span>Open findings</span><strong>1</strong></div><p style="margin-top:16px">AUDIT-08 remains open. Other findings show tested fixes in this worktree. Passing compatibility tests can document a defect. This is not the full DSL qualification matrix.</p><a href="cooperative-cancellation-implementation.md">Cancellation evidence & scope ↗</a></div></aside>
 <main class="main" id="main" tabindex="-1">
 <div class="breadcrumb"><span id="audit-id"></span><span>/</span><span id="category"></span></div>
 <div class="intro"><div><h1 id="title"></h1><p id="subtitle"></p></div><span id="verdict" class="badge red"></span></div>
@@ -31,7 +31,7 @@
 <section class="detail" id="explanation"><div class="explanation"><div><h3 id="why-title"></h3><p id="why"></p><h3>Working boundary</h3><p id="boundary"></p><div class="evidence" id="evidence"></div></div><div class="fixbox"><div class="eyebrow">Possible solution</div><h3 id="fix-title" style="margin-top:8px"></h3><ol id="fix-steps"></ol><pre id="pseudocode" class="pseudocode"></pre></div></div></section>
 <section class="detail" id="dsl" hidden><div class="codebar"><span id="dsl-note"></span><div><button id="copy">Copy JSON</button> <button id="download">Download JSON ↓</button></div></div><pre id="dsl-code" class="dsl" tabindex="0"></pre></section>
 <section class="detail" id="tests" hidden><h3>Recorded test coverage</h3><p class="testnote">Tests below record the selected behavior. A passing compatibility test may confirm an open defect. Historical failure views and proposed fixes are labelled separately.</p><ul class="testlist" id="testlist"></ul><p class="testnote">Run all cases in this family:</p><pre class="dsl" id="command"></pre><p class="testnote" id="test-requirements"></p></section>
-<footer class="footer"><span>Illustrated traces, not a WASM runner. Updated 07 Sep 2026. Full cancellation qualification and performance comparisons remain in progress.</span><a id="finding-link" href="wasm-emitter-audit.md">Full finding & source references ↗</a></footer>
+<footer class="footer"><span>Illustrated traces, not a WASM runner. Updated 08 Sep 2026. Full cancellation qualification and performance comparisons remain in progress.</span><a id="finding-link" href="wasm-emitter-audit.md">Full finding & source references ↗</a></footer>
 <noscript><p class="noscript">Enable JavaScript to explore the diagrams, or <a href="wasm-emitter-audit.md">read the complete audit</a>.</p></noscript>
 </main></div>
 <script id="pattern-lab">
@@ -213,7 +213,7 @@ families.push(...[
    "Preserve timer requirements in returned and on-disk WIT. Permit published Split retries only after checking the whole closure for runtime requirements, including nested timeouts. Keep Embed publication gates and durable parking."
   ],
   "pseudo": "needs_timer = Agent call OR non_durable_composite_retry\nmanifest closure → imports + shared wait helpers\nAgent / Embed / Split → same timer wait\nzero retries → no extra timer import",
-  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. Nine additional published Split cases cover parent cancellation, success, recovery and sequential fallback through two workflow agents; see the implementation record. These fixes do not repair the formatted Agent errors described in AUDIT-12.",
+  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. Nine additional published Split cases cover parent cancellation, success, recovery and sequential fallback through two workflow agents; see the implementation record. The structured-error follow-up repairs the Agent propagation gap described in AUDIT-12.",
   "tests": [
    "+agent_free_embed_backoff_cancels_without_recovery",
    "+agent_free_split_backoff_cancels_without_recovery",
@@ -251,26 +251,26 @@ families.push(...[
  },
  {
   "id": "composite-errors",
-  "resolved": false,
+  "resolved": true,
   "name": "Agent error propagation",
   "category": "Composite error contract",
-  "risk": "Open",
-  "summary": "Formatted Agent error text breaks Embed parsing and hides rate-limit classification from Split.",
-  "boundary": "Structured Error-step failures reach Embed retry/recovery. Direct Agent retries preserve recognized rate-limit information. The loss occurs when formatted Agent errors cross into composite handling.",
-  "why": "Agent failure lowering returns “Step … failed: Agent …: {…}”. Embed expects a JSON value. Split fails to parse that text and treats it as an ordinary retryable error.",
+  "risk": "Fixed",
+  "summary": "Agent failures now retain structured fields through Embed, Split and durable retry replay.",
+  "boundary": "The originating error code, category, retryability and retry delay survive composite handling. Root lifecycle Cancel still bypasses ordinary recovery.",
+  "why": "The old Agent formatter returned a text prefix plus JSON. Embed could not parse it, and Split lost rate-limit classification. The shared producer now returns a JSON object.",
   "fixTitle": "Preserve structured errors across scopes",
   "fixSteps": [
-   "Carry code, category, retryability and retry-after as structured data through Agent and composite propagation.",
-   "Apply human-readable formatting at presentation boundaries. Do not guess a JSON substring inside arbitrary text.",
-   "Qualify nested wrapping, onError payloads and durable attempt replay before changing the error contract."
+   "Agent failures retain structured fields and separate step/capability context, including checkpointed errors.",
+   "Embed keeps child diagnostics and propagates the originating code and retry policy. Composite retry honors explicit nonretryability.",
+   "Real HTTP and Slack tests cover retry, cancellation and recovery; durable replay retains the wake and avoids repeating failed I/O."
   ],
-  "pseudo": "Agent error-info → structured workflow error\nEmbed / Split classify structured fields\npresentation boundary → readable message\n// Proposed; current text-based behavior remains.",
-  "evidence": "The no-cancel failures also reproduced after restoring the original blocking composite sleeps. Compatibility tests assert these existing outcomes; they are not successful cancellation proofs.",
+  "pseudo": "Agent error-info → JSON object + invocation context\nEmbed / Split → preserve code and retry policy\ncheckpoint replay → same structured error\n// E128 Agent/Embed timeouts remain rejected.",
+  "evidence": "The old parse failures are replaced by passing retry/cancellation cases. Permanent errors reach recovery without retries, and an early durable replay makes no additional HTTP request. This deliberately changes root typed errors and Embed's previously generic code.",
   "tests": [
-   "+embed_agent_http_error_preserves_existing_parse_failure",
-   "+embed_agent_rate_limit_error_preserves_existing_parse_failure",
-   "+split_agent_rate_limit_error_uses_ordinary_retry_budget",
-   "+root_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count"
+   "+embed_retry_after_http_errors_preserves_success",
+   "+embed_retry_after_rate_limit_error_cancels",
+   "+split_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count",
+   "+embed_permanent_agent_error_skips_retries_and_preserves_recovery_fields"
   ],
   "controls": [
    [
@@ -352,13 +352,13 @@ function cancellationScenario(f,mode,v){
   labels=[[composite?'Child error':'Agent error',composite?'structured Error step':'provider response'],['Retry delay',control&&v==='zero'?'zero milliseconds':cancel?'60 seconds':'50 milliseconds'],[cancel?'Cancel arrives':'Wait completes',cancel?'lifecycle signal':'same retry policy'],['Guest outcome',cancel?'cleanup + return':'retry / recovery']];
   expected=cancel?'Cancel the workflow during backoff without issuing another attempt or entering error recovery.':composite?'Three child errors exhaust two retries and produce {"recovered":true}.':'Transient errors are retried and the third request succeeds.';
   observed=historical?'The old blocking sleep did not cooperate with lifecycle cancellation during backoff.':cancel?'The shared canonical timer wait observes cancellation, cleans up and acknowledges it; no further attempt runs.':composite?'Normal and zero-delay retries preserve error counts and recovery output.':'The normal retry count and success result are preserved.';
-  texts=[composite?'A structured Error-step failure reaches the enclosing retry loop. Formatted Agent errors have a separate open gap.':'The HTTP or Slack fixture returns a retryable error.',historical?'The old emitter calls the blocking sleep path.':'The emitter uses the shared canonical wait helper. The host supplies a timer; the guest controls retry.',cancel?'The test requests cancellation during the 60-second backoff; its watchdog is five seconds.':'No cancellation is requested; the timer completion permits the next attempt.',observed];
+  texts=[composite?'A structured child failure reaches the enclosing retry loop. Agent errors now use the same structured propagation contract.':'The HTTP or Slack fixture returns a retryable error.',historical?'The old emitter calls the blocking sleep path.':'The emitter uses the shared canonical wait helper. The host supplies a timer; the guest controls retry.',cancel?'The test requests cancellation during the 60-second backoff; its watchdog is five seconds.':'No cancellation is requested; the timer completion permits the next attempt.',observed];
  }else{
   const split=v==='split',direct=control&&v==='direct';
-  labels=[['Child result',control&&!direct?'structured Error':'Agent error'],['Scope boundary',direct?'direct Agent':split?'Split':'EmbedWorkflow'],['Retry decision',split?'rate-limit metadata':'error decoding'],['Outcome',fix?'proposed contract':'recorded result']];
+  labels=[['Child result',control&&!direct?'structured Error':'Agent error'],['Scope boundary',direct?'direct Agent':split?'Split':'EmbedWorkflow'],['Retry decision',split?'rate-limit metadata':'error decoding'],['Outcome',historical?'original defect':'structured contract']];
   expected=control?(direct?'Recognized rate-limit waits preserve the ordinary retry count.':'Structured child failures reach composite retry and recovery.'):'Preserve the structured error category and rate-limit metadata across the composite boundary.';
-  observed=control?(direct?'The direct Agent succeeds after two recognized rate-limit waits.':'The Error-step child reaches Embed retry and recovery.'):fix?'Proposal only: carry structured errors through nested scopes and format them at the presentation boundary.':split?'The formatted Agent error is treated as an ordinary retryable error; rate-limit budget semantics are lost.':'Embed expects JSON but receives formatted Agent error text. It fails parsing before retry backoff or recovery.';
-  texts=[control&&!direct?'The Error step returns the structured contract expected by the scope.':'The Agent path formats an error as a human-readable prefix followed by JSON.',direct?'The direct retry path can still classify the recognized provider error.':'The child result crosses the composite scope boundary.',fix?'A future shared error representation must preserve metadata without parsing a presentation string.':split?'The failed JSON classification falls back to ordinary retry handling.':'Embed attempts to decode the child error contract.',observed];
+  observed=control?(direct?'The direct Agent succeeds after two recognized rate-limit waits.':'The Error-step child reaches Embed retry and recovery.'):!historical?'Structured errors reach retry and recovery. Recognized rate-limit waits preserve the ordinary retry count; cancellation during backoff prevents another request.':split?'The formatted Agent error is treated as an ordinary retryable error; rate-limit budget semantics are lost.':'Embed expects JSON but receives formatted Agent error text. It fails parsing before retry backoff or recovery.';
+  texts=[control&&!direct?'The Error step returns the structured contract expected by the scope.':historical?'The old Agent path formatted a text prefix followed by JSON.':'The shared Agent path returns a JSON object with invocation context.',direct?'The direct retry path can still classify the recognized provider error.':'The child result crosses the composite scope boundary.',!historical?'Code, retryability and retry delay survive the boundary; explicit nonretryability suppresses retry.':split?'The failed JSON classification falls back to ordinary retry handling.':'Embed attempts to decode the child error contract.',observed];
  }
  const nodes=labels.map(([label,sub],i)=>n(String(i),label,sub,25+i*210,110));
  return {nodes,edges:nodes.slice(1).map((_,i)=>e(String(i),String(i+1),'',!control&&!fix&&i===2)),steps:texts.map((text,i)=>s(String(i),`${String(i+1).padStart(2,'0')} / ${labels[i][0]}`,text)),scopes:[],expected,observed,caption:fix&&!f.resolved?'Illustrated proposal, not an implemented or measured result.':'Illustrated behavior from the linked tests. Timing is schematic; publication and cancellation are supplied by the Rust fixture.',dsl:dslFor(f,mode,v)};
