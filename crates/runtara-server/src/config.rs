@@ -81,7 +81,7 @@ pub struct Config {
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
-    /// Immutable shared compiler/runner reviews; absent keeps legacy defaults.
+    /// Runtime approvals retained solely for previously compiled isolation artifacts.
     pub isolation_policy: Option<std::sync::Arc<isolation::IsolationPolicy>>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
@@ -559,15 +559,15 @@ pub fn get() -> &'static Config {
     CONFIG.get().expect("Config must be initialized before use")
 }
 
-/// Snapshot shared by the compiler and embedded runner. Never rereads the file.
+/// Legacy artifact runtime approvals. Never rereads the file.
 pub fn isolation_policy() -> Option<std::sync::Arc<isolation::IsolationPolicy>> {
     try_get().and_then(|config| config.isolation_policy.clone())
 }
 
-/// Durable cache identity includes the active isolation review and runtime shape.
+/// New compilation always uses standard component composition. Legacy runtime
+/// approvals cannot change cache identity or select another compiler backend.
 pub fn workflow_lowering_tag() -> String {
-    let base = runtara_workflows::direct_lowering_tag();
-    isolation_policy().map_or(base.clone(), |policy| policy.lowering_tag(&base))
+    runtara_workflows::direct_lowering_tag()
 }
 
 /// Initialize the global configuration for a unit test, if nothing has yet.
@@ -793,6 +793,14 @@ pub fn valkey_admission_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_lowering_identity_uses_standard_composition() {
+        let actual = workflow_lowering_tag();
+        assert_eq!(actual, runtara_workflows::direct_lowering_tag());
+        assert!(actual.contains("agent-composition=standard-v1"));
+        assert!(!actual.contains("isolation=v1-"));
+    }
 
     /// The admission ceiling exists to bound work the runner will execute, so
     /// it must stay anchored to the runner's own bound. These drifted apart

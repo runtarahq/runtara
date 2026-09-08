@@ -1025,6 +1025,12 @@ and final local-server testing remain required before rollout.
 
 ## Shared server policy and artifact-compatible rollback
 
+**Historical behavior, superseded by AUDIT-35 (2026-09-08):** new compilation
+always uses standard component composition. `compileEnabled` is now inert,
+and the policy supplies only runtime approvals for older artifacts. The compile
+selection and cache/rollback instructions below describe the earlier experiment;
+see [the current audit](wasm-emitter-audit.md#current-progress--2026-09-08).
+
 The server can now opt in through `RUNTARA_EXPERIMENTAL_ISOLATION_POLICY`, a
 path to an operator-owned JSON file. It loads and validates the file once during
 configuration initialization and shares that snapshot between normal workflow

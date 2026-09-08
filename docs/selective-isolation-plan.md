@@ -1143,3 +1143,22 @@ breakpoint tests establish this boundary. Non-durable breakpoint policy is
 unchanged; the compiler marker is `shared-v23`. Wider G4/G7 and G1–G10 coverage,
 paired measurements, Linux soak, compatibility and upstream integration remain
 open. Commits remain local until the user explicitly requests a push.
+
+
+### Production isolation selection retirement · 2026-09-08
+
+AUDIT-35 removes isolation policy selection from the public compiler options,
+server compilation service and compiler cache identity. New workflows always use
+standard component composition; the cache marker is
+`agent-composition=standard-v1` alongside guest lowering `shared-v23`.
+
+Legacy builders are confined to unit tests and the existing integration-test
+feature. The runtime policy retains exact current/historical approvals and limits
+for old packages; its old `compileEnabled` input cannot affect new compilation.
+No product flag, alternate cancellation backend or new task manager is added.
+
+G9 remains open: inventory registered/parked artifacts and qualify retained
+execution/replay/export contracts before removing their decoder and runner. This
+stage does not qualify native lifecycle recovery, Linux soak or final paired
+measurements. See AUDIT-35 for tests and results. Keep commits local until the
+user explicitly requests a push.

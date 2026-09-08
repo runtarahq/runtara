@@ -9,8 +9,9 @@ and durable suspend/resume through the production invoke ABI.
 Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`.
 The memory, tool-name and public-timeout stages are committed locally as
 `ce58265e`, `2752aa83` and `f9ff11c6`. Failed-attempt checkpoint cancellation is
-committed as `217e11ae` (AUDIT-33). AUDIT-34 applies the same shared guest signal
-handling to breakpoint checkpoints, including resumed markers and rejected Pause.
+committed as `217e11ae` (AUDIT-33). Breakpoint checkpoint handling is committed as
+`ef95a0dd` (AUDIT-34). AUDIT-35 removes production selection of the superseded
+isolation compiler while retaining compatibility support for older artifacts.
 No push is authorized; the latest pushed stage is `6de29584`.
 
 **Implementation is in progress; this snapshot is not release qualification.**
@@ -45,6 +46,11 @@ Implemented and covered by focused tests:
 - Runner control now uses a unique physical handle for each accepted handoff,
   even when pre-start recovery reuses a durable launch ID. Stale Stop/grace/wait
   calls and old occupancy cleanup cannot target the replacement (AUDIT-25).
+- New server, library and CLI compilation uses standard component composition.
+  The old isolation policy cannot select child-task packaging or change the
+  compiler cache identity. Runtime approvals remain available for older artifacts;
+  legacy builders are confined to the existing compatibility-test surface
+  (AUDIT-35).
 - The unreachable concurrent Split retry emitter is retired. Existing sequential
   retry/replay behavior remains covered, with 32 byte-identical before/after
   compiler artifacts and passing parallel/retry execution suites (AUDIT-22).
@@ -64,7 +70,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
-| Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
+| Compatibility and obsolete-path cleanup | AUDIT-35 retires production isolation selection. Inventory registered/parked artifacts; retire remaining superseded isolation/task runtime machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
 | Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
 
 The governing acceptance criteria remain G1–G10 in the
@@ -78,6 +84,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Production isolation selection retirement (AUDIT-35) | Default production build and Clippy; 24 server config, 609 compiler, 28 compatibility execution and six CLI tests passed; legacy runner integration target compiled | New output has no isolation catalog/custom task import. Native runner target was compile-only; registered/parked inventory, full lifecycle E2E and final benchmarks remain open. |
 | Breakpoint cancellation (AUDIT-34) | 35 breakpoint tests; 609 compiler tests outside the deadline execution module; six checkpoint regressions; three public breakpoint execution tests; feature-gated Clippy passed | Counts overlap. Seven new composed regression groups cover receipt handling, marker replay and rejected Pause. Wider deadline/lifecycle/benchmark gates remain open. |
 | Checkpoint cancellation (AUDIT-33) | Six new composed test groups passed in 2.98s; full library: 706 passed, one stale cache-tag assertion failed; corrected assertion rerun passed; 91 public retry tests and feature-gated Clippy passed | Public compilation, real HTTP, one checkpoint delivery, saved outcomes, pending-peer cleanup before acknowledgement and Pause replay. No new native lifecycle E2E or performance claims. |
 | Public timeout compilation (AUDIT-32) | 701 compiler library tests passed in 462.37s; 395 public execution tests passed in 712.74s; three manual benchmarks ignored; 24 server DTO and 24 browser-validator tests passed; generated WASM passed 12 boundary cases | Includes public Agent/Embed, AI tool/MCP/memory, published export, retry, cancellation and original audit regressions. The selected 21 runtime/export tests overlap the library run. Remaining release and paired-measurement gates stay open. |
@@ -2587,3 +2594,62 @@ resume and a parallel-branch breakpoint. Unrelated long-running deadline/abort
 cases, full public execution, native lifecycle/database E2E, browser/component
 builds and paired benchmarks were not repeated for this breakpoint-only lowering
 change. G4/G7 and the broader G1–G10 release qualification remain open.
+
+
+### AUDIT-35 — Retire production selection of the isolated-task compiler
+
+**Status:** new compilation always uses standard component composition.
+The server's old `RUNTARA_EXPERIMENTAL_ISOLATION_POLICY` snapshot still supplied
+`compileEnabled` to the public compiler wrapper, allowing an operator policy to
+select the superseded child-task package. That contradicted the current design
+even though standard composition was the default.
+
+The production `DirectWorkflowCompileOptions` no longer has an isolation policy,
+and its wrapper always compiles and composes through the standard path. The
+server no longer passes compiler reviews or hashes them into compiler provenance.
+The cache tag adds `agent-composition=standard-v1`, so new compilation does not
+reuse the earlier isolated shape as fresh output. The guest lowering marker
+remains `shared-v23`; this change does not alter guest cancellation instructions.
+
+Legacy builders and policy selection types are available only to unit tests and
+the existing `direct-wasm-integration-tests` feature. The environment's development
+dependency enables that existing test surface to keep constructing compatibility
+fixtures. No new product feature or cancellation option is introduced.
+
+The old policy parser still accepts `compileEnabled` as inert compatibility input:
+true, false and omission all retain the same runtime approvals and resource
+limits. Exact current/historical component digests and complete approval checks
+remain enforced for old artifacts. The package decoder, metadata contracts and
+legacy runner remain until registered and parked artifact inventory establishes
+what can safely be retired. This is production-generation retirement, not proof
+that every custom isolation runtime path has been removed.
+
+| Boundary | Regression evidence |
+| --- | --- |
+| Normal public compiler wrapper | `production_compile_wrapper_uses_standard_composition_while_legacy_fixture_stays_readable`: exact normal-composition bytes/checksum, no isolation catalog and no custom execution/tasks import |
+| Legacy artifact shape | The same test constructs and decodes an old package using the compatibility builder; the existing isolated execution suite exercises retained behavior |
+| Retired configuration field | `obsolete_compile_field_is_optional_and_does_not_change_runtime_admission`: true/false/absent preserve approvals and quotas |
+| Runtime admission | `retired_compile_switch_preserves_only_runtime_approvals` plus retained malformed/incomplete approval tests |
+| Compiler cache identity | `production_lowering_identity_uses_standard_composition` and `abi_is_part_of_the_lowering_tag` assert the standard-composition marker |
+
+Verification passed: the default production library build for workflows and
+server (45.18s), **24 server configuration tests** (0.04s), **609 compiler/library
+tests excluding `agent_deadline_tests`** (2.78s), **28 isolated-artifact compatibility
+execution tests** (18.93s), and **six standalone compiler CLI tests** (0.73s),
+including full composition of nested children. The compatibility selection
+includes the new normal-wrapper artifact assertion; these are selected suites,
+not a fresh full execution or deadline run.
+
+Default-feature workflows/server library Clippy passed with warnings denied
+(30.24s). The environment's `scoped_runner_test` integration target compiled with
+its required feature and `--no-run`; this verifies the development-dependency
+wiring, not native runner/database execution. Formatting and whitespace checks
+passed. Agent/WIT sources are unchanged, so matching built components were
+reused. Native lifecycle/database E2E, browser/component rebuilds, full deadline
+execution, Linux soak and paired benchmarks were not repeated for this change.
+
+Remaining G9 work includes real registered/parked artifact inventory, replay and
+export compatibility qualification, then retirement of any unneeded native
+isolation machinery. Broader G1–G10 race/recovery, Linux soak, final paired
+measurements and upstream integration remain open. Commits remain local; a push
+requires an explicit user request.

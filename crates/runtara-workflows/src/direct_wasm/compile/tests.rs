@@ -11120,6 +11120,7 @@ fn abi_is_part_of_the_lowering_tag() {
         tag.contains("cooperative-waits=shared-v23"),
         "recompilation must preserve breakpoint checkpoint signals: {tag}"
     );
+    assert!(tag.contains("agent-composition=standard-v1"));
     assert!(tag.contains("parent-cancel=v1"));
     assert!(tag.contains("loop-cooperation=v1"));
     assert!(tag.contains("retry-cooperation=v4"));

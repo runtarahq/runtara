@@ -128,11 +128,6 @@ pub struct DirectWorkflowCompileOptions {
     pub extra_component_dirs: Vec<PathBuf>,
     /// Optional checksum of the original workflow DSL source.
     pub source_checksum: Option<String>,
-    /// Optional operator review policy. Absent preserves the legacy path.
-    pub isolation_policy: Option<(
-        crate::direct_wasm::AgentIsolationPolicy,
-        runtara_workflow_wit::isolation_package::PackageLimits,
-    )>,
 }
 
 impl std::fmt::Debug for CompilationInput {
@@ -240,39 +235,19 @@ pub fn compile_workflow_direct(
         agent_catalog,
         agent_slug,
     };
-    let direct_result = if let Some((policy, package_limits)) = options.isolation_policy {
-        report_progress(
-            &progress_callback,
-            "composing",
-            "Selecting and linking reviewed workflow components",
-        );
-        crate::direct_wasm::compile_direct_workflow_composed_with_isolation_policy(
-            direct_input,
-            crate::direct_wasm::WorkflowAbi::InvokeHostImports,
-            crate::direct_wasm::compile::omit_runtime_from_env(),
-            &options.components_dir,
-            &options.extra_component_dirs,
-            policy,
-            package_limits,
-        )
-        .map_err(direct_compile_error_to_io)?
-    } else {
-        let mut direct_result =
-            compile_direct_workflow(direct_input).map_err(direct_compile_error_to_io)?;
-        report_progress(
-            &progress_callback,
-            "composing",
-            "Linking direct workflow components",
-        );
-        compose_direct_workflow_with_extra_dirs(
-            &mut direct_result,
-            options.components_dir,
-            &options.extra_component_dirs,
-        )
-        .map_err(direct_compile_error_to_io)?;
-
-        direct_result
-    };
+    let mut direct_result =
+        compile_direct_workflow(direct_input).map_err(direct_compile_error_to_io)?;
+    report_progress(
+        &progress_callback,
+        "composing",
+        "Linking direct workflow components",
+    );
+    compose_direct_workflow_with_extra_dirs(
+        &mut direct_result,
+        options.components_dir,
+        &options.extra_component_dirs,
+    )
+    .map_err(direct_compile_error_to_io)?;
     let package_size = direct_artifact_package_size(&direct_result.build_dir);
 
     Ok(NativeCompilationResult {
@@ -402,7 +377,6 @@ mod tests {
                 progress_callback: None,
             },
             DirectWorkflowCompileOptions {
-                isolation_policy: None,
                 output_dir: output_dir.clone(),
                 components_dir: temp.path().join("missing-components"),
                 extra_component_dirs: Vec::new(),

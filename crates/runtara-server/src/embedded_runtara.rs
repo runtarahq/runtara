@@ -45,7 +45,7 @@ pub struct EmbeddedRuntaraConfig {
     /// Bounded active-execution timeout policy shared with the server runtime
     /// client and Environment lifecycle handlers.
     pub execution_timeout_policy: ExecutionTimeoutPolicy,
-    /// Same immutable review snapshot used by server compilation/cache identity.
+    /// Runtime approvals for previously compiled isolation artifacts.
     pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
 }
 

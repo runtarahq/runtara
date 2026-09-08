@@ -353,8 +353,6 @@ fn compile_workflow_direct_only(
         components_dir,
         extra_component_dirs,
         source_checksum: Some(source_checksum),
-        isolation_policy: crate::config::isolation_policy()
-            .and_then(|policy| policy.compiler_options()),
     };
 
     match compile_workflow_direct(input.clone(), options) {

@@ -1,9 +1,11 @@
-//! Review-driven selection happens before lowering; rejected packages keep their lifetime.
+//! Legacy isolation metadata and compatibility-fixture generation. Production
+//! compilation has no isolation-policy selection entry point.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Explicit embedding policy. Default compilation remains entirely legacy.
-/// Reviews are trusted operator input, never workflow-authored DSL metadata.
+/// Legacy compatibility-fixture policy. Unavailable in production builds.
+/// Reviews are fixture/operator input, never workflow-authored DSL metadata.
+#[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 #[derive(Debug, Clone, Default)]
 pub struct AgentIsolationPolicy {
     /// Enable selective lowering for reviewed dependencies.
@@ -16,6 +18,7 @@ pub struct AgentIsolationPolicy {
 }
 
 /// Approval of a component's behavior under the current compiler contract.
+#[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 #[derive(Debug, Clone)]
 pub struct AgentIsolationReview {
     /// Lowercase SHA-256 of the reviewed component bytes.
@@ -82,13 +85,14 @@ pub struct AgentIsolationReport {
     pub shared_components: BTreeMap<String, String>,
 }
 
-/// Compile once with review-driven lowering, then compose the exact selection.
+/// Build a legacy compatibility fixture with review-driven lowering and composition.
 /// Missing/invalid component artifacts retain the existing composition errors.
 /// Valid but ineligible packages keep legacy execution and report the reason.
 /// Component bytes are checked again during composition, so changes after
 /// selection fail rather than executing bytes that were not reviewed.
 ///
-/// This API does not wire a production runner or change the default backend.
+/// Excluded from production builds; new compilation uses standard composition.
+#[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compile_direct_workflow_composed_with_isolation_policy(
     input: DirectCompilationInput,
     abi: super::super::component::WorkflowAbi,
@@ -130,6 +134,7 @@ pub fn compile_direct_workflow_composed_with_isolation_policy(
 
 pub(super) enum AgentLoweringSelection {
     Exact(BTreeSet<String>),
+    #[cfg(any(test, feature = "direct-wasm-integration-tests"))]
     Policy {
         components_dir: PathBuf,
         extra_component_dirs: Vec<PathBuf>,
@@ -138,6 +143,18 @@ pub(super) enum AgentLoweringSelection {
 }
 
 impl AgentLoweringSelection {
+    #[cfg(not(any(test, feature = "direct-wasm-integration-tests")))]
+    pub(super) fn resolve(
+        self,
+        _manifest: &DirectWorkflowManifest,
+        _workflow_id: &str,
+        _root_supports_isolation: bool,
+    ) -> Result<(BTreeSet<String>, Option<AgentIsolationReport>), DirectCompileError> {
+        let Self::Exact(selected) = self;
+        Ok((selected, None))
+    }
+
+    #[cfg(any(test, feature = "direct-wasm-integration-tests"))]
     pub(super) fn resolve(
         self,
         manifest: &DirectWorkflowManifest,

@@ -62,7 +62,9 @@ getrandom = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
-runtara-workflows = { path = "../runtara-workflows" }
+# Compatibility fixtures must still construct old isolated packages; this is
+# test-only and does not expose their compiler in production builds.
+runtara-workflows = { path = "../runtara-workflows", features = ["direct-wasm-integration-tests"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 futures = "0.3"

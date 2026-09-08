@@ -96,9 +96,12 @@ use artifact_metadata::{
 use core_imports::{DirectAgentInvokeImport, DirectCoreFunctionIndices};
 use core_module::{DirectCoreConfig, DirectVariables, emit_direct_core_module};
 use isolation_selection::AgentLoweringSelection;
+pub use isolation_selection::{AgentIsolationDecision, AgentIsolationReason, AgentIsolationReport};
+
+#[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub use isolation_selection::{
-    AgentIsolationDecision, AgentIsolationPolicy, AgentIsolationReason, AgentIsolationReport,
-    AgentIsolationReview, compile_direct_workflow_composed_with_isolation_policy,
+    AgentIsolationPolicy, AgentIsolationReview,
+    compile_direct_workflow_composed_with_isolation_policy,
 };
 
 use super::component::{DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts};
@@ -641,14 +644,15 @@ pub fn compose_direct_workflow_with_extra_dirs(
     compose_direct_workflow_selected(result, components_dir.as_ref(), extra_component_dirs, None)
 }
 
-/// Experimental backend for reviewed, reset-safe Agent components. Keys are
+/// Compatibility-fixture composer for old isolated Agent components. Keys are
 /// Agent IDs; values pin the reviewed SHA-256 bytes. Unselected packages retain
 /// their original component lifetime. Graph control stays in the parent guest.
 ///
 /// Execution requires a scoped invocation launcher. Legacy compilation uses live
 /// adapter call contexts; [`compile_direct_workflow_with_scoped_agents`] emits
 /// logical call contexts and requires a matching reviewed selection here.
-/// Neither mode alone enables durable targeted cancellation or changes the default.
+/// Excluded from production builds; new compilation uses standard composition.
+#[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compose_direct_workflow_with_isolated_agents(
     result: &mut DirectCompilationResult,
     components_dir: impl AsRef<Path>,
@@ -1138,7 +1142,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v23,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v23,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1214,12 +1218,18 @@ pub fn compile_direct_workflow_with_abi(
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    compile_direct_workflow_with_scoped_agents(input, abi, omit_runtime, Default::default())
+    compile_direct_workflow_selected(
+        input,
+        abi,
+        omit_runtime,
+        AgentLoweringSelection::Exact(Default::default()),
+    )
 }
 
-/// Opt-in lowering of reviewed Agent dependencies with compiler-owned logical
-/// invocation contexts. Must be composed with the same isolation selection.
-/// This leaves the DSL, public Agent ABI and legacy compiler default unchanged.
+/// Construct a legacy isolated artifact for compatibility tests. This entry
+/// point is excluded from production builds; new workflows use standard
+/// composition. Must be composed with the same legacy fixture selection.
+#[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compile_direct_workflow_with_scoped_agents(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
