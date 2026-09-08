@@ -1907,3 +1907,70 @@ and debug payloads rather than extending the WIT interface.
 Agent/Embed step timeouts remain rejected by E128. This change provides their
 shared error/recovery prerequisite; it does not implement deadline scheduling,
 scoped timeout outcomes, cleanup grace, or complete the remaining plan gates.
+
+
+## Published Embed retry waits and nested context restoration (2026-09-08)
+
+Non-durable Embed retries now use the existing cooperative callable path when
+all supplied root/child graphs require no lifecycle runtime. Publication safety
+and runtime import omission share that closure check. An Embed reference alone
+no longer forces a callable runtime import; each supplied child's features are
+checked explicitly, including unexecuted recovery paths and deeper children.
+Durability (including the default), logging, explicit Error events, waits,
+timeouts and breakpoints keep runtime ownership. Missing, ambiguous and cyclic
+child closures retain their existing safety diagnostics. Root workflow runtime
+ownership is unchanged. The lowering identity advances to `retry-cooperation=v4`.
+
+The common step-boundary helper previously emitted a consuming root signal read
+unconditionally. Callable Embed completion now uses the shared canonical yield
+and omits that read. This fixed the initial invalid-component failures at the
+poisoned runtime index. There is no per-Agent exception, host graph dispatch,
+new task interface, feature flag or child Store.
+
+Nested tests exposed another shared-local lifetime bug: an inner Embed's error
+branch reached the outer attempt before restoring the outer parent source. Error
+wrapping then looked for the outer step in the child's graph (`unknown direct
+step 'scope'`). The attempt frame now preserves parent source, child input, saved
+entry data and retry checkpoint-key pairs. They are restored before wrapping,
+checkpointing or retrying the failed child, including nonlocal error branches.
+The existing outer frame still restores the context after the retry scope exits.
+
+Tests exercise real HTTP and Slack failures through two published workflow
+components, with both one and two inline Embed levels. Cancellation during
+ordinary/rate-limit backoff returns through the root signal path with exactly one
+HTTP request and no recovery/success publication. Normal retries preserve the
+separate recognized rate-limit budget, zero retries still recover immediately,
+HTTP_429 retains its existing ordinary budget, and permanent failures reach
+recovery with their typed fields after one request. A nested HTTP case passes its
+URL through both input mappings and verifies that subsequent attempts retain it.
+Root nested Embed tests cover the same context repair outside publication.
+
+A pure-child execution case covers default, zero and nonzero retries through the
+same publication/composition helper. The child has no native Agent dependency;
+its input/output mapping survives and no checkpoint or durable sleep is written.
+This proves normal pure-child execution, not interruption during a failing
+Agent-free callable backoff. Every published component is checked for omitted
+runtime imports and absence of isolation selection/catalog artifacts. The source
+compiler tests additionally validate pure and runtime-requiring child components
+with zero/nonzero retries and exercise runtime ownership at three closure depths.
+
+Validation completed:
+
+- Normal component build: all 27 Agents plus stdlib/runtime and metadata.
+- Compiler library: 579 passed; native emitter audit: 30 passed. The new safety
+  matrix checks three closure depths, and emitted-component tests validate
+  pure/durable/log/error/wait/timeout/breakpoint children with zero/nonzero retries.
+- All 49 retry/cancellation scenarios passed, including 16 new published/nested
+  Embed and pure-child cases. The pure-child test also covers the default retry
+  policy in the full execution suite.
+- The built-component callback/error contract test passed for all 27 Agents.
+- Full emitted-workflow execution suite: 379 passed, 3 ignored, no failures.
+- Feature-gated all-target Clippy, formatting and diff checks passed. All 98
+  illustration scenarios generated and their new nested Embed test links resolve.
+
+No server/database E2E, resource soak or new controlled performance report was
+run in this stage. Agent/Embed timeout
+E128, durable callable suspension, other remaining G1–G10 gates and fresh paired
+performance measurements remain open. Retaining extra context uses the existing
+guest operand-stack frame; binary-size and timing effects have not yet been
+measured for this revision.

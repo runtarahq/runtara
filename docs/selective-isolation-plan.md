@@ -440,3 +440,16 @@ explicit nonretryability. This deliberate failure-contract correction is an
 exception to the earlier no-cancel parity baseline and requires explicit tests
 for recovery payloads, component error exports and unchanged replay side-effect
 counts. It does not relax E128 or establish scoped deadline/grace support.
+
+
+### Published Embed follow-up · 2026-09-08
+
+The existing callable path now admits non-durable Embed retries when the complete
+supplied child closure requires no root lifecycle runtime. Share this closure
+analysis between publication and import omission, and use the existing canonical
+boundary yield. Nested failure/retry frames restore parent graph identity and
+child input before recovery or another attempt. Execution coverage includes
+HTTP/Slack retries through two published levels, nested inline Embed, root nested
+recovery, and pure-child normal output. This expands G2/G6 evidence; it does not
+qualify failing Agent-free callable backoff, durable callable suspension, scoped
+timeouts/grace or the remaining compatibility/performance gates.

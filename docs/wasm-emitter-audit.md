@@ -1127,3 +1127,30 @@ checks. These prove the primitive selection/cleanup contract, not emitted Agent
 or Embed deadline semantics. Authored zero/overflow behavior, durable budget
 restoration, inheritance, retries/recovery and emergency grace still require
 integration evidence. See the cooperative cancellation implementation record.
+
+
+### AUDIT-11/12 follow-up · published and nested Embed · 2026-09-08
+
+Published Embed retries now keep their waits in the guest when every supplied
+child is non-durable and runtime-free. The common completion boundary yields to
+parent cancellation instead of reading the root signal. Closure tests cover
+runtime-requiring children at root, child and grandchild depth and validate both
+retained-runtime and omitted-runtime component shapes.
+
+Nested error tests also found that an inner Embed could overwrite the outer
+attempt's parent-source locals. Wrapping the outer error then failed with an
+unknown-step lookup in the inner graph. The shared attempt frame now restores
+parent source, child input, saved data and retry-key locals before error handling
+and retries. This repair also applies to top-level nested Embed execution.
+
+| Case | Corrected behavior | Test |
+| --- | --- | --- |
+| Published Embed waits after HTTP/Slack failure | Parent cancellation stops backoff without another request or recovery | `published_embed_retry_after_http_error_cancels`, `published_embed_retry_after_rate_limit_error_cancels` |
+| Two inline Embeds inside two published workflow components | Errors reach the correct outer recovery/retry scope | `published_nested_embed_retry_preserves_rate_limit_budget`, `published_nested_embed_permanent_error_preserves_recovery_fields` |
+| Nested HTTP input mapping followed by retry | URL survives both child scopes and reaches subsequent attempts | `published_nested_embed_retry_restores_input_after_http_error`, `root_nested_embed_retry_restores_input_after_http_error` |
+| Published Embed child contains only Finish/mapping | Default/zero/nonzero retry settings preserve normal output without lifecycle runtime imports in the child | `published_embed_pure_child_preserves_output_without_runtime_or_agent_io` |
+
+Execution cases are in `cooperative_workflow_cancellation/nested_retry.rs`.
+Compiler and safety tests cover runtime ownership and import validity. Pure-child
+normal execution does not prove cancellation inside a failing Agent-free
+callable retry. E128 and the AUDIT-08 retry-policy differences remain unchanged.

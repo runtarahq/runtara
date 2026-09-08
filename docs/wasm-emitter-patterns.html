@@ -213,7 +213,7 @@ families.push(...[
    "Preserve timer requirements in returned and on-disk WIT. Permit published Split retries only after checking the whole closure for runtime requirements, including nested timeouts. Keep Embed publication gates and durable parking."
   ],
   "pseudo": "needs_timer = Agent call OR non_durable_composite_retry\nmanifest closure → imports + shared wait helpers\nAgent / Embed / Split → same timer wait\nzero retries → no extra timer import",
-  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. Nine additional published Split cases cover parent cancellation, success, recovery and sequential fallback through two workflow agents; see the implementation record. The structured-error follow-up repairs the Agent propagation gap described in AUDIT-12.",
+  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. Published Split and Embed cases cover parent cancellation, success and recovery through two workflow agents. Split retains its sequential retry fallback; nested Embed restores parent context and mapped input. See the implementation record. The AUDIT-12 follow-ups repair structured Agent errors and nested Embed context restoration.",
   "tests": [
    "+agent_free_embed_backoff_cancels_without_recovery",
    "+agent_free_split_backoff_cancels_without_recovery",
@@ -255,14 +255,14 @@ families.push(...[
   "name": "Agent error propagation",
   "category": "Composite error contract",
   "risk": "Fixed",
-  "summary": "Agent failures now retain structured fields through Embed, Split and durable retry replay.",
+  "summary": "Agent failures retain structured fields through Embed and Split; nested Embed restores the parent context before retry or recovery.",
   "boundary": "The originating error code, category, retryability and retry delay survive composite handling. Root lifecycle Cancel still bypasses ordinary recovery.",
-  "why": "The old Agent formatter returned a text prefix plus JSON. Embed could not parse it, and Split lost rate-limit classification. The shared producer now returns a JSON object.",
+  "why": "The old Agent formatter returned a text prefix plus JSON. Embed could not parse it, and Split lost rate-limit classification. The shared producer now returns a JSON object. Nested Embed attempt frames also restore the parent source and mapped child input before retry/recovery.",
   "fixTitle": "Preserve structured errors across scopes",
   "fixSteps": [
    "Agent failures retain structured fields and separate step/capability context, including checkpointed errors.",
    "Embed keeps child diagnostics and propagates the originating code and retry policy. Composite retry honors explicit nonretryability.",
-   "Real HTTP and Slack tests cover retry, cancellation and recovery; durable replay retains the wake and avoids repeating failed I/O."
+   "Real HTTP and Slack tests cover published and nested Embed retry/cancellation. Durable replay retains its wake; nested input mapping survives retries."
   ],
   "pseudo": "Agent error-info → JSON object + invocation context\nEmbed / Split → preserve code and retry policy\ncheckpoint replay → same structured error\n// E128 Agent/Embed timeouts remain rejected.",
   "evidence": "The old parse failures are replaced by passing retry/cancellation cases. Permanent errors reach recovery without retries, and an early durable replay makes no additional HTTP request. This deliberately changes root typed errors and Embed's previously generic code.",
@@ -270,7 +270,9 @@ families.push(...[
    "+embed_retry_after_http_errors_preserves_success",
    "+embed_retry_after_rate_limit_error_cancels",
    "+split_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count",
-   "+embed_permanent_agent_error_skips_retries_and_preserves_recovery_fields"
+   "+embed_permanent_agent_error_skips_retries_and_preserves_recovery_fields",
+   "+published_nested_embed_retry_restores_input_after_http_error",
+   "+published_nested_embed_retry_after_rate_limit_error_cancels"
   ],
   "controls": [
    [

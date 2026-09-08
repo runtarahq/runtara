@@ -117,7 +117,7 @@ use super::static_data::{
 };
 use super::support::{
     DirectWorkflowSupportReport, analyze_direct_wasm_support_with_child_workflows,
-    analyze_workflow_agent_safety,
+    analyze_workflow_agent_safety, workflow_agent_requires_runtime,
 };
 
 /// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
@@ -1133,7 +1133,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v3,structured-agent-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1300,9 +1300,11 @@ fn compile_direct_workflow_inner(
         super::component::WorkflowAbi::AgentCapabilities => {
             !needs_runtime
                 || (!workflow_agent_safety.may_suspend_or_sleep
-                    && !manifest
-                        .feature_summary
-                        .needs_agent_runtime(input.track_events))
+                    && !workflow_agent_requires_runtime(
+                        &input.execution_graph,
+                        &input.child_workflows,
+                        input.track_events,
+                    ))
         }
         super::component::WorkflowAbi::InvokeHostImports => {
             omit_runtime_requested && !needs_runtime

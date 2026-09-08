@@ -341,7 +341,16 @@ fn signal(kind: &str) -> RuntimeSignalInfo {
 }
 
 fn compile_nested_agents(
+    graph: ExecutionGraph,
+    depth: usize,
+    dir: &std::path::Path,
+) -> anyhow::Result<runtara_workflows::direct_wasm::DirectCompilationResult> {
+    compile_nested_agents_with_children(graph, vec![], depth, dir)
+}
+
+fn compile_nested_agents_with_children(
     mut graph: ExecutionGraph,
+    mut children: Vec<runtara_workflows::ChildWorkflowInput>,
     depth: usize,
     dir: &std::path::Path,
 ) -> anyhow::Result<runtara_workflows::direct_wasm::DirectCompilationResult> {
@@ -353,8 +362,9 @@ fn compile_nested_agents(
     fs::create_dir(&staging)?;
     let mut agents = Vec::new();
     for level in 0..depth {
-        let safety =
-            runtara_workflows::direct_wasm::support::analyze_workflow_agent_safety(&graph, &[]);
+        let safety = runtara_workflows::direct_wasm::support::analyze_workflow_agent_safety(
+            &graph, &children,
+        );
         anyhow::ensure!(
             !safety.may_suspend_or_sleep,
             "fixture violates publish contract: {safety:?}"
@@ -366,7 +376,7 @@ fn compile_nested_agents(
                 version: 1,
                 source_checksum: None,
                 execution_graph: graph.clone(),
-                child_workflows: vec![],
+                child_workflows: std::mem::take(&mut children),
                 output_dir: dir.join(&slug),
                 track_events: false,
                 agent_catalog: (!agents.is_empty()).then(|| {
@@ -423,7 +433,8 @@ fn compile_nested_agents(
                 "call":{"id":"call","stepType":"Agent","agentId":slug,"capabilityId":"run", "maxRetries":3,"retryDelay":0,
                     "inputMapping":{"items":{"valueType":"reference","value":"data.items"}}},
                 "finish":{"id":"finish","stepType":"Finish","inputMapping":{"result":{"valueType":"reference","value":"steps.call.outputs"}}},
-                "handled":{"id":"handled","stepType":"Finish"}
+                "handled":{"id":"handled","stepType":"Finish","inputMapping":{
+                    "unexpected_parent_error":{"valueType":"reference","value":"steps.__error"}}}
             }, "executionPlan":[{"fromStep":"call","toStep":"finish"},{"fromStep":"call","toStep":"handled","label":"onError"}]
         }))?;
     }

@@ -99,7 +99,8 @@ pub fn analyze_workflow_agent_safety(
     let children = DirectSupportChildWorkflows::from_child_workflows(child_workflows);
     let mut violations = Vec::new();
     let mut child_stack = Vec::new();
-    let cooperative_waits_supported = !analyze_workflow_features(graph).needs_agent_runtime(false);
+    let cooperative_waits_supported =
+        !workflow_agent_requires_runtime(graph, child_workflows, false);
     collect_workflow_agent_safety(
         graph,
         "root",
@@ -125,6 +126,18 @@ pub fn analyze_workflow_agent_safety(
         may_suspend_or_sleep: !violations.is_empty(),
         violations,
     }
+}
+
+/// Embed children execute inline. Inspect the same complete supplied closure
+/// for publication and import omission, including children without Agent calls.
+pub(crate) fn workflow_agent_requires_runtime(
+    graph: &ExecutionGraph,
+    children: &[ChildWorkflowInput],
+    track_events: bool,
+) -> bool {
+    std::iter::once(graph)
+        .chain(children.iter().map(|child| &child.execution_graph))
+        .any(|graph| analyze_workflow_features(graph).needs_agent_runtime(track_events))
 }
 
 fn collect_workflow_agent_safety(
@@ -253,13 +266,13 @@ fn collect_workflow_agent_step_safety(
             cooperative_waits_supported,
         ),
         Step::EmbedWorkflow(embed) => {
-            if embed.max_retries.unwrap_or(3) > 0 {
+            if embed.max_retries.unwrap_or(3) > 0 && !cooperative_waits_supported {
                 push_workflow_agent_safety_violation(
                     violations,
                     path,
                     step,
                     "retry-backoff",
-                    "EmbedWorkflow retries can sleep between attempts; run this workflow as a top-level workflow or remove the retry policy before publishing it as an agent",
+                    "EmbedWorkflow backoff is callable only when the complete child closure is non-durable and has no root runtime operations; remove durable, logging, suspension, timeout and breakpoint paths before publishing",
                 );
             }
 
@@ -2238,6 +2251,107 @@ mod tests {
                         && violation.feature == "retry-backoff"),
                 "{case}: {report:?}"
             );
+        }
+    }
+
+    #[test]
+    fn workflow_agent_embed_backoff_checks_the_complete_runtime_closure() {
+        let root = serde_json::json!({"durable":false,"entryPoint":"embed","steps":{
+            "embed":{"id":"embed","stepType":"EmbedWorkflow","childWorkflowId":"child",
+                "childVersion":1},
+            "finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[{"fromStep":"embed","toStep":"finish"}]});
+        let middle = serde_json::json!({"durable":false,"entryPoint":"inner","steps":{
+            "inner":{"id":"inner","stepType":"EmbedWorkflow","childWorkflowId":"leaf",
+                "childVersion":1,"maxRetries":0},
+            "finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[{"fromStep":"inner","toStep":"finish"}]});
+        let leaf = serde_json::json!({"durable":false,"entryPoint":"finish","steps":{
+            "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]});
+        let make_children = |middle: serde_json::Value, leaf: serde_json::Value| {
+            vec![
+                ChildWorkflowInput {
+                    step_id: "embed".into(),
+                    workflow_id: "child".into(),
+                    version_requested: "1".into(),
+                    version_resolved: 1,
+                    execution_graph: serde_json::from_value(middle).unwrap(),
+                },
+                ChildWorkflowInput {
+                    step_id: "inner".into(),
+                    workflow_id: "leaf".into(),
+                    version_requested: "1".into(),
+                    version_resolved: 1,
+                    execution_graph: serde_json::from_value(leaf).unwrap(),
+                },
+            ]
+        };
+        // Default retries are covered as well as explicit zero/nonzero policies.
+        for retries in [None, Some(0), Some(2)] {
+            let mut root = root.clone();
+            if let Some(retries) = retries {
+                root["steps"]["embed"]["maxRetries"] = retries.into();
+            }
+            let graph = serde_json::from_value(root).unwrap();
+            let children = make_children(middle.clone(), leaf.clone());
+            assert!(!workflow_agent_requires_runtime(&graph, &children, false));
+            assert!(!analyze_workflow_agent_safety(&graph, &children).may_suspend_or_sleep);
+            assert!(workflow_agent_requires_runtime(&graph, &children, true));
+        }
+        for location in 0..3 {
+            for case in [
+                "durable",
+                "default-durable",
+                "log",
+                "error",
+                "wait",
+                "timeout",
+                "breakpoint",
+            ] {
+                let mut graphs = [root.clone(), middle.clone(), leaf.clone()];
+                let graph = &mut graphs[location];
+                match case {
+                    "durable" => graph["durable"] = true.into(),
+                    "default-durable" => {
+                        graph.as_object_mut().unwrap().remove("durable");
+                    }
+                    "log" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"Log","message":"fixture"})
+                    }
+                    "error" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"Error","code":"FIXTURE","category":"transient",
+                        "severity":"error","message":"fixture"})
+                    }
+                    "wait" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"WaitForSignal"})
+                    }
+                    "timeout" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"Split","config":{"timeout":0,
+                            "value":{"valueType":"immediate","value":[]}},"subgraph":leaf})
+                    }
+                    "breakpoint" => graph["steps"]["finish"]["breakpoint"] = true.into(),
+                    _ => unreachable!(),
+                }
+                let parent = serde_json::from_value(graphs[0].clone()).unwrap();
+                let children = make_children(graphs[1].clone(), graphs[2].clone());
+                assert!(
+                    workflow_agent_requires_runtime(&parent, &children, false),
+                    "{location}/{case}"
+                );
+                let safety = analyze_workflow_agent_safety(&parent, &children);
+                assert!(
+                    safety
+                        .violations
+                        .iter()
+                        .any(|violation| violation.path == "root/steps/embed"
+                            && violation.feature == "retry-backoff"),
+                    "{location}/{case}: {safety:?}"
+                );
+            }
         }
     }
 

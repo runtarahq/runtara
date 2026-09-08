@@ -65,6 +65,13 @@ pub(super) fn emit_check_signals_and_suspend(
     indices: &DirectCoreFunctionIndices,
 ) {
     super::cooperative_wait::emit_if_safe_boundary(body, indices);
+    if indices.omit_runtime {
+        // The shared boundary already yielded to parent cancellation. Callable
+        // workflows cannot consume the root signal; hostless entries have no
+        // yield import and simply continue here.
+        body.instruction(&Instruction::End);
+        return;
+    }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
     return_if_retptr_error(body, indices);

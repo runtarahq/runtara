@@ -11096,7 +11096,7 @@ fn abi_is_part_of_the_lowering_tag() {
     );
     assert!(tag.contains("parent-cancel=v1"));
     assert!(tag.contains("loop-cooperation=v1"));
-    assert!(tag.contains("retry-cooperation=v3"));
+    assert!(tag.contains("retry-cooperation=v4"));
     assert!(tag.contains("structured-agent-errors=v1"));
     assert!(
         tag.contains("durable-delay-parking=v1"),
@@ -11228,6 +11228,104 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
                     .world_wit
                     .contains("workflow-runtime/runtime")
             );
+            Validator::new_with_features(wasmparser::WasmFeatures::all())
+                .validate_all(&fs::read(compiled.wasm_path).unwrap())
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
+    use super::super::component::WorkflowAbi;
+    for retries in [0, 2] {
+        for case in [
+            "pure",
+            "durable",
+            "log",
+            "error",
+            "wait",
+            "timeout",
+            "breakpoint",
+        ] {
+            let root = serde_json::json!({"durable":false,"entryPoint":"embed","steps":{
+                "embed":{"id":"embed","stepType":"EmbedWorkflow","childWorkflowId":"child",
+                    "childVersion":1,"maxRetries":retries,"retryDelay":50},
+                "finish":{"id":"finish","stepType":"Finish"}},
+                "executionPlan":[{"fromStep":"embed","toStep":"finish"}]});
+            let leaf = serde_json::json!({"durable":false,"entryPoint":"finish","steps":{
+                "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]});
+            let mut child = leaf.clone();
+            let extra = match case {
+                "pure" => None,
+                "durable" => {
+                    child["durable"] = true.into();
+                    None
+                }
+                "breakpoint" => {
+                    child["steps"]["finish"]["breakpoint"] = true.into();
+                    None
+                }
+                "log" => {
+                    Some(serde_json::json!({"id":"extra","stepType":"Log","message":"fixture"}))
+                }
+                "error" => Some(
+                    serde_json::json!({"id":"extra","stepType":"Error","code":"FIXTURE",
+                    "category":"transient","severity":"error","message":"fixture"}),
+                ),
+                "wait" => {
+                    child["durable"] = true.into();
+                    Some(serde_json::json!({"id":"extra","stepType":"WaitForSignal"}))
+                }
+                "timeout" => Some(serde_json::json!({"id":"extra","stepType":"Split",
+                    "config":{"timeout":0,"value":{"valueType":"immediate","value":[]}},"subgraph":leaf})),
+                _ => unreachable!(),
+            };
+            if let Some(extra) = extra {
+                child["steps"]["extra"] = extra;
+                child["entryPoint"] = "extra".into();
+                if case == "error" {
+                    child["steps"].as_object_mut().unwrap().remove("finish");
+                } else {
+                    child["executionPlan"] =
+                        serde_json::json!([{"fromStep":"extra","toStep":"finish"}]);
+                }
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let compiled = compile_direct_workflow_with_abi(
+                DirectCompilationInput {
+                    workflow_id: format!("embed-runtime-{case}-{retries}"),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: serde_json::from_value(root).unwrap(),
+                    child_workflows: vec![crate::compile::ChildWorkflowInput {
+                        step_id: "embed".into(),
+                        workflow_id: "child".into(),
+                        version_requested: "1".into(),
+                        version_resolved: 1,
+                        execution_graph: serde_json::from_value(child).unwrap(),
+                    }],
+                    output_dir: dir.path().into(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                },
+                WorkflowAbi::AgentCapabilities,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{case}/{retries}: {error}"));
+            assert_eq!(compiled.omit_runtime, case == "pure", "{case}/{retries}");
+            assert_eq!(
+                compiled
+                    .component_artifacts
+                    .world_wit
+                    .contains("workflow-runtime/runtime"),
+                case != "pure",
+                "{case}/{retries}"
+            );
+            if case == "pure" {
+                assert_eq!(compiled.component_artifacts.has_timers, retries > 0);
+            }
             Validator::new_with_features(wasmparser::WasmFeatures::all())
                 .validate_all(&fs::read(compiled.wasm_path).unwrap())
                 .unwrap();

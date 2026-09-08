@@ -136,10 +136,10 @@ impl WorkflowFeatureSummary {
         })
     }
 
-    /// Runtime ownership for a callable workflow. Non-durable Agent/Split retries use
+    /// Runtime ownership for one graph of a callable workflow. Agent/Embed/Split retries use
     /// cancellable host-I/O timers and connections use the separate resolver.
     /// This is only an import analysis: callers must also apply the complete
-    /// workflow-agent safety gate (including Split/Embed retry paths).
+    /// workflow-agent safety gate and inspect every supplied Embed child graph.
     pub(crate) fn needs_agent_runtime(&self, track_events: bool) -> bool {
         if track_events || self.root_durable {
             return true;
@@ -148,7 +148,6 @@ impl WorkflowFeatureSummary {
             matches!(
                 feature,
                 WorkflowFeature::AiAgent
-                    | WorkflowFeature::ChildWorkflow
                     | WorkflowFeature::LogEvent
                     | WorkflowFeature::ExplicitError
                     | WorkflowFeature::Delay

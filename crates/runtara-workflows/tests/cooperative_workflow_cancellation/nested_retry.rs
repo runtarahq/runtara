@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RetryScope {
     Embed,
+    NestedEmbed,
     Split,
     SplitWithParallelism,
 }
@@ -88,11 +89,7 @@ async fn run_retry_in_scope(
     }
     let mut children = vec![];
     if let Some(scope) = composite_scope {
-        let split = scope != RetryScope::Embed;
-        assert!(
-            split || depth == 0,
-            "published Embed closure is not qualified"
-        );
+        let split = matches!(scope, RetryScope::Split | RetryScope::SplitWithParallelism);
         // The HTTP/Slack capability itself never retries. Its error reaches
         // the enclosing scope, which owns the wait and whole-child retry.
         graph["steps"]["fetch"]["maxRetries"] = 0.into();
@@ -107,6 +104,26 @@ async fn run_retry_in_scope(
                 "sequential":items == 1,"parallelism":2,"dontStopOnFailed":false,
                 "maxRetries":retries,"retryDelay":delay},"subgraph":graph})
         } else {
+            if scope == RetryScope::NestedEmbed {
+                if !rate_limited {
+                    graph["steps"]["fetch"]["inputMapping"]["url"] = serde_json::json!({
+                        "valueType":"reference","value":"data.url"});
+                }
+                children.push(runtara_workflows::ChildWorkflowInput {
+                    step_id: "inner".into(),
+                    workflow_id: "http-leaf".into(),
+                    version_requested: "1".into(),
+                    version_resolved: 1,
+                    execution_graph: serde_json::from_value(graph)?,
+                });
+                graph = serde_json::json!({"durable":false,"entryPoint":"inner","steps":{
+                    "inner":{"id":"inner","stepType":"EmbedWorkflow","childWorkflowId":"http-leaf",
+                        "childVersion":1,"maxRetries":0,"inputMapping":{
+                            "url":{"valueType":"reference","value":"data.url"}}},
+                    "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                        "ok":{"valueType":"immediate","value":true}}}},
+                    "executionPlan":[{"fromStep":"inner","toStep":"finish"}]});
+            }
             children.push(runtara_workflows::ChildWorkflowInput {
                 step_id: "scope".into(),
                 workflow_id: "http-child".into(),
@@ -116,7 +133,7 @@ async fn run_retry_in_scope(
             });
             serde_json::json!({"id":"scope","stepType":"EmbedWorkflow",
                 "childWorkflowId":"http-child","childVersion":1,"maxRetries":retries,
-                "retryDelay":delay})
+                "retryDelay":delay,"inputMapping":{"url":{"valueType":"immediate","value":url}}})
         };
         graph = serde_json::json!({"durable":false,"entryPoint":"scope","steps":{
             "scope":step,"finish":{"id":"finish","stepType":"Finish",
@@ -155,7 +172,7 @@ async fn run_retry_in_scope(
             false,
         )?
     } else {
-        compile_nested_agents(graph, depth, dir.path())?
+        compile_nested_agents_with_children(graph, children, depth, dir.path())?
     };
     let server_host = host.clone();
     let server = tokio::spawn(async move {
@@ -544,4 +561,135 @@ async fn published_split_permanent_agent_error_preserves_recovery_fields() -> an
 #[tokio::test]
 async fn embed_zero_retries_preserves_agent_error_recovery() -> anyhow::Result<()> {
     run_retry_in_scope(false, false, 0, 503, 0, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_retry_after_http_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, false, 2, 503, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_retry_after_rate_limit_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, true, 1, 429, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_retry_after_http_errors_preserves_success() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 503, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_retry_preserves_rate_limit_budget() -> anyhow::Result<()> {
+    run_retry_in_scope(false, true, 1, 429, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_retry_zero_retries_recovers() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 0, 503, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_http_429_preserves_ordinary_retry_budget() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 1, 429, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_embed_permanent_error_preserves_recovery_fields() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 400, 2, Some(RetryScope::Embed)).await
+}
+
+#[tokio::test]
+async fn published_nested_embed_retry_after_http_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, false, 2, 503, 2, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn published_nested_embed_retry_after_rate_limit_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, true, 1, 429, 2, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn published_nested_embed_retry_preserves_rate_limit_budget() -> anyhow::Result<()> {
+    run_retry_in_scope(false, true, 1, 429, 2, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn published_nested_embed_permanent_error_preserves_recovery_fields() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 400, 2, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn published_nested_embed_retry_restores_input_after_http_error() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 503, 2, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn root_nested_embed_retry_restores_input_after_http_error() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 503, 0, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn root_nested_embed_retry_after_http_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, false, 2, 503, 0, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn root_nested_embed_permanent_error_preserves_recovery_fields() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 400, 0, Some(RetryScope::NestedEmbed)).await
+}
+
+#[tokio::test]
+async fn published_embed_pure_child_preserves_output_without_runtime_or_agent_io()
+-> anyhow::Result<()> {
+    for retries in [None, Some(0), Some(2)] {
+        let dir = tempfile::tempdir()?;
+        let graph = serde_json::from_value(
+            serde_json::json!({"durable":false,"entryPoint":"scope",
+            "steps":{"scope":{"id":"scope","stepType":"EmbedWorkflow","childWorkflowId":"pure",
+                "childVersion":1,"maxRetries":retries,"inputMapping":{"value":{"valueType":"immediate","value":7}}},
+                "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                    "answer":{"valueType":"reference","value":"steps.scope.outputs.answer"}}}},
+            "executionPlan":[{"fromStep":"scope","toStep":"finish"}]}),
+        )?;
+        let children = vec![runtara_workflows::ChildWorkflowInput {
+            step_id: "scope".into(),
+            workflow_id: "pure".into(),
+            version_requested: "1".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(
+                serde_json::json!({"durable":false,"entryPoint":"finish",
+                "steps":{"finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                    "answer":{"valueType":"reference","value":"data.value"}}}},"executionPlan":[]}),
+            )?,
+        }];
+        let compiled = compile_nested_agents_with_children(graph, children, 2, dir.path())?;
+        let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+        let pre = embedded_executor()
+            .load_instance_pre(&compiled.wasm_path)
+            .await?;
+        let result = embedded_executor()
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(5),
+                    cancel: None,
+                    limits: Default::default(),
+                    runtime: Some(host.clone()),
+                },
+                b"{}".to_vec(),
+            )
+            .await;
+        let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
+            anyhow::bail!("pure Embed failed: {:?}", result.exit);
+        };
+        anyhow::ensure!(
+            serde_json::from_slice::<Value>(&output)?
+                == serde_json::json!({"result":{"result":{"answer":7}}})
+        );
+        anyhow::ensure!(host.checkpoint_writes.lock().unwrap().is_empty());
+        anyhow::ensure!(host.sleep_ids.lock().unwrap().is_empty());
+    }
+    Ok(())
 }

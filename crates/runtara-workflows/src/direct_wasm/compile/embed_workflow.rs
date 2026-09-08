@@ -98,6 +98,20 @@ fn pop_embed_workflow_frame(
     super::loop_deadline::pop_frame(body);
 }
 
+// An inner Embed can return or branch to this attempt's failure target before
+// the enclosing retry wrapper restores its frame. Preserve the context used
+// immediately after that branch to wrap/checkpoint errors and start retries.
+const ATTEMPT_CONTEXT: [u32; 8] = [
+    DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
+    DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
+    DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
+    DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+    DIRECT_EMBED_SAVED_DATA_PTR_LOCAL,
+    DIRECT_EMBED_SAVED_DATA_LEN_LOCAL,
+    super::DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
+    super::DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
+];
+
 fn push_embed_workflow_attempt_frame(
     body: &mut WasmFunction,
     steps_ptr_local: u32,
@@ -108,6 +122,9 @@ fn push_embed_workflow_attempt_frame(
     route_len_local: u32,
 ) {
     super::loop_deadline::push_frame(body);
+    for local in ATTEMPT_CONTEXT {
+        body.instruction(&Instruction::LocalGet(local));
+    }
     body.instruction(&Instruction::LocalGet(
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
     ));
@@ -151,6 +168,9 @@ fn pop_embed_workflow_attempt_frame(
     body.instruction(&Instruction::LocalSet(
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
     ));
+    for local in ATTEMPT_CONTEXT.into_iter().rev() {
+        body.instruction(&Instruction::LocalSet(local));
+    }
     super::loop_deadline::pop_frame(body);
 }
 
