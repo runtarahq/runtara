@@ -164,6 +164,7 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
+    pub(super) timer_abort_async: Option<u32>,
     pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
@@ -662,6 +663,7 @@ impl DirectCoreImportIndices {
             subtask_cancel: self.subtask_cancel,
             subtask_drop: self.subtask_drop,
             timer_sleep_async: self.timer_sleep_async,
+            timer_abort_async: self.timer_abort_async,
             monotonic_now: self.monotonic_now,
             agent_invokes_async: self.agent_invokes_async,
         })
@@ -825,6 +827,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
+    pub(super) timer_abort_async: Option<u32>,
     pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }

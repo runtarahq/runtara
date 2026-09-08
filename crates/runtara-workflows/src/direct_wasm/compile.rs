@@ -163,6 +163,8 @@ interface timers {
     /// Async-TYPED so the emitter may async-lower it into a waitable; the
     /// world-level sync lowering is never called.
     sleep: async func(ms: u64);
+    /// Emergency whole-execution alarm; dispose through standard cancellation.
+    abort-after: async func(ms: u64);
 }
 ";
 const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
@@ -1138,7 +1140,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v14,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v15,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()

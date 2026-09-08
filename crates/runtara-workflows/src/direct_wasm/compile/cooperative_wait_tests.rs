@@ -171,6 +171,33 @@ fn run_helper(
     expected_outcome: i32,
     expected_cancelled: &[i32],
 ) {
+    run_helper_with_alarm(
+        context,
+        window,
+        ready,
+        waiting,
+        target,
+        deadline,
+        cancel_returns,
+        expected_outcome,
+        expected_cancelled,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_helper_with_alarm(
+    context: Context,
+    window: bool,
+    ready: &[(i32, i32)],
+    waiting: &[(i32, i32)],
+    target: i32,
+    deadline: i32,
+    cancel_returns: i32,
+    expected_outcome: i32,
+    expected_cancelled: &[i32],
+    alarm: bool,
+) {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, emitted_helper(context)).unwrap();
     let mut linker = Linker::<Events>::new(&engine);
@@ -290,6 +317,7 @@ fn run_helper(
         .filter(|s| *s >> 4 != 0)
         .map(|s| s >> 4)
         .chain([99])
+        .chain(alarm.then_some(4))
         .collect();
     let mut store = wasmtime::Store::new(
         &engine,
@@ -318,6 +346,7 @@ fn run_helper(
     let mut params = vec![Val::I32(0); HELPER_PARAMS];
     let mut set =
         |local, value| params[STATE.iter().position(|l| *l == local).unwrap()] = Val::I32(value);
+    set(ALARM, if alarm { 4 } else { 0 });
     set(STATUS, target);
     set(DEADLINE_STATUS, deadline);
     set(WINDOW_ACTIVE, 1);
@@ -571,5 +600,68 @@ fn emitted_window_deadline_resolves_the_lifecycle_poll_timer() {
         CANCELLED,
         4,
         &[1, 99, 3],
+    );
+}
+
+#[test]
+fn emitted_alarm_lives_through_timeout_cleanup_and_disarms_on_success() {
+    for (ready, target, expected, cancelled) in [
+        (vec![(2, 2)], 17, 4, vec![1, 4]),
+        (vec![(1, 2)], 17, 0, vec![2, 4]),
+        (vec![], RETURNED, 0, vec![2, 4]),
+    ] {
+        run_helper_with_alarm(
+            Context::Callable,
+            false,
+            &ready,
+            &[],
+            target,
+            33,
+            CANCELLED,
+            expected,
+            &cancelled,
+            true,
+        );
+    }
+    // An enclosing timeout retains its alarm until every window peer resolves.
+    run_helper_with_alarm(
+        Context::Callable,
+        true,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        4,
+        &[1, 99, 4],
+        true,
+    );
+}
+
+#[test]
+fn emitted_propagated_cancellation_relinquishes_local_grace_before_cleanup() {
+    run_helper_with_alarm(
+        Context::Callable,
+        false,
+        &[],
+        &[(0, 6)],
+        17,
+        33,
+        CANCELLED,
+        3,
+        &[4, 2, 1, 99],
+        true,
+    );
+    run_helper_with_alarm(
+        Context::RootCancel,
+        false,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        2,
+        &[4, 1, 99],
+        true,
     );
 }

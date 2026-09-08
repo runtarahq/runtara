@@ -37,6 +37,10 @@ const WINDOW_BEGIN: u32 = 157;
 // enclosing scope creates its timer; this wait resolves it before returning.
 pub(super) const DEADLINE_STATUS: u32 = 158;
 pub(super) const TIMED_OUT: u32 = 159;
+const ALARM: u32 = 182;
+// Match the default root Stop grace. Explicit root Stop requests retain their
+// own native deadline; propagated cancellation disarms this local alarm.
+pub(super) const TIMEOUT_CLEANUP_GRACE_MS: u64 = 5_000;
 const POLL: i32 = 128;
 const RETURNED: i32 = 2;
 const START_CANCELLED: i32 = 3;
@@ -47,7 +51,7 @@ const POLL_INTERVAL_MS: i64 = 1_000;
 // values. No globals, heap frame, or host-owned tasks are needed.
 // Scratch cursors/handles are deliberately excluded. STATUS is the packed
 // input to Await; the final extra result describes entry control flow.
-const STATE: [u32; 19] = [
+const STATE: [u32; 20] = [
     TARGET,
     SET,
     TIMER,
@@ -67,6 +71,7 @@ const STATE: [u32; 19] = [
     parallel_deadline::ENABLED,
     parallel_deadline::OWNER,
     parallel_deadline::TIMER_STATUS,
+    ALARM,
 ];
 pub(super) const HELPER_PARAMS: usize = STATE.len();
 pub(super) const HELPER_COUNT: usize = 7;
@@ -167,6 +172,7 @@ fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         body.instruction(&Instruction::I32Const(6));
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
+        close_alarm(body, indices);
         close_all(body, indices);
         if indices.cooperative_helper_body {
             helper_return(body, 3);
@@ -274,6 +280,47 @@ fn cancel_and_drop(body: &mut Function, indices: &DirectCoreFunctionIndices, han
     set_zero(body, handle);
 }
 
+/// The caller leaves the remaining scope duration in milliseconds on the
+/// stack. Arm before invoking guest code: its first instruction may never yield.
+pub(super) fn arm_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    let remaining = super::agent_deadline::REMAINING;
+    body.instruction(&Instruction::LocalSet(remaining));
+    body.instruction(&Instruction::LocalGet(remaining));
+    body.instruction(&Instruction::I64Const(
+        (u64::MAX - TIMEOUT_CLEANUP_GRACE_MS) as i64,
+    ));
+    body.instruction(&Instruction::I64GtU);
+    body.instruction(&Instruction::If(BlockType::Result(
+        wasm_encoder::ValType::I64,
+    )));
+    body.instruction(&Instruction::I64Const(-1));
+    body.instruction(&Instruction::Else);
+    body.instruction(&Instruction::LocalGet(remaining));
+    body.instruction(&Instruction::I64Const(TIMEOUT_CLEANUP_GRACE_MS as i64));
+    body.instruction(&Instruction::I64Add);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::Call(
+        indices.timer_abort_async.expect("cleanup alarm"),
+    ));
+    body.instruction(&Instruction::I32Const(4));
+    body.instruction(&Instruction::I32ShrU);
+    body.instruction(&Instruction::LocalTee(ALARM));
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::Unreachable);
+    body.instruction(&Instruction::End);
+}
+
+fn close_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if indices.timer_abort_async.is_none() {
+        return;
+    }
+    body.instruction(&Instruction::LocalGet(ALARM));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    cancel_and_drop(body, indices, ALARM);
+    body.instruction(&Instruction::End);
+}
+
 fn deadline_handle(body: &mut Function) {
     body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
     body.instruction(&Instruction::I32Const(4));
@@ -364,6 +411,7 @@ fn close_all(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     });
     emit_window_close(body, indices);
     body.instruction(&Instruction::End);
+    close_alarm(body, indices);
 }
 
 /// A terminal storage error owns the entire invocation. Preserve its result
@@ -461,6 +509,7 @@ fn act_on_cancel(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::I32And);
     body.instruction(&Instruction::If(BlockType::Empty));
+    close_alarm(body, indices);
     close_all(body, indices);
     acknowledge(body, indices, true);
     body.instruction(&Instruction::End);
@@ -749,6 +798,7 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
     parallel_deadline::observe_event(body, indices);
     body.instruction(&Instruction::Else);
     close_deadline(body, indices);
+    close_alarm(body, indices);
     helper_return(body, 0);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
@@ -806,6 +856,7 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     if call_helper(body, indices, Helper::Await) {
         body.instruction(&Instruction::Else);
         close_deadline(body, indices);
+        close_alarm(body, indices);
         body.instruction(&Instruction::End);
         return;
     }
@@ -871,6 +922,7 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     // Only this operation is owned by the deadline. An enclosing window's
     // unrelated calls remain live. Root/parent cancellation uses close_all.
     close_wait(body, indices);
+    close_alarm(body, indices);
     helper_return(body, 4);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
@@ -914,9 +966,11 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     close_wait(body, indices);
+    close_alarm(body, indices);
     body.instruction(&Instruction::Else);
     // The operation completed eagerly; its deadline still needs resolution.
     close_deadline(body, indices);
+    close_alarm(body, indices);
     body.instruction(&Instruction::End);
 }
 
@@ -975,6 +1029,7 @@ pub(super) fn emit_iteration_boundary(body: &mut Function, indices: &DirectCoreF
     if let Some(yield_index) = indices.thread_yield {
         body.instruction(&Instruction::Call(yield_index));
         body.instruction(&Instruction::If(BlockType::Empty));
+        close_alarm(body, indices);
         close_all(body, indices);
         emit_entry_cancel_return(body);
         body.instruction(&Instruction::End);

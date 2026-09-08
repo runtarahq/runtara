@@ -219,6 +219,7 @@ fn deliver(body: &mut Function, indices: &DirectCoreFunctionIndices, slot: u32) 
     body.instruction(&Instruction::I32Store(mem(4)));
     close_timer(body, indices);
     close_deadline(body, indices);
+    close_alarm(body, indices);
     helper_return(body, 0);
 }
 

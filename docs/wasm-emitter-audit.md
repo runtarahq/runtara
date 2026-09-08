@@ -1563,7 +1563,8 @@ interruption, or remove E128.
 
 ### AUDIT-18 · An independent cleanup alarm for the existing executor
 
-**Status: native enforcement implemented; emitter integration pending.** The
+**Status: native enforcement and shared deadline-wait integration implemented;
+complete timed-scope ownership remains pending.** The
 production host timer interface now includes `abort-after: async func(ms: u64)`.
 Unlike `sleep`, expiry aborts the entire execution. It is a platform I/O/safety
 capability whose ownership uses standard subtask handles, not a standardized
@@ -1607,8 +1608,30 @@ without that guard: native return rejection alone still allows a late durable
 publication. A call already started before expiry retains its existing outcome
 semantics; no rollback or preemption of arbitrary native code is implied.
 
-No Agent wrapper, emitted helper, WIT dependency or artifact cache key changes
-in this stage. The compiler still needs to arm/disarm this shared alarm across
-timed execution and cleanup, preserve root Stop grace, and derive remaining grace from the
-original monotonic event. E128 remains. Per-Store latch allocation, armed-alarm
-cost and cancellation races remain part of the full performance/soak gates.
+The shared deadline-wait emitter now arms this alarm before sequential Agent
+entry, connection preparation and enclosing-scope window waits. It uses the
+remaining monotonic deadline plus a saturating five-second grace, matching the
+current default root Stop grace. It retains the alarm through timeout cleanup
+and disposes it after success. Parent cancellation and observed root Cancel
+relinquish the local alarm before cleanup; no fresh local grace replaces the
+initiating owner's deadline.
+
+The existing seven helpers carry 20 i32 state values (one added alarm handle).
+The compiler's timer WIT adds `abort-after`, and the cache tag is
+`cooperative-waits=shared-v15`. No Agent export or binding changes are needed.
+New compiler artifacts require the updated host timer interface; old artifacts
+continue importing their existing subset.
+
+Tests in `deadline_cleanup_tests.rs` exercise real emitted/composed workflows
+with an infinite Agent body, an infinite cancellation callback, and a successful
+timed call followed by six seconds of untimed HTTP work in the same Store.
+Deterministic shared-helper tests check cleanup/disposal order for own timeout,
+window timeout, success and root/parent propagation.
+
+Parallel launches still need alarms retained for each pending call, including
+while another call is prepared. Enclosing inline scopes need uninterrupted
+coverage across dispatch and assembly boundaries, including preparation-timeout
+propagation into cleanup of the entire window. These remain prerequisites
+for removing E128; shared-wait coverage alone does not establish full scope
+grace. Per-Store latch allocation, armed-alarm cost and cancellation races remain
+part of the full performance/soak gates.

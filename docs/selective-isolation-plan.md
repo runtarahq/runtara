@@ -843,8 +843,35 @@ Preserve the externally configured root
 Stop grace: propagated cancellation must not replace it with a fresh, shorter
 child budget. Ordinary polling-timer disposal should not start a cleanup alarm.
 
-The current emitter does not yet call `abort-after`; E128 and G5/G6 remain open.
+At this native prerequisite stage the emitter did not yet call `abort-after`;
+E128 and G5/G6 remain open. The next section records subsequent emitter work.
 This change closes the native enforcement prerequisite, not the production
 timeout feature. Include the per-Store latch and armed-timer allocations in the
 paired native memory/latency/soak measurements. Blocking native code that cannot
 yield remains a separate qualification limit; no host process is killed here.
+
+
+### Shared deadline-wait alarm integration · 2026-09-08
+
+Generated sequential Agent/connection waits and enclosing-scope window waits now
+arm the native alarm before dispatch, for the earliest remaining deadline plus
+five seconds of cleanup grace. Five seconds matches the current default root
+Stop grace. Addition saturates at `u64::MAX`. Normal return and completed timeout
+cleanup cancel/drop the alarm; timeout cleanup keeps it until all calls owned by
+that cleanup path resolve. Parent cancellation and observed root Cancel dispose
+of the local alarm before propagating cleanup so the initiating caller's grace
+continues to govern. No new option, selector or Agent-specific wrapper is added.
+
+The same seven shared helpers carry one additional i32 handle (20 state values).
+The cache identity advances to `cooperative-waits=shared-v15`; the compiler's
+host-timer contract adds the emergency import. Existing composed Agent artifacts
+are unchanged. This requires an updated host for newly emitted timer imports;
+older artifacts still import their existing subset.
+
+This is not yet complete timed-scope ownership. Parallel launch paths still need
+per-pending-call alarms armed before entering noncooperative code, retained while
+another call/preparation runs, and disposed when their owning call resolves.
+Enclosing inline scopes must retain coverage across dispatch/assembly boundaries,
+including preparation-timeout propagation into cleanup of the entire window.
+Keep E128, G5/G6 and the wider G1–G10 qualification open. Do not claim complete
+scope grace from the sequential/window-wait tests alone.

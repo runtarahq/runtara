@@ -22,6 +22,59 @@ E2E, multi-owner routing and remaining P3 timeout/race work are still open.
 Lifecycle acknowledgements and post-run fallback preserve accepted terminal
 outcomes.
 
+## Generated deadline-wait alarms · 2026-09-08
+
+The shared deadline-wait emitter now arms `abort-after` before sequential Agent
+entry, connection preparation and enclosing-scope window waits. Its duration is
+the original deadline's remaining monotonic budget plus five seconds, saturating
+at `u64::MAX`. Five seconds matches the current default Stop grace. The alarm
+remains live throughout timeout cleanup and is cancelled/dropped after successful
+resolution. Root Cancel and parent cancellation dispose of the local alarm
+before propagating cleanup, preserving the initiating owner's grace.
+
+This extends the existing seven shared helpers with one i32 alarm handle (20
+state values). The compiler timer contract imports `abort-after`; the cache key
+advances to `cooperative-waits=shared-v15`. Agent binaries and their macro remain
+unchanged. `wat` is a test-only dependency for deliberately uncooperative Agent
+fixtures, not a production alternate compiler or backend.
+
+The new composed emitter tests prove whole-run abort for an Agent that loops
+forever on entry and an Agent whose standard cancellation callback loops forever.
+Both use a 100 ms step budget and the real five-second grace, and must return
+`CleanupAborted` before the separate ten-second whole-run timeout. Another test
+completes a timed HTTP call and then spends six seconds in untimed HTTP work in
+the same Store, proving that the disposed alarm cannot abort later execution.
+Shared-helper event tests check alarm disposal after own/window timeout cleanup,
+after success, and before root/parent propagation.
+
+The 654 compiler library tests passed serially (213.01s); after adding the three
+composed cases, those three passed (17.89s). Feature-gated workflow Clippy passed.
+The full workflow execution suite passed: 395 tests, three manual benchmarks
+ignored (720.48s). The standard build script then rebuilt all 27 Agents and two
+shared components; all 58 WASM/metadata files are byte-identical to the tested
+artifacts. All 92 component-cancellation tests passed on those outputs (62.98s). Performance, Linux/soak and authenticated server E2E remain
+unqualified.
+
+Commands used with the pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, the isolated native target and the worktree's component
+output directory:
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests::cleanup -- --test-threads=1 --nocapture
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+scripts/build-agent-components.sh
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=1
+```
+
+This is still partial timed-scope ownership: parallel launches need alarms held
+by each pending call before entry and while other calls are prepared. Enclosing
+inline scopes need continuous coverage across dispatch/assembly boundaries,
+including propagation from a timed preparation wait into window-wide cleanup.
+E128 and the remaining G1–G10 gates stay open. No opt-in product feature or host
+workflow task registry has been introduced.
+
 ## Native cleanup alarm implementation · 2026-09-08
 
 The existing host timer interface now implements `abort-after(ms)`. This is an
@@ -56,7 +109,7 @@ alarms, zero/maximum grace and 1,000 disposals. Two real database tests cover
 terminal recording and preservation. A negative Component Model control proves
 that an ordinary timer future throwing an error cannot interrupt CPU cleanup.
 
-The current emitter does not yet arm this alarm. A timed scope must arm it before
+At the native prerequisite stage, the emitter did not yet arm this alarm. A timed scope must arm it before
 entering potentially noncooperative code, for the remaining deadline plus grace,
 and retain it through cancellation cleanup. Integrate this into the shared
 helpers while preserving initiating-owner grace and externally configured

@@ -121,6 +121,8 @@ pub(super) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices, own:
         body.instruction(&Instruction::If(BlockType::Empty));
     }
     body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
+    super::cooperative_wait::arm_alarm(body, indices);
+    body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
     body.instruction(&Instruction::Call(
         indices.timer_sleep_async.expect("deadline timer"),
     ));

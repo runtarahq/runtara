@@ -330,6 +330,13 @@ pub(super) fn emit_direct_core_module(
             );
             import_indices.timer_sleep_async = Some(imported_function_count);
             imported_function_count += 1;
+            imports.import(
+                "runtara:host-io/timers@0.1.0",
+                "[async-lower]abort-after",
+                wasm_encoder::EntityType::Function(type_index),
+            );
+            import_indices.timer_abort_async = Some(imported_function_count);
+            imported_function_count += 1;
         }
 
         for (name, import) in &world.imports {
@@ -852,6 +859,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I32),
     // 179-181: timed-window flag, selected slot and owned timer status.
     (3, ValType::I32),
+    // 182: safety alarm owned by the current deadline wait.
+    (1, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

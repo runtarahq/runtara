@@ -14,6 +14,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "deadline_cleanup_tests.rs"]
+mod cleanup;
+
 #[path = "embed_deadline_tests.rs"]
 mod embed;
 
@@ -243,6 +246,7 @@ fn executor() -> &'static WorkflowExecutor {
 #[derive(Clone, Copy, Debug)]
 enum Shape {
     Root,
+    LongContinuation,
     Preparation(bool),
     Published(usize),
     InlineWhile(usize),
@@ -299,6 +303,16 @@ fn compile_shaped(
             "stepId":{"valueType":"reference","value":"steps.__error.stepId"}}}},
         "executionPlan":[{"fromStep":"fetch","toStep":"finish"},
             {"fromStep":"fetch","toStep":"handled","label":"onError"}]});
+    if matches!(shape, Shape::LongContinuation) {
+        graph["steps"]["after"] = json!({"id":"after","stepType":"Agent",
+            "agentId":"http","capabilityId":"http-request","maxRetries":0,
+            "inputMapping":{"url":{"valueType":"immediate","value":format!("{url}/after")}}});
+        graph["executionPlan"][0]["toStep"] = "after".into();
+        graph["executionPlan"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"fromStep":"after","toStep":"finish"}));
+    }
     if matches!(shape, Shape::Preparation(_)) {
         graph["steps"]["fetch"]["connectionId"] = "conn".into();
     }
