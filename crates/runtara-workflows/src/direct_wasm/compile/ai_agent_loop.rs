@@ -53,6 +53,52 @@ const AI_MEMORY_DEBUG_PHASE_SAVE: u32 = 1;
 const AI_MEMORY_DEBUG_PHASE_COMPACT_SLIDING: u32 = 2;
 const AI_MEMORY_DEBUG_PHASE_COMPACT_SUMMARIZE: u32 = 3;
 
+// Inline children share these locals with an enclosing AI loop. Keep the
+// caller's state on the guest operand stack; only the child's result escapes.
+const CHILD_FRAME: [u32; 22] = [
+    DIRECT_AI_BASE_PTR_LOCAL,
+    DIRECT_AI_BASE_LEN_LOCAL,
+    DIRECT_AI_STATE_PTR_LOCAL,
+    DIRECT_AI_STATE_LEN_LOCAL,
+    DIRECT_AI_PENDING_PTR_LOCAL,
+    DIRECT_AI_PENDING_LEN_LOCAL,
+    DIRECT_AI_TURN_OUT_PTR_LOCAL,
+    DIRECT_AI_TURN_OUT_LEN_LOCAL,
+    DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+    DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    DIRECT_AI_TOOL_COUNT_LOCAL,
+    DIRECT_AI_TOOL_IDX_LOCAL,
+    DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+    DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+    DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+    DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+    DIRECT_AI_ITER_LOCAL,
+    DIRECT_AI_TOOL_MATCH_LOCAL,
+    DIRECT_AI_CONV_PTR_LOCAL,
+    DIRECT_AI_CONV_LEN_LOCAL,
+    DIRECT_AI_TOOL_CALL_COUNTER_LOCAL,
+    DIRECT_AI_HEAP_BASE_LOCAL,
+];
+
+pub(super) fn push_child_frame(body: &mut WasmFunction, result: (u32, u32)) {
+    for local in CHILD_FRAME
+        .into_iter()
+        .filter(|local| *local != result.0 && *local != result.1)
+    {
+        body.instruction(&Instruction::LocalGet(local));
+    }
+}
+
+pub(super) fn pop_child_frame(body: &mut WasmFunction, result: (u32, u32)) {
+    for local in CHILD_FRAME
+        .into_iter()
+        .rev()
+        .filter(|local| *local != result.0 && *local != result.1)
+    {
+        body.instruction(&Instruction::LocalSet(local));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_ai_agent_loop_plan(
     body: &mut WasmFunction,

@@ -2603,3 +2603,50 @@ real-component cancellation tests and all 395 workflow integration tests passed
 (three manual benchmarks ignored). Final feature-gated all-target Clippy,
 formatting, diff checks and patterns-page JavaScript syntax passed. No browser
 visual check or additional performance/E2E/soak result is claimed for this stage.
+
+## Preserve AI callers across inline Embed children (2026-09-08)
+
+The ordinary Embed attempt frame now preserves AI-loop context through shared
+`push_child_frame`/`pop_child_frame` helpers. They save the existing AI locals on
+the guest operand stack and restore them after the child attempt, including a
+captured child failure. The designated result locals are excluded. This keeps
+outer pending results, conversation, tool indices/counter, iteration and heap
+watermark independent of an inner AI loop. It introduces no new host import,
+Store, runtime task state or canonical local slots.
+
+Tool planning also now checks the current graph's declared step type before
+resolving an Embed child. Reusing an outer Embed ID for an inner Agent previously
+caused unbounded planner recursion and native stack overflow; after that fix,
+the execution reproduction separately showed the first of two child results
+being lost. Both failures were observed before their corresponding fixes. The
+new planner check also covers Wait tools with the reused ID; existing true
+child-closure cycle rejection remains intact.
+
+The six composed tests in `compile/nested_ai_tests.rs` verify multi-turn and
+multi-tool caller preservation, large histories, ordinary child failure,
+root/own/parent cancellation with pending model headers/body, nested signal
+resume, completed replay and child arena collection with a large outer value.
+They cover durable/non-durable execution as applicable and use the existing
+private-emitter E128 assertion for authored Embed budgets. The compiler artifact
+cache identity is `cooperative-waits=shared-v11`.
+
+Other inline callbacks and mixed recovery/parallel contexts remain to qualify.
+The frame's extra saved values/code must be included in paired measurements;
+this stage makes no new benchmark claim and does not complete G1–G10 or retire
+E128. See AUDIT-13 for the concrete failure and test mapping.
+
+Verification: all 27 Agent and both shared workflow components rebuilt. The final
+compiler suite passed all 636 tests with `--test-threads=1`; the focused nested-AI
+matrix passed all six tests. All 395 workflow integration tests passed (three
+manual benchmarks ignored), as did all 86 real-component cancellation tests.
+Feature-gated all-target Clippy, formatting, diff checks and patterns-page
+JavaScript syntax passed.
+
+The first compiler run, concurrent with integration/component workloads, had
+three older 200 ms deadline fixtures expire before their first HTTP request
+arrived. A targeted retry case also failed while the integration process was
+still busy; the inventory recheck passed. The complete serial rerun passed with
+the original budgets and assertions unchanged. These results establish functional
+regression coverage, not a timing guarantee under contention. Browser visual
+checks, database/server E2E, resource soak and paired performance were not run
+for this stage.

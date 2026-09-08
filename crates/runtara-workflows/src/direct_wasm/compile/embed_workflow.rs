@@ -213,6 +213,7 @@ fn emit_embed_workflow_child_attempt(
 ) {
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    super::ai_agent_loop::push_child_frame(body, (output_ptr_local, output_len_local));
     push_embed_workflow_attempt_frame(
         body,
         steps_ptr_local,
@@ -271,6 +272,7 @@ fn emit_embed_workflow_child_attempt(
         route_ptr_local,
         route_len_local,
     );
+    super::ai_agent_loop::pop_child_frame(body, (output_ptr_local, output_len_local));
 }
 
 #[allow(clippy::too_many_arguments)]

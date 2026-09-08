@@ -998,9 +998,10 @@ fn step_run_plan_inner(
                 if let Some(edge) = tool_edge {
                     // An EmbedWorkflow tool target has a preloaded child graph;
                     // run it as the tool, feeding its output back to the model.
-                    if child_workflows
+                    if let Some(step) = graph
+                        .steps
                         .iter()
-                        .any(|child| child.step_id == edge.to_step)
+                        .find(|step| step.id == edge.to_step && step.step_type == "EmbedWorkflow")
                     {
                         let child = child_workflow_graph(child_workflows, &edge.to_step)?;
                         let child_plan = step_run_plan(
@@ -1009,11 +1010,6 @@ fn step_run_plan_inner(
                             &child.graph.entry_point,
                             &mut Vec::new(),
                         )?;
-                        let step = graph
-                            .steps
-                            .iter()
-                            .find(|step| step.id == edge.to_step)
-                            .expect("Embed tool definition");
                         tools.push(DirectAiToolPlan::Embed {
                             step_id: edge.to_step.clone(),
                             input_mapping_id: embed_workflow_input_mapping_id(

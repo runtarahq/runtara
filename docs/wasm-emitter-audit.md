@@ -1375,3 +1375,36 @@ response shape validation, including large history, unknown tool indices and
 argument values, malformed JSON, missing fields and integer overflow. The new
 response checkpoint adds storage and validation cost; the plan now requires
 explicit AI-loop measurements. No new performance result is asserted here.
+
+### AUDIT-13 · Nested AI tools: planner identity and caller state
+
+Two independently reproduced failures affected an outer AiAgent using an inline
+Embed tool whose child contains another AI loop:
+
+1. If the inner Agent or WaitForSignal tool reused the outer Embed's local step
+   ID, the planner selected the child workflow by ID alone. A valid finite graph
+   could recurse until the native compilation thread overflowed its stack and
+   aborted the process. Tool selection now first checks the target's type in
+   its own graph. Actual static child-closure cycles retain their existing
+   rejection.
+2. The inline child reused the outer AI loop's locals. The reproduction completed
+   but returned only the second child result where two were expected. The
+   existing Embed attempt boundary now saves/restores the caller's AI buffers,
+   pending results, iteration/tool counters, conversation and heap watermark.
+   Only the child's designated output locals escape that frame.
+
+| Case | Result after the fix | Test in `compile/nested_ai_tests.rs` |
+| --- | --- | --- |
+| Two outer tools, with repeated local IDs and inner turns | Both original results and tool IDs reach the outer model | `nested_ai_preserves_two_outer_tool_calls_and_conversation` |
+| More outer turns and 16–64 KiB histories | Caller and child histories remain separate; completed replay adds no calls | `nested_ai_large_histories_preserve_outer_turns_and_repeated_calls` |
+| Child provider error | Original caller context receives `AI_TURN_COMPLETION_FAILED` | `nested_ai_error_returns_to_outer_model_with_original_context` |
+| Nested signal wait and early resume | Both saved decisions and the wait identity survive | `nested_ai_wait_resume_preserves_both_decisions_and_original_signal` |
+| Root Cancel, own Embed timeout or earlier parent timeout during inner model I/O | Root/parent reasons bypass outer model feedback; own timeout restores outer context for feedback | `nested_ai_cancellation_respects_owner_and_restores_parent_context` |
+| Child loops reclaim large scratch values | Outer 64 KiB interned state and both tool results remain intact | `nested_ai_child_collection_keeps_outer_interned_state` |
+
+Coverage includes pending headers/partial bodies and both durable/non-durable
+execution where applicable. This adds no host state or per-agent wrapper. The
+frame reuses existing locals and the guest operand stack; its code/stack overhead
+still belongs in the planned size and latency comparison. Other inline callback
+boundaries, deeper mixed recovery/parallel cases, full own AI budgets and cleanup
+grace remain subject to the plan's qualification gates. E128 is unchanged.

@@ -179,22 +179,7 @@ impl Server {
                             if operation == Child::Cancel {
                                 host.cancel.store(true, Ordering::SeqCst);
                             }
-                            loop {
-                                match stream.read(&mut buffer).await {
-                                    Ok(0) => break,
-                                    Ok(_) => {}
-                                    Err(error)
-                                        if matches!(
-                                            error.kind(),
-                                            std::io::ErrorKind::ConnectionReset
-                                                | std::io::ErrorKind::BrokenPipe
-                                        ) =>
-                                    {
-                                        break;
-                                    }
-                                    Err(error) => return Err(error.into()),
-                                }
-                            }
+                            await_peer_close(&mut stream).await?;
                             cleanup.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
@@ -211,6 +196,19 @@ impl Server {
                             .ok_or_else(|| anyhow::anyhow!("unexpected model call {index}"))?
                     }
                 };
+                if let Some(pending) = response.get("fixture_pending").and_then(Value::as_str) {
+                    if pending == "body" {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n{")
+                            .await?;
+                    }
+                    if pending == "cancel" {
+                        host.cancel.store(true, Ordering::SeqCst);
+                    }
+                    await_peer_close(&mut stream).await?;
+                    cleanup.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                }
                 let body = serde_json::to_vec(&response)?;
                 stream
                     .write_all(
@@ -797,4 +795,26 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![json!("echo-id"), json!("approval-id")]);
     Ok(())
+}
+
+#[path = "nested_ai_tests.rs"]
+mod nested_ai;
+
+async fn await_peer_close(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
+    let mut buffer = [0; 1024];
+    loop {
+        match stream.read(&mut buffer).await {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }

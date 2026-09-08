@@ -685,3 +685,26 @@ window is drained. Preserve peer cleanup before returning a storage failure;
 do not turn a read error into a new attempt or silently report successful
 checkpoint completion. Their qualification remains part of the durable/error
 and resource-cleanup gates.
+
+### Nested AI inside Embed tools · 2026-09-08
+
+The immediate nested-AI reproduction is fixed: the Embed attempt boundary saves
+and restores the caller's AI state using an explicit guest frame, preserving its
+conversation, pending results, counters and heap watermark. The child result is
+excluded from restoration. Tool planning now selects Embed by the current
+graph's declared target type, preventing a same-ID inner Agent/Wait tool from
+being mistaken for the outer Embed and recursing during native compilation.
+
+Six composed tests exercise repeated local IDs, two tools in one outer turn,
+more inner/outer turns, 16–64 KiB histories, child provider errors, root Cancel,
+both timeout owners, nested signal resume and child collection with an outer
+64 KiB interned value. Existing completed-turn and per-call keys are preserved.
+No host task layer or product switch is introduced.
+
+Remaining follow-up: qualify AI in other inline callbacks (`onWait` and recovery
+handlers), deeper mixed parallel/error paths, full own AI budgets and cleanup
+grace. The raw checkpoint-call fault inventory above remains open. The new frame
+adds saved guest values/code at Embed attempt boundaries; measure ordinary
+Embed, nested AI and deep nesting in the existing paired size/latency matrix.
+This advances the caller-state and cancellation gates without closing G1–G10 or
+retiring E128.
