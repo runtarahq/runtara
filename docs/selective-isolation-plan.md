@@ -546,3 +546,26 @@ complete own Embed/AI/tool deadlines and their retry/preparation waits, then
 bounded cancellation cleanup and the remaining public Stop/E2E/soak/measurement
 work. E128 remains until the complete contract passes; this stage does not close
 G5, G6 or the full G1–G10 matrix.
+
+
+### Parallel scope deadlines · 2026-09-08
+
+Enclosing deadlines now reach the existing parallel wait set in Split, branch
+scheduler and depth-wavefront paths. Expiry resolves the window before owner
+recovery, balances its pause deferral and skips child recovery/retry. Ready
+completions win deadline ties; internal timers cannot become Agent results.
+Launch/assembly boundary checks prevent new work after an observed expiry.
+
+Split-owned timeouts now retain the requested concurrent window for otherwise
+eligible bodies. Production HTTP tests prove overlap, header/body cleanup,
+reverse-completion/input-result ordering, ordinary failure recovery and durable
+replay. A delayed fast-branch assembly test requires cleanup of its pending peer
+without launching the next request. Deterministic helper tests cover cancellation
+resolution, event ordering, root/parent priority and handle ownership.
+
+The wait owns a fresh timer until it returns an event, so shared-wait size and
+per-event timer overhead must be included in the controlled comparison. This
+stage does not close individual timed-Agent sibling survival, nested concurrent
+scope ownership, interruptible preparation, own Embed/AI/tool budgets, cleanup
+grace or G1–G10. E128 and the separate remaining parallel eligibility constraints
+remain until their contracts are implemented and qualified.

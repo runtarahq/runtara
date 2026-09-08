@@ -1,6 +1,6 @@
 # Cooperative cancellation implementation record
 
-Status: sequential/parallel root cancellation and Agent binding migration, 2026-09-07. Governing contract:
+Status: cooperative root cancellation and guest deadline implementation in progress, 2026-09-08. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
 All 27 built-in Agent exports now use a shared callback-binding macro. Eighteen
@@ -2322,3 +2322,68 @@ Verification on the final source:
 This stage reuses the previously built Agent/stdlib/runtime bundle; none of those
 component sources changed. No new component build, visual browser inspection,
 size/latency benchmark, resource soak, or database/server E2E is claimed here.
+
+
+## Parallel scope deadlines and launch boundaries (2026-09-08)
+
+The shared `WindowWait` helper now observes an enclosing deadline alongside the
+existing lifecycle poll timer and parallel call handles. The entry function
+selects the earliest guest-local scope; the helper manages the standard waitable
+set and resolves owned handles. A selected deadline cancels the active window,
+drops its calls/timers/set, releases that window's pause/shutdown deferral, and
+returns the existing timeout outcome. Recovery then follows the same owner-aware
+unwind as sequential work. Root Cancel is checked before selecting timeout.
+No host task registry, graph dispatch, extra Store or cancellation WIT was added.
+
+Ready call completions are delivered before deadline selection regardless of
+notification order. Timer completions never count as item completions. Each wait
+resolves its deadline timer before returning an ordinary event; branch assembly
+can then await other I/O without overwriting or inheriting a live timer. This
+creates a timer per scoped wait, rather than retaining one across assembly. The
+controlled size/latency comparison must include this cost; no performance claim
+is inferred from correctness tests.
+
+A shared `WindowCancel` helper handles expiry observed around launch/assembly
+boundaries without waiting for peers. These checks prevent a fast branch from
+starting its next call after the enclosing scope expires. Parallel preparation
+is checked before entry and again before Agent invocation; these checks do not
+yet interrupt a blocking preparation import while it is running. Split also
+checks between windows and after final assembly. Cache identity is
+`cooperative-waits=shared-v6`; helpers retain the existing 16-value state transfer.
+
+A Split's own timeout no longer forces sequential fallback. Other eligibility
+rules remain: Split/Agent retries, Agent-owned deadlines, workflow-agent bodies
+and breakpoint shapes still have their current restrictions. W073 and the DSL
+field documentation now describe the implemented timeout behavior. This does
+not declare targeted per-Agent sibling preservation or the full G6 gate complete.
+
+New coverage executes the real emitted helpers with deterministic event ordering
+and normally composed workflows with production HTTP I/O:
+
+- Four helper tests cover ready/deadline ties (including already-due and STARTED
+  events), all three legal cancel resolutions, root/parent cancellation priority,
+  lifecycle timer cleanup, exact handle ownership and balanced deferral.
+- Enclosing While expiry cancels live Split windows, independently advancing
+  branches, depth-wavefront branches, and parallel calls inside two Embed layers.
+- Split-owned expiry retains two overlapping calls and cleans both pending
+  headers or partial response bodies before the handler completes.
+- Success controls enforce overlap with a two-request barrier, complete in
+  reverse order, retain input-order results, and replay a durable result without
+  sending another request. Ordinary HTTP 503 still reaches normal recovery in
+  durable and non-durable workflows.
+- A fast branch completes one request, spends 600 ms in a debug callback under a
+  500 ms enclosing budget, and never sends its next request. Its pending peer
+  closes before the enclosing timeout handler completes.
+
+Verification on the final source: 609 compiler library tests and 392 direct
+workflow execution tests passed (three manual benchmarks ignored), with
+`direct-wasm-integration-tests` enabled. Feature-gated all-target workflows Clippy,
+Rust formatting, `git diff --check` and patterns-page JavaScript syntax passed.
+The Agent/stdlib/runtime sources and WIT did not change; the suite reused the
+previously rebuilt component bundle. No fresh component build, browser visual
+inspection, database/server E2E, soak or controlled size/latency run is claimed.
+
+Own Embed/AI/tool budgets, interruptible preparation, individual timed-Agent sibling
+survival, cleanup grace/non-cooperation, authenticated server/multi-owner E2E,
+resource soak, controlled paired measurements and superseded-path retirement
+remain open. E128 stays in place for Agent/Embed timeout syntax.

@@ -2113,7 +2113,7 @@ pub struct SplitConfig {
     /// per-agent instance pool).
     ///
     /// When > 1 and the Split body is an eligible single-Agent subgraph (no
-    /// breakpoints, no split-level retries/timeout, not a workflow-agent
+    /// breakpoints, no split-level retries, not a workflow-agent
     /// child), iterations run as CONCURRENT windows: agent calls are launched
     /// as component-model-async subtasks and their I/O overlaps. Ineligible
     /// shapes keep the strictly sequential execution (advisory W073).

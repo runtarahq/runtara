@@ -63,13 +63,14 @@ const STATE: [u32; 16] = [
     DEADLINE_STATUS,
 ];
 pub(super) const HELPER_PARAMS: usize = STATE.len();
-pub(super) const HELPER_COUNT: usize = 5;
+pub(super) const HELPER_COUNT: usize = 6;
 
 #[derive(Clone, Copy)]
 pub(super) enum Helper {
     Poll,
     Boundary,
     Checkpoint,
+    WindowCancel,
     Await,
     WindowWait,
 }
@@ -79,6 +80,7 @@ impl Helper {
         Self::Poll,
         Self::Boundary,
         Self::Checkpoint,
+        Self::WindowCancel,
         Self::Await,
         Self::WindowWait,
     ];
@@ -138,7 +140,7 @@ fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper:
         emit_entry_cancel_return(body);
         body.instruction(&Instruction::End);
     }
-    if matches!(helper, Helper::Await) {
+    if matches!(helper, Helper::Await | Helper::WindowWait) {
         body.instruction(&Instruction::LocalGet(CURSOR));
         body.instruction(&Instruction::I32Const(4));
         body.instruction(&Instruction::I32Eq);
@@ -187,6 +189,7 @@ pub(super) fn helper_body(helper: Helper, indices: &DirectCoreFunctionIndices) -
         Helper::Poll => emit_poll_before_call(&mut body, &inline),
         Helper::Boundary => emit_retained_boundary(&mut body, &inline),
         Helper::Checkpoint => emit_checkpoint_signal(&mut body, &inline),
+        Helper::WindowCancel => cancel_window_deadline(&mut body, &inline),
         Helper::Await => {
             body.instruction(&Instruction::LocalGet(STATUS));
             emit_await_call(&mut body, &inline);
@@ -491,13 +494,71 @@ pub(super) fn emit_window_close(body: &mut Function, indices: &DirectCoreFunctio
 }
 
 pub(super) fn emit_window_boundary(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    release_window_boundary(body);
+    if !indices.omit_runtime {
+        super::checkpoint::emit_check_signals_and_suspend(body, indices);
+    }
+}
+
+fn release_window_boundary(body: &mut Function) {
     body.instruction(&Instruction::LocalGet(DEFER_BOUNDARY));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Sub);
     body.instruction(&Instruction::LocalSet(DEFER_BOUNDARY));
-    if !indices.omit_runtime {
-        super::checkpoint::emit_check_signals_and_suspend(body, indices);
+}
+
+/// Select an enclosing deadline in the entry function, where its owner/frame
+/// live. The helper owns only this wait's timer and the active window's handles.
+/// Resolve the timer on every return: branch assembly can itself await I/O and
+/// must not inherit or overwrite a live timer from the preceding window wait.
+pub(super) fn emit_scoped_window_wait(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    failure_target: Option<super::DirectFailureTarget>,
+) {
+    if indices.monotonic_now.is_some() {
+        super::deadline_scope::arm(body, indices, false);
     }
+    emit_window_wait(body, indices);
+    if indices.monotonic_now.is_some() {
+        body.instruction(&Instruction::LocalGet(TIMED_OUT));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        super::deadline_scope::select(body);
+        body.instruction(&Instruction::End);
+        super::deadline_scope::propagate(body, indices, failure_target);
+    }
+}
+
+/// Check around synchronous preparation/assembly without waiting for peers.
+/// When expiry is already known, clean the whole owned window before unwind;
+/// otherwise a fast branch could keep launching work while its sibling hangs.
+pub(super) fn emit_window_deadline_boundary(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    failure_target: Option<super::DirectFailureTarget>,
+) {
+    if indices.monotonic_now.is_none() {
+        return;
+    }
+    super::deadline_scope::choose(body, indices, false);
+    body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
+    body.instruction(&Instruction::I64Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    assert!(call_helper(body, indices, Helper::WindowCancel));
+    super::deadline_scope::select(body);
+    super::deadline_scope::propagate(body, indices, failure_target.map(|target| target.nested(1)));
+    body.instruction(&Instruction::End);
+}
+
+fn cancel_window_deadline(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if !indices.omit_runtime {
+        poll(body, indices, false);
+    }
+    close_all(body, indices);
+    // Recovery resumes this invocation, so balance the window's deferral.
+    // Retained pause/shutdown intent remains pending until a safe boundary.
+    release_window_boundary(body);
+    helper_return(body, 4);
 }
 
 /// Wait for one event. A polling timer is internal to this wait and never
@@ -506,6 +567,37 @@ pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunction
     if call_helper(body, indices, Helper::WindowWait) {
         return;
     }
+    deadline_handle(body);
+    body.instruction(&Instruction::LocalTee(HANDLE));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(HANDLE));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // Deliver already-ready calls before selecting expiry, regardless of the
+    // notification order. The caller drains/assembles one ordinary event per
+    // return; internal timer events never decrement its pending-call count.
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
+    body.instruction(&Instruction::Call(indices.waitable_set_poll.unwrap()));
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(1));
+    observe_window_event(body, indices);
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    cancel_window_deadline(body, indices);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
     if !indices.omit_runtime {
         body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
         body.instruction(&Instruction::I32Eqz);
@@ -535,30 +627,43 @@ pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunction
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::Call(indices.waitable_set_wait.unwrap()));
     handle_wait_event(body, indices);
+    observe_window_event(body, indices);
     if !indices.omit_runtime {
-        // Consume only a RETURNED timer; STARTED still owns its handle.
-        load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
-        body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
-        body.instruction(&Instruction::I32Eq);
-        load(body, DIRECT_PSPLIT_EVENT_OFFSET, 4);
-        body.instruction(&Instruction::I32Const(RETURNED));
-        body.instruction(&Instruction::I32Eq);
-        body.instruction(&Instruction::I32And);
-        body.instruction(&Instruction::If(BlockType::Empty));
-        body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
-        body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
-        set_zero(body, WINDOW_TIMER);
-        body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::I32Store(mem(4)));
-        body.instruction(&Instruction::End);
-        body.instruction(&Instruction::Else);
-        // An eager timer needs another poll, not an uninterruptible wait.
-        body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::I32Store(mem(4)));
+        // An eager lifecycle timer needs another poll, not an
+        // uninterruptible wait on an otherwise empty waitable set.
         body.instruction(&Instruction::End);
     }
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+}
+
+fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 4);
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    deadline_handle(body);
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::LocalSet(DEADLINE_STATUS));
+    body.instruction(&Instruction::Else);
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
+    set_zero(body, WINDOW_TIMER);
+    body.instruction(&Instruction::Else);
+    close_deadline(body, indices);
+    helper_return(body, 0);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 /// Clear a resolved call's slot before its handle can be recycled by the engine.

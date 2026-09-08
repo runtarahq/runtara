@@ -427,7 +427,6 @@ pub(super) fn emit_split_plan(
         parallel_window,
         durable,
         max_retries,
-        timeout_ms,
         nested_plan,
     );
     // When the Split has an onError route, redirect every fatal failure (a

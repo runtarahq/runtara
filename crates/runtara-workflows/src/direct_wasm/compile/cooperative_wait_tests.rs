@@ -79,6 +79,7 @@ fn emitted_helper(context: Context) -> Vec<u8> {
                 exports.export(export.name, kind, export.index);
             }
             exports.export("test-await", ExportKind::Func, imported + defined - 2);
+            exports.export("test-window", ExportKind::Func, imported + defined - 1);
             exports.export("test-memory", ExportKind::Memory, 0);
             out.section(&exports);
         } else if let Some((id, range)) = payload.as_section() {
@@ -123,6 +124,31 @@ fn run(
 #[allow(clippy::too_many_arguments)]
 fn run_in_context(
     context: Context,
+    ready: &[(i32, i32)],
+    waiting: &[(i32, i32)],
+    target: i32,
+    deadline: i32,
+    cancel_returns: i32,
+    expected_outcome: i32,
+    expected_cancelled: &[i32],
+) {
+    run_helper(
+        context,
+        false,
+        ready,
+        waiting,
+        target,
+        deadline,
+        cancel_returns,
+        expected_outcome,
+        expected_cancelled,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_helper(
+    context: Context,
+    window: bool,
     ready: &[(i32, i32)],
     waiting: &[(i32, i32)],
     target: i32,
@@ -257,14 +283,23 @@ fn run_in_context(
             ready: ready.iter().copied().collect(),
             waiting: waiting.iter().copied().collect(),
             live,
-            joined: BTreeMap::from([(99, 200)]),
+            joined: if window {
+                BTreeMap::from([(1, 100), (99, 100)])
+            } else {
+                BTreeMap::from([(99, 200)])
+            },
             cancel_returns,
             root_cancel: matches!(context, Context::RootCancel),
             ..Default::default()
         },
     );
     let instance = linker.instantiate(&mut store, &module).unwrap();
-    let function = instance.get_func(&mut store, "test-await").unwrap();
+    let function = instance
+        .get_func(
+            &mut store,
+            if window { "test-window" } else { "test-await" },
+        )
+        .unwrap();
     assert_eq!(function.ty(&store).params().len(), HELPER_PARAMS);
     let mut params = vec![Val::I32(0); HELPER_PARAMS];
     let mut set =
@@ -273,8 +308,15 @@ fn run_in_context(
     set(DEADLINE_STATUS, deadline);
     set(WINDOW_ACTIVE, 1);
     set(WINDOW_BEGIN, 1024);
-    set(WINDOW_END, 1024 + super::super::DIRECT_PSPLIT_SLOT_STRIDE);
-    set(super::super::DIRECT_PSPLIT_WS_LOCAL, 200);
+    set(
+        WINDOW_END,
+        1024 + super::super::DIRECT_PSPLIT_SLOT_STRIDE * if window { 2 } else { 1 },
+    );
+    set(DEFER_BOUNDARY, 3);
+    set(
+        super::super::DIRECT_PSPLIT_WS_LOCAL,
+        if window { 100 } else { 200 },
+    );
     let mem = instance.get_memory(&mut store, "test-memory").unwrap();
     mem.write(
         &mut store,
@@ -282,6 +324,21 @@ fn run_in_context(
         &99i32.to_le_bytes(),
     )
     .unwrap();
+    if window {
+        mem.write(
+            &mut store,
+            1024 + super::super::DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET as usize,
+            &1i32.to_le_bytes(),
+        )
+        .unwrap();
+        mem.write(
+            &mut store,
+            1024 + super::super::DIRECT_PSPLIT_SLOT_STRIDE as usize
+                + super::super::DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET as usize,
+            &99i32.to_le_bytes(),
+        )
+        .unwrap();
+    }
     let mut result = vec![Val::I32(0); HELPER_PARAMS + 1];
     function.call(&mut store, &params, &mut result).unwrap();
     assert_eq!(result[HELPER_PARAMS].i32(), Some(expected_outcome));
@@ -290,6 +347,33 @@ fn run_in_context(
         result[STATE.iter().position(|l| *l == DEADLINE_STATUS).unwrap()].i32(),
         Some(0)
     );
+    if window {
+        if expected_outcome == 0 {
+            // An ordinary call is delivered intact; the entry drops it and
+            // advances its slot, rather than counting a timer as a completion.
+            assert_eq!(store.data().live, BTreeSet::from([1, 99]));
+            assert_eq!(store.data().joined, BTreeMap::from([(1, 100), (99, 100)]));
+            let mut event = [0; 8];
+            mem.read(&store, DIRECT_PSPLIT_EVENT_OFFSET as usize, &mut event)
+                .unwrap();
+            assert_eq!(event, [1, 0, 0, 0, 2, 0, 0, 0]);
+            assert_eq!(
+                result[STATE.iter().position(|l| *l == DEFER_BOUNDARY).unwrap()].i32(),
+                Some(3)
+            );
+        } else {
+            assert!(store.data().live.is_empty());
+            assert!(store.data().joined.is_empty());
+            assert_eq!(store.data().closed_sets, vec![100]);
+            if expected_outcome == 4 {
+                assert_eq!(
+                    result[STATE.iter().position(|l| *l == DEFER_BOUNDARY).unwrap()].i32(),
+                    Some(2)
+                );
+            }
+        }
+        return;
+    }
     if matches!(expected_outcome, 2 | 3) {
         assert!(store.data().live.is_empty());
         assert!(store.data().joined.is_empty());
@@ -359,4 +443,119 @@ fn emitted_deadline_root_cancel_wins_before_timeout_recovery() {
 #[test]
 fn emitted_deadline_root_poll_timer_is_resolved_without_touching_sibling() {
     run_in_context(Context::Root, &[], &[(2, 2)], 17, 33, CANCELLED, 4, &[1, 3]);
+}
+
+#[test]
+fn emitted_window_deadline_delivers_ready_calls_before_expiry() {
+    for (ready, cancelled) in [
+        (vec![(1, 2), (2, 2)], vec![2]),
+        (vec![(2, 2), (1, 2)], vec![]),
+        (vec![(2, 1), (1, 1), (2, 2), (1, 2)], vec![]),
+        (vec![(1, 2)], vec![2]),
+    ] {
+        run_helper(
+            Context::Callable,
+            true,
+            &ready,
+            &[],
+            17,
+            33,
+            CANCELLED,
+            0,
+            &cancelled,
+        );
+    }
+    run_helper(
+        Context::Callable,
+        true,
+        &[(1, 2)],
+        &[],
+        17,
+        RETURNED,
+        CANCELLED,
+        0,
+        &[],
+    );
+}
+
+#[test]
+fn emitted_window_deadline_resolves_every_owned_call_and_releases_deferral() {
+    for returned in [RETURNED, START_CANCELLED, CANCELLED] {
+        run_helper(
+            Context::Callable,
+            true,
+            &[(2, 2)],
+            &[],
+            17,
+            33,
+            returned,
+            4,
+            &[1, 99],
+        );
+    }
+    run_helper(
+        Context::Callable,
+        true,
+        &[],
+        &[],
+        17,
+        RETURNED,
+        CANCELLED,
+        4,
+        &[1, 99],
+    );
+}
+
+#[test]
+fn emitted_window_deadline_preserves_root_and_parent_cancel_priority() {
+    run_helper(
+        Context::RootCancel,
+        true,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        2,
+        &[1, 99],
+    );
+    run_helper(
+        Context::Callable,
+        true,
+        &[],
+        &[(0, 6)],
+        17,
+        33,
+        CANCELLED,
+        3,
+        &[2, 1, 99],
+    );
+}
+
+#[test]
+fn emitted_window_deadline_resolves_the_lifecycle_poll_timer() {
+    run_helper(
+        Context::Root,
+        true,
+        &[],
+        &[(2, 2)],
+        17,
+        33,
+        CANCELLED,
+        4,
+        &[1, 99, 3],
+    );
+    // A completed lifecycle timer is internal too, and never escapes as a
+    // completed Agent call or decrements the caller's pending count.
+    run_helper(
+        Context::Root,
+        true,
+        &[],
+        &[(3, 2), (2, 2)],
+        17,
+        33,
+        CANCELLED,
+        4,
+        &[1, 99, 3],
+    );
 }

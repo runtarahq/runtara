@@ -1372,7 +1372,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint and not a workflow-agent child, on a Split with no retries or timeout; other shapes run sequentially.",
+                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint and not a workflow-agent child, on a Split with no retries; enclosing and Split timeouts retain the concurrent window, while other shapes run sequentially.",
                     step_id, parallelism
                 )
             }

@@ -789,6 +789,11 @@ fn emit_branch_scheduler(
 
         body.instruction(&Instruction::Block(BlockType::Empty)); // $drive_done (L0)
         body.instruction(&Instruction::Loop(BlockType::Empty)); // $drive (L1)
+        super::cooperative_wait::emit_window_deadline_boundary(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(4)),
+        );
 
         // if SCHED == NEEDS_LAUNCH: launch node[cursor].
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
@@ -822,6 +827,7 @@ fn emit_branch_scheduler(
                     route_ptr_local,
                     route_len_local,
                     Some(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL),
+                    failure_target.map(|target| target.nested(6)),
                 );
             } else {
                 // Sync step: run it inline (blocking), then fall through the eager
@@ -982,7 +988,11 @@ fn emit_branch_scheduler(
     body.instruction(&Instruction::BrIf(1)); // -> $sched_done (Br 1: Loop $sched, Block $sched_done)
 
     // Poll without publishing terminal state while peer calls remain active.
-    super::cooperative_wait::emit_window_wait(body, indices);
+    super::cooperative_wait::emit_scoped_window_wait(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(2)),
+    );
     // Only a settled subtask advances a branch.
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET + 4));
     body.instruction(&Instruction::I32Load(mem32()));
@@ -1363,12 +1373,13 @@ fn emit_concurrent_branches(
                     route_ptr_local,
                     route_len_local,
                     None, // wavefront: drain-all, no per-branch pending flag
+                    failure_target,
                 );
             }
         }
 
         // DRAIN depth d.
-        emit_drain_pending(body, indices, subtask_drop);
+        emit_drain_pending(body, indices, subtask_drop, failure_target);
         super::cooperative_wait::emit_window_close(body, indices);
 
         // ASSEMBLE depth d in TWO passes: non-suspending nodes first, then
@@ -1385,6 +1396,11 @@ fn emit_concurrent_branches(
                 if is_suspending_node(node) != suspending_pass {
                     continue;
                 }
+                super::cooperative_wait::emit_window_deadline_boundary(
+                    body,
+                    indices,
+                    failure_target,
+                );
                 if matches!(node, DirectRunPlan::Agent { .. }) {
                     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
                     body.instruction(&Instruction::I32Const(
@@ -1472,7 +1488,9 @@ fn emit_branch_launch(
     // driver waits for it; an EAGER/skipped launch leaves `flag` at 0 so the driver
     // assembles immediately. `None` = the wavefront's fire-and-drain-all join.
     sched_pending_flag: Option<u32>,
+    failure_target: Option<DirectFailureTarget>,
 ) {
+    super::cooperative_wait::emit_window_deadline_boundary(body, indices, failure_target);
     let component_id = pool_member_component_id(branch.agent_component_id, pool_member);
     let invoke = indices
         .agent_invokes_async
@@ -1590,6 +1608,12 @@ fn emit_branch_launch(
         indices,
         DIRECT_PSPLIT_LAUNCH_LOCAL,
         DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
+    );
+
+    super::cooperative_wait::emit_window_deadline_boundary(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(1)),
     );
 
     // slot.state = AGENT_READY, then async-invoke into slot+RESULT_OFFSET.

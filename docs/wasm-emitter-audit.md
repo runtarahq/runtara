@@ -1258,3 +1258,21 @@ This is partial G5/G6/G7 qualification. Parallel scope timers, own Embed/AI/tool
 budgets, preparation waits, bounded cleanup grace, E2E, soak and controlled size/
 timing comparisons remain required. Public Agent/Embed timeout syntax still
 returns E128. Existing loop zero-timeout behavior remains disabled.
+
+
+### Parallel deadline qualification · 2026-09-08
+
+Enclosing While/Split deadlines now interrupt pending parallel windows through
+the standard shared guest wait. A Split's own timeout retains parallel I/O for
+otherwise eligible bodies. Deterministic emitted-helper tests verify ready-event
+ties, timer/call separation, cancellation resolution and balanced pause deferral.
+Production HTTP tests require two live calls, cleanup before recovery, ordered
+results despite reverse completion, ordinary error routing, and durable replay.
+A fast-branch overrun test also forbids its next HTTP request while requiring
+cleanup of the pending peer. Tests are in `compile/cooperative_wait_tests.rs` and
+`tests/cooperative_workflow_cancellation/{mod.rs,parallel_deadline.rs}`.
+
+Individual timed-Agent sibling preservation, overlapping nested scopes,
+interruptible preparation, own Embed/AI/tool deadlines and cleanup grace are not
+fully qualified. Agent/Embed timeout syntax remains E128-gated. The implementation
+record lists final verification; this stage adds no controlled benchmark claim.

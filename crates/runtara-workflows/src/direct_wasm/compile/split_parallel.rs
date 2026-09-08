@@ -26,7 +26,7 @@
 //! `spikes/wasip3-stackful` (`run-both-sync`).
 //!
 //! V1 eligibility (anything else degrades to the sequential lowering):
-//!   - Split: no retries or timeout; `dontStopOnFailed` stays on the sequential
+//!   - Split: no retries; `dontStopOnFailed` stays on the sequential
 //!     lowering.
 //!   - Body: exactly one Agent step (terminal next), no retries, no breakpoint,
 //!     and not a workflow-agent child (those share the parent's
@@ -138,7 +138,6 @@ pub(super) fn parallel_agent_body<'a>(
     parallel_window: Option<u32>,
     durable: bool,
     max_retries: u32,
-    timeout_ms: Option<u64>,
     nested_plan: &'a DirectRunPlan,
 ) -> Option<ParallelAgentBody<'a>> {
     if !static_data.parallel_enabled {
@@ -146,11 +145,10 @@ pub(super) fn parallel_agent_body<'a>(
     }
     let window = parallel_window?;
     // Split-level durability is fine: the whole-split checkpoint if/else wraps
-    // the item region (parallel windows included) unchanged. Split RETRIES and
-    // TIMEOUT add extra frame blocks around the item region whose branch-depth
-    // interplay is not wired for the parallel arm yet — sequential fallback.
+    // the item region (parallel windows included) unchanged. The shared wait
+    // observes the Split deadline. Split retries retain sequential fallback.
     let _ = durable;
-    if window <= 1 || max_retries > 0 || timeout_ms.is_some() {
+    if window <= 1 || max_retries > 0 {
         return None;
     }
     let DirectRunPlan::Agent {
@@ -242,7 +240,6 @@ fn collect_parallel_agent_components(
             parallel_window,
             durable,
             max_retries,
-            timeout_ms,
             nested_plan,
             next_plan,
             error_plan,
@@ -253,7 +250,6 @@ fn collect_parallel_agent_components(
                 *parallel_window,
                 *durable,
                 *max_retries,
-                *timeout_ms,
                 nested_plan,
             ) {
                 let pool =
@@ -487,13 +483,18 @@ pub(super) fn emit_drain_pending(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     subtask_drop: u32,
+    failure_target: Option<super::DirectFailureTarget>,
 ) {
     body.instruction(&Instruction::Block(BlockType::Empty)); // $drained
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $drain
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
-    super::cooperative_wait::emit_window_wait(body, indices);
+    super::cooperative_wait::emit_scoped_window_wait(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(2)),
+    );
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET + 4));
     body.instruction(&Instruction::I32Load(mem32()));
     body.instruction(&Instruction::I32Const(SUBTASK_RETURNED));
@@ -684,9 +685,8 @@ fn emit_pool_reinvoke(
 /// The chunked launch/drain/assemble item pipeline. Emitted INSIDE the split
 /// prologue (frames, source, count, results and heap watermark already set
 /// up by `emit_split_plan`), replacing the sequential item loop. The caller
-/// guarantees: no retries and no timeout — so no retry frame or deadline
-/// checks exist around this. A durable outer Split checkpoint may still wrap
-/// the item region.
+/// guarantees no Split retry wrapper. The active enclosing deadline covers
+/// every window; a durable outer Split checkpoint may wrap the item region.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_parallel_split_items(
     body: &mut WasmFunction,
@@ -742,6 +742,14 @@ pub(super) fn emit_parallel_split_items(
     // item cursor starts at 0 (set by the caller, mirroring sequential).
     body.instruction(&Instruction::Block(BlockType::Empty)); // $chunks_done
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $chunks
+    // Check before launching another window, including the final boundary
+    // after assembly. There are no pending handles or deferred acknowledgements
+    // here; an expired owner can unwind without leaking window state.
+    super::loop_deadline::check(
+        body,
+        indices,
+        fresh_failure_target.map(|target| target.nested(2)),
+    );
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::I32GeU);
@@ -829,6 +837,11 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::I32GeU);
     body.instruction(&Instruction::BrIf(1));
 
+    super::cooperative_wait::emit_window_deadline_boundary(
+        body,
+        indices,
+        fresh_failure_target.map(|target| target.nested(4)),
+    );
     body.instruction(&Instruction::Block(BlockType::Empty)); // $skip
     // Any retptr error below (mapping, validation, connection) skips the
     // launch — the slot stays EMPTY and assemble reproduces the exact failure
@@ -1033,6 +1046,11 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
         body.instruction(&Instruction::I32Eqz);
         body.instruction(&Instruction::If(BlockType::Empty));
+        super::cooperative_wait::emit_window_deadline_boundary(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(6)),
+        );
         emit_pool_reinvoke(
             body,
             &invoke_pool,
@@ -1048,6 +1066,11 @@ pub(super) fn emit_parallel_split_items(
         emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
         body.instruction(&Instruction::End);
     } else {
+        super::cooperative_wait::emit_window_deadline_boundary(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(5)),
+        );
         emit_pool_reinvoke(
             body,
             &invoke_pool,
@@ -1076,7 +1099,12 @@ pub(super) fn emit_parallel_split_items(
     // Wait until every launched subtask has RETURNED. Results are written
     // through the slot retptrs by the runtime before the completion event. The
     // Cooperative signal observation remains live while every call is pending.
-    emit_drain_pending(body, indices, subtask_drop);
+    emit_drain_pending(
+        body,
+        indices,
+        subtask_drop,
+        fresh_failure_target.map(|target| target.nested(2)),
+    );
 
     // ── CONCURRENT RETRY ROUNDS (§3.4) ───────────────────────────────────────
     // Non-durable retrying items back off in the SAME waitable-set: each round
@@ -1322,7 +1350,12 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::BrIf(1)); // -> $rounds_done
 
         // ---- drain the backoff timers (they overlap here) ----
-        emit_drain_pending(body, indices, subtask_drop);
+        emit_drain_pending(
+            body,
+            indices,
+            subtask_drop,
+            fresh_failure_target.map(|target| target.nested(4)),
+        );
 
         // ---- re-invoke the timed-out items CONCURRENTLY ----
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
@@ -1418,7 +1451,12 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::End); // $reinvoke_done
 
         // ---- drain the re-invokes, then classify again ----
-        emit_drain_pending(body, indices, subtask_drop);
+        emit_drain_pending(
+            body,
+            indices,
+            subtask_drop,
+            fresh_failure_target.map(|target| target.nested(4)),
+        );
         body.instruction(&Instruction::Br(0)); // -> $rounds
         body.instruction(&Instruction::End); // loop $rounds
         body.instruction(&Instruction::End); // $rounds_done
@@ -1438,6 +1476,11 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::I32GeU);
     body.instruction(&Instruction::BrIf(1));
 
+    super::cooperative_wait::emit_window_deadline_boundary(
+        body,
+        indices,
+        fresh_failure_target.map(|target| target.nested(4)),
+    );
     super::split::emit_split_item_pipeline(
         body,
         indices,

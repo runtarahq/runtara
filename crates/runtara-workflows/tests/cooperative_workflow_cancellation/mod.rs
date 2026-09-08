@@ -48,6 +48,12 @@ impl RuntimeHost for Host {
         self.inner.fail(error).await
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        if self.scenario == Scenario::ParallelDeadlineAfterAssemble
+            && kind == "step_debug_end"
+            && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == "b"
+        {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
         self.events
             .lock()
             .unwrap()
@@ -55,7 +61,7 @@ impl RuntimeHost for Host {
         self.inner.custom_event(kind, payload).await
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {
-        Ok(false)
+        Ok(self.scenario == Scenario::ParallelDeadlineAfterAssemble)
     }
     async fn breakpoint_pause(&self) -> Result<(), String> {
         self.inner.breakpoint_pause().await
@@ -226,7 +232,10 @@ enum Scenario {
     NestedParallelSplit,
     SignalReadFailure,
     ParallelSplit,
+    TimedParallelSplit,
+    TimedParallelSplitBody,
     ParallelBranches,
+    ParallelDeadlineAfterAssemble,
     WavefrontBranches,
     ParallelSignalReadFailure,
     PauseBranches,
@@ -476,6 +485,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             | Scenario::HubspotReadBody
             | Scenario::SharepointDownloadBody
             | Scenario::ShopifyImagesBody
+            | Scenario::TimedParallelSplitBody
     );
     let fail_signal_read = matches!(
         scenario,
@@ -484,10 +494,13 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
     let parallel = matches!(
         scenario,
         Scenario::ParallelSplit
+            | Scenario::TimedParallelSplit
+            | Scenario::TimedParallelSplitBody
             | Scenario::EmbedParallel
             | Scenario::NestedParallelBranches
             | Scenario::NestedParallelSplit
             | Scenario::ParallelBranches
+            | Scenario::ParallelDeadlineAfterAssemble
             | Scenario::WavefrontBranches
             | Scenario::ParallelSignalReadFailure
             | Scenario::PauseBranches
@@ -724,6 +737,8 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         graph = if matches!(
             scenario,
             Scenario::ParallelSplit
+                | Scenario::TimedParallelSplit
+                | Scenario::TimedParallelSplitBody
                 | Scenario::ParallelSignalReadFailure
                 | Scenario::NestedParallelSplit
         ) {
@@ -731,6 +746,18 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         } else {
             serde_json::from_str(&parallel_http_branches_graph(&url, true))?
         };
+        if scenario == Scenario::ParallelDeadlineAfterAssemble {
+            graph["steps"]["b"]["inputMapping"]["url"] = immediate(format!("{url}/fast").into());
+            graph["steps"]["after"] = graph["steps"]["b"].clone();
+            graph["steps"]["after"]["id"] = "after".into();
+            let edges = graph["executionPlan"].as_array_mut().unwrap();
+            for edge in edges.iter_mut() {
+                if edge["fromStep"] == "b" {
+                    edge["toStep"] = "after".into();
+                }
+            }
+            edges.push(serde_json::json!({"fromStep":"after","toStep":"finish"}));
+        }
         if scenario == Scenario::WavefrontBranches {
             for branch in ["b", "c"] {
                 let wait = format!("wait-{branch}");
@@ -782,7 +809,20 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             },"executionPlan":[{"fromStep":id,"toStep":"finish"},{"fromStep":id,"toStep":"handled","label":"onError"}]});
         }
     }
-    if deadline {
+    let own_split_deadline = matches!(
+        scenario,
+        Scenario::TimedParallelSplit | Scenario::TimedParallelSplitBody
+    );
+    if own_split_deadline {
+        graph["steps"]["split"]["config"]["timeout"] = 500.into();
+        graph["steps"]["handled"] = serde_json::json!({"id":"handled","stepType":"Finish","inputMapping":{
+            "code":{"valueType":"reference","value":"steps.__error.code"},
+            "stepId":{"valueType":"reference","value":"steps.__error.stepId"}}});
+        graph["executionPlan"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"fromStep":"split","toStep":"handled","label":"onError"}));
+    } else if deadline {
         graph = serde_json::json!({"durable":false,"entryPoint":"outer","steps":{
             "outer":{"id":"outer","stepType":"While","config":{"maxIterations":1,"timeout":500},
                 "condition":{"type":"operation","op":"EQ","arguments":[
@@ -804,7 +844,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                 execution_graph: graph,
                 child_workflows: children,
                 output_dir: dir.path().into(),
-                track_events: false,
+                track_events: scenario == Scenario::ParallelDeadlineAfterAssemble,
                 agent_catalog: None,
                 agent_slug: None,
             },
@@ -1108,9 +1148,10 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                         if started == expected_requests && !deadline {
                             server_host.requested.store(true, Ordering::SeqCst);
                         }
-                        let respond = scenario.drains_normally() || (scenario == Scenario::CheckpointCancelBranches && started == 1);
+                        let deadline_fast = scenario == Scenario::ParallelDeadlineAfterAssemble && request.starts_with(b"GET /fast ");
+                        let respond = scenario.drains_normally() || (scenario == Scenario::CheckpointCancelBranches && started == 1) || deadline_fast;
                         if respond {
-                            while server_host.observed.load(Ordering::SeqCst) == 0 {
+                            while if deadline_fast { server_host.requests.load(Ordering::SeqCst) < 2 } else { server_host.observed.load(Ordering::SeqCst) == 0 } {
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await?;
@@ -1158,12 +1199,15 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             let runtara_component_host::InvokeExit::Completed(output) = &run.exit else {
                 anyhow::bail!("expected enclosing timeout recovery: {:?}", run.exit);
             };
-            anyhow::ensure!(serde_json::from_slice::<Value>(output)? == serde_json::json!({"code":"WHILE_TIMEOUT","stepId":"outer"}), "wrong timeout owner: {:?}", run.exit);
+            anyhow::ensure!(serde_json::from_slice::<Value>(output)? == serde_json::json!({"code": if own_split_deadline {"SPLIT_TIMEOUT"} else {"WHILE_TIMEOUT"},"stepId": if own_split_deadline {"split"} else {"outer"}}), "wrong timeout owner: {:?}", run.exit);
             tokio::time::timeout(Duration::from_secs(2), host.wait_closed()).await?;
             anyhow::ensure!(host.requests.load(Ordering::SeqCst) == expected_requests, "cancelled AI work sent another request");
             anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst), "scope timeout acknowledged a root command");
             anyhow::ensure!(!host.inner.checkpoints.lock().unwrap().keys().any(|key| key.contains("attempt")), "enclosing timeout became a child attempt checkpoint");
             anyhow::ensure!(host.inner.failed.lock().unwrap().is_none(), "handled deadline published failure");
+            if scenario == Scenario::ParallelDeadlineAfterAssemble {
+                anyhow::ensure!(host.events.lock().unwrap().iter().any(|(kind,payload)| kind == "step_debug_end" && serde_json::from_slice::<Value>(payload).unwrap()["step_id"] == "b"), "fast branch never reached its assembly boundary");
+            }
             return anyhow::Ok(());
         }
         if fail_signal_read {
@@ -1522,4 +1566,36 @@ async fn emitted_inherited_timeout_skips_nested_embed_retry_and_recovery() -> an
         run_with_deadline(scenario, true).await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn emitted_inherited_timeout_cancels_live_parallel_windows() -> anyhow::Result<()> {
+    for scenario in [
+        Scenario::ParallelSplit,
+        Scenario::ParallelBranches,
+        Scenario::WavefrontBranches,
+        Scenario::EmbedParallel,
+    ] {
+        run_with_deadline(scenario, true).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn emitted_split_own_timeout_keeps_parallel_io_and_cleans_both_calls() -> anyhow::Result<()> {
+    for scenario in [
+        Scenario::TimedParallelSplit,
+        Scenario::TimedParallelSplitBody,
+    ] {
+        run_with_deadline(scenario, true).await?;
+    }
+    Ok(())
+}
+
+mod parallel_deadline;
+
+#[tokio::test]
+async fn emitted_expired_parallel_scope_stops_fast_branch_before_next_request() -> anyhow::Result<()>
+{
+    run_with_deadline(Scenario::ParallelDeadlineAfterAssemble, true).await
 }
