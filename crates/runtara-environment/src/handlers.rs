@@ -1558,10 +1558,15 @@ pub fn spawn_container_monitor(
     // allowed; a closed gate is bounded by its separate handoff lease. The
     // durable attempt fences cleanup when a recovered launch reuses its id.
     start_gate: Option<(StartGate, i32)>,
+    execution_lease: Option<crate::execution_lease::ExecutionLease>,
 ) {
     let instance_id = handle.instance_id.clone();
 
-    tokio::spawn(async move {
+    let lease_runner = runner.clone();
+    let lease_handle = handle.clone();
+    let lease_pool = pool.clone();
+    let lease_gate = start_gate.as_ref().map(|(gate, _)| gate.clone());
+    let monitoring = async move {
         if let Some((gate, attempt_count)) = start_gate {
             // Matched exhaustively rather than tested for `Opened`: a variant
             // added later must not silently join the failure set.
@@ -1702,6 +1707,29 @@ pub fn spawn_container_monitor(
                     timeout,
                 )
                 .await;
+            }
+        }
+    };
+    tokio::spawn(async move {
+        tokio::pin!(monitoring);
+        let Some(lease) = execution_lease else {
+            monitoring.await;
+            return;
+        };
+        tokio::select! {
+            () = &mut monitoring => {}
+            reason = lease.watch(&lease_pool, &lease_handle) => {
+                warn!(instance_id = %lease_handle.instance_id, handle_id = %lease_handle.handle_id, reason,
+                    "Stopping physical execution after ownership loss");
+                if let Err(error) = lease_runner.stop(&lease_handle).await {
+                    error!(%error, "Failed to stop execution after ownership loss");
+                }
+                if let Some(gate) = lease_gate {
+                    gate.cancel();
+                }
+                // The normal monitor still owns actual-exit observation,
+                // terminal fallback and exact-handle resource release.
+                monitoring.await;
             }
         }
     });

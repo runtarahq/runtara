@@ -34,6 +34,20 @@ pub struct ContainerInfo {
     pub timeout_seconds: Option<i64>,
 }
 
+impl ContainerInfo {
+    /// Reconstruct the persisted physical control handle, without live metrics.
+    pub fn runner_handle(&self) -> crate::runner::RunnerHandle {
+        crate::runner::RunnerHandle {
+            launch_id: self.launch_id.clone(),
+            handle_id: self.container_id.clone(),
+            instance_id: self.instance_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            started_at: self.started_at,
+            metrics: None,
+        }
+    }
+}
+
 /// Container registry client for PostgreSQL operations
 pub struct ContainerRegistry {
     pool: PgPool,
@@ -90,6 +104,21 @@ impl ContainerRegistry {
             .await?;
 
         Ok(containers)
+    }
+
+    /// Bounded candidates whose running owner lease expired. Recovery still
+    /// locks and rechecks each claim before changing any lifecycle state.
+    pub async fn expired_running_owners(&self) -> Result<Vec<ContainerInfo>> {
+        Ok(sqlx::query_as::<_, ContainerInfo>(
+            "SELECT cr.* FROM instance_launches launch \
+             JOIN container_registry cr ON cr.launch_id = launch.launch_id \
+                 AND cr.instance_id = launch.instance_id \
+             WHERE launch.state = 'running' AND launch.lease_owner IS NOT NULL \
+                 AND launch.lease_expires_at <= clock_timestamp() \
+             ORDER BY launch.lease_expires_at LIMIT 256",
+        )
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Get a specific container's info

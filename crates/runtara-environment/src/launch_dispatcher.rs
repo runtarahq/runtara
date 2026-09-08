@@ -889,6 +889,11 @@ impl LaunchDispatcher {
                     self.drain.clone(),
                     self.lifecycle_observers.clone(),
                     Some((gate.clone(), running.attempt_count)),
+                    Some(crate::execution_lease::ExecutionLease::new(
+                        self.owner.clone(),
+                        running.attempt_count,
+                        self.handoff_deadline(&running).unwrap_or_else(Instant::now),
+                    )),
                 );
                 if !gate.open() {
                     // Queue expiry, cancellation, or the durable gate

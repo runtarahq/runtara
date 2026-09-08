@@ -1452,8 +1452,6 @@ impl LaunchRepository {
             r#"
             UPDATE instance_launches
             SET state = 'running',
-                lease_owner = NULL,
-                lease_expires_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
               AND state = 'starting'
@@ -1513,6 +1511,51 @@ impl LaunchRepository {
 
         tx.commit().await?;
         Ok(Some(running.try_into()?))
+    }
+
+    /// Renew a live execution's existing lease after checking its exact
+    /// dispatcher claim and physical registry handle. An expired owner cannot
+    /// revive its right to execute, even if this query waited on a row lock.
+    pub async fn renew_running_lease(
+        &self,
+        launch_id: &str,
+        owner: &str,
+        attempt_count: i32,
+        handle_id: &str,
+        duration: Duration,
+    ) -> Result<bool, LaunchQueueError> {
+        let duration_us = i64::try_from(duration.as_micros()).unwrap_or(i64::MAX);
+        let result = sqlx::query(
+            r#"
+            WITH locked(launch_id) AS MATERIALIZED (
+                SELECT launch_id FROM instance_launches WHERE launch_id = $1 FOR UPDATE
+            ), checked(launch_id, checked_at) AS MATERIALIZED (
+                SELECT launch_id, clock_timestamp() FROM locked
+            )
+            UPDATE instance_launches AS launch
+            SET lease_expires_at = checked.checked_at + ($5 * INTERVAL '1 microsecond'),
+                updated_at = checked.checked_at
+            FROM checked
+            WHERE launch.launch_id = checked.launch_id
+              AND launch.state = 'running'
+              AND launch.lease_owner = $2
+              AND launch.attempt_count = $3
+              AND launch.lease_expires_at > checked.checked_at
+              AND EXISTS (
+                  SELECT 1 FROM container_registry cr
+                  WHERE cr.instance_id = launch.instance_id
+                    AND cr.launch_id = launch.launch_id AND cr.container_id = $4
+              )
+            "#,
+        )
+        .bind(launch_id)
+        .bind(owner)
+        .bind(attempt_count)
+        .bind(handle_id)
+        .bind(duration_us)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Confirm that a `running` generation may open its in-memory start gate.

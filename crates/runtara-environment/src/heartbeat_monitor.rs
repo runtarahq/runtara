@@ -166,6 +166,18 @@ impl HeartbeatMonitor {
 
     /// Check for stale instances and mark them as failed.
     async fn check_stale_instances(&self) -> crate::error::Result<()> {
+        // A process may die just after publishing an event. Owner expiry is
+        // independent of event age, so do not wait for heartbeat_timeout before
+        // reconciling that abandoned run.
+        for container in self.container_registry.expired_running_owners().await? {
+            crate::recovery::recover_registered(
+                &self.pool,
+                self.core_persistence.as_ref(),
+                &container,
+                crate::recovery::auto_recover_enabled(),
+            )
+            .await?;
+        }
         let cutoff = Utc::now()
             - chrono::Duration::from_std(self.config.heartbeat_timeout)
                 .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?;
@@ -309,6 +321,28 @@ impl HeartbeatMonitor {
             started_at: container.started_at,
             metrics: None,
         };
+        let leased = crate::launch_queue::LaunchRepository::new(self.pool.clone())
+            .get(&container.launch_id)
+            .await
+            .map_err(|error| crate::error::Error::Other(error.to_string()))?
+            .is_some_and(|launch| launch.lease_owner.is_some());
+        if leased && !self.runner.is_running(&handle).await {
+            // Absence from this process is not proof of owner death. The
+            // durable launch lock/lease decides whether a peer may recover it.
+            if let Some(current) = self.container_registry.get(&container.instance_id).await?
+                && current.launch_id == container.launch_id
+                && current.container_id == container.container_id
+            {
+                crate::recovery::recover_registered(
+                    &self.pool,
+                    self.core_persistence.as_ref(),
+                    &current,
+                    crate::recovery::auto_recover_enabled(),
+                )
+                .await?;
+            }
+            return Ok(());
+        }
         let runner_stopped = match self.runner.stop(&handle).await {
             Ok(()) => true,
             Err(e) => {
@@ -348,7 +382,11 @@ impl HeartbeatMonitor {
         // owns this instance and none of the rest applies.
         if !self
             .container_registry
-            .cleanup_generation(&container.instance_id, &container.launch_id)
+            .cleanup_handle(
+                &container.instance_id,
+                &container.launch_id,
+                &container.container_id,
+            )
             .await?
         {
             info!(

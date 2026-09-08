@@ -1959,6 +1959,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         DrainController::new(),
         LaunchLifecycleObservers::default(),
         None,
+        None,
     );
 
     // Poll for the terminal status instead of sleeping a fixed budget. The
@@ -2063,6 +2064,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         DrainController::new(),
         LaunchLifecycleObservers::default(),
         None,
+        None,
     );
 
     // Wait for the container to complete (10ms delay + buffer)
@@ -2157,6 +2159,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         Duration::from_millis(200),
         DrainController::new(),
         LaunchLifecycleObservers::default(),
+        None,
         None,
     );
 

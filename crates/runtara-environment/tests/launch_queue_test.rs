@@ -120,6 +120,221 @@ async fn instance_result(
     .expect("instance must exist")
 }
 
+async fn owned_running_registration(
+    context: &TestContext,
+) -> (
+    LaunchFixture,
+    runtara_environment::launch_queue::Launch,
+    runtara_environment::container_registry::ContainerInfo,
+) {
+    use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
+    let fixture = fixture(context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+    let claim = repository
+        .claim_ready("live-owner", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(claim.launch_id, id);
+    repository
+        .begin_start(&id, "live-owner", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    let container = ContainerInfo {
+        container_id: Uuid::new_v4().to_string(),
+        launch_id: id.clone(),
+        instance_id: fixture.instance_id.clone(),
+        tenant_id: fixture.tenant_id.clone(),
+        binary_path: "/fixture/owned.wasm".into(),
+        started_at: chrono::Utc::now(),
+        timeout_seconds: Some(60),
+    };
+    ContainerRegistry::new(context.pool.clone())
+        .register(&container)
+        .await
+        .unwrap();
+    let running = repository
+        .mark_running(&id, "live-owner", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    repository
+        .confirm_gate_open(&id, claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    (fixture, running, container)
+}
+
+#[tokio::test]
+async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
+    use runtara_environment::{
+        container_registry::ContainerRegistry, recovery::recover_registered,
+    };
+    let context = TestContext::new().await.unwrap();
+    let (fixture, running, container) = owned_running_registration(&context).await;
+    assert_eq!(running.lease_owner.as_deref(), Some("live-owner"));
+    assert!(running.lease_expires_at.is_some());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    assert!(
+        recover_registered(&context.pool, &persistence, &container, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await.0,
+        "running"
+    );
+    assert!(
+        ContainerRegistry::new(context.pool.clone())
+            .get(&fixture.instance_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let repository = LaunchRepository::new(context.pool.clone());
+    for (owner, attempt, handle) in [
+        (
+            "peer",
+            running.attempt_count,
+            container.container_id.as_str(),
+        ),
+        (
+            "live-owner",
+            running.attempt_count + 1,
+            container.container_id.as_str(),
+        ),
+        ("live-owner", running.attempt_count, "stale-physical-handle"),
+    ] {
+        assert!(
+            !repository
+                .renew_running_lease(
+                    &running.launch_id,
+                    owner,
+                    attempt,
+                    handle,
+                    Duration::from_secs(90)
+                )
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        repository
+            .renew_running_lease(
+                &running.launch_id,
+                "live-owner",
+                running.attempt_count,
+                &container.container_id,
+                Duration::from_secs(90)
+            )
+            .await
+            .unwrap()
+    );
+    let renewed = repository.get(&running.launch_id).await.unwrap().unwrap();
+    assert!(renewed.lease_expires_at > running.lease_expires_at);
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+#[tokio::test]
+async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
+    use runtara_environment::{
+        container_registry::ContainerRegistry,
+        recovery::{RecoveryOutcome, recover_registered},
+    };
+    let context = TestContext::new().await.unwrap();
+    let (fixture, running, container) = owned_running_registration(&context).await;
+    sqlx::query("UPDATE instance_launches SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE launch_id = $1")
+        .bind(&running.launch_id).execute(&context.pool).await.unwrap();
+    let repository = LaunchRepository::new(context.pool.clone());
+    assert!(
+        !repository
+            .renew_running_lease(
+                &running.launch_id,
+                "live-owner",
+                running.attempt_count,
+                &container.container_id,
+                Duration::from_secs(90)
+            )
+            .await
+            .unwrap()
+    );
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    assert_eq!(
+        recover_registered(&context.pool, &persistence, &container, true)
+            .await
+            .unwrap(),
+        Some(RecoveryOutcome::Recovered)
+    );
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await.0,
+        "suspended"
+    );
+    assert!(
+        ContainerRegistry::new(context.pool.clone())
+            .get(&fixture.instance_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        recover_registered(&context.pool, &persistence, &container, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+#[tokio::test]
+async fn expired_owner_snapshot_cannot_recover_a_replacement_handle() {
+    use runtara_environment::{
+        container_registry::ContainerRegistry, recovery::recover_registered,
+    };
+    let context = TestContext::new().await.unwrap();
+    let (fixture, running, old) = owned_running_registration(&context).await;
+    sqlx::query("UPDATE instance_launches SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE launch_id = $1")
+        .bind(&running.launch_id).execute(&context.pool).await.unwrap();
+    let mut current = old.clone();
+    current.container_id = Uuid::new_v4().to_string();
+    let registry = ContainerRegistry::new(context.pool.clone());
+    registry.register(&current).await.unwrap();
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    assert!(
+        recover_registered(&context.pool, &persistence, &old, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await.0,
+        "running"
+    );
+    assert_eq!(
+        registry
+            .get(&fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .container_id,
+        current.container_id
+    );
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
 #[tokio::test]
 async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     let context = TestContext::new().await.expect("test database must start");

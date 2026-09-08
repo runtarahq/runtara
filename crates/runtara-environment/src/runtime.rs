@@ -664,13 +664,20 @@ impl EnvironmentRuntime {
         // and dies abruptly — the path `recovery` then has to rescue under a
         // crash-loop cap. Reporting that as a successful drain is how a host
         // comes to believe its instances were parked when none of them were.
-        let active = container_registry
+        let registered = container_registry
             .list_all_registered()
             .await
             .map_err(|e| {
                 error!(error = %e, "Could not list active instances; drain cannot proceed");
                 e
             })?;
+
+        let mut active = Vec::new();
+        for info in registered {
+            if self.state.runner.is_running(&info.runner_handle()).await {
+                active.push(info);
+            }
+        }
 
         let mut report = DrainReport {
             active: active.len(),
@@ -928,127 +935,30 @@ impl DrainReport {
     }
 }
 
-/// Recover orphaned containers on startup.
-///
-/// When the Environment restarts, there may be containers in the registry
-/// that were running before the restart. This function checks each one:
-///
-/// Workflow guests run in-process, so an Environment restart necessarily killed
-/// every one of them. Each registry entry is therefore stale by definition:
-///
-/// - Core shows terminal status → clean up registry
-/// - Core still shows "running" → mark as crashed and clean up
-///
-/// This prevents "zombie" entries in the registry and ensures crashed instances
-/// are properly marked.
+/// Reconcile registrations whose durable owner has expired. A peer starting
+/// does not imply that other in-process executions sharing this database died.
 async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistence) -> Result<()> {
     let registry = ContainerRegistry::new(pool.clone());
-    let containers = registry.list_all_registered().await?;
-
-    if containers.is_empty() {
-        debug!("No containers in registry to recover");
-        return Ok(());
-    }
-
-    info!(
-        count = containers.len(),
-        "Checking registered containers for recovery"
-    );
-
-    // Summary counters for an operator-facing startup line.
-    let mut recovered = 0usize;
-    let mut failed = 0usize;
-
-    for container in containers {
-        let instance_id = &container.instance_id;
-
-        // The guest died with the previous process — check Core status.
-        match persistence.get_instance_meta(instance_id).await {
-            Ok(Some(inst)) => {
-                let status = inst.status;
-                if matches!(
-                    status,
-                    CoreInstanceStatus::Completed
-                        | CoreInstanceStatus::Failed
-                        | CoreInstanceStatus::Cancelled
-                        | CoreInstanceStatus::Suspended
-                ) {
-                    // Already terminal - just clean up registry
-                    info!(
-                        instance_id = %instance_id,
-                        status = ?status,
-                        "Cleaning up terminated container from registry"
-                    );
-                } else {
-                    // Process is gone but Core still shows the instance
-                    // running: it was killed by this Environment restart. Route
-                    // it into the suspend → wake → relaunch recovery path
-                    // (replay-from-start with the checkpoint cache) instead of
-                    // dead-ending at `failed`. A crash-loop cap bounds instances
-                    // that never make progress. Per-workflow opt-out is wired in
-                    // a later phase; default is to recover.
-                    warn!(
-                        instance_id = %instance_id,
-                        status = ?status,
-                        "Found orphaned container (process gone, Core shows running) - recovering after Environment restart"
-                    );
-
-                    let outcome = crate::recovery::recover_or_fail(
-                        pool,
-                        persistence,
-                        instance_id,
-                        crate::recovery::auto_recover_enabled(),
-                    )
-                    .await;
-                    match &outcome {
-                        Ok(crate::recovery::RecoveryOutcome::Recovered) => recovered += 1,
-                        Ok(crate::recovery::RecoveryOutcome::Failed) => failed += 1,
-                        Ok(crate::recovery::RecoveryOutcome::Unchanged) => continue,
-                        Err(error) => {
-                            warn!(instance_id, %error, "Recovery write failed; retaining registry entry");
-                            continue;
-                        }
-                    }
-
-                    info!(
-                        instance_id = %instance_id,
-                        outcome = ?outcome,
-                        "Orphaned instance recovery decision"
-                    );
-                }
+    for container in registry.list_all_registered().await? {
+        match crate::recovery::recover_registered(
+            pool,
+            persistence,
+            &container,
+            crate::recovery::auto_recover_enabled(),
+        )
+        .await
+        {
+            Ok(Some(outcome)) => {
+                info!(instance_id = %container.instance_id, ?outcome, "Reconciled orphaned registration");
             }
             Ok(None) => {
-                // Instance not in Core - just clean up registry
-                warn!(
-                    instance_id = %instance_id,
-                    "Container in registry but not in Core - cleaning up"
-                );
+                debug!(instance_id = %container.instance_id, "Leaving live or replaced registration alone");
             }
-            Err(e) => {
-                error!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "Failed to check instance status during recovery"
-                );
-                continue;
+            Err(error) => {
+                warn!(instance_id = %container.instance_id, %error, "Recovery failed; retaining registration");
             }
         }
-        // A wake can replace the row after this scan. Retire only the exact
-        // physical handle observed; failed/unapplied decisions retained it above.
-        let _ = registry
-            .cleanup_handle(instance_id, &container.launch_id, &container.container_id)
-            .await;
     }
-
-    if recovered > 0 || failed > 0 {
-        info!(
-            recovered,
-            failed,
-            "Environment-restart recovery: relaunching instances killed by the previous restart \
-             (failed = exceeded RUNTARA_MAX_AUTO_RESTARTS or auto-recovery disabled)"
-        );
-    }
-
     Ok(())
 }
 

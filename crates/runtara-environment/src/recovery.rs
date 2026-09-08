@@ -67,6 +67,81 @@ pub enum RecoveryOutcome {
     Unchanged,
 }
 
+/// Recover one observed physical registration only after locking its durable
+/// launch. Holding that lock across the Core write prevents queue reconciliation
+/// and a new start from replacing the generation midway through recovery.
+/// None means a live claim or a replacement owns the observation now.
+pub async fn recover_registered(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    container: &crate::container_registry::ContainerInfo,
+    auto_recover: bool,
+) -> Result<Option<RecoveryOutcome>> {
+    let mut guard = pool.begin().await?;
+    let launch_state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1 FOR UPDATE")
+            .bind(&container.launch_id)
+            .fetch_optional(&mut *guard)
+            .await?;
+    if let Some(state) = launch_state {
+        // Evaluate time in a fresh statement after acquiring the row lock.
+        let live: bool = sqlx::query_scalar(
+            "SELECT lease_owner IS NOT NULL AND \
+             COALESCE(lease_expires_at > clock_timestamp(), false) \
+             FROM instance_launches WHERE launch_id = $1",
+        )
+        .bind(&container.launch_id)
+        .fetch_one(&mut *guard)
+        .await?;
+        if live || !matches!(state.as_str(), "running" | "starting") {
+            return Ok(None);
+        }
+    }
+    // Legacy registrations may predate the launch queue. Their prior recovery
+    // behavior remains; they do not establish cross-version owner liveness.
+    let registered: Option<String> = sqlx::query_scalar(
+        "SELECT container_id FROM container_registry \
+         WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 FOR UPDATE",
+    )
+    .bind(&container.instance_id)
+    .bind(&container.launch_id)
+    .bind(&container.container_id)
+    .fetch_optional(&mut *guard)
+    .await?;
+    if registered.is_none() {
+        return Ok(None);
+    }
+    let outcome = match persistence
+        .get_instance_meta(&container.instance_id)
+        .await?
+    {
+        Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
+            let outcome =
+                recover_or_fail(pool, persistence, &container.instance_id, auto_recover).await?;
+            if outcome == RecoveryOutcome::Unchanged {
+                return Ok(Some(outcome));
+            }
+            outcome
+        }
+        Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Pending => {
+            // The durable start-gate/queue expiry path owns an unopened run.
+            return Ok(None);
+        }
+        _ => RecoveryOutcome::Unchanged,
+    };
+    sqlx::query(
+        "DELETE FROM container_registry \
+         WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3",
+    )
+    .bind(&container.instance_id)
+    .bind(&container.launch_id)
+    .bind(&container.container_id)
+    .execute(&mut *guard)
+    .await?;
+    guard.commit().await?;
+    Ok(Some(outcome))
+}
+
 /// Pure crash-loop decision, separated from any I/O so it can be unit-tested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Decision {

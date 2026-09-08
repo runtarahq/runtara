@@ -35,8 +35,10 @@ Implemented and covered by focused tests:
   started peer returns success without closing the owner's HTTP request within
   four seconds. Inspection confirms that peer startup incorrectly recovers A's
   live execution and Stop cancels its replacement (AUDIT-23 follow-up below).
-  Recovery now preserves outcomes accepted after a stale scan, but identifying
-  live owners and routing remote grace remain unresolved (AUDIT-24).
+  Recovery preserves outcomes accepted after a stale scan (AUDIT-24). The current
+  snapshot retains and renews existing launch ownership leases to protect live
+  owners (AUDIT-26); the authenticated peer E2E has not been rerun with this
+  change, and remote grace delivery remains unimplemented.
 - Runner control now uses a unique physical handle for each accepted handoff,
   even when pre-start recovery reuses a durable launch ID. Stale Stop/grace/wait
   calls and old occupancy cleanup cannot target the replacement (AUDIT-25).
@@ -55,7 +57,7 @@ feature flag or optional cancellation backend has been added.
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
-| Server and persistence E2E | Single-server authenticated header/body cancellation passes. Fix startup's incorrect recovery of another server's live execution, then qualify remote grace delivery and the remaining status/acknowledgement and emergency escalation cases. AUDIT-24 prevents stale recovery from overwriting accepted lifecycle outcomes; it does not establish live-owner detection. |
+| Server and persistence E2E | Single-server authenticated header/body cancellation passes on the preceding server build. Ownership leases and guarded peer recovery are implemented in this snapshot (AUDIT-26), pending authenticated multi-server verification. Implement remote grace delivery and qualify status/acknowledgement, peer drain, owner loss and emergency escalation. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
 | Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
@@ -2044,3 +2046,79 @@ This corrects a prerequisite for safe ownership/grace routing. It does not tell
 startup which server is alive, renew ownership, or deliver a remote grace
 deadline. AUDIT-23, the wider lifecycle/compatibility work and G1–G10 remain open.
 See the implementation record for verification and skipped gates.
+
+### AUDIT-26 · Execution ownership lease implementation snapshot
+
+**Status: implemented with focused regression coverage; multi-server behavior is
+not yet qualified.** This checkpoint saves the current work on
+`feat/cooperative-cancellation-progress`, separate from `main`. It includes the
+ownership implementation and tests, not just this document. The latest server
+E2E evidence still comes from the preceding physical-handle stage (`611507c7`):
+owner/header and owner/body cases passed at 0.968s and 0.984s, then peer startup
+changed the live instance from `running` to `suspended` before Stop. Those timings
+are individual fixture observations, not controlled benchmarks.
+
+The implementation reuses `instance_launches.lease_owner` and `lease_expires_at`
+through the running state. The existing physical-run monitor renews that claim
+for 30 seconds every 10 seconds, checking owner, attempt, physical handle and
+unexpired ownership. It uses a conservative local deadline, one second before
+its renewal interval expires, and retries transient database errors within that
+bound. A blocked renewal future cannot indefinitely retain execution: losing
+ownership invokes the existing whole-execution abort and closes an unopened
+start gate. Renewing ownership does not extend the original start-gate deadline.
+
+Startup recovery locks the observed durable launch and exact physical registry
+row before checking expiry and applying a Core recovery decision. Live claims
+and replacement handles are retained. The existing heartbeat pass also scans
+expired running owners independently of workflow event age; a new forward
+migration indexes that scan. Drain selects handles owned by the local runner.
+These are execution lifecycle responsibilities. No new per-step registry,
+workflow scheduler, guest ABI, component binary or product feature flag is added;
+the existing monitor polls renewal alongside execution completion.
+
+| Behavior | Regression test |
+| --- | --- |
+| A live claim survives a peer recovery attempt; only its exact owner, attempt and physical handle may renew | `live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer` |
+| An expired claim cannot renew; recovery suspends it once and removes its exact registration | `expired_running_owner_cannot_renew_and_is_recovered_once` |
+| A stale recovery snapshot cannot mutate a replacement physical handle | `expired_owner_snapshot_cannot_recover_a_replacement_handle` |
+| Exhausting the monitor's database pool still aborts real spinning WASM at the local ownership bound; normal cleanup resumes when the pool is released | `blocked_lease_database_cannot_keep_a_physical_guest_running` |
+
+Remaining risks and required follow-up:
+
+- Rebuild the server and rerun all four authenticated header/body, owner/peer
+  scenarios. The last failing E2E is not converted into a pass by these focused
+  ownership tests. Stop still arms emergency grace through a local runner handle;
+  peer request delivery and grace routing remain unfinished.
+- Qualify sustained renewal, expiry while waiting for a row lock, peer drain,
+  periodic recovery after recent heartbeats, and concurrent lifecycle transitions.
+- A database outage can now end a whole execution when ownership cannot renew.
+  Recovery latency includes the lease duration and the existing heartbeat scan
+  cadence. Pauses of the native process and host/database clock changes need
+  explicit operational qualification.
+- Recovery holds a database connection and row locks while Core persistence uses
+  another connection. Small-pool and concurrent-recovery behavior still needs
+  capacity testing. Measure renewal writes, index maintenance and database load
+  in the final paired benchmark report.
+- Legacy registrations without a lease retain the historical recovery fallback;
+  this does not establish mixed-version multi-server safety.
+- Public Agent/Embed timeouts still return E128. The remaining G1–G10 work,
+  artifact compatibility/obsolete-path cleanup, final size and latency comparison,
+  Linux soak, recent-upstream integration and PR remain open. The conflicting
+  committed migration numbers 025/026 have not been rewritten or resolved.
+
+Verification on this source snapshot:
+
+- `cargo test -p runtara-environment --features scoped-workflow-integration-tests
+  --lib --test embedded_runner_test --test launch_queue_test --test handlers_test
+  --test heartbeat_monitor_test --test cooperative_stop_test
+  --test container_registry_test -- --test-threads=1` passed **349 tests**:
+  244 library, 11 embedded runner, 12 launch queue, 45 handlers, 21 heartbeat,
+  four composed Stop and 12 container registry tests. The new blocked-pool
+  spinning-WASM regression passed. Tests used the isolated PostgreSQL fixture,
+  pinned toolchain and existing matching Agent component build.
+- Feature-gated environment all-target Clippy with `-D warnings` and
+  `git diff --check` passed. The commit uses the normal pre-commit hook, which
+  requires workspace formatting and workspace all-target Clippy; no bypass.
+- This is a progress checkpoint. The server was not rebuilt and authenticated
+  server E2E was not rerun with the lease change. The full compiler/component
+  matrices, final paired benchmarks and Linux soak were also not rerun.

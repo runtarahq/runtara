@@ -292,6 +292,88 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
+    use runtara_environment::{
+        container_registry::{ContainerInfo, ContainerRegistry},
+        execution_lease::ExecutionLease,
+        handlers::{DrainController, spawn_container_monitor},
+        launch_dispatcher::LaunchLifecycleObservers,
+    };
+    let h = harness().await;
+    let id = unique("lease-database-blocked");
+    let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    seed_detached_instance(&h, &id).await;
+    let handle = h
+        .runner
+        .try_launch_detached(&options(&id, &wasm))
+        .await
+        .unwrap();
+    let registry = ContainerRegistry::new(h.pool.clone());
+    registry
+        .register(&ContainerInfo {
+            container_id: handle.handle_id.clone(),
+            launch_id: handle.launch_id.clone(),
+            instance_id: id.clone(),
+            tenant_id: handle.tenant_id.clone(),
+            binary_path: wasm.to_string_lossy().into_owned(),
+            started_at: handle.started_at,
+            timeout_seconds: Some(30),
+        })
+        .await
+        .unwrap();
+    // Exhaust only the monitor's private pool. Runner/Core work retains its
+    // independent pool, so this specifically blocks renewal, not guest start.
+    let blocked_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*h.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let held_connection = blocked_pool.acquire().await.unwrap();
+    let lease_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    spawn_container_monitor(
+        blocked_pool.clone(),
+        h.runner.clone(),
+        handle.clone(),
+        h.persistence.clone(),
+        Duration::from_secs(30),
+        DrainController::new(),
+        LaunchLifecycleObservers::default(),
+        None,
+        Some(ExecutionLease::new("blocked-owner", 1, lease_deadline)),
+    );
+    let exited = tokio::time::timeout(
+        Duration::from_secs(3),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await;
+    drop(held_connection);
+    if exited.is_err() {
+        h.runner.stop(&handle).await.unwrap();
+    }
+    assert!(
+        exited.is_ok(),
+        "a blocked lease query must not outlive the execution's ownership bound"
+    );
+    assert!(tokio::time::Instant::now() >= lease_deadline);
+    assert_eq!(h.runner.occupancy().unwrap().held, 0);
+    assert!(
+        h.persistence
+            .get_pending_signal(&id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while registry.get(&id).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("normal monitor cleanup must resume once the pool is released");
+    blocked_pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn retired_handle_cannot_control_a_reused_durable_launch() {
     let h = harness().await;
     let id = unique("reused-launch");

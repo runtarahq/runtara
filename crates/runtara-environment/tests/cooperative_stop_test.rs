@@ -246,6 +246,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
         DrainController::new(),
         LaunchLifecycleObservers::default(),
         None,
+        None,
     );
     tokio::time::timeout(Duration::from_secs(10), requested).await??;
     let before = tokio::time::Instant::now();
