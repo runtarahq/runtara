@@ -14,6 +14,7 @@ export interface ExecutionHistoryItem {
   instanceId: string;
   workflowId: string;
   workflowName?: string;
+  runLabel?: string;
   createdAt: string;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -31,6 +32,8 @@ export interface ExecutionHistoryItem {
  * Filter options for the invocation history table.
  */
 export interface ExecutionHistoryFilters {
+  search?: string;
+  runLabel?: string;
   workflowId?: string;
   status?: string;
   createdFrom?: string;

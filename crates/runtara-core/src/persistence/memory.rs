@@ -167,6 +167,7 @@ impl Persistence for InMemoryPersistence {
         store.instances.insert(
             instance_id.to_string(),
             InstanceRecord {
+                run_label: None,
                 instance_id: instance_id.to_string(),
                 tenant_id: tenant_id.to_string(),
                 definition_version: 1,
@@ -230,6 +231,7 @@ impl Persistence for InMemoryPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
+        let run_label = params.normalized_run_label()?;
         let mut store = self.store.lock().unwrap();
         let Some(inst) = store.instances.get_mut(params.instance_id) else {
             return match params.guard {
@@ -246,6 +248,7 @@ impl Persistence for InMemoryPersistence {
         }
 
         inst.status = params.status;
+        inst.run_label = run_label;
         // Replaced: a transition that carries no output or error clears the
         // previous one, so a failure cannot be read as still holding a stale
         // success payload.

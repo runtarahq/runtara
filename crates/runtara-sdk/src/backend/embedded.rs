@@ -210,13 +210,19 @@ impl SdkBackend for EmbeddedBackend {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len())))]
     fn completed(&self, output: &[u8]) -> Result<()> {
+        self.completed_with_label(output, None)
+    }
+
+    fn completed_with_label(&self, output: &[u8], run_label: Option<&str>) -> Result<()> {
+        let mut params =
+            CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Completed)
+                .if_running()
+                .with_output(output);
+        if let Some(label) = run_label {
+            params = params.with_run_label(label);
+        }
         self.rt
-            .block_on(
-                self.persistence.complete_instance(
-                    CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Completed)
-                        .with_output(output),
-                ),
-            )
+            .block_on(self.persistence.complete_instance(params))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
@@ -666,6 +672,7 @@ mod tests {
             Ok(instances
                 .get(instance_id)
                 .map(|inst| runtara_core::persistence::InstanceRecord {
+                    run_label: None,
                     instance_id: instance_id.to_string(),
                     tenant_id: inst.tenant_id.clone(),
                     definition_version: 1,

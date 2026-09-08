@@ -14,7 +14,7 @@ import { useTableQuery } from '@/shared/hooks/api';
 import { usePagination } from '@/shared/hooks/usePagination';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAllExecutions } from '../queries';
-import { ExecutionHistoryFilters, ExecutionHistoryItem } from '../types';
+import { ExecutionHistoryFilters } from '../types';
 import { invocationHistoryColumns } from './InvocationHistoryColumns';
 import {
   InvocationHistoryFilters,
@@ -38,7 +38,20 @@ export function InvocationHistoryTable({
   onFiltersChange,
 }: InvocationHistoryTableProps) {
   const { pagination, setPagination } = usePagination();
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(filters.search ?? '');
+  useEffect(() => {
+    setSearch(filters.search ?? '');
+  }, [filters.search]);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const nextSearch = search.trim() || undefined;
+      if (nextSearch !== filters.search) {
+        setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+        onFiltersChange({ ...filters, search: nextSearch });
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search, filters, onFiltersChange, setPagination]);
 
   // Convert filters to table sorting state
   const sorting = useMemo<SortingState>(() => {
@@ -46,7 +59,7 @@ export function InvocationHistoryTable({
     return [{ id: filters.sortBy, desc: filters.sortOrder === 'desc' }];
   }, [filters.sortBy, filters.sortOrder]);
 
-  const { data, totalPages, isFetching } = useTableQuery({
+  const { data, totalPages, totalElements, isFetching } = useTableQuery({
     queryKey: queryKeys.executions.list({
       pageIndex: pagination.pageIndex,
       pageSize: pagination.pageSize,
@@ -90,26 +103,7 @@ export function InvocationHistoryTable({
     [filters, onFiltersChange]
   );
 
-  // Client-side quick search over the currently loaded page (mirrors the mockup)
-  const query = search.trim().toLowerCase();
-  const filteredData = useMemo(() => {
-    if (!query) return data;
-    return (data as ExecutionHistoryItem[]).filter((item) =>
-      [
-        item.workflowName,
-        item.workflowId,
-        item.instanceId,
-        item.status,
-        item.version,
-      ]
-        .filter((v) => v !== undefined && v !== null)
-        .some((v) => String(v).toLowerCase().includes(query))
-    );
-  }, [data, query]);
-
-  const footerLeft = query
-    ? `${filteredData.length} match “${search.trim()}” on this page`
-    : `${data.length} on this page`;
+  const footerLeft = `${totalElements} executions · ${data.length} on this page`;
 
   const handlePageChange = (page: number) =>
     setPagination((prev) => ({ ...prev, pageIndex: page }));
@@ -120,6 +114,7 @@ export function InvocationHistoryTable({
   const handleClearFilters = () =>
     onFiltersChange({
       ...filters,
+      runLabel: undefined,
       workflowId: undefined,
       status: undefined,
       createdFrom: undefined,
@@ -137,7 +132,7 @@ export function InvocationHistoryTable({
             <ToolbarSearch
               value={search}
               onChange={setSearch}
-              placeholder="Search this page…"
+              placeholder="Search executions…"
               className="w-56"
             />
           }
@@ -171,7 +166,7 @@ export function InvocationHistoryTable({
     >
       <DataTable
         columns={invocationHistoryColumns}
-        data={filteredData}
+        data={data}
         pagination={{
           ...pagination,
           onPageChange: handlePageChange,

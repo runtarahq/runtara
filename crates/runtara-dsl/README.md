@@ -29,6 +29,38 @@ assert_eq!(workflow.memory_tier.unwrap_or(MemoryTier::XL).total_memory_bytes(), 
 
 Enable the `utoipa` feature if you need `ToSchema` derives for OpenAPI generation.
 
+## Execution labels
+
+A top-level Finish may set optional `runLabel` metadata independently of its
+`inputMapping` output:
+
+```json
+{
+  "id": "finish",
+  "stepType": "Finish",
+  "runLabel": { "valueType": "template", "value": "Order/{{ data.orderId }} [done]" },
+  "inputMapping": { "success": { "valueType": "immediate", "value": true } }
+}
+```
+
+Literal strings and references are supported too. The resolved string is trimmed
+of surrounding spaces and may contain up to 250 ASCII letters, digits, spaces,
+dots, dashes, forward slashes, parentheses, or square brackets. Omitted, null,
+and empty labels mean no label. A supplied nonempty label must contain at least
+one letter or digit; whitespace-only, punctuation-only, and invisible characters
+are invalid. Duplicate labels are allowed. Invalid literals
+fail workflow validation; invalid dynamic results (including evaluation errors)
+are ignored and Finish completes normally without a label. Labels longer than
+250 characters are truncated, then trailing spaces are removed. The retained
+text must still contain a letter or digit.
+
+The label is saved with successful completion and replaces the workflow name in
+execution lists. Executions that have not reached Finish retain their workflow
+name. Finish steps inside Split, While, or onWait subgraphs cannot set labels;
+inline child workflows and workflow agent capabilities cannot rename their parent.
+The execution list supports case-insensitive literal substring `search` and an
+exact `runLabel` filter, both applied before pagination and counting.
+
 ## Inside Runtara
 
 - Consumed by `runtara-workflows` (compiler/executor), `runtara-agents` (capability metadata), and `runtara-server` (REST validation + OpenAPI surface).

@@ -132,6 +132,15 @@ pub trait RuntimeHost: Send + Sync {
     fn instance_id(&self) -> Result<String, String>;
     /// Report terminal success with the output payload.
     async fn complete(&self, output: Vec<u8>) -> Result<(), String>;
+    /// Complete with optional label metadata. Hosts without label support still
+    /// complete successfully; optional metadata must not prevent completion.
+    async fn complete_with_label(
+        &self,
+        output: Vec<u8>,
+        _run_label: Vec<u8>,
+    ) -> Result<(), String> {
+        self.complete(output).await
+    }
     /// Report terminal failure with the error payload.
     async fn fail(&self, error: Vec<u8>) -> Result<(), String>;
     /// Emit a custom event (`kind` becomes the event subtype).
@@ -291,6 +300,14 @@ fn add_runtime_version_to_linker(
         |mut store: StoreContextMut<'_, WorkflowState>, (output,): (Vec<u8>,)| {
             let host = require_host(&mut store);
             Box::new(async move { Ok((host?.complete(output).await,)) })
+        },
+    )?;
+
+    inst.func_wrap_async(
+        "complete-with-label",
+        |mut store: StoreContextMut<'_, WorkflowState>, (output, run_label): (Vec<u8>, Vec<u8>)| {
+            let host = require_host(&mut store);
+            Box::new(async move { Ok((host?.complete_with_label(output, run_label).await,)) })
         },
     )?;
 

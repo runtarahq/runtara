@@ -417,6 +417,21 @@ pub struct FinishStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
+    /// Optional execution label, resolved when the top-level Finish completes.
+    /// Use a MappingValue with valueType immediate, reference, or template.
+    /// Separate from inputMapping/output; duplicate labels are allowed.
+    /// Allowed characters: ASCII letters, digits, ordinary spaces, . - / ( ) [ ].
+    /// Surrounding spaces are trimmed; valid long labels are truncated to 250
+    /// characters and trailing spaces removed. The retained label must contain
+    /// a letter or digit. Invalid literals fail authoring validation; invalid
+    /// dynamic values (including non-strings and evaluation errors) are ignored
+    /// without failing Finish or changing its output. Omitted, null, and empty
+    /// strings mean no label. Execution lists display runLabel when present,
+    /// otherwise the workflow name. Not supported inside Split, While, or onWait
+    /// subgraphs; inline child workflows cannot rename their parent execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_label: Option<MappingValue>,
+
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,

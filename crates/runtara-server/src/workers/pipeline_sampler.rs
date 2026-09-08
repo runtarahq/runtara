@@ -8,10 +8,10 @@
 //! handler that reads the world per request.
 //!
 //! Two cadences, because one of the readings is not like the others. The
-//! durable launch-state reading is index-bounded by the live handoff set and
-//! is sampled on the fast tick; the parked count is a database scan whose cost grows with the
-//! table, so it runs on its own slow tick and its last value is carried between
-//! them — see [`SLOW_TICK`].
+//! durable launch-state reading is index-bounded by the live handoff set and is
+//! sampled on the fast tick; the parked count has no ceiling, so its cost grows
+//! with the parked population rather than with the live set, and it runs on its
+//! own slow tick with its last value carried between them — see [`SLOW_TICK`].
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,11 +31,12 @@ pub const FAST_TICK: Duration = Duration::from_secs(1);
 
 /// How often the parked count is taken.
 ///
-/// Counting suspended instances without a ceiling is the one genuinely
-/// expensive reading here: on a host holding a million of them it is a scan of
-/// every matching index entry. A parked population moves at a few hundred a
-/// second at most, so half a minute of staleness costs a viewer nothing while
-/// keeping that scan off the fast path entirely.
+/// Counting suspended instances without a ceiling is still the one reading with
+/// no upper bound on its work: migration 025 made it an index-only scan rather
+/// than a scan of the table, but on a host holding a million parked instances
+/// that is a million index entries walked. A parked population moves at a few
+/// hundred a second at most, so half a minute of staleness costs a viewer
+/// nothing while keeping that walk off the fast path entirely.
 pub const SLOW_TICK: Duration = Duration::from_secs(30);
 
 /// How long a stage may sit full before its age is worth remarking on.
@@ -770,8 +771,8 @@ async fn count_parked(
         Ok(count) => {
             let elapsed = started.elapsed();
             if elapsed > Duration::from_millis(200) {
-                // Surfaced rather than swallowed: this is the one reading whose
-                // cost grows with the table, and a slow one is the signal to
+                // Surfaced rather than swallowed: this is the one reading with
+                // no ceiling on its work, and a slow one is the signal to
                 // lengthen the interval or accept a displayed ceiling.
                 tracing::warn!(
                     elapsed_ms = elapsed.as_millis() as u64,

@@ -1,3 +1,4 @@
+import { executionDisplayName } from '@/features/workflows/utils/run-label';
 import { ColumnDef } from '@tanstack/react-table';
 import { Link } from 'react-router';
 import { ExternalLink, Eye, Zap, MessageSquare, Bug } from 'lucide-react';
@@ -56,26 +57,33 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
   {
     id: 'workflowId',
     accessorKey: 'workflowName',
-    header: 'Workflow',
+    header: 'Execution',
     enableSorting: false,
     cell: ({ row }) => {
       const workflowId = row.original.workflowId;
-      const workflowName = row.original.workflowName || workflowId;
+      const workflowName = executionDisplayName(row.original);
       const instanceId = row.original.instanceId;
 
       return (
         <div className="flex flex-col gap-0.5">
-          {workflowName ? (
+          {workflowId ? (
             <Link
               to={`/workflows/${workflowId}`}
               className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary"
             >
-              {workflowName}
+              <span className="max-w-80 truncate" title={workflowName}>
+                {workflowName}
+              </span>
               <ExternalLink className="size-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
             </Link>
           ) : (
             <span className="text-sm font-medium italic text-muted-foreground">
-              Ad-hoc invocation
+              {workflowName}
+            </span>
+          )}
+          {row.original.runLabel && row.original.workflowName && (
+            <span className="text-xs text-muted-foreground">
+              {row.original.workflowName}
             </span>
           )}
           <span className="font-mono text-xs text-muted-foreground">

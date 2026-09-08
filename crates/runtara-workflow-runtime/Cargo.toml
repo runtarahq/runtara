@@ -18,5 +18,6 @@ native = ["runtara-sdk/native"]
 wasi = ["runtara-sdk/wasi"]
 
 [dependencies]
+serde_json = { workspace = true }
 runtara-sdk = { path = "../runtara-sdk", version = "8.9", default-features = false, features = ["http"] }
 wit-bindgen = "0.58"

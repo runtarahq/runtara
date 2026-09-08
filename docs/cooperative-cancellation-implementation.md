@@ -1498,7 +1498,7 @@ waits for the post-exit path. Ordinary cooperative signal handling remains in th
 guest, using the existing signal receipt. No workflow graph routing, child tasks,
 new cancellation transport or custom task registry is introduced.
 
-Forward migration `026_aborted_termination.sql` adds the `aborted` termination
+Forward migration `028_aborted_termination.sql` adds the `aborted` termination
 reason. The server's typed runtime parser and JSON representation recognize it.
 This changes no HTTP OpenAPI schema: the modified runtime type is not an OpenAPI
 response schema, and the existing generated HTTP client has no termination-reason

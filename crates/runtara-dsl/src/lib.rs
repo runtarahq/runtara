@@ -32,6 +32,9 @@ pub const DEFAULT_STEP_TIMEOUT_MS: u64 = 180_000;
 // Include the schema types
 include!("schema_types.rs");
 
+/// Execution label validation.
+pub mod run_label;
+
 // Path utilities
 pub mod paths;
 
@@ -1925,6 +1928,7 @@ mod tests {
         steps.insert(
             "finish".to_string(),
             Step::Finish(FinishStep {
+                run_label: None,
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,
@@ -2070,6 +2074,7 @@ mod tests {
         steps.insert(
             "finish".to_string(),
             Step::Finish(FinishStep {
+                run_label: None,
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,

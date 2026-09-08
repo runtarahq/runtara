@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::parse_enabled;
+use crate::config::{ProcessEnv, Vars, days, parse_enabled, positive};
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::Notify;
@@ -70,33 +70,24 @@ impl ImageCleanupWorkerConfig {
     /// - `RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS`: seconds between cleanup runs (default: 21600)
     /// - `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS`: days before stale images are deleted (default: 3)
     /// - `RUNTARA_IMAGE_CLEANUP_BATCH_SIZE`: max images per cycle (default: 50)
+    ///
+    /// The three numbers follow the crate's positive-only rule: zero and below
+    /// fall back to the default rather than being honoured.
     pub fn from_env() -> Self {
-        let enabled = parse_enabled(
-            std::env::var("RUNTARA_IMAGE_CLEANUP_ENABLED")
-                .ok()
-                .as_deref(),
-        );
+        Self::from_vars(&ProcessEnv)
+    }
 
-        let poll_interval_secs = std::env::var("RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(6 * 3600);
-
-        let max_age_days = std::env::var("RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(3);
-
-        let batch_size = std::env::var("RUNTARA_IMAGE_CLEANUP_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50);
-
+    /// [`Self::from_env`] against a supplied set of values.
+    pub(crate) fn from_vars(vars: &dyn Vars) -> Self {
         Self {
-            enabled,
-            poll_interval: Duration::from_secs(poll_interval_secs),
-            max_age: Duration::from_secs(max_age_days * 24 * 3600),
-            batch_size,
+            enabled: parse_enabled(vars.get("RUNTARA_IMAGE_CLEANUP_ENABLED").as_deref()),
+            poll_interval: Duration::from_secs(positive(
+                vars,
+                "RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS",
+                6 * 3600,
+            )),
+            max_age: days(positive(vars, "RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS", 3)),
+            batch_size: positive(vars, "RUNTARA_IMAGE_CLEANUP_BATCH_SIZE", 50),
             data_dir: PathBuf::new(), // Set by runtime
         }
     }

@@ -206,6 +206,14 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                 onClick={() => setSelectedInstanceId(instance.instanceId)}
               >
                 <div className="min-w-0">
+                  {instance.runLabel && (
+                    <div
+                      className="truncate text-xs font-medium"
+                      title={instance.runLabel}
+                    >
+                      {instance.runLabel}
+                    </div>
+                  )}
                   <div className="truncate text-xs font-medium">
                     {formatDate(instance.createdAt)}
                   </div>

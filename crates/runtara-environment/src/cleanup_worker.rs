@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::parse_enabled;
+use crate::config::{ProcessEnv, Vars, days, parse_enabled, positive};
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
@@ -53,28 +53,24 @@ impl CleanupWorkerConfig {
     ///   by default; only an explicit opt-out turns it off.
     /// - `RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS`: seconds between scans (default: 3600)
     /// - `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS`: days before run dirs are removed (default: 3)
+    ///
+    /// The two numbers follow the crate's positive-only rule: zero and below
+    /// fall back to the default rather than being honoured.
     pub fn from_env() -> Self {
-        let enabled = parse_enabled(
-            std::env::var("RUNTARA_RUN_DIR_CLEANUP_ENABLED")
-                .ok()
-                .as_deref(),
-        );
+        Self::from_vars(&ProcessEnv)
+    }
 
-        let poll_interval_secs = std::env::var("RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3600);
-
-        let max_age_days = std::env::var("RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(3);
-
+    /// [`Self::from_env`] against a supplied set of values.
+    pub(crate) fn from_vars(vars: &dyn Vars) -> Self {
         Self {
-            enabled,
+            enabled: parse_enabled(vars.get("RUNTARA_RUN_DIR_CLEANUP_ENABLED").as_deref()),
             data_dir: PathBuf::from(".data"),
-            poll_interval: Duration::from_secs(poll_interval_secs),
-            max_age: Duration::from_secs(max_age_days * 24 * 3600),
+            poll_interval: Duration::from_secs(positive(
+                vars,
+                "RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS",
+                3600,
+            )),
+            max_age: days(positive(vars, "RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS", 3)),
         }
     }
 }

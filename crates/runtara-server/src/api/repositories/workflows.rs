@@ -2307,6 +2307,29 @@ impl WorkflowRepository {
             .flatten())
     }
 
+    /// Resolve name matches before the runtime database applies pagination.
+    pub async fn workflow_ids_matching_execution_search(
+        &self,
+        tenant_id: &str,
+        search: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let pattern = format!(
+            "%{}%",
+            search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        sqlx::query_scalar(
+            "SELECT DISTINCT workflow_id FROM workflow_definitions
+             WHERE tenant_id = $1 AND deleted_at IS NULL AND definition->>'name' ILIKE $2",
+        )
+        .bind(tenant_id)
+        .bind(pattern)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// Get workflow names for multiple workflow IDs in bulk
     ///
     /// Returns a HashMap mapping workflow_id -> (name, current_version).

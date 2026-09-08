@@ -9,6 +9,8 @@ pub mod embedded;
 pub mod mock;
 mod traits;
 
+use crate::config::Vars;
+
 pub use common::WorkflowRunnerConfig;
 pub use embedded::{EmbeddedWasmRunner, ScopedAgentRunnerConfig};
 pub use mock::MockRunner;
@@ -54,7 +56,7 @@ pub fn build_runner_configured(
     core_http_url: Option<String>,
     scoped_agents: Option<ScopedAgentRunnerConfig>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
-    if let Ok(requested) = std::env::var("RUNTARA_RUNNER")
+    if let Some(requested) = crate::config::ProcessEnv.get("RUNTARA_RUNNER")
         && !requested.is_empty()
     {
         tracing::warn!(

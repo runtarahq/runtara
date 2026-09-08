@@ -33,6 +33,8 @@ export async function getAllExecutions(
     {
       page: pageIndex,
       size: pageSize,
+      search: filters.search || undefined,
+      runLabel: filters.runLabel || undefined,
       workflowId: filters.workflowId || undefined,
       status: filters.status || undefined,
       createdFrom: filters.createdFrom || undefined,
@@ -56,6 +58,7 @@ export async function getAllExecutions(
       instanceId: instance.id,
       workflowId: instance.workflowId,
       workflowName: instance.workflowName ?? undefined,
+      runLabel: instance.runLabel ?? undefined,
       createdAt: instance.created,
       startedAt: instance.started || null,
       completedAt: instance.finished || instance.updated || null,

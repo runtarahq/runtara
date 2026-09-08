@@ -50,6 +50,11 @@ pub trait SdkBackend: Send + Sync {
     /// Send a completed event.
     fn completed(&self, output: &[u8]) -> Result<()>;
 
+    /// Atomically complete with execution label metadata.
+    fn completed_with_label(&self, output: &[u8], _run_label: Option<&str>) -> Result<()> {
+        self.completed(output)
+    }
+
     /// Send a failed event.
     fn failed(&self, error: &str) -> Result<()>;
 

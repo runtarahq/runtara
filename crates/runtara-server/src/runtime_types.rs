@@ -183,6 +183,9 @@ pub struct HealthStatus {
 /// Instance status response with full details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
+    /// Optional label assigned at successful workflow completion.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
+    pub run_label: Option<String>,
     // Identity
     /// Instance ID.
     pub instance_id: String,
@@ -242,6 +245,9 @@ pub struct InstanceInfo {
 /// Summary of an instance (used in list results).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceSummary {
+    /// Optional label assigned at successful workflow completion.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
+    pub run_label: Option<String>,
     /// Instance ID.
     pub instance_id: String,
     /// Tenant ID.
@@ -414,6 +420,13 @@ impl ListInstancesOrder {
 /// Options for listing instances.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListInstancesOptions {
+    /// Case-insensitive literal substring search across run metadata.
+    pub search: Option<String>,
+    /// Exact normalized execution label filter.
+    pub run_label: Option<String>,
+    /// Workflow IDs whose names match search, resolved in the server database.
+    #[serde(default)]
+    pub search_workflow_ids: Vec<String>,
     /// Filter by tenant ID.
     pub tenant_id: Option<String>,
     /// Filter by status — an instance matches if it holds any one of these.
@@ -1892,6 +1905,7 @@ mod tests {
     #[test]
     fn test_instance_info_with_metrics() {
         let info = InstanceInfo {
+            run_label: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -1922,6 +1936,7 @@ mod tests {
     #[test]
     fn test_instance_info_without_metrics() {
         let info = InstanceInfo {
+            run_label: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -1952,6 +1967,7 @@ mod tests {
     #[test]
     fn test_instance_info_serde_with_metrics() {
         let info = InstanceInfo {
+            run_label: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "workflow".to_string(),
@@ -1989,6 +2005,7 @@ mod tests {
     #[test]
     fn test_instance_info_with_stderr() {
         let info = InstanceInfo {
+            run_label: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),

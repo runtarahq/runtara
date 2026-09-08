@@ -8,9 +8,17 @@
 #     environment or the repository .env file.
 #
 # The test creates an isolated workflow/image, backs up and removes that image's
-# binary, then publishes a trigger event directly. The first delivery must stay
-# pending while a forced recompilation restores the artifact. Replaying the same
-# instance id must be deduplicated and ACKed without a second instance row.
+# binary, then executes the workflow. The first delivery must stay pending while
+# a forced recompilation restores the artifact. Replaying the same event must be
+# deduplicated and ACKed without a second instance row.
+#
+# This test earned its keep: it caught artifact loss being unrecoverable by
+# recompilation. The repair fired and the compile reported success, but the
+# post-compile reuse branch matched the existing image row on checksums and
+# skipped registration, so the deleted file was never rewritten and the event
+# retried into the same failure until its budget ran out (13 repair attempts,
+# 14 compiles reported successful, one register_image_stream call). Reuse now
+# requires the artifact to be on disk as well as the row to match.
 
 set -euo pipefail
 
@@ -75,6 +83,24 @@ wait_for_group_read() {
         local current
         current=$(group_entries_read)
         if [ "${current}" -gt "${baseline}" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# Delivery and acknowledgement are two separate Valkey calls, so an entry is
+# briefly pending between the read that increments `entries-read` and the XACK
+# that clears it. Asserting on a single XPENDING right after the read is a race
+# the assertion loses whenever it samples inside that window: the worker
+# acknowledged a deduplicated replay six milliseconds after delivery and the
+# check ran two milliseconds in. Poll instead — the assertion is still "this
+# entry gets acknowledged", it just no longer requires that to be instantaneous.
+wait_for_ack() {
+    local entry_id="$1"
+    for _ in {1..30}; do
+        if [ -z "$(redis XPENDING "${STREAM}" "${GROUP}" "${entry_id}" "${entry_id}" 1)" ]; then
             return 0
         fi
         sleep 1
@@ -170,24 +196,43 @@ ARTIFACT_BACKUP=$(mktemp -t runtara-trigger-replay-artifact.XXXXXX)
 cp "${ARTIFACT}" "${ARTIFACT_BACKUP}"
 rm "${ARTIFACT}"
 
-echo "3. Publishing one event against the stale image and waiting for forced repair"
-INSTANCE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-REQUESTED_AT="$(date +%s)000"
-EVENT=$(jq -nc \
-    --arg instance_id "${INSTANCE_ID}" \
-    --arg tenant_id "${TENANT_ID}" \
-    --arg workflow_id "${WORKFLOW_ID}" \
-    --argjson version "${VERSION}" \
-    --argjson requested_at "${REQUESTED_AT}" \
-    '{instance_id:$instance_id,tenant_id:$tenant_id,workflow_id:$workflow_id,version:$version,
-      inputs:{data:{input:{e2e:true}},variables:{}},
-      trigger:{type:"http_api",correlation_id:null},requested_at:$requested_at,
-      track_events:false,debug:false}')
-
+echo "3. Executing against the stale image and waiting for forced repair"
+# The first delivery is produced by the server, not hand-crafted here.
+#
+# This used to XADD a synthetic event built from scratch. The trigger worker now
+# refuses any event without a durable source request id — `missing_durable_request_id`,
+# a permanent failure — because admission is durable and a producer that bypasses
+# it can double-launch. A shell script cannot mint that id without duplicating
+# the outbox's invariants, and it should not: driving the real endpoint gets a
+# real request row, and the event the worker sees is the one production writes.
+#
+# The replay in step 4 then re-publishes THAT event verbatim, which is a truer
+# test of idempotency than replaying something only this script knows how to build.
 READS_BEFORE=$(group_entries_read)
-FIRST_ENTRY_ID=$(redis XADD "${STREAM}" '*' \
-    event_type trigger trigger_type http_api instance_id "${INSTANCE_ID}" \
-    workflow_id "${WORKFLOW_ID}" data "${EVENT}")
+EXECUTE_RESPONSE=$(curl -fsS --max-time 120 -X POST \
+    "${API}/workflows/${WORKFLOW_ID}/execute" \
+    -H 'Content-Type: application/json' \
+    -d '{"inputs":{"data":{"input":{"e2e":true}},"variables":{}}}')
+INSTANCE_ID=$(jq -r '.data.instanceId // .data.instance_id // empty' <<<"${EXECUTE_RESPONSE}")
+[ -n "${INSTANCE_ID}" ] || { echo "execute did not return an instance id: ${EXECUTE_RESPONSE}"; exit 1; }
+
+# Find the entry the server just published for this instance, and keep its
+# payload so the replay can repeat it exactly.
+FIRST_ENTRY_ID=""
+EVENT=""
+for _ in {1..30}; do
+    ENTRY=$(redis XREVRANGE "${STREAM}" + - COUNT 50 2>/dev/null || true)
+    FIRST_ENTRY_ID=$(awk -v id="${INSTANCE_ID}" '
+        /^[0-9]+-[0-9]+$/ { entry = $0 }
+        $0 == id { print entry; exit }
+    ' <<<"${ENTRY}")
+    [ -n "${FIRST_ENTRY_ID}" ] && break
+    sleep 1
+done
+[ -n "${FIRST_ENTRY_ID}" ] || { echo "server published no trigger entry for ${INSTANCE_ID}"; exit 1; }
+EVENT=$(redis XRANGE "${STREAM}" "${FIRST_ENTRY_ID}" "${FIRST_ENTRY_ID}" COUNT 1 \
+    | awk 'prev == "data" { print; exit } { prev = $0 }')
+[ -n "${EVENT}" ] || { echo "could not read the published event payload"; exit 1; }
 
 for _ in {1..120}; do
     INSTANCE_COUNT=$(db_scalar "${RUNTARA_DATABASE_URL}" \
@@ -200,7 +245,7 @@ done
 [ "${INSTANCE_COUNT:-0}" = "1" ] || { echo "repaired execution never registered"; exit 1; }
 [ -f "${ARTIFACT}" ] || { echo "forced recompilation did not restore ${ARTIFACT}"; exit 1; }
 wait_for_group_read "${READS_BEFORE}" || { echo "trigger group did not consume first event"; exit 1; }
-[ -z "$(redis XPENDING "${STREAM}" "${GROUP}" "${FIRST_ENTRY_ID}" "${FIRST_ENTRY_ID}" 1)" ] || {
+wait_for_ack "${FIRST_ENTRY_ID}" || {
     echo "first event was not acknowledged after repair"
     exit 1
 }
@@ -222,7 +267,7 @@ REPLAY_ENTRY_ID=$(redis XADD "${STREAM}" '*' \
     event_type trigger trigger_type http_api instance_id "${INSTANCE_ID}" \
     workflow_id "${WORKFLOW_ID}" data "${EVENT}")
 wait_for_group_read "${READS_BEFORE}" || { echo "trigger group did not consume replay"; exit 1; }
-[ -z "$(redis XPENDING "${STREAM}" "${GROUP}" "${REPLAY_ENTRY_ID}" "${REPLAY_ENTRY_ID}" 1)" ] || {
+wait_for_ack "${REPLAY_ENTRY_ID}" || {
     echo "deduplicated replay was not acknowledged"
     exit 1
 }

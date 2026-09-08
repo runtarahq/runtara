@@ -62,6 +62,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::Finish {
             step_id,
             mapping_id,
+            run_label_mapping_id,
             breakpoint,
         } => {
             emit_step_debug_event(
@@ -91,6 +92,23 @@ pub(super) fn emit_run_plan_mapping(
                 route_len_local,
                 failure_target,
             );
+            if let Some(label_mapping_id) = run_label_mapping_id {
+                emit_apply_mapping_step_error(
+                    body,
+                    indices,
+                    static_data,
+                    track_events,
+                    *label_mapping_id,
+                    step_id,
+                    source_ptr_local,
+                    source_len_local,
+                    super::core_module::RUN_LABEL_PTR_LOCAL,
+                    super::core_module::RUN_LABEL_LEN_LOCAL,
+                    route_ptr_local,
+                    route_len_local,
+                    failure_target,
+                );
+            }
             emit_step_breakpoint(
                 body,
                 indices,

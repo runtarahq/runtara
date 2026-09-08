@@ -33,6 +33,24 @@ pub async fn handle_instance_event(
     state: &InstanceHandlerState,
     event: InstanceEvent,
 ) -> Result<InstanceEventResponse> {
+    handle_instance_event_with_run_label(state, event, None).await
+}
+
+/// Complete an execution with optional label metadata in the guarded update.
+/// Other event types must not supply a label.
+pub async fn handle_instance_event_with_run_label(
+    state: &InstanceHandlerState,
+    event: InstanceEvent,
+    run_label: Option<&str>,
+) -> Result<InstanceEventResponse> {
+    let run_label = runtara_dsl::run_label::adopt_run_label(run_label);
+    if run_label.is_some() && !matches!(event.event_type(), InstanceEventType::EventCompleted) {
+        return Err(CoreError::ValidationError {
+            field: "runLabel".into(),
+            message: "Run labels require successful completion".into(),
+        }
+        .into());
+    }
     debug!(
         event_type = ?event.event_type,
         checkpoint_id = ?event.checkpoint_id,
@@ -104,6 +122,9 @@ pub async fn handle_instance_event(
                     .if_running();
             if let Some(o) = output {
                 params = params.with_output(o);
+            }
+            if let Some(label) = run_label.as_deref() {
+                params = params.with_run_label(label);
             }
             let applied = state.persistence.complete_instance(params).await?;
             if applied {

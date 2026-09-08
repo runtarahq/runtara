@@ -42,6 +42,8 @@ use crate::error::{Error, Result};
 /// turning `found: false` back into an error.
 #[derive(Debug)]
 pub struct InstanceDetail {
+    /// Optional label assigned at successful workflow completion.
+    pub run_label: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Lifecycle status.
@@ -85,6 +87,8 @@ pub struct InstanceDetail {
 /// One instance as a list reports it.
 #[derive(Debug)]
 pub struct InstanceListItem {
+    /// Optional label assigned at successful workflow completion.
+    pub run_label: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Owning tenant.
@@ -125,6 +129,12 @@ pub struct InstanceImageBinding {
 /// Options for listing instances.
 #[derive(Debug, Clone, Default)]
 pub struct ListInstancesOptions {
+    /// Case-insensitive literal substring search across run metadata.
+    pub search: Option<String>,
+    /// Exact normalized execution label filter.
+    pub run_label: Option<String>,
+    /// Workflow IDs whose names match search, resolved in the server database.
+    pub search_workflow_ids: Vec<String>,
     /// Filter by tenant ID.
     pub tenant_id: Option<String>,
     /// Filter by status — a row matches if it holds any one of these. `None`
@@ -207,6 +217,7 @@ impl InstanceRepository {
         Ok(Some(InstanceDetail {
             status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
             instance_id: inst.instance_id,
+            run_label: inst.run_label,
             tenant_id: inst.tenant_id,
             image_id: inst.image_id,
             image_name: inst.image_name,
@@ -229,19 +240,10 @@ impl InstanceRepository {
 
     /// List instances matching `options`.
     ///
-    /// A failing count degrades to `0` rather than failing the call: the page is
-    /// the answer the caller asked for, and losing it because a second query
-    /// stumbled would be the worse outcome.
+    /// Count failures propagate: a successful page must have truthful totals.
     pub async fn list(&self, options: &ListInstancesOptions) -> Result<InstancePage> {
         let instances = crate::db::list_instances(&self.pool, options).await?;
-
-        let total_count = match crate::db::count_instances(&self.pool, options).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Count instances error: {}", e);
-                0
-            }
-        };
+        let total_count = crate::db::count_instances(&self.pool, options).await?;
 
         Ok(InstancePage {
             instances: instances
@@ -250,6 +252,7 @@ impl InstanceRepository {
                     Ok(InstanceListItem {
                         status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
                         instance_id: inst.instance_id,
+                        run_label: inst.run_label,
                         tenant_id: inst.tenant_id,
                         image_id: inst.image_id,
                         image_name: inst.image_name,
@@ -278,20 +281,6 @@ impl InstanceRepository {
         Ok(crate::db::count_instances_by_status(&self.pool, tenant_id, statuses, ceiling).await?)
     }
 
-    /// Count a tenant's instances in the given statuses, with no ceiling.
-    ///
-    /// [`Self::count_by_status`] bounds its scan because the admission gate
-    /// only needs to know whether the cap is reached. A viewer reporting how
-    /// many instances are parked needs the actual number, and this is the read
-    /// that costs what that answer costs — O(matching rows), for a slow tick.
-    pub async fn count_by_status_unbounded(
-        &self,
-        tenant_id: &str,
-        statuses: &[String],
-    ) -> Result<i64> {
-        Ok(crate::db::count_instances_by_status_unbounded(&self.pool, tenant_id, statuses).await?)
-    }
-
     /// How many of a tenant's instances are parked.
     ///
     /// Which statuses count as parked is this crate's knowledge, so it is
@@ -300,14 +289,20 @@ impl InstanceRepository {
     /// server crate holding that literal is a second spelling of a vocabulary
     /// it does not own.
     ///
-    /// Unbounded, and deliberately so — see [`Self::count_by_status_unbounded`]
-    /// for what that costs.
+    /// Unbounded, unlike [`Self::count_by_status`], because a viewer wants the
+    /// real figure rather than "at least the cap". That used to make it the
+    /// expensive half of the pair — a sequential scan of a table whose dominant
+    /// value is exactly the one being counted. Migration 025 indexes that value
+    /// per tenant, so the answer is an index-only scan and the missing ceiling
+    /// costs a viewer nothing. The query has to spell the status as a literal
+    /// to reach that index; [`crate::db::count_parked_instances`] says why.
     pub async fn count_parked(&self, tenant_id: &str) -> Result<i64> {
-        self.count_by_status_unbounded(
+        Ok(crate::db::count_parked_instances(
+            &self.pool,
             tenant_id,
-            &[crate::core_types::status_name(InstanceStatus::Suspended).to_string()],
+            crate::core_types::status_name(InstanceStatus::Suspended),
         )
-        .await
+        .await?)
     }
 
     /// Record what the process used, and read back the status the guest

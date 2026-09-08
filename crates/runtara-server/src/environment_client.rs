@@ -121,6 +121,7 @@ impl EnvironmentClient {
 
         Ok(InstanceInfo {
             instance_id: inst.instance_id,
+            run_label: inst.run_label,
             image_id: inst.image_id.unwrap_or_default(),
             image_name: inst.image_name.unwrap_or_default(),
             tenant_id: inst.tenant_id,
@@ -177,6 +178,7 @@ impl EnvironmentClient {
                 .into_iter()
                 .map(|inst| InstanceSummary {
                     instance_id: inst.instance_id,
+                    run_label: inst.run_label,
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
@@ -383,6 +385,15 @@ impl EnvironmentClient {
             .into_iter()
             .next()
             .map(image_summary))
+    }
+
+    /// Whether an image's registered artifact is still on disk.
+    ///
+    /// The compile path reuses an immutable artifact on the strength of its
+    /// row; this is how it checks the file is actually there before doing so.
+    #[instrument(skip(self), fields(image_id = %image_id), level = "debug")]
+    pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool> {
+        Ok(self.image_registry().artifact_present(image_id).await?)
     }
 
     /// Get one image, scoped to a tenant.
@@ -796,6 +807,9 @@ fn list_instances_options(
     options: &ListInstancesOptions,
 ) -> instance_repository::ListInstancesOptions {
     instance_repository::ListInstancesOptions {
+        search: options.search.clone(),
+        run_label: options.run_label.clone(),
+        search_workflow_ids: options.search_workflow_ids.clone(),
         tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {
             options

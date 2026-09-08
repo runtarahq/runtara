@@ -13,6 +13,8 @@ use crate::instance_repository::ListInstancesOptions;
 /// Instance with image info (joined from instance_images).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct InstanceWithImage {
+    /// Optional label assigned at successful workflow completion.
+    pub run_label: Option<String>,
     /// Unique identifier for the instance.
     pub instance_id: String,
     /// Tenant identifier for multi-tenancy isolation.
@@ -36,6 +38,8 @@ pub struct InstanceWithImage {
 /// Full instance record with image info and heartbeat.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct InstanceFull {
+    /// Optional label assigned at successful workflow completion.
+    pub run_label: Option<String>,
     /// Unique identifier for the instance.
     pub instance_id: String,
     /// Tenant identifier for multi-tenancy isolation.
@@ -101,7 +105,7 @@ pub async fn get_instance_full(
     sqlx::query_as::<_, InstanceFull>(
         r#"
         SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
-               i.status::TEXT as status, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
+               i.status::TEXT as status, i.run_label, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
                i.attempt, i.max_attempts,
                i.memory_peak_bytes, i.cpu_usage_usec,
@@ -132,69 +136,109 @@ fn status_filter(options: &ListInstancesOptions) -> Option<&[String]> {
         .filter(|statuses| !statuses.is_empty())
 }
 
-/// List instances with optional filters.
+/// Escape LIKE metacharacters so a search term is always literal.
+pub fn escape_like_literal(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// One predicate builder for both the page and its unpaged count.
+fn push_instance_filters(
+    query: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
+    options: &ListInstancesOptions,
+) {
+    query.push(" WHERE TRUE");
+    if let Some(tenant) = &options.tenant_id {
+        query.push(" AND i.tenant_id = ").push_bind(tenant.clone());
+    }
+    if let Some(statuses) = status_filter(options) {
+        query
+            .push(" AND i.status = ANY(")
+            .push_bind(statuses.to_vec())
+            .push("::instance_status[])");
+    }
+    if let Some(image_id) = &options.image_id {
+        query
+            .push(" AND ii.image_id = ")
+            .push_bind(image_id.clone());
+    }
+    if let Some(prefix) = &options.image_name_prefix {
+        query
+            .push(" AND img.name LIKE ")
+            .push_bind(format!("{}%", escape_like_literal(prefix)));
+    }
+    for (column, value) in [
+        ("i.created_at >= ", options.created_after),
+        ("i.created_at < ", options.created_before),
+        ("i.finished_at >= ", options.finished_after),
+        ("i.finished_at < ", options.finished_before),
+    ] {
+        if let Some(value) = value {
+            query.push(" AND ").push(column).push_bind(value);
+        }
+    }
+    if let Some(label) = &options.run_label {
+        query.push(" AND i.run_label = ").push_bind(label.clone());
+    }
+    if let Some(search) = options
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let pattern = format!("%{}%", escape_like_literal(search));
+        query
+            .push(" AND (i.run_label ILIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR i.instance_id ILIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR img.name ILIKE ")
+            .push_bind(pattern.clone())
+            .push(
+                " OR (CASE WHEN i.status = 'pending' THEN 'queued' ELSE i.status::text END) ILIKE ",
+            )
+            .push_bind(pattern)
+            .push(" OR split_part(img.name, ':', 1) = ANY(")
+            .push_bind(options.search_workflow_ids.clone())
+            .push("))");
+    }
+}
+
+/// List instances with optional filters, with a deterministic tie-breaker.
 pub async fn list_instances(
     pool: &PgPool,
     options: &ListInstancesOptions,
 ) -> Result<Vec<InstanceWithImage>, sqlx::Error> {
-    // Build ORDER BY clause based on order_by option
-    let order_clause = match options.order_by.as_deref() {
-        Some("created_at_asc") => "ORDER BY i.created_at ASC",
-        Some("finished_at_desc") => "ORDER BY i.finished_at DESC NULLS LAST",
-        Some("finished_at_asc") => "ORDER BY i.finished_at ASC NULLS LAST",
-        _ => "ORDER BY i.created_at DESC", // default: created_at_desc
-    };
-
-    // Escape the image name prefix for LIKE pattern (escape % and _)
-    let image_name_pattern = options.image_name_prefix.as_ref().map(|prefix| {
-        let escaped = prefix.replace('%', "\\%").replace('_', "\\_");
-        format!("{}%", escaped)
-    });
-
-    let query = format!(
-        r#"
-        SELECT i.instance_id, i.tenant_id, i.status::TEXT as status,
-               i.created_at, i.started_at, i.finished_at,
-               i.error, ii.image_id, img.name as image_name
-        FROM instances i
-        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
-        LEFT JOIN images img ON ii.image_id = img.image_id
-        WHERE ($1::TEXT IS NULL OR i.tenant_id = $1)
-          AND ($2::TEXT[] IS NULL OR i.status::TEXT = ANY($2::TEXT[]))
-          AND ($3::TEXT IS NULL OR ii.image_id = $3)
-          AND ($4::TEXT IS NULL OR img.name LIKE $4)
-          AND ($5::TIMESTAMPTZ IS NULL OR i.created_at >= $5)
-          AND ($6::TIMESTAMPTZ IS NULL OR i.created_at < $6)
-          AND ($7::TIMESTAMPTZ IS NULL OR i.finished_at >= $7)
-          AND ($8::TIMESTAMPTZ IS NULL OR i.finished_at < $8)
-        {}
-        LIMIT $9 OFFSET $10
-        "#,
-        order_clause
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT i.instance_id, i.tenant_id, i.status::TEXT as status,
+         i.created_at, i.started_at, i.finished_at, i.error, i.run_label,
+         ii.image_id, img.name as image_name
+         FROM instances i
+         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
+         LEFT JOIN images img ON ii.image_id = img.image_id",
     );
-
-    sqlx::query_as::<_, InstanceWithImage>(&query)
-        .bind(options.tenant_id.as_deref())
-        .bind(status_filter(options))
-        .bind(options.image_id.as_deref())
-        .bind(image_name_pattern.as_deref())
-        .bind(options.created_after)
-        .bind(options.created_before)
-        .bind(options.finished_after)
-        .bind(options.finished_before)
-        .bind(options.limit)
-        .bind(options.offset)
-        .fetch_all(pool)
-        .await
+    push_instance_filters(&mut query, options);
+    query.push(match options.order_by.as_deref() {
+        Some("created_at_asc") => " ORDER BY i.created_at ASC, i.instance_id ASC",
+        Some("finished_at_desc") => " ORDER BY i.finished_at DESC NULLS LAST, i.instance_id DESC",
+        Some("finished_at_asc") => " ORDER BY i.finished_at ASC NULLS LAST, i.instance_id ASC",
+        _ => " ORDER BY i.created_at DESC, i.instance_id DESC",
+    });
+    query
+        .push(" LIMIT ")
+        .push_bind(options.limit)
+        .push(" OFFSET ")
+        .push_bind(options.offset);
+    query.build_query_as().fetch_all(pool).await
 }
 
 /// Count a tenant's instances in the given statuses.
 ///
 /// Separate from [`count_instances`] on purpose. That one backs pagination, so
-/// it carries every optional filter and joins the image tables; the optional
-/// filters are written `$n IS NULL OR col = $n`, which is not sargable, and the
-/// status compare casts the enum to text, so neither `idx_instances_status` nor
-/// any other index applies and it degrades to a sequential scan.
+/// it carries every optional filter and joins the image tables. The admission
+/// gate needs only a tenant/status predicate, without those extra joins.
 ///
 /// The admission gate only ever wants "how many are active for this tenant",
 /// and it runs on every intake. Binding the status list as the enum array and
@@ -234,36 +278,63 @@ pub async fn count_instances_by_status(
     Ok(count.0)
 }
 
-/// Count a tenant's instances in the given statuses, with no ceiling.
+/// The parked count's query text.
 ///
-/// The sibling above stops at a bound because its caller only needs to know
-/// whether a cap is reached. A viewer wants the real figure and pays for it:
-/// this is O(matching rows), which for `suspended` means the largest set in the
-/// table. It belongs on a slow tick, never on an intake path.
-pub async fn count_instances_by_status_unbounded(
-    pool: &PgPool,
-    tenant_id: &str,
-    statuses: &[String],
-) -> Result<i64, sqlx::Error> {
-    // Same predicate as the capped form minus its LIMIT subquery, so the two
-    // cannot drift apart on which rows they consider. Not the same plan,
-    // though: `idx_instances_status` is a plain index on `status`, and the
-    // caller that wants this asks for `suspended` — the value that dominates
-    // the table — so the planner will reasonably prefer a sequential scan.
-    // That cost is the point of the ceiling on the capped form, and the reason
-    // this one belongs on a slow tick behind a slow-query warning.
-    let count: (i64,) = sqlx::query_as(
+/// Built rather than written inline so the test that asserts on its query plan
+/// can EXPLAIN the statement this function runs, instead of a copy that could
+/// drift away from it.
+///
+/// `parked` is spliced, and that is the whole point of the shape. See
+/// [`count_parked_instances`] for why a bound status cannot work here.
+pub(crate) fn parked_count_sql(parked: &str) -> String {
+    format!(
         r#"
         SELECT COUNT(*)
         FROM instances
         WHERE tenant_id = $1
-          AND status = ANY($2::instance_status[])
-        "#,
+          AND status = '{parked}'
+        "#
     )
-    .bind(tenant_id)
-    .bind(statuses)
-    .fetch_one(pool)
-    .await?;
+}
+
+/// Count a tenant's parked instances, with no ceiling.
+///
+/// The sibling above stops at a bound because its caller only needs to know
+/// whether a cap is reached. A viewer wants the real figure, and this answers it
+/// from `idx_instances_suspended_tenant` (025) instead of by reading the table:
+/// an index-only scan over one tenant's parked rows. Measured over 500k
+/// instances with 350k suspended, counting one tenant's 306k: 15,622 buffers
+/// before that index, 261 after.
+pub async fn count_parked_instances(
+    pool: &PgPool,
+    tenant_id: &str,
+    parked: &str,
+) -> Result<i64, sqlx::Error> {
+    // Why the status is spliced rather than bound, which is the whole reason
+    // this is not just the capped query without its LIMIT.
+    //
+    // 025 is a partial index with the predicate `status = 'suspended'`, and the
+    // planner applies a partial index only when it can prove the query's own
+    // predicate implies it. That proof needs a constant. The obvious form,
+    // `status = ANY($2::instance_status[])` with the statuses bound, does not
+    // give it one: sqlx sends a `Vec<String>` as `text[]`, so what the planner
+    // actually sees is `(('{suspended}'::text[])::instance_status[])` — a cast
+    // through the enum's input function, which is `stable` rather than
+    // `immutable` and therefore not folded to a constant before index matching.
+    // The proof fails, the index is skipped in silence, and the count reverts
+    // to reading the table. Measured, and pinned by
+    // `the_parked_count_reaches_its_partial_index`.
+    //
+    // Splicing is safe because the value is never a caller's input:
+    // `status_name` maps a Rust enum to one of six fixed identifiers, and the
+    // only caller passes `InstanceStatus::Suspended`. It is an argument rather
+    // than a literal written here so the label keeps one spelling — the one the
+    // rest of the crate already uses — and a renamed variant cannot leave this
+    // query silently disagreeing with it.
+    let count: (i64,) = sqlx::query_as(&parked_count_sql(parked))
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0)
 }
@@ -273,40 +344,14 @@ pub async fn count_instances(
     pool: &PgPool,
     options: &ListInstancesOptions,
 ) -> Result<i64, sqlx::Error> {
-    // Escape the image name prefix for LIKE pattern (escape % and _)
-    let image_name_pattern = options.image_name_prefix.as_ref().map(|prefix| {
-        let escaped = prefix.replace('%', "\\%").replace('_', "\\_");
-        format!("{}%", escaped)
-    });
-
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM instances i
-        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
-        LEFT JOIN images img ON ii.image_id = img.image_id
-        WHERE ($1::TEXT IS NULL OR i.tenant_id = $1)
-          AND ($2::TEXT[] IS NULL OR i.status::TEXT = ANY($2::TEXT[]))
-          AND ($3::TEXT IS NULL OR ii.image_id = $3)
-          AND ($4::TEXT IS NULL OR img.name LIKE $4)
-          AND ($5::TIMESTAMPTZ IS NULL OR i.created_at >= $5)
-          AND ($6::TIMESTAMPTZ IS NULL OR i.created_at < $6)
-          AND ($7::TIMESTAMPTZ IS NULL OR i.finished_at >= $7)
-          AND ($8::TIMESTAMPTZ IS NULL OR i.finished_at < $8)
-        "#,
-    )
-    .bind(options.tenant_id.as_deref())
-    .bind(status_filter(options))
-    .bind(options.image_id.as_deref())
-    .bind(image_name_pattern.as_deref())
-    .bind(options.created_after)
-    .bind(options.created_before)
-    .bind(options.finished_after)
-    .bind(options.finished_before)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count.0)
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT COUNT(*) FROM instances i
+         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
+         LEFT JOIN images img ON ii.image_id = img.image_id",
+    );
+    push_instance_filters(&mut query, options);
+    let (count,): (i64,) = query.build_query_as().fetch_one(pool).await?;
+    Ok(count)
 }
 
 // ============================================================================
@@ -573,6 +618,7 @@ mod tests {
             order_by: Some("finished_at_desc".to_string()),
             limit: 25,
             offset: 50,
+            ..Default::default()
         };
 
         assert_eq!(options.tenant_id, Some("tenant-1".to_string()));
@@ -628,6 +674,7 @@ mod tests {
     #[test]
     fn test_instance_with_image_debug() {
         let instance = InstanceWithImage {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "running".to_string(),
@@ -648,6 +695,7 @@ mod tests {
     #[test]
     fn test_instance_with_image_clone() {
         let instance = InstanceWithImage {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "running".to_string(),
@@ -668,6 +716,7 @@ mod tests {
     #[test]
     fn test_instance_with_image_no_image() {
         let instance = InstanceWithImage {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "pending".to_string(),
@@ -690,6 +739,7 @@ mod tests {
     #[test]
     fn test_instance_full_debug() {
         let instance = InstanceFull {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),
@@ -721,6 +771,7 @@ mod tests {
     fn test_instance_full_clone() {
         let now = Utc::now();
         let instance = InstanceFull {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),
@@ -753,6 +804,7 @@ mod tests {
     #[test]
     fn test_instance_full_no_heartbeat() {
         let instance = InstanceFull {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: None,
@@ -782,6 +834,7 @@ mod tests {
     #[test]
     fn test_instance_full_with_metrics() {
         let instance = InstanceFull {
+            run_label: None,
             instance_id: "inst-metrics".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),
@@ -812,6 +865,7 @@ mod tests {
         // Simulates an instance where metrics couldn't be collected
         // (e.g., container exited too quickly or cgroup read failed)
         let instance = InstanceFull {
+            run_label: None,
             instance_id: "inst-no-metrics".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),

@@ -23,6 +23,7 @@ default = []
 direct-component = ["dep:wit-bindgen"]
 
 [dependencies]
+runtara-dsl = { path = "../runtara-dsl", default-features = false }
 # Export glue for the wasm32-wasip2 component build.
 wit-bindgen = { version = "0.58", optional = true }
 

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::parse_enabled;
+use crate::config::{ProcessEnv, Vars, days, parse_enabled, positive};
 use chrono::Utc;
 use runtara_core::persistence::Persistence;
 use sqlx::PgPool;
@@ -76,60 +76,25 @@ impl DbCleanupWorkerConfig {
     ///   disables the sweep, leaving debug events to age out with their
     ///   instance as before.
     pub fn from_env() -> Self {
-        let enabled = parse_enabled(std::env::var("RUNTARA_DB_CLEANUP_ENABLED").ok().as_deref());
+        Self::from_vars(&ProcessEnv)
+    }
 
-        let poll_interval_secs = positive_or_default(
-            std::env::var("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS")
-                .ok()
-                .as_deref(),
-            3600,
-        );
-
-        let max_age_days = positive_or_default(
-            std::env::var("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS")
-                .ok()
-                .as_deref(),
-            3,
-        );
-
-        let batch_size = positive_or_default(
-            std::env::var("RUNTARA_DB_CLEANUP_BATCH_SIZE")
-                .ok()
-                .as_deref(),
-            100,
-        );
-
-        let debug_event_max_age = debug_event_max_age_from_raw(
-            std::env::var("RUNTARA_EVENT_DEBUG_RETENTION_HOURS")
-                .ok()
-                .as_deref(),
-        );
-
+    /// [`Self::from_env`] against a supplied set of values.
+    pub(crate) fn from_vars(vars: &dyn Vars) -> Self {
         Self {
-            enabled,
-            poll_interval: Duration::from_secs(poll_interval_secs),
-            max_age: Duration::from_secs(max_age_days * 24 * 3600),
-            batch_size,
-            debug_event_max_age,
+            enabled: parse_enabled(vars.get("RUNTARA_DB_CLEANUP_ENABLED").as_deref()),
+            poll_interval: Duration::from_secs(positive(
+                vars,
+                "RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS",
+                3600,
+            )),
+            max_age: days(positive(vars, "RUNTARA_DB_CLEANUP_MAX_AGE_DAYS", 3)),
+            batch_size: positive(vars, "RUNTARA_DB_CLEANUP_BATCH_SIZE", 100),
+            debug_event_max_age: debug_event_max_age_from_raw(
+                vars.get("RUNTARA_EVENT_DEBUG_RETENTION_HOURS").as_deref(),
+            ),
         }
     }
-}
-
-/// Parse a positive setting, falling back to `default` for anything that is
-/// absent, unparseable, or non-positive.
-///
-/// Zero is rejected rather than honoured: a zero batch size makes the sweep
-/// delete `LIMIT 0` rows forever, because the loop only stops when a pass comes
-/// back short of a full batch and `0 < 0` never does. A zero poll interval
-/// spins the same way. Both hammer Postgres and stop shutdown from joining the
-/// worker, so neither is a value anyone can usefully ask for.
-fn positive_or_default<T>(raw: Option<&str>, default: T) -> T
-where
-    T: std::str::FromStr + PartialOrd + Default + Copy,
-{
-    raw.and_then(|v| v.trim().parse::<T>().ok())
-        .filter(|parsed| *parsed > T::default())
-        .unwrap_or(default)
 }
 
 /// Step-debug retention window from `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`.
@@ -403,27 +368,53 @@ mod tests {
 
 #[cfg(test)]
 mod setting_validation_tests {
-    use super::positive_or_default;
+    use super::*;
+    use crate::config::FixedVars;
 
     /// Zero is the dangerous value, not merely an odd one: it makes the debug
     /// sweep delete `LIMIT 0` rows in a loop that only exits on a short batch,
     /// which never happens because `0 < 0` is false. That spins on Postgres and
     /// stops shutdown from joining the worker.
+    ///
+    /// The rule itself is `crate::config::positive_or_default` and is tested
+    /// there; what this pins is that this worker's settings go through it.
     #[test]
     fn non_positive_settings_fall_back_to_the_default() {
-        assert_eq!(positive_or_default(Some("0"), 100i64), 100);
-        assert_eq!(positive_or_default(Some("-5"), 100i64), 100);
-        assert_eq!(positive_or_default(Some(""), 100i64), 100);
-        assert_eq!(positive_or_default(Some("not-a-number"), 100i64), 100);
-        assert_eq!(positive_or_default(None, 100i64), 100);
-        assert_eq!(positive_or_default(Some("0"), 3600u64), 3600);
+        let config = DbCleanupWorkerConfig::from_vars(&FixedVars::new([
+            ("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS", "0"),
+            ("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS", "0"),
+            ("RUNTARA_DB_CLEANUP_BATCH_SIZE", "-5"),
+        ]));
+
+        assert_eq!(config.poll_interval, Duration::from_secs(3600));
+        assert_eq!(config.max_age, Duration::from_secs(3 * 24 * 3600));
+        assert_eq!(config.batch_size, 100);
     }
 
     #[test]
     fn positive_settings_are_honoured() {
-        assert_eq!(positive_or_default(Some("50"), 100i64), 50);
-        assert_eq!(positive_or_default(Some("  7  "), 100i64), 7);
-        assert_eq!(positive_or_default(Some("1"), 3600u64), 1);
+        let config = DbCleanupWorkerConfig::from_vars(&FixedVars::new([
+            ("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS", "60"),
+            ("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS", "  7  "),
+            ("RUNTARA_DB_CLEANUP_BATCH_SIZE", "25"),
+        ]));
+
+        assert_eq!(config.poll_interval, Duration::from_secs(60));
+        assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(config.batch_size, 25);
+    }
+
+    /// The retention window is the one setting here where zero is a real
+    /// answer, and it must keep meaning "do not sweep" rather than being
+    /// swallowed by the positive-only rule the others follow.
+    #[test]
+    fn a_zero_retention_window_still_disables_the_sweep() {
+        let config = DbCleanupWorkerConfig::from_vars(&FixedVars::new([(
+            "RUNTARA_EVENT_DEBUG_RETENTION_HOURS",
+            "0",
+        )]));
+
+        assert!(config.debug_event_max_age.is_none());
     }
 }
 

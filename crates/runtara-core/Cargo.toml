@@ -21,6 +21,7 @@ path = "src/lib.rs"
 test-support = []
 
 [dependencies]
+runtara-dsl = { path = "../runtara-dsl", default-features = false }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

@@ -108,6 +108,152 @@ fn run(id: &str, graph: Value) -> Value {
     ))
 }
 
+#[test]
+fn run_label_is_persisted_by_compiled_finish_without_changing_output() {
+    let mut graph = early_finish_graph(true, true);
+    graph["steps"]["early"]["runLabel"] =
+        json!({"valueType":"template","value":"Order/{{ 12 }} [done]"});
+    graph["steps"]["merge"]["runLabel"] = immediate(json!("unreached"));
+    let (_temp, artifact) = compile("run-label-branch", graph);
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let output = completed(run_invoke_once(
+        &artifact.wasm_path,
+        host.clone(),
+        b"{}".to_vec(),
+    ));
+    assert_eq!(output, json!({"result":"early"}));
+    assert_eq!(
+        host.run_label.lock().unwrap().as_deref(),
+        Some("Order/12 [done]")
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(host.completed.lock().unwrap().as_ref().unwrap()).unwrap(),
+        output
+    );
+}
+
+#[test]
+fn run_label_invalid_dynamic_value_is_ignored_without_changing_output() {
+    for template in ["invalid_{{ 12 }}", "--- ./()[]", "   ", "\u{200b}"] {
+        let mut graph = early_finish_graph(true, true);
+        graph["steps"]["early"]["runLabel"] = json!({"valueType":"template","value":template});
+        let (_temp, artifact) = compile("run-label-invalid", graph);
+        let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+        assert_eq!(
+            completed(run_invoke_once(
+                &artifact.wasm_path,
+                host.clone(),
+                b"{}".to_vec()
+            )),
+            json!({"result":"early"})
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(host.completed.lock().unwrap().as_ref().unwrap())
+                .unwrap(),
+            json!({"result":"early"})
+        );
+        assert!(host.run_label.lock().unwrap().is_none());
+        assert!(host.failed.lock().unwrap().is_none());
+    }
+}
+
+#[test]
+fn run_label_in_inline_child_does_not_rename_parent() {
+    let child: ExecutionGraph = serde_json::from_value(json!({"entryPoint":"finish","steps":{
+        "finish":{"id":"finish","stepType":"Finish","runLabel":immediate(json!("child")),"inputMapping":{"ok":immediate(json!(true))}}
+    }})).unwrap();
+    let root = json!({"entryPoint":"child","steps":{
+        "child":{"id":"child","stepType":"EmbedWorkflow","childWorkflowId":"child","childVersion":1},
+        "finish":finish("finish")
+    },"executionPlan":[{"fromStep":"child","toStep":"finish"}]});
+    let (_temp, artifact) = compile_with_children(
+        "run-label-parent",
+        root,
+        vec![ChildWorkflowInput {
+            step_id: "child".into(),
+            workflow_id: "child".into(),
+            version_requested: "1".into(),
+            version_resolved: 1,
+            execution_graph: child,
+        }],
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    assert_eq!(
+        completed(run_invoke_once(
+            &artifact.wasm_path,
+            host.clone(),
+            b"{}".to_vec()
+        )),
+        json!({"ok":true})
+    );
+    assert!(host.run_label.lock().unwrap().is_none());
+}
+
+#[test]
+fn run_label_resolves_after_resume_and_empty_or_null_remain_unlabelled() {
+    for (value, expected) in [
+        (json!(" Resumed/42 "), Some("Resumed/42".to_string())),
+        (json!("x".repeat(300)), Some("x".repeat(250))),
+        (json!("---"), None),
+        (json!(42), None),
+        (json!({"x":1}), None),
+        (json!("   "), None),
+        (json!(""), None),
+        (Value::Null, None),
+    ] {
+        let graph = json!({"entryPoint":"delay","inputSchema":{"label":{"type":"string","nullable":true}},"steps":{
+            "delay":{"id":"delay","stepType":"Delay","durationMs":immediate(json!(60_000))},
+            "finish":{"id":"finish","stepType":"Finish","runLabel":{"valueType":"reference","value":"data.label"},"inputMapping":{"ok":immediate(json!(true))}}
+        },"executionPlan":[{"fromStep":"delay","toStep":"finish"}]});
+        let (_temp, artifact) = compile("run-label-resume", graph);
+        let host = audit_deadline_host(1_000_000);
+        let input = serde_json::to_vec(&json!({"label":value})).unwrap();
+        assert_at(
+            run_invoke_once(&artifact.wasm_path, host.clone(), input.clone()),
+            1_060_000,
+        );
+        assert!(host.run_label.lock().unwrap().is_none());
+        assert!(host.completed.lock().unwrap().is_none());
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_060_001);
+        assert_eq!(
+            completed(run_invoke_once(&artifact.wasm_path, host.clone(), input)),
+            json!({"ok":true})
+        );
+        assert_eq!(*host.run_label.lock().unwrap(), expected);
+    }
+}
+
+#[test]
+fn run_label_on_error_handler_finish_completes_the_execution() {
+    let mut graph = timeout_graph(60_000, false);
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fromStep":"loop","toStep":"recovered","label":"onError"}));
+    graph["steps"]["recovered"] = finish("recovered");
+    graph["steps"]["recovered"]["runLabel"] = immediate(json!("Timeout (recovered)"));
+    let (_temp, artifact) = compile("run-label-recovery", graph);
+    let host = audit_deadline_host(1_000_000);
+    assert_at(
+        run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec()),
+        1_001_000,
+    );
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+    assert_eq!(
+        completed(run_invoke_once(
+            &artifact.wasm_path,
+            host.clone(),
+            b"{}".to_vec()
+        )),
+        json!({"ok":true})
+    );
+    assert_eq!(
+        host.run_label.lock().unwrap().as_deref(),
+        Some("Timeout (recovered)")
+    );
+    assert!(host.failed.lock().unwrap().is_none());
+}
+
 fn early_finish_graph(outer: bool, inner: bool) -> Value {
     json!({"entryPoint": "outer", "steps": {
         "outer": {"id": "outer", "stepType": "Conditional", "condition": condition(outer)},

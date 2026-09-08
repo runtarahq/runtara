@@ -586,10 +586,7 @@ fn emit_terminal_run_plan_mapping(
         // suppression (omit-runtime, and AgentCapabilities where the caller
         // owns instance lifecycle).
         if indices.report_terminal_status() {
-            body.instruction(&Instruction::LocalGet(output_ptr_local));
-            body.instruction(&Instruction::LocalGet(output_len_local));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.runtime_complete));
+            super::core_module::emit_complete(body, indices, output_ptr_local, output_len_local);
         }
         super::deadline_scope::close_alarm(body, indices);
         match indices.abi {
