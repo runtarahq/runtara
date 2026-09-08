@@ -2903,7 +2903,9 @@ fn agent_effective_retry_delay_ms(agent: &DirectAgentManifest) -> u64 {
 /// nested graph. Keep retry defaults shared with plan lowering. This is an
 /// artifact requirement, not a selectable cancellation mode.
 pub(super) fn needs_cooperative_timers(manifest: &DirectWorkflowManifest) -> bool {
-    if !manifest.feature_summary.agent_ids.is_empty() {
+    if !manifest.feature_summary.agent_ids.is_empty()
+        || super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows)
+    {
         return true;
     }
     let mut graphs = vec![&manifest.graph];

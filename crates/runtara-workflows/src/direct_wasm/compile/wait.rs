@@ -153,6 +153,7 @@ pub(super) fn emit_ai_wait_tool_arm(
     if store_freeing {
         emit_entry_suspend_on_signal(
             body,
+            indices,
             DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
             DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
             None,
@@ -493,6 +494,7 @@ pub(super) fn emit_wait_for_signal_plan(
     if store_freeing {
         emit_entry_suspend_on_signal(
             body,
+            indices,
             DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
             DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
             Some((

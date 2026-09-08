@@ -74,9 +74,10 @@ pub(super) fn push_retptr_arg(function: &mut WasmFunction) {
     function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
 }
 
-fn return_if_retptr_error_tag(function: &mut WasmFunction) {
+fn return_if_retptr_error_tag(function: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
+    super::deadline_scope::close_alarm(function, indices);
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::Return);
     function.instruction(&Instruction::End);
@@ -95,10 +96,15 @@ pub(super) fn return_if_retptr_error(
     if indices.abi.is_invoke_export() {
         load_retptr_tag(function);
         function.instruction(&Instruction::If(BlockType::Empty));
-        emit_invoke_err_return_from_retptr(function, None, indices.stdlib_invoke_error_fields);
+        emit_invoke_err_return_from_retptr(
+            function,
+            indices,
+            None,
+            indices.stdlib_invoke_error_fields,
+        );
         function.instruction(&Instruction::End);
     } else {
-        return_if_retptr_error_tag(function);
+        return_if_retptr_error_tag(function, indices);
     }
 }
 
@@ -118,6 +124,7 @@ pub(super) fn return_if_retptr_error(
 /// defended), the raw bytes ride `message` with empty structured fields.
 pub(super) fn emit_invoke_err_return_from_retptr(
     function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
     fail_index: Option<u32>,
     stdlib_invoke_error_fields: u32,
 ) {
@@ -178,14 +185,18 @@ pub(super) fn emit_invoke_err_return_from_retptr(
     }));
     function.instruction(&Instruction::I32Const(0)); // retptr = the result area
     function.instruction(&Instruction::Call(stdlib_invoke_error_fields));
-    emit_invoke_err_finalize_from_scratch(function);
+    emit_invoke_err_finalize_from_scratch(function, indices);
 }
 
 /// Finalize the invoke `Err` result after `stdlib.invoke-error-fields` wrote
 /// its result at the area: on the (defended) err arm fall back to the raw
 /// bytes staged at @88/@92 as `message` with empty structured fields; either
 /// way flip the result discriminant to err and return the area pointer.
-fn emit_invoke_err_finalize_from_scratch(function: &mut WasmFunction) {
+fn emit_invoke_err_finalize_from_scratch(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    super::deadline_scope::close_alarm(function, indices);
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
     // Fallback: zero the record, message = staged raw bytes.
@@ -236,6 +247,7 @@ fn emit_invoke_err_finalize_from_scratch(function: &mut WasmFunction) {
 /// finalizer's fallback can reach them, then decompose + finalize.
 pub(super) fn emit_invoke_err_return_from_locals(
     function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
     stdlib_invoke_error_fields: u32,
     error_ptr_local: u32,
     error_len_local: u32,
@@ -258,7 +270,7 @@ pub(super) fn emit_invoke_err_return_from_locals(
     function.instruction(&Instruction::LocalGet(error_len_local));
     function.instruction(&Instruction::I32Const(0)); // retptr = the result area
     function.instruction(&Instruction::Call(stdlib_invoke_error_fields));
-    emit_invoke_err_finalize_from_scratch(function);
+    emit_invoke_err_finalize_from_scratch(function, indices);
 }
 
 /// Reserved error code a composed workflow-agent raises through its
@@ -305,6 +317,7 @@ pub(super) fn emit_entry_suspend_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
+    super::deadline_scope::close_alarm(function, indices);
     match indices.abi {
         crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
             function.instruction(&Instruction::I32Const(0));
@@ -360,7 +373,11 @@ pub(super) fn emit_entry_suspend_return(
 /// resolved. The composing caller owns the cancellation decision and lifecycle
 /// receipt. Returning an error is a standard RETURNED resolution, not a signal
 /// acknowledgement or an error that this workflow may retry/catch.
-pub(super) fn emit_entry_cancel_return(function: &mut WasmFunction) {
+pub(super) fn emit_entry_cancel_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    super::deadline_scope::close_alarm(function, indices);
     emit_agent_control_return(function, b"CANCELLED", b"cancellation", b"error");
 }
 
@@ -480,7 +497,12 @@ pub(super) fn emit_agent_suspend_sentinel_check(
 ///
 /// wake element layout (8-aligned, past the 80-byte result area): disc u8 @88
 /// = 0 (at), payload u64 @96 = deadline.
-pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local: u32) {
+pub(super) fn emit_entry_suspend_at(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    deadline_local: u32,
+) {
+    super::deadline_scope::close_alarm(function, indices);
     super::loop_deadline::clamp(function, deadline_local, None);
     // Zero result area + wake element (0..120).
     function.instruction(&Instruction::I32Const(0));
@@ -547,10 +569,12 @@ pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local:
 /// len @100), deadline-ms: option<u64> (tag @104, value @112) }.
 pub(super) fn emit_entry_suspend_on_signal(
     function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
     signal_id_ptr_local: u32,
     signal_id_len_local: u32,
     deadline: Option<(u32, u32)>,
 ) {
+    super::deadline_scope::close_alarm(function, indices);
     // Every emitted wait carries a runtime optional deadline, including no-timeout waits.
     let deadline = match deadline {
         Some(pair) => pair,
@@ -666,6 +690,7 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
             }));
             push_retptr_arg(function);
             function.instruction(&Instruction::Call(indices.runtime_fail));
+            super::deadline_scope::close_alarm(function, indices);
             function.instruction(&Instruction::I32Const(1));
             function.instruction(&Instruction::Return);
             function.instruction(&Instruction::End);
@@ -684,6 +709,7 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
             };
             emit_invoke_err_return_from_retptr(
                 function,
+                indices,
                 fail_index,
                 indices.stdlib_invoke_error_fields,
             );

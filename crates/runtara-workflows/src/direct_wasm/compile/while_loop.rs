@@ -53,7 +53,7 @@ fn push_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_HEAP_BASE_LOCAL));
 }
 
-fn pop_while_frame(body: &mut WasmFunction) {
+fn pop_while_frame(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_HEAP_BASE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
@@ -67,7 +67,7 @@ fn pop_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
-    super::loop_deadline::pop_frame(body);
+    super::loop_deadline::pop_frame(body, indices);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -402,7 +402,7 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::End);
         pop_step_error_frame(body);
     }
-    pop_while_frame(body);
+    pop_while_frame(body, indices);
 
     if !indices.omit_runtime {
         push_retptr_arg(body);
@@ -493,7 +493,7 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::End);
     }
 
-    pop_while_frame(body);
+    pop_while_frame(body, indices);
 
     if has_error_plan {
         // A failure inside the loop set the step-error flag and branched to the

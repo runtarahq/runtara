@@ -22,6 +22,51 @@ E2E, multi-owner routing and remaining P3 timeout/race work are still open.
 Lifecycle acknowledgements and post-run fallback preserve accepted terminal
 outcomes.
 
+## Continuous enclosing-scope alarms · 2026-09-08
+
+The effective enclosing deadline now owns an alarm throughout its active scope,
+including assembly and checkpoint work with no pending Agent. Entering an earlier
+nested scope replaces that alarm; restoring the parent restores its original
+deadline and remaining grace. An unchanged owner keeps the same alarm. There are
+no heap frames, saved native-handle stacks, new host interfaces or Agent wrappers.
+
+Restoration calculates `max(0, saturating_add(budget, grace) - elapsed)` from the
+original monotonic start. It does not clamp the ordinary remaining budget and
+then add a fresh grace. Shared ABI exits dispose the alarm on completion, failure
+and suspension. Root/parent cancellation relinquishes it before nested cleanup,
+so the initiating cancellation's grace governs. Existing per-call and per-wait
+alarms retain their ownership.
+
+The seven shared helpers now exchange 21 i32 state values. The entry frame adds
+one i32 scope-alarm handle and two i64 scratch locals; parallel slots remain 208
+bytes. The cache tag advances to `cooperative-waits=shared-v17`. Timed Agent-free
+graphs now import the existing timer interface. Zero disables a While/Split
+budget and does not add timer/clock imports solely for that disabled budget.
+Agent/Embed zero-timeout semantics remain unchanged.
+
+The initial blocked-checkpoint regression failed with the independent ten-second
+run timeout. With scope ownership implemented, While and Split abort after their
+200 ms budget plus cleanup grace. Four nested While/Split combinations finish the
+child and block the parent's completion checkpoint; the restored 1.5-second
+parent budget governs, rather than the child's former alarm. Long untimed HTTP
+continuations pass after normal scope completion, ordinary errors and actual
+timeouts, requiring the expected route/output. Deterministic emitted-code tests
+cover overdue-parent arithmetic, zero/maximum bounds and scope-alarm disposal
+before root/parent cleanup. A compiled-artifact check covers disabled-loop imports.
+
+Validation: 598 default-feature library tests passed on the final source. The
+feature-gated library passed 670 tests (444.75s), followed by separate passing
+runs of the expanded continuation cases (40.38s) and new disabled-import test
+(0.25s); the current library has 671 tests. The full workflow execution suite
+passed 395 tests (903.51s), with three manual benchmarks ignored. Feature-gated
+all-target Clippy, formatting and diff checks passed. Components and database
+lifecycle tests were not rebuilt/rerun in this compiler-only stage; prior-stage
+results remain recorded below. No new performance or capacity result is claimed.
+
+Full release qualification and E128 removal remain pending; this section records
+the scope-ownership implementation, not completion of G1–G10 or performance,
+Linux/soak and authenticated server E2E acceptance.
+
 ## Parallel call alarm ownership · 2026-09-08
 
 Scheduler, wavefront and parallel Split launches now arm a cleanup alarm before
@@ -76,7 +121,7 @@ scripts/build-agent-components.sh
 cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=1
 ```
 
-Continuous enclosing inline-scope ownership remains necessary across assembly,
+At this stage continuous enclosing inline-scope ownership remained necessary across assembly,
 checkpoint and other dispatch boundaries. These per-call tests do not establish
 complete scope grace or remove E128. Paired size/latency/native-memory measurements,
 Linux/soak and authenticated server E2E remain open.

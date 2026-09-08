@@ -591,6 +591,7 @@ fn emit_terminal_run_plan_mapping(
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.runtime_complete));
         }
+        super::deadline_scope::close_alarm(body, indices);
         match indices.abi {
             crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
                 load_retptr_tag(body);

@@ -85,7 +85,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::If(BlockType::Empty));
     // An operator resume is allowed to relaunch a parked instance before its
     // timed wake.  Do not shorten the retry: return the original deadline.
-    emit_entry_suspend_at(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
+    emit_entry_suspend_at(body, indices, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     // The retry is due (or a legacy state was found).  A parked run did not
@@ -122,7 +122,7 @@ pub(super) fn emit_retry_park_until_deadline(
         DIRECT_RETRY_PARK_STATE_PTR_LOCAL,
         DIRECT_RETRY_PARK_STATE_LEN_LOCAL,
     );
-    emit_entry_suspend_at(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
+    emit_entry_suspend_at(body, indices, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
 }
 

@@ -907,3 +907,26 @@ budget to zero and then adding a fresh grace would extend an overdue parent's
 cleanup deadline. Qualify blocked checkpoints with no pending Agent, nested
 handled exits, recovery past a disposed child alarm, and root/parent propagation
 before treating this remaining coverage as complete.
+
+### Continuous effective-scope alarm · 2026-09-08
+
+The shared scope frame now retains one alarm for its effective earliest owner
+across assembly/checkpoint boundaries. An earlier nested scope replaces it;
+restoring the parent uses the original monotonic start and budget including grace.
+Unchanged owners retain their alarm. This uses one scalar handle and two scratch
+locals, with no heap stack of handles, host scope registry or new interface.
+
+Shared completion/error/suspension exits dispose the scope alarm. Root and parent
+cancellation relinquish it before cleanup so their initiating grace remains
+authoritative. Timed Agent-free workflows derive the timer import from their
+live deadlines; disabled While/Split budgets add no timer/clock dependency solely
+for the disabled deadline. The seven helper functions exchange 21 i32 values;
+the compiler cache identity is `cooperative-waits=shared-v17`.
+
+Composed proofs cover blocked completion checkpoints without Agent calls, all
+four While/Split nesting combinations, and untimed continuation beyond a disposed
+scope alarm after success, ordinary error and timeout. Emitted-code tests cover
+original-clock grace arithmetic and root/parent disposal order. The import test
+checks real compiled artifacts for zero-disabled loop budgets. Finish the wider
+qualification, paired measurements, Linux/soak and authenticated server E2E before
+claiming G1–G10 or removing E128.

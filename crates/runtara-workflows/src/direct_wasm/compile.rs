@@ -1142,7 +1142,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v16,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v17,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1886,11 +1886,13 @@ fn emit_runtime_fail_return(
         // `result<_, error-info>` with error-info at the same offset.
         abi::emit_invoke_err_return_from_locals(
             body,
+            indices,
             indices.stdlib_invoke_error_fields,
             error_ptr_local,
             error_len_local,
         );
     } else {
+        deadline_scope::close_alarm(body, indices);
         body.instruction(&Instruction::I32Const(1));
         body.instruction(&Instruction::Return);
     }

@@ -51,7 +51,7 @@ const POLL_INTERVAL_MS: i64 = 1_000;
 // values. No globals, heap frame, or host-owned tasks are needed.
 // Scratch cursors/handles are deliberately excluded. STATUS is the packed
 // input to Await; the final extra result describes entry control flow.
-const STATE: [u32; 20] = [
+const STATE: [u32; 21] = [
     TARGET,
     SET,
     TIMER,
@@ -72,6 +72,7 @@ const STATE: [u32; 20] = [
     parallel_deadline::OWNER,
     parallel_deadline::TIMER_STATUS,
     ALARM,
+    super::deadline_scope::ALARM,
 ];
 pub(super) const HELPER_PARAMS: usize = STATE.len();
 pub(super) const HELPER_COUNT: usize = 7;
@@ -150,7 +151,7 @@ fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper:
         body.instruction(&Instruction::I32Const(3));
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
-        emit_entry_cancel_return(body);
+        emit_entry_cancel_return(body, indices);
         body.instruction(&Instruction::End);
     }
     if matches!(helper, Helper::Await | Helper::WindowWait) {
@@ -177,7 +178,7 @@ fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         if indices.cooperative_helper_body {
             helper_return(body, 3);
         } else {
-            emit_entry_cancel_return(body);
+            emit_entry_cancel_return(body, indices);
         }
         body.instruction(&Instruction::End);
     } else {
@@ -250,7 +251,11 @@ fn load_tag(body: &mut Function, address: i32, offset: u64) {
     body.instruction(&Instruction::I32Load8U(mem(offset)));
 }
 
-fn cancel_and_drop(body: &mut Function, indices: &DirectCoreFunctionIndices, handle: u32) {
+pub(super) fn cancel_and_drop(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    handle: u32,
+) {
     body.instruction(&Instruction::LocalGet(handle));
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
@@ -291,6 +296,12 @@ pub(super) fn arm_alarm_into(
     indices: &DirectCoreFunctionIndices,
     handle: u32,
 ) {
+    add_cleanup_grace(body);
+    arm_alarm_duration_into(body, indices, handle);
+}
+
+/// Add the standard cleanup grace to the milliseconds on the stack.
+pub(super) fn add_cleanup_grace(body: &mut Function) {
     let remaining = super::agent_deadline::REMAINING;
     body.instruction(&Instruction::LocalSet(remaining));
     body.instruction(&Instruction::LocalGet(remaining));
@@ -307,6 +318,14 @@ pub(super) fn arm_alarm_into(
     body.instruction(&Instruction::I64Const(TIMEOUT_CLEANUP_GRACE_MS as i64));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::End);
+}
+
+/// Arm an exact remaining duration, already including any cleanup grace.
+pub(super) fn arm_alarm_duration_into(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    handle: u32,
+) {
     body.instruction(&Instruction::Call(
         indices.timer_abort_async.expect("cleanup alarm"),
     ));
@@ -399,6 +418,7 @@ fn clear_slot_handle(body: &mut Function) {
 }
 
 fn relinquish_alarms(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    super::deadline_scope::close_alarm(body, indices);
     close_alarm(body, indices);
     body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -1052,7 +1072,7 @@ pub(super) fn emit_iteration_boundary(body: &mut Function, indices: &DirectCoreF
         body.instruction(&Instruction::If(BlockType::Empty));
         relinquish_alarms(body, indices);
         close_all(body, indices);
-        emit_entry_cancel_return(body);
+        emit_entry_cancel_return(body, indices);
         body.instruction(&Instruction::End);
     }
     if !indices.omit_runtime {

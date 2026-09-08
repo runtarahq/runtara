@@ -14,6 +14,11 @@ pub(super) const SELECTED_PTR: u32 = 170;
 pub(super) const SELECTED_LEN: u32 = 171;
 const CHOSEN: u32 = 172;
 const ELAPSED: u32 = 173;
+// One effective enclosing alarm; replacing/restoring the scope uses its original
+// clock and budget. No heap nodes or saved native handles are needed.
+pub(super) const ALARM: u32 = 183;
+const PREVIOUS_OWNER: u32 = 184;
+const GRACE_BUDGET: u32 = 185;
 const FRAME: [u32; 5] = [OWNER, START, BUDGET, ERROR_PTR, ERROR_LEN];
 
 pub(super) fn owner(id: u32, split: bool) -> i64 {
@@ -25,22 +30,76 @@ pub(super) fn push_frame(body: &mut Function) {
         body.instruction(&Instruction::LocalGet(local));
     }
 }
-pub(super) fn pop_frame(body: &mut Function) {
+pub(super) fn pop_frame(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if indices.monotonic_now.is_some() {
+        remember_alarm_owner(body);
+    }
     for local in FRAME.into_iter().rev() {
         body.instruction(&Instruction::LocalSet(local));
     }
+    restore_alarm(body, indices);
 }
 
-fn remaining(body: &mut Function, indices: &DirectCoreFunctionIndices) {
-    body.instruction(&Instruction::Call(
-        indices.monotonic_now.expect("deadline clock"),
-    ));
+fn elapsed(body: &mut Function, clock: u32) {
+    body.instruction(&Instruction::Call(clock));
     body.instruction(&Instruction::LocalGet(START));
     body.instruction(&Instruction::I64Sub);
     body.instruction(&Instruction::I64Const(1_000_000));
     body.instruction(&Instruction::I64DivU);
     body.instruction(&Instruction::LocalSet(ELAPSED));
+}
+
+fn remaining(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    elapsed(body, indices.monotonic_now.expect("deadline clock"));
     super::agent_deadline::subtract_saturating(body, BUDGET, ELAPSED);
+}
+
+pub(super) fn close_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if indices.monotonic_now.is_none() {
+        return;
+    }
+    body.instruction(&Instruction::LocalGet(ALARM));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::cooperative_wait::cancel_and_drop(body, indices, ALARM);
+    body.instruction(&Instruction::End);
+}
+
+fn arm_scope_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    // Subtract elapsed time AFTER adding grace. Restoring an overdue parent
+    // must not restart a fresh five-second grace period.
+    scope_alarm_remaining(body, indices.monotonic_now.expect("deadline clock"));
+    super::cooperative_wait::arm_alarm_duration_into(body, indices, ALARM);
+}
+
+fn scope_alarm_remaining(body: &mut Function, clock: u32) {
+    elapsed(body, clock);
+    body.instruction(&Instruction::LocalGet(BUDGET));
+    super::cooperative_wait::add_cleanup_grace(body);
+    body.instruction(&Instruction::LocalSet(GRACE_BUDGET));
+    super::agent_deadline::subtract_saturating(body, GRACE_BUDGET, ELAPSED);
+}
+
+fn remember_alarm_owner(body: &mut Function) {
+    body.instruction(&Instruction::LocalGet(OWNER));
+    body.instruction(&Instruction::LocalSet(PREVIOUS_OWNER));
+}
+
+fn restore_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if indices.monotonic_now.is_none() {
+        return;
+    }
+    body.instruction(&Instruction::LocalGet(OWNER));
+    body.instruction(&Instruction::LocalGet(PREVIOUS_OWNER));
+    body.instruction(&Instruction::I64Ne);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    close_alarm(body, indices);
+    body.instruction(&Instruction::LocalGet(OWNER));
+    body.instruction(&Instruction::I64Eqz);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    arm_scope_alarm(body, indices);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 /// The caller has converted its durable epoch deadline to remaining milliseconds.
@@ -64,6 +123,7 @@ pub(super) fn enter(
     body.instruction(&Instruction::I64LtU);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::If(BlockType::Empty));
+    close_alarm(body, indices);
     body.instruction(&Instruction::I64Const(id));
     body.instruction(&Instruction::LocalSet(OWNER));
     body.instruction(&Instruction::Call(
@@ -76,6 +136,7 @@ pub(super) fn enter(
         body.instruction(&Instruction::I32Const(value));
         body.instruction(&Instruction::LocalSet(local));
     }
+    arm_scope_alarm(body, indices);
     body.instruction(&Instruction::End);
 }
 
@@ -217,11 +278,15 @@ pub(super) fn save_failure_frame(body: &mut Function) {
         body.instruction(&Instruction::LocalSet(dst));
     }
 }
-pub(super) fn restore_failure_frame(body: &mut Function) {
+pub(super) fn restore_failure_frame(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if indices.monotonic_now.is_some() {
+        remember_alarm_owner(body);
+    }
     for (dst, src) in FRAME.into_iter().zip(FAILURE_FRAME) {
         body.instruction(&Instruction::LocalGet(src));
         body.instruction(&Instruction::LocalSet(dst));
     }
+    restore_alarm(body, indices);
 }
 
 /// Leave a retry wrapper without recording an enclosing cancellation as an attempt.
@@ -237,4 +302,73 @@ pub(super) fn break_if_selected(
     body.instruction(&Instruction::I64Eqz);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(depth));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_encoder::{
+        CodeSection, EntityType, ExportKind, ExportSection, FunctionSection, ImportSection, Module,
+        TypeSection, ValType,
+    };
+
+    #[test]
+    fn restored_scope_grace_uses_original_clock_and_saturates() {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::I64]);
+        types
+            .ty()
+            .function([ValType::I64, ValType::I64], [ValType::I64]);
+        module.section(&types);
+        let mut imports = ImportSection::new();
+        imports.import("clock", "now", EntityType::Function(0));
+        module.section(&imports);
+        let mut functions = FunctionSection::new();
+        functions.function(1);
+        module.section(&functions);
+        let mut exports = ExportSection::new();
+        exports.export("remaining", ExportKind::Func, 1);
+        module.section(&exports);
+        let mut body = Function::new([(184, ValType::I64)]);
+        for (param, local) in [(0, START), (1, BUDGET)] {
+            body.instruction(&Instruction::LocalGet(param));
+            body.instruction(&Instruction::LocalSet(local));
+        }
+        // Execute the production arithmetic, with only the clock controlled.
+        scope_alarm_remaining(&mut body, 0);
+        body.instruction(&Instruction::End);
+        let mut code = CodeSection::new();
+        code.function(&body);
+        module.section(&code);
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, module.finish()).unwrap();
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker
+            .func_wrap("clock", "now", |caller: wasmtime::Caller<'_, u64>| {
+                *caller.data()
+            })
+            .unwrap();
+        let mut store = wasmtime::Store::new(&engine, 0);
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+        let remaining = instance
+            .get_typed_func::<(u64, u64), u64>(&mut store, "remaining")
+            .unwrap();
+        for (origin, elapsed_ns, budget, expected) in [
+            (0, 0, 0, 5_000),
+            (42, 2_000_000_000, 1_000, 4_000),
+            (42, 6_000_000_000, 1_000, 0),
+            (42, 7_000_000_000, 1_000, 0),
+            (u64::MAX - 999_999, 999_999, 1, 5_001),
+            (0, 0, u64::MAX, u64::MAX),
+            (42, 1_000_000, u64::MAX, u64::MAX - 1),
+            (42, 2_000_000, u64::MAX - 5_001, u64::MAX - 3),
+        ] {
+            *store.data_mut() = origin + elapsed_ns;
+            assert_eq!(
+                remaining.call(&mut store, (origin, budget)).unwrap(),
+                expected
+            );
+        }
+    }
 }

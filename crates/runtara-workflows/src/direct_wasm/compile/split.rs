@@ -93,7 +93,7 @@ fn push_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
 }
 
-fn pop_split_frame(body: &mut WasmFunction) {
+fn pop_split_frame(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(
@@ -126,7 +126,7 @@ fn pop_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL));
-    super::loop_deadline::pop_frame(body);
+    super::loop_deadline::pop_frame(body, indices);
 }
 
 /// Compact a loop's surviving buffer (`buf_ptr`/`buf_len`) down to the captured
@@ -325,8 +325,11 @@ fn sync_split_failure_frame(body: &mut WasmFunction) {
     ));
 }
 
-fn restore_split_frame_from_failure_frame(body: &mut WasmFunction) {
-    super::deadline_scope::restore_failure_frame(body);
+fn restore_split_frame_from_failure_frame(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    super::deadline_scope::restore_failure_frame(body, indices);
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
@@ -887,7 +890,7 @@ pub(super) fn emit_split_plan(
         if has_error_plan {
             pop_step_error_frame(body);
         }
-        pop_split_frame(body);
+        pop_split_frame(body, indices);
 
         if dont_stop_on_failed {
             sync_split_failure_frame(body);
@@ -1097,7 +1100,7 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::End);
     }
 
-    pop_split_frame(body);
+    pop_split_frame(body, indices);
     if dont_stop_on_failed {
         pop_split_failure_frame(body);
     }
@@ -1419,7 +1422,7 @@ pub(super) fn emit_split_append_error_payload_and_continue(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
-    restore_split_frame_from_failure_frame(body);
+    restore_split_frame_from_failure_frame(body, indices);
     body.instruction(&Instruction::Br(branch_depth));
 }
 
@@ -1581,7 +1584,7 @@ pub(super) fn emit_split_item_pipeline(
     if has_error_plan {
         pop_step_error_frame(body);
     }
-    pop_split_frame(body);
+    pop_split_frame(body, indices);
 
     if dont_stop_on_failed {
         sync_split_failure_frame(body);

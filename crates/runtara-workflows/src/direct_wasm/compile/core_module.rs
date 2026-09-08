@@ -861,6 +861,9 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (3, ValType::I32),
     // 182: safety alarm owned by the current deadline wait.
     (1, ValType::I32),
+    // 183: effective enclosing-scope alarm; 184/185: restoration/budget scratch.
+    (1, ValType::I32),
+    (2, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
@@ -1000,6 +1003,7 @@ fn direct_run_function(
         push_retptr_arg(&mut body);
         body.instruction(&Instruction::Call(indices.runtime_complete));
     }
+    super::deadline_scope::close_alarm(&mut body, indices);
     match config.abi {
         WorkflowAbi::CliRunHttp => {
             load_retptr_tag(&mut body);

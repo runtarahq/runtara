@@ -4,6 +4,91 @@ Audited 2026-09-05 against `cdcf9ee4ee0e5f28c0600b524c4984f89cbfe700`.
 Scope: DSL validation, direct-WASM manifest/planning/lowering, JSON stdlib,
 and durable suspend/resume through the production invoke ABI.
 
+## Current progress · 2026-09-08
+
+**Implementation is in progress; this snapshot is not release qualification.**
+The current approach is cooperative cancellation in one normally composed
+workflow `.wasm`. Workflow control and scope/deadline decisions remain in the
+guest, using standard Component Model asynchronous calls and cancellation.
+The platform delivers lifecycle signals, provides I/O and timers, and enforces
+emergency whole-execution abort. The earlier per-step Store/task experiment is
+superseded as the cancellation design; its historical evidence remains below.
+
+Implemented and covered by focused tests:
+
+- All 27 built-in Agents use the shared `agent_component!` export/dispatch
+  machinery. The 18 I/O-capable Agents await cancellable operations.
+- Root cancellation and parent propagation clean up sequential/parallel calls;
+  emitted loops and retry waits have cooperation points. Normally composed
+  workflow-agents, inline Embed and AI provider/tool paths have execution coverage.
+- Guest deadline ownership covers Agent, Embed and enclosing loop scopes,
+  including parallel calls and connection preparation. Emergency alarms bound
+  uncooperative entry/cleanup. AUDIT-20 adds continuous enclosing-scope coverage
+  through assembly and checkpoint work, original-clock grace restoration, and
+  disposal before untimed continuation.
+- Stop/cancel integrates with the environment lifecycle and has runner plus
+  PostgreSQL coverage. Accepted terminal outcomes are preserved; emergency abort
+  does not fabricate a guest cleanup acknowledgement.
+
+**Public Agent/Embed timeout syntax still returns E128.** Internal timeout
+fixtures deliberately bypass that validation rejection to exercise the emitter;
+their success does not mean users can already author those timeouts. No product
+feature flag or optional cancellation backend has been added.
+
+### Remaining work to reach the goal
+
+| Work | Completion criterion |
+| --- | --- |
+| Behavior qualification and fixes | Close simultaneous completion/timeout/root/parent races, concurrent retries and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. Existing coverage is partial, not absent. |
+| Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
+| Server and persistence E2E | Exercise authenticated Cancel/Stop through a running server, execution-owner routing across instances, status/acknowledgement publication and emergency escalation. Runner/database tests alone do not establish this boundary. |
+| Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
+| Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
+| Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
+
+The governing acceptance criteria remain G1–G10 in the
+[updated plan](selective-isolation-plan.md). The
+[implementation record](cooperative-cancellation-implementation.md) contains
+per-stage tests and historical measurements. Later entries supersede earlier
+"remaining" statements when they record the corresponding implementation and
+evidence; the table above is the consolidated current work list.
+
+### Verification for this snapshot
+
+The current scope-alarm change has passed 598 default-feature compiler library
+tests and a 670-test feature-gated library run. The expanded six-case untimed
+continuation test and the subsequently added disabled-loop-import test also
+passed separately; the feature-gated library now contains 671 tests. The earlier
+full run therefore must not be described as one final 671-test run.
+
+Feature-gated all-target Clippy, formatting and diff whitespace checks passed.
+The final workflow execution suite passed **395 tests** in 903.51s, with three
+manual benchmarks ignored and no failures. The commit uses the repository's
+normal pre-commit hook, which requires formatting and workspace all-target Clippy.
+The previous committed stage passed 395 workflow execution tests and 92 component
+cancellation tests, and built all 27 Agents plus both shared components. Those
+previous results are historical evidence, not a rerun of this snapshot. No new
+Agent/WIT/stdlib source changed in the scope-alarm stage. Final paired benchmarks,
+Linux soak and authenticated multi-owner server E2E have not been run for this
+snapshot; database lifecycle tests were not rerun for this compiler-only change.
+
+Commands use the pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, an isolated native target and the existing separately built
+component directory:
+
+```sh
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib scope_alarms_dispose_before_untimed_success_and_error_continuations -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib disabled_loop_budgets_do_not_add_alarm_imports -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+## Update history
+
 **Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
 `d787556e`, AUDIT-03 as `a0629d99`, AUDIT-04 as `70a21db8`, and AUDIT-05 as
 `2c0a3df9`. AUDIT-06 is committed as `53ecca2c` and AUDIT-07 as `b83f6243`.
@@ -1667,8 +1752,45 @@ the pending-preparation test with `CleanupAborted` at 5.505s. With disposal rest
 both normal-success cases pass. A failed workflow stops its fixture rather than
 waiting for requests that it can no longer dispatch, exposing the actual exit.
 
-Continuous scope coverage through inline assembly/checkpoint work and error
+At this stage continuous scope coverage through inline assembly/checkpoint work and error
 propagation remains a prerequisite for removing E128. Actual alarm allocations,
 size/latency comparisons, cancellation races and Linux soak remain part of the
 full plan gates; unchanged guest slot size does not establish unchanged runtime
 memory or performance.
+
+### AUDIT-20 · Enclosing scope alarms survive work between calls
+
+**Status: effective enclosing-scope ownership implemented; full release
+qualification remains pending.** One alarm per emitted invocation follows the
+earliest live enclosing deadline throughout scope work. An earlier nested deadline replaces it, and
+scope restoration reinstates the parent's original deadline plus remaining
+grace. It is not a stack of native tasks or a host graph registry. Existing
+shared scope frames provide the owner, start and budget.
+
+Grace restoration uses `max(0, saturating_add(budget, grace) - elapsed)`.
+Subtracting elapsed time after adding grace prevents overdue parents from gaining
+a fresh cleanup period. Completion, failure and suspension use shared ABI exits
+to dispose the alarm. Root/parent cancellation relinquishes it before resolving
+nested calls, preserving the initiating grace.
+
+Timed Agent-free workflows now derive the existing timer import from their live
+deadline requirements. A disabled While/Split budget does not require a timer or
+clock solely for that budget. The helper count remains seven; helper state has
+21 i32 values, with one i32 alarm handle and two i64 scratch locals added to the
+entry frame. Parallel slots remain 208 bytes. The cache tag is
+`cooperative-waits=shared-v17`.
+
+| Case | Required behavior | Evidence |
+| --- | --- | --- |
+| While/Split completion checkpoint blocks with no Agent calls | Original scope deadline plus grace aborts the execution | `scope_alarm_bounds_checkpoint_without_pending_agent` |
+| Child completes, parent checkpoint blocks; all four While/Split nesting combinations | Dispose child's alarm and restore parent's budget | `parent_scope_alarm_is_restored_after_nested_scope_completion` |
+| Success, ordinary error or timeout followed by six seconds of untimed HTTP | Normal continuation succeeds after scope disposal; timeout closes its HTTP request before recovery | `scope_alarms_dispose_before_untimed_success_and_error_continuations` |
+| Parent restored after its ordinary deadline, or beyond grace | Original clock consumes grace; no reset and saturating arithmetic | `restored_scope_grace_uses_original_clock_and_saturates` |
+| Root/parent cancellation with scope, wait and call alarms | Relinquish local alarms before nested cleanup | `emitted_root_and_parent_cancel_relinquish_scope_alarm_before_cleanup` |
+| Zero-disabled While/Split budget | Compiled world gains no clock/alarm import solely for that budget | `disabled_loop_budgets_do_not_add_alarm_imports` |
+
+The blocked-checkpoint regression initially returned the ordinary ten-second run
+timeout. With scope ownership it returns `CleanupAborted` during the scope's grace
+limit, without a false acknowledgement. These proofs add scope coverage; they do
+not establish arbitrary native-call preemption or close performance, Linux/soak,
+authenticated server E2E and the remaining G1–G10 release gates. E128 remains.

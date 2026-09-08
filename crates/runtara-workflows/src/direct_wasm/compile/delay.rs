@@ -151,7 +151,7 @@ fn emit_park_until_deadline(
     // Woken early — re-park on the SAME absolute deadline. The wait is not
     // shortened by having been relaunched, and nothing is re-saved: the
     // deadline is already durable.
-    emit_entry_suspend_at(body, DIRECT_WAIT_DEADLINE_MS_LOCAL);
+    emit_entry_suspend_at(body, indices, DIRECT_WAIT_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     // The wait is over. Poll before falling through — the same reasoning as the
@@ -198,7 +198,7 @@ fn emit_park_fresh(
         output_ptr_local,
         output_len_local,
     );
-    emit_entry_suspend_at(body, DIRECT_WAIT_DEADLINE_MS_LOCAL);
+    emit_entry_suspend_at(body, indices, DIRECT_WAIT_DEADLINE_MS_LOCAL);
 }
 
 #[allow(clippy::too_many_arguments)]

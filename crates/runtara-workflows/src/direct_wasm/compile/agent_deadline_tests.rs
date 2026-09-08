@@ -17,6 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[path = "deadline_cleanup_tests.rs"]
 mod cleanup;
 
+#[path = "scope_alarm_tests.rs"]
+mod scope_alarm;
+
 #[path = "embed_deadline_tests.rs"]
 mod embed;
 
@@ -44,6 +47,8 @@ struct Host {
     failure_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
     failure_observed: AtomicBool,
     checkpoint_signal: Mutex<Option<String>>,
+    blocked_checkpoint: Mutex<Option<(String, usize)>>,
+    checkpoint_blocked: AtomicBool,
     custom_signals: Mutex<HashMap<String, Vec<u8>>>,
 }
 impl Host {
@@ -62,6 +67,8 @@ impl Host {
             failure_cleanup: Mutex::new(None),
             failure_observed: AtomicBool::new(false),
             checkpoint_signal: Mutex::new(None),
+            blocked_checkpoint: Mutex::new(None),
+            checkpoint_blocked: AtomicBool::new(false),
             custom_signals: Mutex::new(HashMap::new()),
         }
     }
@@ -170,6 +177,24 @@ impl RuntimeHost for Host {
     ) -> Result<RuntimeCheckpointResult, String> {
         if self.checkpoint_error(&key, true) {
             return Err("fixture checkpoint write failure".into());
+        }
+        let block = {
+            let mut blocked = self.blocked_checkpoint.lock().unwrap();
+            match blocked.as_mut() {
+                Some((pattern, skip)) if key.contains(pattern.as_str()) => {
+                    if *skip == 0 {
+                        true
+                    } else {
+                        *skip -= 1;
+                        false
+                    }
+                }
+                _ => false,
+            }
+        };
+        if block {
+            self.checkpoint_blocked.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
         }
         let pending_signal = self
             .checkpoint_signal

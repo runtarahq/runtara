@@ -1644,14 +1644,14 @@ pub(super) fn needs_monotonic_clock(
                     .value
                     .get("timeout")
                     .and_then(|v| v.as_u64())
-                    .is_some()
+                    .is_some_and(|timeout| timeout > 0)
             })
             || graph.splits.iter().any(|value| {
                 value
                     .value
                     .get("timeout")
                     .and_then(|v| v.as_u64())
-                    .is_some()
+                    .is_some_and(|timeout| timeout > 0)
             })
         {
             return true;

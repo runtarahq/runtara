@@ -23,11 +23,11 @@ pub(super) fn push_frame(body: &mut WasmFunction) {
         body.instruction(&Instruction::LocalGet(local));
     }
 }
-pub(super) fn pop_frame(body: &mut WasmFunction) {
+pub(super) fn pop_frame(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     for local in FRAME.into_iter().rev() {
         body.instruction(&Instruction::LocalSet(local));
     }
-    super::deadline_scope::pop_frame(body);
+    super::deadline_scope::pop_frame(body, indices);
 }
 fn key(
     body: &mut WasmFunction,

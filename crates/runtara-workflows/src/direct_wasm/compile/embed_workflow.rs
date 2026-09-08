@@ -82,6 +82,7 @@ fn push_embed_workflow_frame(
 
 fn pop_embed_workflow_frame(
     body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
     steps_ptr_local: u32,
     steps_len_local: u32,
     route_ptr_local: u32,
@@ -95,7 +96,7 @@ fn pop_embed_workflow_frame(
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
-    super::loop_deadline::pop_frame(body);
+    super::loop_deadline::pop_frame(body, indices);
 }
 
 // An inner Embed can return or branch to this attempt's failure target before
@@ -143,8 +144,10 @@ fn push_embed_workflow_attempt_frame(
     ));
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit local pairs mirror the saved attempt frame.
 fn pop_embed_workflow_attempt_frame(
     body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
     steps_ptr_local: u32,
     steps_len_local: u32,
     source_ptr_local: u32,
@@ -171,7 +174,7 @@ fn pop_embed_workflow_attempt_frame(
     for local in ATTEMPT_CONTEXT.into_iter().rev() {
         body.instruction(&Instruction::LocalSet(local));
     }
-    super::loop_deadline::pop_frame(body);
+    super::loop_deadline::pop_frame(body, indices);
 }
 
 fn emit_wrapped_child_error(
@@ -265,6 +268,7 @@ fn emit_embed_workflow_child_attempt(
     body.instruction(&Instruction::End);
     pop_embed_workflow_attempt_frame(
         body,
+        indices,
         steps_ptr_local,
         steps_len_local,
         source_ptr_local,
@@ -515,7 +519,7 @@ pub(super) fn emit_embed_workflow_tool_arm(
     );
     body.instruction(&Instruction::End);
     if timeout_ms.is_some() {
-        super::loop_deadline::pop_frame(body);
+        super::loop_deadline::pop_frame(body, indices);
         super::deadline_scope::claim(body, deadline_owner);
     }
     if durable {
@@ -540,6 +544,7 @@ pub(super) fn emit_embed_workflow_tool_arm(
     }
     pop_embed_workflow_frame(
         body,
+        indices,
         steps_ptr_local,
         steps_len_local,
         route_ptr_local,
@@ -980,6 +985,7 @@ pub(super) fn emit_embed_workflow_plan(
     }
     pop_embed_workflow_frame(
         body,
+        indices,
         steps_ptr_local,
         steps_len_local,
         route_ptr_local,

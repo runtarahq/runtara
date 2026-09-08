@@ -27,7 +27,7 @@ enum Context {
     RootCancel,
 }
 
-fn emitted_helper(context: Context) -> Vec<u8> {
+fn emitted_helper(context: Context, scope_alarm: bool) -> Vec<u8> {
     let graph = serde_json::from_value(serde_json::json!({"durable":false,"entryPoint":"agent",
         "steps":{"agent":{"id":"agent","stepType":"Agent","agentId":"utils",
             "capabilityId":"random-double","maxRetries":0},
@@ -43,8 +43,18 @@ fn emitted_helper(context: Context) -> Vec<u8> {
             crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
         })
         .with_omit_runtime(matches!(context, Context::Callable));
-    let (resolve, world) =
-        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids).unwrap();
+    let (resolve, world) = build_direct_component_resolve_scoped(
+        &manifest.feature_summary.agent_ids,
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp,
+        false,
+        None,
+        &Default::default(),
+        false,
+        &Default::default(),
+        true,
+        scope_alarm,
+    )
+    .unwrap();
     let bytes = emit_direct_core_module(&resolve, world, &config).unwrap();
     let mut imported = 0;
     let mut defined = 0;
@@ -227,8 +237,39 @@ fn run_helper_with_call_alarms(
     alarm: bool,
     call_alarms: bool,
 ) {
+    run_helper_with_scope_alarm(
+        context,
+        window,
+        ready,
+        waiting,
+        target,
+        deadline,
+        cancel_returns,
+        expected_outcome,
+        expected_cancelled,
+        alarm,
+        call_alarms,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_helper_with_scope_alarm(
+    context: Context,
+    window: bool,
+    ready: &[(i32, i32)],
+    waiting: &[(i32, i32)],
+    target: i32,
+    deadline: i32,
+    cancel_returns: i32,
+    expected_outcome: i32,
+    expected_cancelled: &[i32],
+    alarm: bool,
+    call_alarms: bool,
+    scope_alarm: bool,
+) {
     let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, emitted_helper(context)).unwrap();
+    let module = wasmtime::Module::new(&engine, emitted_helper(context, scope_alarm)).unwrap();
     let mut linker = Linker::<Events>::new(&engine);
     for import in module.imports() {
         let ExternType::Func(ty) = import.ty() else {
@@ -352,6 +393,7 @@ fn run_helper_with_call_alarms(
         } else {
             vec![]
         })
+        .chain(scope_alarm.then_some(7))
         .collect();
     let mut store = wasmtime::Store::new(
         &engine,
@@ -381,6 +423,10 @@ fn run_helper_with_call_alarms(
     let mut set =
         |local, value| params[STATE.iter().position(|l| *l == local).unwrap()] = Val::I32(value);
     set(ALARM, if alarm { 4 } else { 0 });
+    set(
+        super::super::deadline_scope::ALARM,
+        if scope_alarm { 7 } else { 0 },
+    );
     set(STATUS, target);
     set(DEADLINE_STATUS, deadline);
     set(WINDOW_ACTIVE, 1);
@@ -798,6 +844,38 @@ fn emitted_root_and_parent_cancel_disarm_all_call_alarms_before_any_cleanup() {
         CANCELLED,
         2,
         &[4, 5, 6, 1, 99],
+        true,
+        true,
+    );
+}
+
+#[test]
+fn emitted_root_and_parent_cancel_relinquish_scope_alarm_before_cleanup() {
+    run_helper_with_scope_alarm(
+        Context::Callable,
+        true,
+        &[],
+        &[(0, 6)],
+        17,
+        33,
+        CANCELLED,
+        3,
+        &[7, 4, 5, 6, 2, 1, 99],
+        true,
+        true,
+        true,
+    );
+    run_helper_with_scope_alarm(
+        Context::RootCancel,
+        true,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        2,
+        &[7, 4, 5, 6, 1, 99],
+        true,
         true,
         true,
     );
