@@ -39,7 +39,7 @@ feature flag or optional cancellation backend has been added.
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | Close simultaneous completion/timeout/root/parent races, concurrent retries and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. Existing coverage is partial, not absent. |
+| Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
 | Server and persistence E2E | Exercise authenticated Cancel/Stop through a running server, execution-owner routing across instances, status/acknowledgement publication and emergency escalation. Runner/database tests alone do not establish this boundary. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -53,7 +53,7 @@ per-stage tests and historical measurements. Later entries supersede earlier
 "remaining" statements when they record the corresponding implementation and
 evidence; the table above is the consolidated current work list.
 
-### Verification for this snapshot
+### Verification for the scope-alarm snapshot (`f8d2d5b5`)
 
 The current scope-alarm change has passed 598 default-feature compiler library
 tests and a 670-test feature-gated library run. The expanded six-case untimed
@@ -1794,3 +1794,47 @@ timeout. With scope ownership it returns `CleanupAborted` during the scope's gra
 limit, without a false acknowledgement. These proofs add scope coverage; they do
 not establish arbitrary native-call preemption or close performance, Linux/soak,
 authenticated server E2E and the remaining G1–G10 release gates. E128 remains.
+
+### AUDIT-21 · Parallel deadline selection under simultaneous readiness
+
+**Status: deterministic emitted-helper race contract covered; no production
+behavior or public support gate changed.** The shared canonical-event fixture now
+also executes the real `WindowWait` helper with per-Agent deadlines enabled,
+two live call slots, per-call alarms and an effective enclosing-scope alarm.
+The existing tests primarily exercised an operation or enclosing-window timer;
+these cases exercise the distinct per-Agent timer/ready-slot path.
+
+| Case | Required behavior | Evidence |
+| --- | --- | --- |
+| Target completion, its timer and peer completion all ready | Every notification order preserves both successful results; calls stay owned by their slots for scheduler assembly and alarms are disposed | `parallel_ready_completion_beats_own_deadline_in_every_event_order` |
+| Target timer and successful peer ready; target finishes while cancellation is resolving | Selected `AGENT_TIMEOUT` overwrites the late success retptr; peer result survives, and both call handles remain for single scheduler disposal | `parallel_selected_timeout_survives_late_success_and_preserves_ready_peer` |
+| Enclosing deadline, Agent timer and peer completion all ready | Every order selects the enclosing scope outcome, resolves the window and balances its deferral; scope alarm remains until enclosing unwind | `parallel_enclosing_timeout_owns_pending_window_even_with_ready_peer` |
+| Root Cancel observed before own-timeout selection, or parent cancellation delivered at a cancellable wait | Root/parent outcome owns cleanup; scope alarm is relinquished before resolving the calls, with no Agent timeout result substituted | `parallel_root_and_parent_cancel_take_ownership_before_local_timeout` |
+
+The four test groups cover 21 controlled notification/cancellation combinations,
+including normal return, start-cancelled and cancelled results from standard
+synchronous cancellation. They check result tags/error code, handle ownership,
+waitable-set membership, alarm disposal and scope deferral. Fixture instantiation
+is shared with the prior helper tests. Detaching/dropping a fixture waitable
+removes its queued notifications, so a disposed timer cannot produce an impossible
+stale event. A late normal return writes a success to the actual target slot's
+result area before cancellation returns.
+
+A temporary negative control omitting the production timeout-result write fails
+the late-success regression (`0` success tag instead of `1` error tag). Restoring
+the production emitter makes it pass. This establishes sensitivity to timeout
+selection being lost; the fixture does not stand in for engine-level cancellation
+or HTTP cleanup tests. Root cancellation here is observed at the existing
+pre-timeout poll; this does not claim that a signal preempts an already accepted
+completion at every instruction.
+
+Retry inventory: `parallel_agent_body` and `concurrent_branch_pools` exclude
+retrying Agent bodies, and Split-level retries also use sequential fallback.
+`concurrent_backoff` is always false under production eligibility. Qualifying
+cancellation must preserve those existing retry/replay semantics; enabling a
+new concurrent durable retry scheduler is not a prerequisite for this change.
+The unreachable old lowering still needs cleanup in the obsolete-path inventory.
+
+Verification for this test-only stage is recorded in the implementation record.
+E128, composed runtime race qualification, final measurements and the other
+remaining release gates stay open.

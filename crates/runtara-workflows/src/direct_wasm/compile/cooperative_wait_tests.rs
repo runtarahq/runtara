@@ -18,6 +18,7 @@ struct Events {
     closed_sets: Vec<i32>,
     cancel_returns: i32,
     root_cancel: bool,
+    late_result: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -122,6 +123,143 @@ fn memory(caller: &mut Caller<'_, Events>) -> wasmtime::Memory {
         .unwrap()
         .into_memory()
         .unwrap()
+}
+
+fn instantiate_events(
+    context: Context,
+    scope_alarm: bool,
+    events: Events,
+) -> (wasmtime::Store<Events>, wasmtime::Instance) {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, emitted_helper(context, scope_alarm)).unwrap();
+    let mut linker = Linker::<Events>::new(&engine);
+    for import in module.imports() {
+        let ExternType::Func(ty) = import.ty() else {
+            panic!("nonfunction import");
+        };
+        let name = import.name().to_string();
+        linker
+            .func_new(
+                import.module(),
+                import.name(),
+                ty,
+                move |mut caller, args, results| {
+                    let arg = |n: usize| args[n].i32().unwrap();
+                    match name.as_str() {
+                        "[waitable-set-new]" => results[0] = Val::I32(100),
+                        "[waitable-join]" => {
+                            assert!(
+                                caller.data().live.contains(&arg(0)),
+                                "join after resolution"
+                            );
+                            if arg(1) == 0 {
+                                caller.data_mut().joined.remove(&arg(0));
+                                // Detached waitables cannot deliver another queued
+                                // notification to their former waitable set.
+                                caller.data_mut().ready.retain(|event| event.0 != arg(0));
+                                caller.data_mut().waiting.retain(|event| event.0 != arg(0));
+                            } else {
+                                assert!(caller.data_mut().joined.insert(arg(0), arg(1)).is_none());
+                            }
+                        }
+                        "[waitable-set-poll]"
+                        | "[cancellable][waitable-set-wait]"
+                        | "[waitable-set-wait]" => {
+                            assert_eq!(arg(0), 100);
+                            let event = if name == "[waitable-set-poll]" {
+                                caller.data_mut().ready.pop_front()
+                            } else {
+                                Some(
+                                    caller
+                                        .data_mut()
+                                        .waiting
+                                        .pop_front()
+                                        .expect("unexpected blocking wait"),
+                                )
+                            };
+                            if let Some((handle, state)) = event {
+                                let mem = memory(&mut caller);
+                                mem.write(&mut caller, arg(1) as usize, &handle.to_le_bytes())?;
+                                mem.write(&mut caller, arg(1) as usize + 4, &state.to_le_bytes())?;
+                                results[0] = Val::I32(if state == 6 { 6 } else { 1 });
+                            } else {
+                                results[0] = Val::I32(0);
+                            }
+                        }
+                        "heartbeat" | "poll-signal" => {
+                            let mem = memory(&mut caller);
+                            mem.write(&mut caller, arg(0) as usize, &[0; 48])?;
+                            if name == "poll-signal" && caller.data().root_cancel {
+                                mem.write(&mut caller, 400, b"cancel")?;
+                                mem.write(&mut caller, 416, b"cancel-test")?;
+                                for (offset, value) in
+                                    [(4, 1i32), (8, 400), (12, 6), (16, 416), (20, 11)]
+                                {
+                                    mem.write(
+                                        &mut caller,
+                                        arg(0) as usize + offset,
+                                        &value.to_le_bytes(),
+                                    )?;
+                                }
+                            }
+                        }
+                        "handle-checkpoint-signal" => {
+                            let mem = memory(&mut caller);
+                            mem.write(&mut caller, arg(4) as usize, &[0, 0, 0, 0, 1, 0, 0, 0])?;
+                        }
+                        "[async-lower]sleep" => {
+                            assert!(caller.data_mut().live.insert(3));
+                            results[0] = Val::I32(49);
+                        }
+                        "[subtask-cancel]" => {
+                            assert!(caller.data().live.contains(&arg(0)));
+                            assert!(
+                                !caller.data().joined.contains_key(&arg(0)),
+                                "cancel must detach first"
+                            );
+                            caller.data_mut().cancelled.push(arg(0));
+                            results[0] = Val::I32(caller.data().cancel_returns);
+                            // Even a normal return during cancellation cannot replace a
+                            // deadline selected by the guest with a late success.
+                            if caller.data().cancel_returns == RETURNED {
+                                let mem = memory(&mut caller);
+                                mem.write(&mut caller, 0, b"late")?;
+                                if arg(0) == 1
+                                    && let Some(address) = caller.data().late_result
+                                {
+                                    // A cancelled call can finish normally and write
+                                    // its success retptr before cancellation returns.
+                                    mem.write(&mut caller, address, &[0; 80])?;
+                                }
+                            }
+                        }
+                        "[subtask-drop]" => {
+                            assert!(
+                                caller.data_mut().live.remove(&arg(0)),
+                                "double/unknown drop"
+                            );
+                            caller.data_mut().joined.remove(&arg(0));
+                            caller.data_mut().ready.retain(|event| event.0 != arg(0));
+                            caller.data_mut().waiting.retain(|event| event.0 != arg(0));
+                            caller.data_mut().dropped.push(arg(0));
+                        }
+                        "[waitable-set-drop]" => {
+                            assert!(
+                                !caller.data().joined.values().any(|set| *set == arg(0)),
+                                "set dropped with a joined handle"
+                            );
+                            caller.data_mut().closed_sets.push(arg(0));
+                        }
+                        _ => return Err(wasmtime::Error::msg(format!("unexpected import {name}"))),
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    let mut store = wasmtime::Store::new(&engine, events);
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    (store, instance)
 }
 
 fn run(
@@ -268,120 +406,6 @@ fn run_helper_with_scope_alarm(
     call_alarms: bool,
     scope_alarm: bool,
 ) {
-    let engine = wasmtime::Engine::default();
-    let module = wasmtime::Module::new(&engine, emitted_helper(context, scope_alarm)).unwrap();
-    let mut linker = Linker::<Events>::new(&engine);
-    for import in module.imports() {
-        let ExternType::Func(ty) = import.ty() else {
-            panic!("nonfunction import");
-        };
-        let name = import.name().to_string();
-        linker
-            .func_new(
-                import.module(),
-                import.name(),
-                ty,
-                move |mut caller, args, results| {
-                    let arg = |n: usize| args[n].i32().unwrap();
-                    match name.as_str() {
-                        "[waitable-set-new]" => results[0] = Val::I32(100),
-                        "[waitable-join]" => {
-                            assert!(
-                                caller.data().live.contains(&arg(0)),
-                                "join after resolution"
-                            );
-                            if arg(1) == 0 {
-                                caller.data_mut().joined.remove(&arg(0));
-                            } else {
-                                assert!(caller.data_mut().joined.insert(arg(0), arg(1)).is_none());
-                            }
-                        }
-                        "[waitable-set-poll]"
-                        | "[cancellable][waitable-set-wait]"
-                        | "[waitable-set-wait]" => {
-                            assert_eq!(arg(0), 100);
-                            let event = if name == "[waitable-set-poll]" {
-                                caller.data_mut().ready.pop_front()
-                            } else {
-                                Some(
-                                    caller
-                                        .data_mut()
-                                        .waiting
-                                        .pop_front()
-                                        .expect("unexpected blocking wait"),
-                                )
-                            };
-                            if let Some((handle, state)) = event {
-                                let mem = memory(&mut caller);
-                                mem.write(&mut caller, arg(1) as usize, &handle.to_le_bytes())?;
-                                mem.write(&mut caller, arg(1) as usize + 4, &state.to_le_bytes())?;
-                                results[0] = Val::I32(if state == 6 { 6 } else { 1 });
-                            } else {
-                                results[0] = Val::I32(0);
-                            }
-                        }
-                        "heartbeat" | "poll-signal" => {
-                            let mem = memory(&mut caller);
-                            mem.write(&mut caller, arg(0) as usize, &[0; 48])?;
-                            if name == "poll-signal" && caller.data().root_cancel {
-                                mem.write(&mut caller, 400, b"cancel")?;
-                                mem.write(&mut caller, 416, b"cancel-test")?;
-                                for (offset, value) in
-                                    [(4, 1i32), (8, 400), (12, 6), (16, 416), (20, 11)]
-                                {
-                                    mem.write(
-                                        &mut caller,
-                                        arg(0) as usize + offset,
-                                        &value.to_le_bytes(),
-                                    )?;
-                                }
-                            }
-                        }
-                        "handle-checkpoint-signal" => {
-                            let mem = memory(&mut caller);
-                            mem.write(&mut caller, arg(4) as usize, &[0, 0, 0, 0, 1, 0, 0, 0])?;
-                        }
-                        "[async-lower]sleep" => {
-                            assert!(caller.data_mut().live.insert(3));
-                            results[0] = Val::I32(49);
-                        }
-                        "[subtask-cancel]" => {
-                            assert!(caller.data().live.contains(&arg(0)));
-                            assert!(
-                                !caller.data().joined.contains_key(&arg(0)),
-                                "cancel must detach first"
-                            );
-                            caller.data_mut().cancelled.push(arg(0));
-                            results[0] = Val::I32(caller.data().cancel_returns);
-                            // Even a normal return during cancellation cannot replace a
-                            // deadline selected by the guest with a late success.
-                            if caller.data().cancel_returns == RETURNED {
-                                let mem = memory(&mut caller);
-                                mem.write(&mut caller, 0, b"late")?;
-                            }
-                        }
-                        "[subtask-drop]" => {
-                            assert!(
-                                caller.data_mut().live.remove(&arg(0)),
-                                "double/unknown drop"
-                            );
-                            caller.data_mut().joined.remove(&arg(0));
-                            caller.data_mut().dropped.push(arg(0));
-                        }
-                        "[waitable-set-drop]" => {
-                            assert!(
-                                !caller.data().joined.values().any(|set| *set == arg(0)),
-                                "set dropped with a joined handle"
-                            );
-                            caller.data_mut().closed_sets.push(arg(0));
-                        }
-                        _ => return Err(wasmtime::Error::msg(format!("unexpected import {name}"))),
-                    }
-                    Ok(())
-                },
-            )
-            .unwrap();
-    }
     let live = [target, deadline]
         .into_iter()
         .filter(|s| *s >> 4 != 0)
@@ -395,8 +419,9 @@ fn run_helper_with_scope_alarm(
         })
         .chain(scope_alarm.then_some(7))
         .collect();
-    let mut store = wasmtime::Store::new(
-        &engine,
+    let (mut store, instance) = instantiate_events(
+        context,
+        scope_alarm,
         Events {
             ready: ready.iter().copied().collect(),
             waiting: waiting.iter().copied().collect(),
@@ -411,7 +436,6 @@ fn run_helper_with_scope_alarm(
             ..Default::default()
         },
     );
-    let instance = linker.instantiate(&mut store, &module).unwrap();
     let function = instance
         .get_func(
             &mut store,
@@ -880,3 +904,6 @@ fn emitted_root_and_parent_cancel_relinquish_scope_alarm_before_cleanup() {
         true,
     );
 }
+
+#[path = "parallel_deadline_race_tests.rs"]
+mod parallel_deadline_races;

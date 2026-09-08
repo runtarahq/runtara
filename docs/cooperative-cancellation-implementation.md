@@ -3019,3 +3019,49 @@ Agent components were reused from the existing rebuilt set; no Agent, WIT or
 production host source changed. Dedicated component-host tests, authenticated
 server E2E, browser visual review, Linux/soak and paired performance measurements
 were not rerun for this stage. E128 and the remaining release gates stay open.
+
+## Deterministic parallel deadline races · 2026-09-08
+
+Four new test groups drive the actual emitted `WindowWait` with per-Agent timers,
+ready slots and enclosing alarms. They cover all notification orders for a ready
+completion versus its own timer and peer, all orders for enclosing/own/peer
+readiness, a normal return during selected timeout cleanup, and root/parent
+priority at their existing observation boundaries. The 21 controlled combinations
+assert canonical error/result values, retained handles for scheduler assembly,
+set membership, alarm ownership and balanced scope deferral. AUDIT-21 maps the
+exact tests and limits.
+
+The shared event fixture now supplies both old and new tests, removes queued
+notifications when a waitable detaches/drops, and can simulate a callee writing a
+late success into its real result slot during cancellation. Removing the emitter's
+timeout-result write in a temporary negative control causes the new late-success
+test to fail on the result tag. Production code was restored before verification;
+this stage changes no emitted code, Agent artifact or host interface.
+
+The retry inventory confirms that production Split and branch eligibility still
+falls back to sequential execution for retrying Agent bodies (and Split-level
+retries). Preserve that contract during cancellation qualification. The dormant
+concurrent-backoff lowering is not evidence of a supported concurrent retry path.
+
+Validation: all 602 default-feature compiler library tests passed (0.81s). The
+21 shared-helper tests passed with `direct-wasm-integration-tests` enabled
+(0.17s), including all four new race groups. Feature-gated all-target Clippy,
+formatting and diff checks passed. The negative-control run failed on the expected
+success/error tag assertion, not a compile or fixture setup error. Full composed
+workflow/component suites, component builds, database/server E2E and measurements
+were not repeated for this test-only change; their earlier results are unchanged
+historical evidence. The full feature-gated library now contains 675 tests, but
+this stage ran only its 21 affected helper tests.
+
+```sh
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib cooperative_wait::tests
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+E128 retirement, real composed race qualification, replay/suspension and CPU
+cooperation gaps, obsolete implementation cleanup, final paired measurements,
+Linux capacity/soak, authenticated multi-owner server E2E and upstream integration
+remain open. No G1–G10 gate is declared complete by this deterministic test stage.
