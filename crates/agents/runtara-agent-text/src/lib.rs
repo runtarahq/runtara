@@ -1623,41 +1623,52 @@ pub fn wrap_text(input: WrapTextInput) -> Result<String, String> {
     } else {
         vec![&text]
     };
+    // Width is a column count, so every comparison and split below counts
+    // characters. Byte indices would slice through a multi-byte character and
+    // panic, which traps the whole component instead of returning an error.
+    let width = input.width;
     let mut result = Vec::new();
     for line in lines {
-        if line.len() <= input.width {
+        if line.chars().count() <= width {
             result.push(line.to_string());
             continue;
         }
         let words: Vec<&str> = line.split_whitespace().collect();
         let mut current_line = String::new();
+        let mut current_width = 0usize;
         for word in words {
-            if current_line.is_empty() {
-                if word.len() > input.width {
-                    let mut remaining = word;
-                    while remaining.len() > input.width {
-                        result.push(remaining[..input.width].to_string());
-                        remaining = &remaining[input.width..];
-                    }
-                    current_line = remaining.to_string();
-                } else {
-                    current_line = word.to_string();
-                }
-            } else if current_line.len() + 1 + word.len() <= input.width {
+            let word_width = word.chars().count();
+            if !current_line.is_empty() && current_width + 1 + word_width <= width {
                 current_line.push(' ');
                 current_line.push_str(word);
-            } else {
-                result.push(current_line);
-                if word.len() > input.width {
-                    let mut remaining = word;
-                    while remaining.len() > input.width {
-                        result.push(remaining[..input.width].to_string());
-                        remaining = &remaining[input.width..];
+                current_width += 1 + word_width;
+                continue;
+            }
+            if !current_line.is_empty() {
+                result.push(std::mem::take(&mut current_line));
+            }
+            if word_width > width {
+                let mut chars = word.chars().peekable();
+                let mut chunk = String::new();
+                let mut chunk_width = 0usize;
+                while chars.peek().is_some() {
+                    chunk.clear();
+                    chunk_width = 0;
+                    while chunk_width < width
+                        && let Some(character) = chars.next()
+                    {
+                        chunk.push(character);
+                        chunk_width += 1;
                     }
-                    current_line = remaining.to_string();
-                } else {
-                    current_line = word.to_string();
+                    if chars.peek().is_some() {
+                        result.push(std::mem::take(&mut chunk));
+                    }
                 }
+                current_line = chunk;
+                current_width = chunk_width;
+            } else {
+                current_line = word.to_string();
+                current_width = word_width;
             }
         }
         if !current_line.is_empty() {
@@ -3029,6 +3040,45 @@ mod tests {
         for line in result.lines() {
             assert!(line.len() <= 10);
         }
+    }
+
+    #[test]
+    fn test_wrap_text_splits_long_multibyte_words_on_character_boundaries() {
+        // Byte slicing used to cut through a multi-byte character here and
+        // panic, which traps the component rather than returning an error.
+        let input = WrapTextInput {
+            text: Some("ééééé".to_string()),
+            width: 2,
+            preserve_newlines: true,
+        };
+        assert_eq!(wrap_text(input).unwrap(), "éé\néé\né");
+    }
+
+    #[test]
+    fn test_wrap_text_measures_width_in_characters() {
+        let input = WrapTextInput {
+            text: Some("日本語 テキスト".to_string()),
+            width: 3,
+            preserve_newlines: true,
+        };
+        let result = wrap_text(input).unwrap();
+        assert_eq!(result, "日本語\nテキス\nト");
+        for line in result.lines() {
+            assert!(line.chars().count() <= 3, "{line}");
+        }
+    }
+
+    #[test]
+    fn test_wrap_text_keeps_ascii_behaviour() {
+        let input = WrapTextInput {
+            text: Some("alpha beta gammagammagamma delta".to_string()),
+            width: 10,
+            preserve_newlines: true,
+        };
+        assert_eq!(
+            wrap_text(input).unwrap(),
+            "alpha beta\ngammagamma\ngamma\ndelta"
+        );
     }
 
     #[test]
