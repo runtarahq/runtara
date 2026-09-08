@@ -386,16 +386,15 @@ pub(super) fn emit_agent_plan(
                 DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
                 DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
             );
-            // Bare `checkpoint` (not `emit_checkpoint_save`): a durability point,
-            // not a suspend point — `handle_checkpoint` is load-first idempotent,
-            // and the following backoff sleep is where a pending cancel/pause parks
-            // the instance. Its `checkpoint-result` (found / pending-signal) is
-            // intentionally ignored here.
+            // Preserve signals delivered with the failed attempt. Cancel stops
+            // before retry/terminal routing; Pause stays deferred until the
+            // backoff deadline is persisted, preserving its clock on replay.
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
             super::checkpoint::emit_checkpoint(body, indices);
+            super::cooperative_wait::emit_retry_checkpoint_signal(body, indices);
             body.instruction(&Instruction::End); // fresh-failure If
             body.instruction(&Instruction::End); // hit/miss If
         } else {

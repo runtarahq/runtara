@@ -7,9 +7,10 @@ and durable suspend/resume through the production invoke ABI.
 ## Current progress · 2026-09-08
 
 Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`.
-The memory and tool-name stages are committed locally as `ce58265e` and `2752aa83`.
-AUDIT-32 removes the E128 rejection and migrates the deadline execution corpus to
-public compilation. No push is authorized; the latest pushed stage is `6de29584`.
+The memory, tool-name and public-timeout stages are committed locally as
+`ce58265e`, `2752aa83` and `f9ff11c6`. AUDIT-33 preserves lifecycle signals delivered
+with failed-attempt checkpoints, using the existing guest signal helper.
+No push is authorized; the latest pushed stage is `6de29584`.
 
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
@@ -76,6 +77,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Checkpoint cancellation (AUDIT-33) | Six new composed test groups passed in 2.98s; full library: 706 passed, one stale cache-tag assertion failed; corrected assertion rerun passed; 91 public retry tests and feature-gated Clippy passed | Public compilation, real HTTP, one checkpoint delivery, saved outcomes, pending-peer cleanup before acknowledgement and Pause replay. No new native lifecycle E2E or performance claims. |
 | Public timeout compilation (AUDIT-32) | 701 compiler library tests passed in 462.37s; 395 public execution tests passed in 712.74s; three manual benchmarks ignored; 24 server DTO and 24 browser-validator tests passed; generated WASM passed 12 boundary cases | Includes public Agent/Embed, AI tool/MCP/memory, published export, retry, cancellation and original audit regressions. The selected 21 runtime/export tests overlap the library run. Remaining release and paired-measurement gates stay open. |
 | Name validation and inferred imports (AUDIT-31) | 701 feature-gated compiler library tests passed in 485.04s; 19 public AI tests passed in 8.69s | Includes the three new name-collision regressions and the deadline corpus with production timer/clock inference. E128 remains; timeout execution still uses private emission. |
 | AI memory deadlines (AUDIT-30) | 697-test compiler library run; final 15-test memory selection; 242 stdlib tests (one manual benchmark ignored); 92 component cancellation tests; six dispatcher tests; 19 public AI tests passed | The final memory selection includes one regression added after the full library run; overlapping counts are not summed. Public timeout syntax and final release qualification remain open. |
@@ -2499,3 +2501,49 @@ the generated WASM then passed 12 JSON boundary cases, preserving the exact
 maximum-u64 literal. Owning-package feature-gated Clippy passed. Generated assets
 remain ignored. These checks do not replace the outstanding database/server E2E,
 paired benchmarks or Linux soak.
+
+
+### AUDIT-33 — Cancel delivered with a failed-attempt checkpoint
+
+**Status:** fixed in guest lowering; six new composed regression groups pass.
+The compiler cache tag advances to `shared-v22`.
+
+The retry emitter discarded `pending_signal` from a failed-attempt checkpoint.
+A Cancel already delivered at that boundary could therefore require another
+notification before it was acknowledged. With one checkpoint delivery and no
+subsequent notification, the regression returned a retry suspension without
+acknowledging Cancel. This also exposed terminal-failure routing to the same gap.
+The persistence host already invalidates cached signal polls after checkpoint
+receipts, which can supply another notification; the guest should honor the
+receipt it has rather than depend on that repetition. This is a guest boundary
+finding, not evidence that the production server loses persisted commands.
+
+After storing an attempt's error envelope, the emitter now calls the shared
+checkpoint signal helper with Pause temporarily deferred. Cancel closes owned
+calls and acknowledges immediately, before retry or terminal/error routing.
+Pause is retained until the retry's absolute wake is saved, so replay does not
+start a fresh backoff. This uses existing invocation-local deferral state and
+standard subtask cleanup. No native bookkeeping, WIT interface or product flag
+is added. Existing artifacts keep their original code until recompiled.
+
+| Boundary | Retained evidence in `checkpoint_cancellation_tests.rs` |
+| --- | --- |
+| Cancel at durable budget creation | No HTTP request or result checkpoint; one budget checkpoint; acknowledgement and suspended guest exit |
+| Cancel after completed Agent result, with zero or two retries configured | Exactly one HTTP request and one successful result record; no normal continuation, retry or onError dispatch |
+| Cancel after failed attempt, with retryable/permanent errors and one/two retries configured | Failed attempt classification survives; no retry or terminal failure; one-shot receipt acknowledged |
+| Cancel after one parallel branch returns while its sibling waits for headers/body | Successful record retained; pending peer has no result record; server observes socket closure before runtime acknowledgement, before Store teardown |
+| Pause delivered once with a failed attempt | Absolute retry wake saved before acknowledgement; early resume leaves checkpoints unchanged; due replay skips the completed failed attempt and runs one retry |
+| Pause after completed result, followed by resume beyond the original Agent deadline | Completed result wins replay; no extra HTTP call or rewritten checkpoint |
+
+All cases compile authored DSL through the public compiler and compose the normal
+built components. Cancelled runs are not resumed by these tests; replay coverage
+uses Pause. They do not promise rollback of external effects; these fixtures do not
+exercise the persistence server. The original three checkpoint-cancellation groups passed in
+2.34s; after adding the failed-attempt case and fix, four passed in 2.74s; the final
+six-group matrix passed in 2.98s. The full library run passed 706 tests and failed
+one stale `shared-v21` assertion (501.96s). Updating that expectation to `shared-v22`
+and rerunning the exact test passed. No production change followed the full run.
+The public retry execution selection passed all 91 tests in 216.32s, and
+feature-gated all-target Clippy passed in 7.36s. Other public execution cases and
+native lifecycle/database E2E were not rerun for this guest-only change. G4/G5/G7 still require the
+remaining broader race/recovery matrix; final G1–G10 qualification remains open.

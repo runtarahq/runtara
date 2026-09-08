@@ -1115,3 +1115,19 @@ baseline/candidate measurements, Linux soak and recent upstream integration
 G1–G10; do not infer completion from the public deadline corpus. Existing compiled
 and parked artifacts retain their original semantics. Keep changes local until
 the user explicitly requests a push.
+
+
+### Checkpoint delivery and cancellation · 2026-09-08
+
+AUDIT-33 closes one G4/G7 boundary: Cancel delivered with a failed-attempt
+checkpoint is now retained and handled before retry or terminal failure. The
+existing shared guest checkpoint helper handles it; Pause remains deferred until
+the retry wake is persisted. Six composed regression groups cover pre-dispatch,
+completed/failed results, pending parallel HTTP cleanup before acknowledgement,
+and Pause replay with original clocks and completed-result reuse. The compiler
+marker is `shared-v22`; old artifacts retain their emitted behavior.
+
+This does not close all completion/expiry races, lifecycle persistence E2E,
+owner-failure/recovery, compatibility, Linux soak or paired-measurement gates.
+The current audit and implementation record distinguish narrow boundary evidence
+from the remaining G1–G10 qualification. Keep commits local; no push is authorized.

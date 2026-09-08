@@ -592,6 +592,25 @@ pub(super) fn emit_checkpoint_signal(body: &mut Function, indices: &DirectCoreFu
     body.instruction(&Instruction::End);
 }
 
+/// Failed-attempt persistence has already saved the external outcome. Cancel
+/// may stop immediately, but Pause must wait until the retry deadline is saved
+/// so replay cannot start a fresh backoff. Reuse the normal signal helper and
+/// its existing deferral state; a later empty poll does not erase this receipt.
+pub(super) fn emit_retry_checkpoint_signal(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+) {
+    body.instruction(&Instruction::LocalGet(DEFER_BOUNDARY));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DEFER_BOUNDARY));
+    emit_checkpoint_signal(body, indices);
+    body.instruction(&Instruction::LocalGet(DEFER_BOUNDARY));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Sub);
+    body.instruction(&Instruction::LocalSet(DEFER_BOUNDARY));
+}
+
 pub(super) fn emit_retained_boundary(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     if call_helper(body, indices, Helper::Boundary) {
         return;

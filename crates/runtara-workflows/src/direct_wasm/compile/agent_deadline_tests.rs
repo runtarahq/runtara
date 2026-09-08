@@ -46,6 +46,8 @@ struct Host {
     failure_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
     failure_observed: AtomicBool,
     checkpoint_signal: Mutex<Option<String>>,
+    checkpoint_cancel: AtomicBool,
+    checkpoint_signal_remaining: AtomicUsize,
     blocked_checkpoint: Mutex<Option<(String, usize)>>,
     checkpoint_blocked: AtomicBool,
     custom_signals: Mutex<HashMap<String, Vec<u8>>>,
@@ -66,6 +68,8 @@ impl Host {
             failure_cleanup: Mutex::new(None),
             failure_observed: AtomicBool::new(false),
             checkpoint_signal: Mutex::new(None),
+            checkpoint_cancel: AtomicBool::new(false),
+            checkpoint_signal_remaining: AtomicUsize::new(usize::MAX),
             blocked_checkpoint: Mutex::new(None),
             checkpoint_blocked: AtomicBool::new(false),
             custom_signals: Mutex::new(HashMap::new()),
@@ -201,9 +205,26 @@ impl RuntimeHost for Host {
             .unwrap()
             .as_ref()
             .filter(|prefix| key.starts_with(prefix.as_str()))
+            .filter(|_| {
+                self.checkpoint_signal_remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            })
             .map(|_| RuntimeSignalInfo {
-                signal_type: "pause".into(),
-                command_id: "response-pause".into(),
+                signal_type: if self.checkpoint_cancel.load(Ordering::SeqCst) {
+                    "cancel"
+                } else {
+                    "pause"
+                }
+                .into(),
+                command_id: if self.checkpoint_cancel.load(Ordering::SeqCst) {
+                    "root-cancel"
+                } else {
+                    "response-pause"
+                }
+                .into(),
                 payload: vec![],
                 checkpoint_id: None,
             });

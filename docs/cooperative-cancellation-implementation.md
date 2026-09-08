@@ -3756,3 +3756,70 @@ as an exact JSON literal to avoid JavaScript number rounding. This smoke test
 exercises the generated module; it does not claim browser UI interaction coverage.
 The build and smoke logs use the same prefix with `browser-native-final.log`,
 `browser-build-final.log` and `browser-smoke.log` suffixes.
+
+
+### Cancellation at completed and failed-attempt checkpoints · 2026-09-08
+
+AUDIT-33 fixes a guest signal-consumption gap in the shared Agent retry emitter.
+The first three new public composed regressions passed (2.34s): Cancel at budget
+creation, Cancel after a saved successful result, and Cancel after a parallel
+result with a live HTTP peer. A failed-attempt test initially assumed only one
+Agent-prefixed record; it instead observed the failed attempt and a retry-wake
+record because the fixture repeated the command on each matching checkpoint.
+That exposed the need to distinguish first delivery from repeated delivery.
+
+With the fixture limited to one delivered checkpoint receipt, the failed-attempt
+case reproduced a missing acknowledgement (1.09s). The old emitter explicitly
+ignored the failed-attempt checkpoint's pending signal. The runtime can redeliver
+persisted commands, but the guest must retain the command it already received.
+No claim is made here about loss of a persisted production-server signal.
+
+The attempt emitter now reuses `emit_checkpoint_signal` with the existing Pause
+boundary deferral incremented for this call. Cancel resolves calls and acknowledges
+immediately; Pause remains retained until the absolute retry wake is persisted.
+This preserves retry replay timing and uses standard cancellation cleanup, without
+new native bookkeeping, WIT or feature flags. The compiler cache marker changes
+from `shared-v21` to `shared-v22`. Built guest libraries/Agents are unchanged.
+
+The corrected four-group selection passed (2.74s). The final six-group matrix
+passed (2.98s), including retryable and permanent errors, configured retry counts,
+HTTP headers/body cleanup before acknowledgement, one-shot Pause with early/due
+replay, and a completed result replayed after its original budget elapsed. Saved
+successful JSON and failed-attempt classification are asserted, along with exact
+request and checkpoint counts. Replay is tested with Pause, not by restarting a
+cancelled instance. These are emitted-guest/host-interface proofs, not a new native
+server/database cancellation E2E or a simultaneous-ready CM scheduling proof.
+
+Verification commands use the pinned toolchain and matching component directory:
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib checkpoint_cancellation -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+```
+
+Logs: `/private/tmp/cooperative-checkpoint-cancel-focused.log`, `-attempt.log`,
+`-once.log`, `-fixed.log`, `-matrix.log` and `-lib.log` share the same filename
+prefix. The full-library run passed **706 tests** and failed **one stale cache-tag
+assertion** in **501.96s**. `abi_is_part_of_the_lowering_tag` still expected
+`shared-v21`; production correctly emitted `shared-v22`. The assertion was updated
+and its focused rerun passed (one test, `-tag.log`). No production change followed
+the full run; its other 706 cases were not rerun solely for this assertion edit.
+The public retry execution selection passed **91 tests** in **216.32s** with none
+ignored (307 other public cases filtered). Feature-gated all-target Clippy passed
+in **7.36s**. These checks cover the affected retry paths, including published,
+nested, pure, recovery, replay and existing audit cases. The full public execution
+suite, component rebuild, browser build and native lifecycle/database E2E were
+not repeated: this stage changes guest compiler lowering and test fixtures, not
+Agent libraries, interfaces, browser validation or server implementation.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib abi_is_part_of_the_lowering_tag -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute retry -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Final logs use `-tag.log`, `-public-retry.log` and `-clippy.log` with the same prefix. Remaining G1–G10 work, final paired measurements, Linux soak,
+upstream/migration integration and PR remain open.
+Changes stay local until the user explicitly requests a push.

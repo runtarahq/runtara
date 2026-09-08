@@ -410,3 +410,6 @@ async fn checkpoint_failure_resolves_live_parallel_io_before_reporting() -> anyh
 
 #[path = "parallel_agent_deadline_tests.rs"]
 mod parallel_agent_deadline;
+
+#[path = "checkpoint_cancellation_tests.rs"]
+mod checkpoint_cancellation;
