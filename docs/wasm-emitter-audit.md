@@ -93,7 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
-| Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment and migration-version suites; the five-case cancellation E2E; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. The feature-gated database suites, frontend, Linux soak and paired benchmarks were not run. |
+| Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment, server, store, object-store, connections and migration-version suites; the five-case cancellation E2E; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. Frontend, Linux soak and paired benchmarks were not run. |
 | Late completion (AUDIT-36) | Six new groups passed: 20 composed runs covering timeout, root Cancel and normal completion | Public DSL emitter plus normally composed fixture Agent; cleanup events, same-component reuse and real checkpoint records. Simultaneous-ready scheduling and native lifecycle E2E remain separate gates. |
 | Production isolation selection retirement (AUDIT-35) | Default production build and Clippy; 24 server config, 609 compiler, 28 compatibility execution and six CLI tests passed; legacy runner integration target compiled | New output has no isolation catalog/custom task import. Native runner target was compile-only; registered/parked inventory, full lifecycle E2E and final benchmarks remain open. |
 | Breakpoint cancellation (AUDIT-34) | 35 breakpoint tests; 609 compiler tests outside the deadline execution module; six checkpoint regressions; three public breakpoint execution tests; feature-gated Clippy passed | Counts overlap. Seven new composed regression groups cover receipt handling, marker replay and rejected Pause. Wider deadline/lifecycle/benchmark gates remain open. |
@@ -2800,6 +2800,13 @@ Verified after the merge:
 | `scoped_runner_test` and `cooperative_stop_test` | 7 and 4 passed against a recreated database |
 | `migration_versions_test` | 2 passed |
 | `cargo test --workspace --lib` | no failures with `RUNTARA_AGENT_COMPONENTS_DIR` set |
+| `runtara-core` with `test-support`, single-threaded | 79 passed |
+| `runtara-store-postgres` with `db-integration-tests` | 72 and 23 passed, one ignored |
+| `runtara-environment` with `db-integration-tests` | 159 passed across eleven targets, three ignored |
+| `runtara-server` with `db-integration-tests,valkey-integration-tests` | no failures across the suite |
+| `runtara-object-store` integration | 73 passed once the test database had the `vector` extension |
+| `runtara-connections`, single-threaded | no failures |
+| `runtara-sdk`, `runtara-workflows` default, and the hermetic macro/agents/mcp targets | no failures |
 | `runtara-validation-wasm` for `wasm32-unknown-unknown`, `RUSTFLAGS=-D warnings` | built |
 | `test_cooperative_cancellation.py` | 5 cases passed; owner and peer, headers and body, 0.62-1.10s, plus sustained renewal |
 | Workspace all-target Clippy, formatting, diff whitespace | passed |
@@ -2818,9 +2825,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Not run in this stage: the feature-gated database suites for core, store-postgres,
-server, object-store and connections; frontend build and tests; Linux latency,
-throughput and soak; and any paired benchmark. The `component-host` real-Agent
+Not run in this stage: frontend build and tests; Linux latency, throughput and
+soak; and any paired benchmark. The `component-host` real-Agent
 test resolves components from the workspace `target/wasm32-wasip2/release` rather
 than `RUNTARA_AGENT_COMPONENTS_DIR`, so a separately staged component directory
 must be linked there before it will run locally. G1-G10 remain open, CodeQL

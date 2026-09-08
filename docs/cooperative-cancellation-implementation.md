@@ -3909,5 +3909,8 @@ isolated-step targets; `scoped_runner_test`, `cooperative_stop_test` and
 `migration_versions_test`; `cargo test --workspace --lib`; the
 `wasm32-unknown-unknown` validation build under `-D warnings`; and the five-case
 authenticated cancellation E2E, where owner and peer header and body cases
-cancelled in 0.62-1.10s. The feature-gated database suites, frontend, Linux soak,
-CodeQL triage and paired measurements were not run.
+cancelled in 0.62-1.10s. The feature-gated database suites for core,
+store-postgres, environment, server, object-store and connections also pass on
+the merged tree; the object-store vector test needs `CREATE EXTENSION vector` in
+its database. Frontend, Linux soak, CodeQL triage and paired measurements were
+not run.
