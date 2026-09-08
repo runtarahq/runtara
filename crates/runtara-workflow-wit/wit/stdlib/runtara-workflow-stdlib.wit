@@ -608,6 +608,14 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // Inline tool source with the same per-call identity as workflow-agent tools.
+    tool-scope-source: func(
+        ai-step-id: string,
+        label: string,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
     agent-cache-key: func(
         agent-id: u32,
         source: list<u8>,

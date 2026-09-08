@@ -2585,23 +2585,37 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
 
-        let prefix = child_scope_v2(
-            &source,
-            "tool-child",
-            serde_json::json!([ai_step_id, label, call_counter]),
-        )
-        .unwrap_or_else(|| {
-            child_cache_prefix(
-                &format!("{ai_step_id}.tool.{label}.{call_counter}"),
-                &source,
-            )
-        });
+        let prefix = tool_call_cache_prefix(ai_step_id, label, call_counter, &source);
         let envelope = serde_json::json!({
             "data": input,
             "variables": { "_cache_key_prefix": prefix }
         });
         serde_json::to_vec(&envelope)
             .map_err(|err| format!("failed to serialize scoped tool input: {err}"))
+    }
+
+    /// Preserve the caller source while selecting the replay-stable tool call.
+    /// Inline Embed tools need its definition path as well as its namespace.
+    pub fn tool_scope_source(
+        ai_step_id: &str,
+        label: &str,
+        call_counter: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let mut source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
+        let prefix = tool_call_cache_prefix(ai_step_id, label, call_counter, &source);
+        let object = source
+            .as_object_mut()
+            .ok_or("tool source must be an object")?;
+        let variables = object
+            .entry("variables")
+            .or_insert_with(|| serde_json::json!({}));
+        variables
+            .as_object_mut()
+            .ok_or("tool source variables must be an object")?
+            .insert("_cache_key_prefix".into(), prefix.into());
+        serde_json::to_vec(&source).map_err(|err| format!("failed to serialize tool source: {err}"))
     }
 
     /// Resolve an Agent's connection to ONE concrete connection id, evaluated
@@ -5717,6 +5731,22 @@ pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
             format!("{workflow_id}::{step_id}{loop_indices_suffix}")
         }
     }
+}
+
+fn tool_call_cache_prefix(
+    ai_step_id: &str,
+    label: &str,
+    call_counter: u32,
+    source: &Value,
+) -> String {
+    child_scope_v2(
+        source,
+        "tool-child",
+        serde_json::json!([ai_step_id, label, call_counter]),
+    )
+    .unwrap_or_else(|| {
+        child_cache_prefix(&format!("{ai_step_id}.tool.{label}.{call_counter}"), source)
+    })
 }
 
 fn embed_child_variables(
@@ -11704,6 +11734,75 @@ mod tests {
             nested["variables"]["_cache_key_prefix"],
             json!("top-wf::call__ai.tool.wf_echo.2[1]")
         );
+    }
+
+    #[test]
+    fn tool_scope_source_preserves_context_and_is_replay_stable() {
+        for version in [1, 2] {
+            let original = json!({
+                "data": {"large": "x".repeat(80_000)},
+                "steps": {"previous": {"outputs": {"id": 42}}},
+                "variables": {
+                    "_durable_key_version": version,
+                    "_workflow_id": "parent",
+                    "_instance_id": "instance",
+                    "_tenant_id": "tenant",
+                    "_cache_key_prefix": "outer",
+                    "_manifest_graph_path": [["embedWorkflow", "nested"]],
+                    "_loop_path": [["items", 2]],
+                    "_loop_indices": [2],
+                    "custom": {"kept": true}
+                }
+            });
+            let bytes = serde_json::to_vec(&original).unwrap();
+            let scope = |ai, label, counter| {
+                DirectJsonManifest::tool_scope_source(ai, label, counter, &bytes).unwrap()
+            };
+            let first = scope("ai", "tool", 0);
+            assert_eq!(first, scope("ai", "tool", 0), "replay identity");
+            for other in [
+                scope("ai", "tool", 1),
+                scope("other", "tool", 0),
+                scope("ai", "other", 0),
+            ] {
+                assert_ne!(first, other, "distinct invocation identity");
+            }
+            let mut scoped: Value = serde_json::from_slice(&first).unwrap();
+            let envelope: Value = serde_json::from_slice(
+                &DirectJsonManifest::agent_tool_scope_input("ai", "tool", 0, b"{}", &bytes)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                scoped["variables"]["_cache_key_prefix"],
+                envelope["variables"]["_cache_key_prefix"]
+            );
+            scoped["variables"]["_cache_key_prefix"] =
+                original["variables"]["_cache_key_prefix"].clone();
+            assert_eq!(
+                scoped, original,
+                "definition lookup and caller state survive scoping"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_scope_source_checks_shape_and_allows_missing_variables() {
+        let scoped: Value = serde_json::from_slice(
+            &DirectJsonManifest::tool_scope_source("ai", "tool", 0, br#"{"data":42}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scoped["data"], 42);
+        assert!(scoped["variables"]["_cache_key_prefix"].is_string());
+        for input in [
+            b"{".as_slice(),
+            b"[]",
+            b"null",
+            br#"{"variables":null}"#,
+            br#"{"variables":[]}"#,
+        ] {
+            assert!(DirectJsonManifest::tool_scope_source("ai", "tool", 0, input).is_err());
+        }
     }
 
     #[test]

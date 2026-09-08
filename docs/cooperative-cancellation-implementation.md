@@ -2501,3 +2501,50 @@ Clippy, Rust formatting, `git diff --check` and patterns-page JavaScript syntax
 passed. The final eight-test Embed rerun includes the explicit E128 assertion
 and child-aware support analysis. No browser visual check, database/server E2E,
 resource soak or controlled size/latency run is claimed for this stage.
+
+## Inline Embed tools: shared scopes and budgets (2026-09-08)
+
+`emit_embed_workflow_tool_arm` now calls the same budget entry, exit and error
+capture helpers as the normal Embed path. Its run-plan retains the authored
+timeout and durability fields. The additive stdlib `tool-scope-source` export
+reuses the existing workflow-agent tool identity calculation while preserving
+all caller source fields. It scopes the child, completed result and budget to
+one AI step/label/call-counter invocation. Existing published workflow-agent
+scope formulas are unchanged.
+
+A completed durable result bypasses budget loading; a pending call retains its
+absolute epoch deadline through early resumes. Own expiry is wrapped as
+non-retryable `EMBED_TIMEOUT` feedback after restoring the parent deadline.
+Inherited expiry skips result caching and propagates out of the AI loop; root
+Cancel follows the existing signal acknowledgment/lifecycle path. No additional
+host cancellation registry, Store, host interface or feature switch is added.
+The compiler cache identity advances to `cooperative-waits=shared-v9` for the
+changed guest import and emission.
+
+Compatibility: newly compiled inline Embed tools use per-call checkpoint
+namespaces instead of their previous shared child namespace. Previously composed
+artifacts keep their embedded implementation; this stage does not migrate parked
+instances to a newly compiled binary.
+
+Seven composed test functions cover zero budgets, repeated HTTP calls in both
+success/timeout orders, hanging headers and bodies, root Cancel, both parent/own
+expiry orderings, ordinary error/success, completed replay and a partially
+completed turn parked on Delay, plus malformed pending budget records. Two new native tests exercise malformed source
+shape and context preservation with legacy/v2 tool identities and a large
+payload. The private timeout fixture still asserts public E128 rejection with
+the complete child closure before emitting its candidate.
+
+The pending-turn replay fixture repeats the model response. Persisting that
+response before tool dispatch remains necessary for nondeterministic model
+replies, and nested AI-tool state/arena frames still require qualification.
+E128, the remaining G1–G10 gates, server E2E, soak and paired measurements remain
+open. No new performance result is claimed here.
+
+Verification: all 27 Agent and both shared workflow components rebuilt. The full
+compiler suite passed 624 tests; the final seven-test tool matrix then passed
+with exact feedback assertions and the additional corrupt-budget case. Stdlib
+passed 239 tests (one existing ignored), plus its doctest. All 86 real-component
+cancellation tests and all 395 workflow integration tests passed (three manual
+benchmarks ignored). Final feature-gated all-target Clippy, formatting, diff and
+patterns-page JavaScript syntax checks pass. Browser visual checks,
+database/server E2E, soak and controlled benchmarks were not run for this stage.

@@ -17,6 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[path = "embed_deadline_tests.rs"]
 mod embed;
 
+#[path = "embed_tool_deadline_tests.rs"]
+mod embed_tool;
+
 struct Host {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     started: Instant,

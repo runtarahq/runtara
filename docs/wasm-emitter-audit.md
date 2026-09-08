@@ -1309,3 +1309,38 @@ precedence, zero/overflow, replay, backoff, early wakes and malformed state. See
 `compile/embed_deadline_tests.rs` and the implementation record. Public E128
 rejection remains until the remaining tool/publication, race and grace contracts
 are qualified; this is not a claim that all authored Embed timeouts are released.
+
+### Inline Embed tool identity and timeout follow-up · 2026-09-08
+
+Repeated inline Embed tools previously reused the child's step scope. The
+candidate now derives a per-call namespace using the same guest helper as a
+published workflow-agent tool, preserving the caller's definition path and
+variables. The normal Embed path and tool path share deadline initialization,
+exit checking and owned-error capture. No per-agent cancellation implementation
+or host workflow dispatcher is added.
+
+| Case | Candidate behavior | Test in `compile/embed_tool_deadline_tests.rs` |
+| --- | --- | --- |
+| Zero own budget | No child HTTP; non-retryable `EMBED_TIMEOUT` becomes tool feedback | `embed_tool_zero_budget_is_model_feedback_without_child_io` |
+| Two calls to one tool | Distinct scopes and fresh budgets; hanging headers/body are closed | `embed_tool_pending_io_closes_and_next_call_has_fresh_budget` |
+| Root Cancel or earlier parent expiry | Leave AI loop without feeding a child error to the model | `embed_tool_root_cancel_and_parent_timeout_bypass_model_feedback` |
+| Earlier own expiry | Model may finish inside the still-live parent scope | `embed_tool_own_timeout_allows_model_to_finish_inside_parent_budget` |
+| First call complete, second parked | Reuse completed result; early wake preserves the second call's original deadline | `embed_tool_resume_reuses_completed_call_and_original_pending_budget` |
+| No timeout; ordinary failure then success | Keep normal error feedback and completion replay | `embed_tool_untimed_calls_preserve_errors_success_and_completed_replay` |
+| Corrupt pending budget | Return non-retryable `EMBED_DEADLINE_STATE`; no new child I/O | `embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io` |
+
+The stdlib tests additionally check source preservation with a large payload,
+legacy/v2 identities, replay equality, distinct counters/labels/AI steps, absent
+variables and malformed input. Workflow-agent tool keys keep their existing
+formula. Newly compiled inline Embed tools change checkpoint namespaces;
+existing composed binaries are unaffected, and this is not a parked-workflow
+checkpoint migration.
+
+**Remaining replay gap:** an unfinished AI turn can call the model again on
+resume. The test deliberately returns the same tool list and arguments. It does
+not establish correctness if the model changes that list. Persist the model's
+reply before dispatch, then test replay with a different scripted next reply.
+The corrupt-budget test rejects 1-, 7- and 9-byte pending deadline records without new child I/O.
+Nested AI loops inside these tool children also need explicit frame/arena
+qualification. E128 remains until these and the remaining timeout contracts are
+qualified. See the implementation record for checks actually run.

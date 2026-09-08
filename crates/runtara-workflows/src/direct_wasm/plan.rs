@@ -258,6 +258,10 @@ pub(super) enum DirectAiToolPlan {
         /// The EmbedWorkflow step id that owns the preloaded child graph; used to
         /// build the child variables/scope and debug events.
         step_id: String,
+        input_mapping_id: u32,
+        label: String,
+        durable: bool,
+        timeout_ms: Option<u64>,
         /// The composed child workflow run plan (built from the preloaded graph).
         child_plan: Box<DirectRunPlan>,
     },
@@ -1005,8 +1009,28 @@ fn step_run_plan_inner(
                             &child.graph.entry_point,
                             &mut Vec::new(),
                         )?;
+                        let step = graph
+                            .steps
+                            .iter()
+                            .find(|step| step.id == edge.to_step)
+                            .expect("Embed tool definition");
                         tools.push(DirectAiToolPlan::Embed {
                             step_id: edge.to_step.clone(),
+                            input_mapping_id: embed_workflow_input_mapping_id(
+                                graph,
+                                &edge.to_step,
+                            )?,
+                            label: name.clone(),
+                            durable: graph.durable
+                                && step
+                                    .body
+                                    .get("durable")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(true),
+                            timeout_ms: step
+                                .body
+                                .get("timeout")
+                                .and_then(serde_json::Value::as_u64),
                             child_plan: Box::new(child_plan),
                         });
                         continue;

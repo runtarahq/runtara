@@ -605,3 +605,39 @@ record for exact results. E128 remains: Embed-as-tool budgets, runtime-free
 publication with own Embed deadlines, completion races and cleanup grace still
 require qualification before releasing the authored timeout field. This advances
 G5/G6/G7 without declaring them complete.
+
+### Inline Embed tool scopes and budgets · 2026-09-08
+
+Reuse the normal Embed budget entry, exit and timeout capture helpers for an
+Embed invoked by the AI loop. Use the existing workflow-agent tool identity
+formula (AI step, advertised label and replayed call counter) for its caller
+source, child checkpoints, result and total budget. Preserve the source's
+manifest definition path, loop identity and user variables separately.
+
+The candidate saves a completed tool result before the next tool runs. Its own
+expiry becomes `EMBED_TIMEOUT` feedback after scope restoration; inherited
+expiry and root Cancel leave the AI loop without another model call. A completed
+result bypasses deadline loading on replay. Tests must include two calls to the
+same tool, both timeout/success orderings, a partially completed turn that parks,
+early resume, and both parent/child budget orderings.
+
+Compatibility: new inline Embed tool artifacts now use a per-call checkpoint
+namespace. This corrects collisions between repeated calls; it is not a migration
+of a parked artifact's checkpoints. Existing composed binaries retain their
+embedded implementation. Published workflow-agent scope keys remain unchanged.
+
+Keep G5/G6/G7 and E128 open. The resume fixture currently scripts the same model
+reply on each attempt. Persist the model reply before dispatching its tools so a
+changed response on replay cannot assign a cached result to different arguments.
+Also qualify AI-inside-Embed-tool state/arena frames, nested/parallel children,
+the remaining preparation operations, runtime-free
+publication, completion races and cleanup grace before claiming complete tool
+support. The full performance, server E2E and soak requirements are unchanged.
+
+Next replay qualification: save the returned AI turn before starting its first
+tool. Reuse the existing guest checkpoint machinery with a distinct key from the
+completed-turn snapshot. A checkpoint write failure must prevent tool dispatch.
+Resume must restore the exact tool IDs, order and arguments without another
+model request; test a different next provider reply and a failure between tool
+calls. This applies once in the shared AI loop to every tool kind, rather than
+adding separate persistence code to individual Agents or transports.

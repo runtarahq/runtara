@@ -735,7 +735,11 @@ pub(super) fn emit_ai_agent_loop_plan(
                 );
             }
             DirectAiToolPlan::Embed {
-                step_id,
+                step_id: embed_step_id,
+                input_mapping_id,
+                label,
+                durable,
+                timeout_ms,
                 child_plan,
             } => {
                 emit_embed_workflow_tool_arm(
@@ -743,7 +747,12 @@ pub(super) fn emit_ai_agent_loop_plan(
                     indices,
                     static_data,
                     track_events,
+                    embed_step_id,
+                    *input_mapping_id,
                     step_id,
+                    label,
+                    *durable,
+                    *timeout_ms,
                     child_plan,
                     DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
                     DIRECT_AI_TOOL_ARGS_LEN_LOCAL,

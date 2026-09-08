@@ -88,7 +88,7 @@ fn compiled(
             "finish":{"id":"finish","stepType":"Finish","inputMapping":{"result":{"valueType":"reference","value":"steps.outer.outputs.outputs"}}},
             "handled":handled},"executionPlan":[{"fromStep":"outer","toStep":"finish"},{"fromStep":"outer","toStep":"handled","label":"onError"}]});
     }
-    let mut result = compile_direct_workflow_with_abi(
+    let result = compile_direct_workflow_with_abi(
         DirectCompilationInput {
             workflow_id: "embed-deadline".into(),
             version: 1,
@@ -109,6 +109,16 @@ fn compiled(
         graph["steps"]["embed"]["timeout"] = budget.into();
     }
     let graph = serde_json::from_value(graph)?;
+    reemit(result, graph, children, track_events, "embed-deadline")
+}
+
+pub(super) fn reemit(
+    mut result: DirectCompilationResult,
+    graph: runtara_dsl::ExecutionGraph,
+    children: Vec<crate::ChildWorkflowInput>,
+    track_events: bool,
+    workflow_id: &str,
+) -> anyhow::Result<DirectCompilationResult> {
     result.support_report =
         super::super::super::support::analyze_direct_wasm_support_with_child_workflows(
             &graph, &children,
@@ -153,7 +163,7 @@ fn compiled(
         &manifest_json,
         &support,
         track_events,
-        "embed-deadline",
+        workflow_id,
         WorkflowAbi::InvokeHostImports,
         result.omit_runtime,
         None,
@@ -167,7 +177,13 @@ fn compiled(
             result.omit_runtime,
             None,
             &pools,
-            false,
+            manifest.graph.agents.iter().any(|agent| {
+                agent
+                    .connection_id
+                    .as_deref()
+                    .is_some_and(|id| !id.is_empty())
+                    || agent.connection_ref.is_some()
+            }),
             &Default::default(),
             true,
             true,

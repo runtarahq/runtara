@@ -273,6 +273,81 @@ fn emit_embed_workflow_child_attempt(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn begin_deadline(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    step_id_segment: &DirectDataSegment,
+    deadline_owner: i64,
+    timeout: u64,
+    durable: bool,
+) {
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    super::agent_deadline::enter(
+        body,
+        indices,
+        &static_data.embed_deadline_state_error,
+        step_id_segment,
+        (
+            DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
+            DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
+        ),
+        timeout,
+        durable,
+    );
+    super::agent_deadline::remaining(body, indices);
+    super::deadline_scope::enter(
+        body,
+        indices,
+        deadline_owner,
+        &static_data.embed_timeout_error,
+        super::agent_deadline::REMAINING,
+    );
+    if durable {
+        super::loop_deadline::include_epoch(body, super::agent_deadline::DEADLINE);
+    }
+    super::loop_deadline::check(
+        body,
+        indices,
+        Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+    );
+}
+fn end_deadline(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+    // Includes synchronous child work and final assembly before accepting
+    // success. Preserve a previously selected reason until its owner claims.
+    super::deadline_scope::break_if_selected(body, indices, 0);
+    super::loop_deadline::check(
+        body,
+        indices,
+        Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+    );
+    body.instruction(&Instruction::End);
+}
+fn capture_deadline_error(
+    body: &mut WasmFunction,
+    deadline_owner: i64,
+    output_ptr_local: u32,
+    output_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(super::deadline_scope::SELECTED));
+    body.instruction(&Instruction::I64Const(deadline_owner));
+    body.instruction(&Instruction::I64Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    for (dst, src) in [
+        (output_ptr_local, super::deadline_scope::SELECTED_PTR),
+        (output_len_local, super::deadline_scope::SELECTED_LEN),
+    ] {
+        body.instruction(&Instruction::LocalGet(src));
+        body.instruction(&Instruction::LocalSet(dst));
+    }
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::End);
+}
+
 /// Lower an EmbedWorkflow target used as an AiAgent tool: run the composed child
 /// workflow with the LLM-provided tool arguments as its input data and leave the
 /// child's final output (or a wrapped error) in the tool-result locals. Mirrors
@@ -287,6 +362,11 @@ pub(super) fn emit_embed_workflow_tool_arm(
     static_data: &DirectCoreStaticData,
     track_events: bool,
     embed_step_id: &str,
+    input_mapping_id: u32,
+    ai_step_id: &str,
+    label: &str,
+    durable: bool,
+    timeout_ms: Option<u64>,
     child_plan: &DirectRunPlan,
     tool_args_ptr_local: u32,
     tool_args_len_local: u32,
@@ -305,6 +385,13 @@ pub(super) fn emit_embed_workflow_tool_arm(
         .step_id(embed_step_id)
         .expect("embed tool step ids are present in static data");
 
+    push_embed_workflow_frame(
+        body,
+        steps_ptr_local,
+        steps_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
     // The LLM tool arguments ARE the child workflow's input data (no input
     // mapping, matching the generated tool arm's `__child_data = __tool_args`).
     body.instruction(&Instruction::LocalGet(tool_args_ptr_local));
@@ -312,12 +399,42 @@ pub(super) fn emit_embed_workflow_tool_arm(
     body.instruction(&Instruction::LocalGet(tool_args_len_local));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_DATA_LEN_LOCAL));
 
-    // The AiAgent step's source is the parent source for the child's variable
-    // scope (cache-key prefix, scope id, workflow id).
+    // The replay-stable tool call identity scopes both child checkpoints and
+    // its own result/budget. Keep definition lookup and the caller source intact.
+    push_segment_args(body, static_data.step_id(ai_step_id).expect("AI step"));
+    push_segment_args(body, static_data.step_id(label).expect("tool label"));
+    body.instruction(&Instruction::LocalGet(
+        super::DIRECT_AI_TOOL_CALL_COUNTER_LOCAL,
+    ));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
-    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));
-    body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_tool_scope_source));
+    return_if_retptr_error(body, indices);
+    load_retptr_list(
+        body,
+        DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
+        DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
+    );
+
+    if durable {
+        push_segment_args(body, step_id_segment);
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_embed_workflow_cache_key));
+        return_if_retptr_error(body, indices);
+        load_retptr_list(body, route_ptr_local, route_len_local);
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            tool_result_ptr_local,
+            tool_result_len_local,
+        );
+        body.instruction(&Instruction::Else);
+    }
 
     // child_variables = embed-workflow-variables(parent_source, child_data)
     push_segment_args(body, step_id_segment);
@@ -333,6 +450,20 @@ pub(super) fn emit_embed_workflow_tool_arm(
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
         DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
     );
+
+    let deadline_owner = -(i64::from(input_mapping_id) + 1);
+    if let Some(timeout) = timeout_ms {
+        super::loop_deadline::push_frame(body);
+        begin_deadline(
+            body,
+            indices,
+            static_data,
+            step_id_segment,
+            deadline_owner,
+            timeout,
+            durable,
+        );
+    }
 
     // Run a single child attempt; the child's output lands in the tool-result
     // locals and the shared child-error flag records failure. A child failure is
@@ -360,6 +491,16 @@ pub(super) fn emit_embed_workflow_tool_arm(
         workflow_error_kind,
     );
 
+    if timeout_ms.is_some() {
+        end_deadline(body, indices);
+        capture_deadline_error(
+            body,
+            deadline_owner,
+            DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL,
+            DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL,
+        );
+    }
+
     // On failure, wrap the child error as the tool result.
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -371,6 +512,37 @@ pub(super) fn emit_embed_workflow_tool_arm(
         tool_result_len_local,
     );
     body.instruction(&Instruction::End);
+    if timeout_ms.is_some() {
+        super::loop_deadline::pop_frame(body);
+        super::deadline_scope::claim(body, deadline_owner);
+    }
+    if durable {
+        // An enclosing expiry is an unwind reason, not a completed tool result.
+        if indices.monotonic_now.is_some() {
+            body.instruction(&Instruction::LocalGet(super::deadline_scope::SELECTED));
+            body.instruction(&Instruction::I64Eqz);
+            body.instruction(&Instruction::If(BlockType::Empty));
+        }
+        emit_checkpoint_save(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            tool_result_ptr_local,
+            tool_result_len_local,
+        );
+        if indices.monotonic_now.is_some() {
+            body.instruction(&Instruction::End);
+        }
+        body.instruction(&Instruction::End);
+    }
+    pop_embed_workflow_frame(
+        body,
+        steps_ptr_local,
+        steps_len_local,
+        route_ptr_local,
+        route_len_local,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -764,36 +936,14 @@ pub(super) fn emit_embed_workflow_plan(
     // zero is reserved for an Agent-owned deadline. Mapping IDs are global.
     let deadline_owner = -(i64::from(input_mapping_id) + 1);
     if let Some(timeout) = timeout_ms {
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
-        body.instruction(&Instruction::Block(BlockType::Empty));
-        super::agent_deadline::enter(
+        begin_deadline(
             body,
             indices,
-            &static_data.embed_deadline_state_error,
+            static_data,
             step_id_segment,
-            (
-                DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
-                DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
-            ),
+            deadline_owner,
             timeout,
             durable,
-        );
-        super::agent_deadline::remaining(body, indices);
-        super::deadline_scope::enter(
-            body,
-            indices,
-            deadline_owner,
-            &static_data.embed_timeout_error,
-            super::agent_deadline::REMAINING,
-        );
-        if durable {
-            super::loop_deadline::include_epoch(body, super::agent_deadline::DEADLINE);
-        }
-        super::loop_deadline::check(
-            body,
-            indices,
-            Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
         );
     }
 
@@ -824,15 +974,7 @@ pub(super) fn emit_embed_workflow_plan(
         workflow_error_kind,
     );
     if timeout_ms.is_some() {
-        // Includes synchronous child work and final assembly before accepting
-        // success. Preserve a previously selected reason until its owner claims.
-        super::deadline_scope::break_if_selected(body, indices, 0);
-        super::loop_deadline::check(
-            body,
-            indices,
-            Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
-        );
-        body.instruction(&Instruction::End);
+        end_deadline(body, indices);
     }
     pop_embed_workflow_frame(
         body,
@@ -851,21 +993,8 @@ pub(super) fn emit_embed_workflow_plan(
     body.instruction(&Instruction::LocalSet(data_len_local));
 
     if timeout_ms.is_some() {
-        body.instruction(&Instruction::LocalGet(super::deadline_scope::SELECTED));
-        body.instruction(&Instruction::I64Const(deadline_owner));
-        body.instruction(&Instruction::I64Eq);
-        body.instruction(&Instruction::If(BlockType::Empty));
-        for (dst, src) in [
-            (output_ptr_local, super::deadline_scope::SELECTED_PTR),
-            (output_len_local, super::deadline_scope::SELECTED_LEN),
-        ] {
-            body.instruction(&Instruction::LocalGet(src));
-            body.instruction(&Instruction::LocalSet(dst));
-        }
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        capture_deadline_error(body, deadline_owner, output_ptr_local, output_len_local);
         super::deadline_scope::claim(body, deadline_owner);
-        body.instruction(&Instruction::End);
     }
     super::deadline_scope::propagate(body, indices, failure_target);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
