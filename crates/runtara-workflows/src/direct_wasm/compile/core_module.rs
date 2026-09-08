@@ -241,6 +241,15 @@ pub(super) fn emit_direct_core_module(
             &mut imports,
             &mut imported_function_count,
         ));
+        import_indices.waitable_set_poll = Some(builtin(
+            "[waitable-set-poll]",
+            &[ValType::I32, ValType::I32],
+            &[ValType::I32],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
         import_indices.waitable_set_wait = Some(builtin(
             if matches!(
                 config.abi,
@@ -810,6 +819,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (4, ValType::I32),
     // 146-157: cooperative window bounds/handles and retained lifecycle receipt.
     (12, ValType::I32),
+    // 158: owned deadline packed status; 159: last await selected timeout.
+    (2, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

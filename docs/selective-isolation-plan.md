@@ -464,3 +464,16 @@ parent cancellation during backoff and root/published zero-retry, zero-delay and
 delayed recovery. This closes the failing pure-callable backoff gap identified
 above; it does not establish scoped timeout/grace, durable callable suspension,
 exact cancellation latency or the remaining compatibility/performance gates.
+
+### Shared emitted deadline outcome · 2026-09-08
+
+The shared Await emitter now has an owned deadline-subtask input and a distinct
+scoped-timeout outcome. Deterministic execution of the generated helper checks
+readiness ties, final selection during cleanup, root/parent cancellation and
+preservation of an enclosing sibling window. This replaces the missing emitter
+mechanism; it does not yet wire DSL scopes to that input/outcome. Current callers
+supply no deadline, and E128 remains unchanged. Integrate the owning scope's
+remaining budget and recovery target before enabling it: discard a late result,
+skip cancelled work's retries, preserve durable deadlines, restore outer context
+and keep unrelated parallel work live. Cleanup grace and the remaining G1–G10
+qualification still apply.

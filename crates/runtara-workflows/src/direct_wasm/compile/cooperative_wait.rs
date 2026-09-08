@@ -30,6 +30,10 @@ const COMMAND_PTR: u32 = 154;
 const COMMAND_LEN: u32 = 155;
 const SIGNAL_PENDING: u32 = 156;
 const WINDOW_BEGIN: u32 = 157;
+// An optional owned deadline arrives as a canonical async call status. The
+// enclosing scope creates its timer; this wait resolves it before returning.
+pub(super) const DEADLINE_STATUS: u32 = 158;
+pub(super) const TIMED_OUT: u32 = 159;
 const POLL: i32 = 128;
 const RETURNED: i32 = 2;
 const START_CANCELLED: i32 = 3;
@@ -37,10 +41,10 @@ const CANCELLED: i32 = 4;
 const POLL_INTERVAL_MS: i64 = 1_000;
 
 // Shared core functions receive and return invocation-local state as Wasm
-// values. No globals, heap frame, new imports, or host-owned tasks are needed.
+// values. No globals, heap frame, or host-owned tasks are needed.
 // Scratch cursors/handles are deliberately excluded. STATUS is the packed
 // input to Await; the final extra result describes entry control flow.
-const STATE: [u32; 15] = [
+const STATE: [u32; 16] = [
     TARGET,
     SET,
     TIMER,
@@ -56,6 +60,7 @@ const STATE: [u32; 15] = [
     SIGNAL_PENDING,
     WINDOW_BEGIN,
     super::DIRECT_PSPLIT_WS_LOCAL,
+    DEADLINE_STATUS,
 ];
 pub(super) const HELPER_PARAMS: usize = STATE.len();
 pub(super) const HELPER_COUNT: usize = 5;
@@ -93,6 +98,7 @@ fn helper_return(body: &mut Function, outcome: i32) {
 
 /// Outcomes: 0 resumes, 1 propagates the error at zero, 2 suspends, 3 returns
 /// from an invocation cancelled by its composing parent (without a root ack).
+/// Outcome 4 selects the scope deadline after resolving this wait's handles.
 /// Entry-ABI-specific terminal reporting remains in the entry function.
 fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper: Helper) -> bool {
     let Some(index) = indices.cooperative_helpers[helper as usize] else {
@@ -132,6 +138,12 @@ fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper:
         emit_entry_cancel_return(body);
         body.instruction(&Instruction::End);
     }
+    if matches!(helper, Helper::Await) {
+        body.instruction(&Instruction::LocalGet(CURSOR));
+        body.instruction(&Instruction::I32Const(4));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::LocalSet(TIMED_OUT));
+    }
     true
 }
 
@@ -159,7 +171,7 @@ fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
 
 pub(super) fn helper_body(helper: Helper, indices: &DirectCoreFunctionIndices) -> Function {
     // Keep the emitter's canonical absolute local indices. Parameters occupy
-    // its first 15 i32 slots and are copied to the state locals before use.
+    // its first 16 i32 slots and are copied to the state locals before use.
     let mut body = Function::new(super::core_module::drop_leading_locals(
         super::core_module::CANONICAL_LOCAL_GROUPS,
         HELPER_PARAMS as u32,
@@ -250,7 +262,23 @@ fn cancel_and_drop(body: &mut Function, indices: &DirectCoreFunctionIndices, han
     set_zero(body, handle);
 }
 
+fn deadline_handle(body: &mut Function) {
+    body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::I32Const(4));
+    body.instruction(&Instruction::I32ShrU);
+}
+
+fn close_deadline(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    deadline_handle(body);
+    body.instruction(&Instruction::LocalTee(HANDLE));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    cancel_and_drop(body, indices, HANDLE);
+    body.instruction(&Instruction::End);
+    set_zero(body, DEADLINE_STATUS);
+}
+
 fn close_wait(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    close_deadline(body, indices);
     for handle in [TARGET, TIMER] {
         body.instruction(&Instruction::LocalGet(handle));
         body.instruction(&Instruction::If(BlockType::Empty));
@@ -570,6 +598,7 @@ pub(super) fn emit_timer_wait(body: &mut Function, indices: &DirectCoreFunctionI
 
 /// Consume an async-lowered invoke's packed status, preserving its result at 0.
 pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    set_zero(body, TIMED_OUT);
     body.instruction(&Instruction::LocalSet(STATUS));
     body.instruction(&Instruction::LocalGet(STATUS));
     body.instruction(&Instruction::I32Const(15));
@@ -579,6 +608,8 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::If(BlockType::Empty));
     // Eagerly completed calls need neither a wait nor a state transfer.
     if call_helper(body, indices, Helper::Await) {
+        body.instruction(&Instruction::Else);
+        close_deadline(body, indices);
         body.instruction(&Instruction::End);
         return;
     }
@@ -592,11 +623,49 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::LocalGet(SET));
     body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
     set_zero(body, TIMER);
+    deadline_handle(body);
+    body.instruction(&Instruction::LocalTee(HANDLE));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(HANDLE));
+    body.instruction(&Instruction::LocalGet(SET));
+    body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
     body.instruction(&Instruction::LocalGet(TARGET));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
+    body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // Drain all ready events before selecting expiry. An already-ready target
+    // wins the deadline tie, independently of waitable-set notification order.
+    body.instruction(&Instruction::Block(BlockType::Empty));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(SET));
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
+    body.instruction(&Instruction::Call(indices.waitable_set_poll.unwrap()));
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(1));
+    observe_await_event(body, indices);
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(TARGET));
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(2));
+    body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    if !indices.omit_runtime {
+        poll(body, indices, false);
+    }
+    // Only this operation is owned by the deadline. An enclosing window's
+    // unrelated calls remain live. Root/parent cancellation uses close_all.
+    close_wait(body, indices);
+    helper_return(body, 4);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
     if !indices.omit_runtime {
         body.instruction(&Instruction::LocalGet(TIMER));
         body.instruction(&Instruction::I32Eqz);
@@ -624,6 +693,18 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::Call(indices.waitable_set_wait.unwrap()));
     handle_wait_event(body, indices);
+    observe_await_event(body, indices);
+    body.instruction(&Instruction::Br(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    close_wait(body, indices);
+    body.instruction(&Instruction::Else);
+    // The operation completed eagerly; its deadline still needs resolution.
+    close_deadline(body, indices);
+    body.instruction(&Instruction::End);
+}
+
+fn observe_await_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     load(body, DIRECT_PSPLIT_EVENT_OFFSET, 4);
     body.instruction(&Instruction::I32Const(RETURNED));
     body.instruction(&Instruction::I32Eq);
@@ -636,19 +717,16 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::If(BlockType::Empty));
     set_zero(body, TARGET);
     body.instruction(&Instruction::Else);
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    deadline_handle(body);
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::LocalSet(DEADLINE_STATUS));
+    body.instruction(&Instruction::Else);
     set_zero(body, TIMER);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
-    body.instruction(&Instruction::Br(0));
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::LocalGet(TIMER));
-    body.instruction(&Instruction::If(BlockType::Empty));
-    cancel_and_drop(body, indices, TIMER);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::LocalGet(SET));
-    body.instruction(&Instruction::Call(indices.waitable_set_drop.unwrap()));
-    set_zero(body, SET);
     body.instruction(&Instruction::End);
 }
 
@@ -678,3 +756,7 @@ pub(super) fn emit_if_safe_boundary(body: &mut Function, indices: &DirectCoreFun
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
 }
+
+#[cfg(test)]
+#[path = "cooperative_wait_tests.rs"]
+mod tests;

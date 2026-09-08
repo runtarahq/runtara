@@ -1180,3 +1180,20 @@ These tests use no Agent in the failing graph and cover root/published recovery,
 zero retries/delay, actual delayed retries, and cancellation through two published
 components. See the implementation record for timing assumptions and verification
 scope. E128 remains in force; this does not release scoped Agent/Embed timeouts.
+
+### Scoped deadline lowering prerequisite (2026-09-08)
+
+The shared Await emitter now includes an owned deadline timer input and a scoped
+timeout outcome. `compile/cooperative_wait_tests.rs` executes the generated core
+helper to check completion/deadline ordering, already-due deadlines, cleanup that
+returns a late value, timer resolution, root/parent cancellation, and an unrelated
+sibling remaining live after timeout. Its deterministic canonical-event fixtures
+complement the separate real-component deadline tests; they are not DSL timeout
+execution tests.
+
+Current DSL call sites do not create that deadline input or consume its timeout
+outcome. **Agent/Embed timeouts remain rejected with E128, and existing loop
+budgets still require integration to interrupt pending I/O.** Remaining work must
+preserve scope ownership, inherited/durable budgets, recovery context, sibling
+execution and cleanup grace. See the implementation record for exact evidence
+and limits; the emitter primitive alone does not close the timeout audit gap.

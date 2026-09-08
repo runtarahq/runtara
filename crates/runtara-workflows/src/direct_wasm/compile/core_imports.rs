@@ -155,6 +155,7 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) thread_yield: Option<u32>,
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
+    pub(super) waitable_set_poll: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
     pub(super) subtask_cancel: Option<u32>,
@@ -639,6 +640,7 @@ impl DirectCoreImportIndices {
             thread_yield: self.thread_yield,
             waitable_set_new: self.waitable_set_new,
             waitable_set_wait: self.waitable_set_wait,
+            waitable_set_poll: self.waitable_set_poll,
             waitable_set_drop: self.waitable_set_drop,
             waitable_join: self.waitable_join,
             subtask_cancel: self.subtask_cancel,
@@ -797,6 +799,7 @@ pub(super) struct DirectCoreFunctionIndices {
     /// Wait/subtask builtins, present when the workflow invokes Agents.
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
+    pub(super) waitable_set_poll: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
     pub(super) subtask_cancel: Option<u32>,

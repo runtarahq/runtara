@@ -2027,3 +2027,68 @@ callback/error contract passed for all 27 Agents. No database or server E2E,
 resource soak, or fresh size/timing comparison was run. Scoped
 Agent/Embed timeouts, durable callable suspension and the remaining G1–G10 gates
 are still open.
+
+## Deadline outcome in the shared emitted wait (2026-09-08)
+
+The production shared Await emitter now accepts an optional owned deadline
+subtask and can return a distinct scoped-timeout outcome. This is an
+internal compiler contract, not an authored option or alternate execution path.
+It uses the same canonical async call status, waitable set, poll, cancel and drop
+operations as the other cooperative waits. The owning scope will supply its
+timer; the wait resolves that timer on every exit. No host task API or bookkeeping
+was added.
+
+The wait drains ready notifications before selecting expiry, including
+nonterminal notifications. Completion wins if both operation and deadline are
+observed ready in that batch. An observed root Cancel takes priority over timeout
+recovery. Once timeout is selected, cancelling the operation cannot turn a late
+normal return into accepted success. Deadline cleanup closes only this wait's
+operation, polling timer and set. An enclosing active window remains live;
+root/parent cancellation instead resolves the whole active window as before.
+
+The deadline's packed status occupies one additional shared-helper parameter.
+The helper now takes 16 i32 parameters, matching the first 16 canonical local
+slots; no mixed-type parameter remapping or guest heap frame is needed. A second
+local records the timeout selection at the caller. Normal/eager completion also
+resolves an unused deadline. The standard non-cancellable `waitable-set.poll`
+intrinsic is added for readiness draining; cancellable waits still deliver parent
+cancellation. Cache identity advances to `cooperative-waits=shared-v2`.
+
+Eight tests execute the actual generated Await function from a compiled workflow
+module, with deterministic native fixtures for canonical events and resource
+accounting:
+
+- Completion/deadline readiness in either order, including nonterminal events.
+- Selected timeout with cancellation resolving as returned, start-cancelled or
+  cancelled; late writes cannot change the chosen outcome.
+- Normal/eager completion with an unused pending deadline.
+- Already-due deadline with or without an already-ready operation.
+- Parent cancellation resolving the deadline, operation and active sibling.
+- Unbounded waiting preserving its existing event path.
+- Root Cancel observed before timeout recovery.
+- Root polling timer cleanup while the unrelated sibling remains joined/live.
+
+The fixtures reject double drops, cancellation before detachment and dropping a
+set while handles remain joined. They export the real generated helper for
+execution; they do not substitute a hand-written wait algorithm. These are core
+emitter tests with simulated canonical events, not real Component Model I/O
+interruption tests. The separate nine-test real-component deadline contract
+continues to qualify those standard operations.
+
+**DSL wiring remains incomplete.** Current workflow callers leave the deadline
+input empty. They do not yet create a scope timer or route the timeout outcome
+through Agent/Embed/loop recovery. Therefore this stage does not change E128,
+activate interruption for existing loop deadlines, or prove inherited budgets,
+parallel target ownership, durable deadline replay, cleanup grace or CPU
+cooperation. Next, bind the timer to the owning scope's remaining budget, consume
+the timeout outcome before result/retry/checkpoint handling, and restore the
+parent scope before recovery. A deadline must not be consumed as an ordinary
+Agent result or caught by an unrelated inner onError route.
+
+Validation: compiler library 587 passed, including eight emitted-helper
+tests and the shared-code growth bound; the four pure-workflow composed test
+functions passed. Feature-gated Clippy and all nine real-component deadline
+contract tests passed. Full emitted-workflow execution: 383 passed, 3 ignored,
+no failures. Formatting and diff checks passed. No new binary-size/timing comparison, server/database E2E or resource soak
+was performed. Extra helper state and cleanup branches still need the planned
+paired performance measurement.
