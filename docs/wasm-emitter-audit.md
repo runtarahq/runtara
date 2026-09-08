@@ -2785,8 +2785,16 @@ drop. The suite also got faster: **566s to 442s**.
 The third and fourth red checks need no code change here. `validation wasm` and
 `frontend (embedded UI)` both failed the `wasm32-unknown-unknown` build on
 `-D dead-code` for `needs_agent_runtime`; the already-committed `f9ff11c6` gates
-that function, and the build now passes with CI's flags. CodeQL reports nine new
-alerts on the branch and has not been triaged.
+that function, and the build now passes with CI's flags. CodeQL's nine new
+alerts are all `rust/hard-coded-cryptographic-value`, and every one is a test
+fixture's 32-byte artifact identity (`PrecompileRequest::for_artifact([7; 32],
+...)` and friends) in `isolated_package.rs`, `isolated_capability.rs`,
+`isolated_agent_execution`, `wasm_performance_baseline` and the scoped
+`runtime_host` tests. They are identities, not key material, and
+`isolated_package.rs` relies on two distinct literals to prove a mismatched
+identity is refused. There is no CodeQL configuration file in the repository, so
+excluding test paths or dismissing these is a repository-settings decision rather
+than a code change.
 
 Verified after the merge:
 
