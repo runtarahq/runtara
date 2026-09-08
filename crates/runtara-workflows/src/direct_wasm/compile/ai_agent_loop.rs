@@ -195,6 +195,11 @@ pub(super) fn emit_ai_agent_loop_plan(
             source_len_local,
             super::agent_invoke::AgentInvocationSite::MemoryLoad,
         );
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(0)),
+        );
         emit_agent_invoke_error_branch(
             body,
             indices,
@@ -449,6 +454,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         source_len_local,
         super::agent_invoke::AgentInvocationSite::AiTurn,
     );
+    super::deadline_scope::propagate(body, indices, failure_target.map(|target| target.nested(2)));
     emit_agent_invoke_error_branch(
         body,
         indices,
@@ -712,6 +718,11 @@ pub(super) fn emit_ai_agent_loop_plan(
                     source_len_local,
                     super::agent_invoke::AgentInvocationSite::AiTool(caller_agent_id),
                 );
+                super::deadline_scope::propagate(
+                    body,
+                    indices,
+                    failure_target.map(|target| target.nested(5)),
+                );
                 // A tool failure is fed back to the LLM as the tool result (the
                 // error envelope) and the loop continues, rather than failing the
                 // workflow — matching the generated loop's `{"error": …}` result.
@@ -769,6 +780,12 @@ pub(super) fn emit_ai_agent_loop_plan(
                 );
             }
         }
+        // An inherited deadline also bypasses embedded-tool error feedback.
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(5)),
+        );
         body.instruction(&Instruction::End);
     }
 
@@ -948,6 +965,11 @@ pub(super) fn emit_ai_agent_loop_plan(
                 source_len_local,
                 super::agent_invoke::AgentInvocationSite::Summarize,
             );
+            super::deadline_scope::propagate(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(0)),
+            );
             emit_agent_invoke_error_branch(
                 body,
                 indices,
@@ -1070,6 +1092,11 @@ pub(super) fn emit_ai_agent_loop_plan(
             source_ptr_local,
             source_len_local,
             super::agent_invoke::AgentInvocationSite::MemorySave,
+        );
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(0)),
         );
         emit_agent_invoke_error_branch(
             body,

@@ -1622,6 +1622,43 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
+/// Live deadlines need the standard clock, including inline and supplied graphs.
+pub(super) fn needs_monotonic_clock(
+    root: &DirectGraphManifest,
+    children: &[DirectChildWorkflowGraphManifest],
+) -> bool {
+    let mut graphs = vec![root];
+    graphs.extend(children.iter().map(|child| &child.graph));
+    while let Some(graph) = graphs.pop() {
+        if graph.agents.iter().any(|agent| agent.timeout.is_some())
+            || graph.whiles.iter().any(|value| {
+                value
+                    .value
+                    .get("timeout")
+                    .and_then(|v| v.as_u64())
+                    .is_some()
+            })
+            || graph.splits.iter().any(|value| {
+                value
+                    .value
+                    .get("timeout")
+                    .and_then(|v| v.as_u64())
+                    .is_some()
+            })
+        {
+            return true;
+        }
+        for step in &graph.steps {
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    false
+}
+
 /// Agent budgets across the complete definition tree, including inline loop
 /// graphs and supplied child workflows. IDs are allocated manifest-wide.
 pub(super) fn agent_timeouts(

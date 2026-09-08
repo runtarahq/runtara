@@ -18,6 +18,7 @@ const FRAME: [u32; 3] = [
     DIRECT_ACTIVE_DEADLINE_MS_LOCAL,
 ];
 pub(super) fn push_frame(body: &mut WasmFunction) {
+    super::deadline_scope::push_frame(body);
     for local in FRAME {
         body.instruction(&Instruction::LocalGet(local));
     }
@@ -26,6 +27,7 @@ pub(super) fn pop_frame(body: &mut WasmFunction) {
     for local in FRAME.into_iter().rev() {
         body.instruction(&Instruction::LocalSet(local));
     }
+    super::deadline_scope::pop_frame(body);
 }
 fn key(
     body: &mut WasmFunction,
@@ -61,6 +63,8 @@ pub(super) fn enter(
     source: (u32, u32),
     timeout: u64,
     deadline_local: u32,
+    owner: i64,
+    error: &DirectDataSegment,
 ) {
     let step = static_data.step_id(step_id).expect("planned loop step");
     key(body, indices, step, source, true);
@@ -79,6 +83,22 @@ pub(super) fn enter(
         deadline_local,
         true,
     );
+    // Convert the durable epoch deadline once for this live scope.
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    return_if_retptr_error(body, indices);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_NOW_MS_LOCAL));
+    super::agent_deadline::subtract_saturating(body, deadline_local, DIRECT_LOOP_NOW_MS_LOCAL);
+    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_NOW_MS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_LOOP_NOW_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(timeout as i64));
+    body.instruction(&Instruction::I64GtU);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I64Const(timeout as i64));
+    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_NOW_MS_LOCAL));
+    body.instruction(&Instruction::End);
+    super::deadline_scope::enter(body, indices, owner, error, DIRECT_LOOP_NOW_MS_LOCAL);
     // Add this deadline to the enclosing minimum. Frame restoration removes it.
     body.instruction(&Instruction::LocalGet(DIRECT_ACTIVE_DEADLINE_FLAG_LOCAL));
     body.instruction(&Instruction::I32Eqz);
@@ -160,43 +180,23 @@ pub(super) fn clamp(body: &mut WasmFunction, deadline_local: u32, present: Optio
     body.instruction(&Instruction::End);
 }
 
-/// Test before dispatch/retry and before each iteration exit. Expiry belongs to
-/// the loop rather than an item retry, and equality is already expired.
-#[allow(clippy::too_many_arguments)]
+/// Observe the earliest live scope at a cooperative loop boundary.
 pub(super) fn check(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    deadline: u32,
-    error: &DirectDataSegment,
     target: Option<DirectFailureTarget>,
-    output: (u32, u32),
-    route: (u32, u32),
 ) {
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
-    super::abi::emit_retptr_error_or_return(body, indices, target, route.0, route.1);
-    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
-    body.instruction(&Instruction::LocalGet(deadline));
-    body.instruction(&Instruction::I64GeU);
-    body.instruction(&Instruction::LocalGet(DIRECT_LOOP_COMPLETED_LOCAL));
-    body.instruction(&Instruction::I32Eqz);
-    body.instruction(&Instruction::I32And);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(error.offset));
-    body.instruction(&Instruction::LocalSet(output.0));
-    body.instruction(&Instruction::I32Const(error.len_i32()));
-    body.instruction(&Instruction::LocalSet(output.1));
-    if let Some(target) = target {
-        super::split::emit_split_append_error_payload_and_continue(
-            body,
-            indices,
-            target.nested(1),
-            output.0,
-            output.1,
-        );
-    } else {
-        emit_runtime_fail_return(body, indices, output.0, output.1);
+    if indices.monotonic_now.is_none() {
+        return;
     }
+    super::deadline_scope::choose(body, indices, false);
+    body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
+    body.instruction(&Instruction::I64Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // Root Cancel wins over scope expiry just as it does in the shared Await.
+    super::cooperative_wait::emit_poll_before_call(body, indices);
+    super::deadline_scope::select(body);
+    super::deadline_scope::propagate(body, indices, target.map(|target| target.nested(1)));
     body.instruction(&Instruction::End);
 }
 

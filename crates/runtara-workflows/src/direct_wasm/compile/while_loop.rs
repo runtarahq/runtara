@@ -38,6 +38,8 @@ use super::{
 
 fn push_while_frame(body: &mut WasmFunction) {
     super::loop_deadline::push_frame(body);
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
@@ -63,6 +65,8 @@ fn pop_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
     super::loop_deadline::pop_frame(body);
 }
 
@@ -130,7 +134,7 @@ pub(super) fn emit_while_plan(
     // locals, then restoring the parent steps context and routing the captured
     // error after the loop. Lifecycle suspension (cancel/pause/shutdown) still
     // returns early without routing, matching the existing While durability path.
-    let has_error_plan = error_plan.is_some();
+    let has_error_plan = error_plan.is_some() || indices.monotonic_now.is_some();
     let internal_failure_target = if has_error_plan {
         Some(DirectFailureTarget::StepError { branch_depth: 0 })
     } else {
@@ -207,6 +211,8 @@ pub(super) fn emit_while_plan(
             ),
             timeout_ms,
             DIRECT_WHILE_DEADLINE_MS_LOCAL,
+            super::deadline_scope::owner(while_id, false),
+            &static_data.while_timeout_error,
         );
     }
 
@@ -238,21 +244,8 @@ pub(super) fn emit_while_plan(
         DIRECT_WHILE_STATE_LEN_LOCAL,
     );
 
-    // Enforce the wall-clock timeout before each iteration. On expiry the While
-    // step fails with the static WHILE_TIMEOUT payload, routed through the same
-    // failure target as any other in-loop failure: an onError handler when
-    // present, otherwise the enclosing aggregation or `runtime.fail`.
-    if timeout_ms.is_some() {
-        super::loop_deadline::check(
-            body,
-            indices,
-            DIRECT_WHILE_DEADLINE_MS_LOCAL,
-            &static_data.while_timeout_error,
-            loop_failure_target,
-            (output_ptr_local, output_len_local),
-            (route_ptr_local, route_len_local),
-        );
-    }
+    // Untimed inner loops still observe an enclosing scope's budget.
+    super::loop_deadline::check(body, indices, loop_failure_target);
 
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
@@ -399,7 +392,7 @@ pub(super) fn emit_while_plan(
         } else {
             loop_failure_target
         },
-        if has_error_plan {
+        if error_plan.is_some() {
             Some(DirectHandledTarget { branch_depth: 0 })
         } else {
             None
@@ -502,7 +495,7 @@ pub(super) fn emit_while_plan(
 
     pop_while_frame(body);
 
-    if let Some(error_plan) = error_plan {
+    if has_error_plan {
         // A failure inside the loop set the step-error flag and branched to the
         // capture block end. Restore the parent steps context and route the
         // captured error through the shared onError machinery.
@@ -512,6 +505,7 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::LocalSet(steps_ptr_local));
         body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
         body.instruction(&Instruction::LocalSet(steps_len_local));
+        super::deadline_scope::claim(body, super::deadline_scope::owner(while_id, false));
         emit_agent_error_route_or_fail(
             body,
             indices,
@@ -529,7 +523,7 @@ pub(super) fn emit_while_plan(
             output_len_local,
             route_ptr_local,
             route_len_local,
-            Some(error_plan),
+            error_plan,
             data_ptr_local,
             data_len_local,
             workflow_log_kind,

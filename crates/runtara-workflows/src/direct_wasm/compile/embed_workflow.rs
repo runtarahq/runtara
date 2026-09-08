@@ -484,6 +484,7 @@ fn emit_embed_workflow_child_with_retry(
             workflow_log_kind,
             workflow_error_kind,
         );
+        super::deadline_scope::break_if_selected(body, indices, 2);
         body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_wrapped_child_error(
@@ -537,6 +538,7 @@ fn emit_embed_workflow_child_with_retry(
             workflow_log_kind,
             workflow_error_kind,
         );
+        super::deadline_scope::break_if_selected(body, indices, 1);
         body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_wrapped_child_error(
@@ -794,6 +796,7 @@ pub(super) fn emit_embed_workflow_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(data_len_local));
 
+    super::deadline_scope::propagate(body, indices, failure_target);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
     // This embed level is now resolving its child's failure. Clear the shared

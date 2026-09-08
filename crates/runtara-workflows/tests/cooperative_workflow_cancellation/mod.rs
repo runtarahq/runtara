@@ -460,6 +460,10 @@ fn compile_nested_agents_with_children(
 }
 
 async fn run(scenario: Scenario) -> anyhow::Result<()> {
+    run_with_deadline(scenario, false).await
+}
+
+async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result<()> {
     let pre_cancel = scenario == Scenario::BeforeLaunch;
     let partial_body = matches!(
         scenario,
@@ -778,6 +782,16 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             },"executionPlan":[{"fromStep":id,"toStep":"finish"},{"fromStep":id,"toStep":"handled","label":"onError"}]});
         }
     }
+    if deadline {
+        graph = serde_json::json!({"durable":false,"entryPoint":"outer","steps":{
+            "outer":{"id":"outer","stepType":"While","config":{"maxIterations":1,"timeout":500},
+                "condition":{"type":"operation","op":"EQ","arguments":[
+                    {"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]},"subgraph":graph},
+            "handled":{"id":"handled","stepType":"Finish","inputMapping":{
+                "code":{"valueType":"reference","value":"steps.__error.code"},
+                "stepId":{"valueType":"reference","value":"steps.__error.stepId"}}}},
+            "executionPlan":[{"fromStep":"outer","toStep":"handled","label":"onError"}]});
+    }
     let graph = serde_json::from_value(graph)?;
     let compiled = if scenario.nested_depth() > 0 {
         compile_nested_agents(graph, scenario.nested_depth(), dir.path())?
@@ -885,7 +899,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                                 if cancel_load || cancel_save {
                                     let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
                                     assert_eq!(started, expected_requests);
-                                    server_host.requested.store(true, Ordering::SeqCst);
+                                    if !deadline { server_host.requested.store(true, Ordering::SeqCst); }
                                     loop {
                                         match stream.read(&mut buffer).await {
                                             Ok(0) => break,
@@ -1091,7 +1105,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
-                        if started == expected_requests {
+                        if started == expected_requests && !deadline {
                             server_host.requested.store(true, Ordering::SeqCst);
                         }
                         let respond = scenario.drains_normally() || (scenario == Scenario::CheckpointCancelBranches && started == 1);
@@ -1140,6 +1154,18 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 br#"{"data":{"items":[1,2]}}"#.to_vec(),
             )
             .await;
+        if deadline {
+            let runtara_component_host::InvokeExit::Completed(output) = &run.exit else {
+                anyhow::bail!("expected enclosing timeout recovery: {:?}", run.exit);
+            };
+            anyhow::ensure!(serde_json::from_slice::<Value>(output)? == serde_json::json!({"code":"WHILE_TIMEOUT","stepId":"outer"}), "wrong timeout owner: {:?}", run.exit);
+            tokio::time::timeout(Duration::from_secs(2), host.wait_closed()).await?;
+            anyhow::ensure!(host.requests.load(Ordering::SeqCst) == expected_requests, "cancelled AI work sent another request");
+            anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst), "scope timeout acknowledged a root command");
+            anyhow::ensure!(!host.inner.checkpoints.lock().unwrap().keys().any(|key| key.contains("attempt")), "enclosing timeout became a child attempt checkpoint");
+            anyhow::ensure!(host.inner.failed.lock().unwrap().is_none(), "handled deadline published failure");
+            return anyhow::Ok(());
+        }
         if fail_signal_read {
             anyhow::ensure!(matches!(&run.exit, runtara_component_host::InvokeExit::Failed(error) if error.message == "signal delivery failed"), "signal error lost: {:?}", run.exit);
             tokio::time::timeout(Duration::from_secs(2), host.wait_closed()).await?;
@@ -1471,3 +1497,29 @@ async fn emitted_embed_cancel_cleans_parallel_child_branches() -> anyhow::Result
 mod composite_retry;
 
 mod pure_retry;
+
+#[tokio::test]
+async fn emitted_inherited_timeout_cancels_ai_io_before_child_recovery() -> anyhow::Result<()> {
+    for scenario in [
+        Scenario::AiSingle,
+        Scenario::AiTurn,
+        Scenario::AiMemoryLoad,
+        Scenario::AiSummary,
+        Scenario::AiMemorySave,
+    ] {
+        run_with_deadline(scenario, true).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn emitted_inherited_timeout_skips_nested_embed_retry_and_recovery() -> anyhow::Result<()> {
+    for scenario in [
+        Scenario::EmbedBody,
+        Scenario::EmbedPartialBody,
+        Scenario::EmbedWhileBody,
+    ] {
+        run_with_deadline(scenario, true).await?;
+    }
+    Ok(())
+}

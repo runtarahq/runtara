@@ -44,11 +44,13 @@ pub(super) fn emit_agent_invoke(
     super::cooperative_wait::emit_poll_before_call(body, indices);
     let deadline = matches!(site, AgentInvocationSite::Step(_))
         && static_data.agent_timeout(agent_id).is_some();
-    if deadline {
-        super::agent_deadline::remaining(body, indices);
+    let scoped_deadline = indices.monotonic_now.is_some();
+    if scoped_deadline {
+        super::deadline_scope::choose(body, indices, deadline);
         body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
         body.instruction(&Instruction::I64Eqz);
         body.instruction(&Instruction::If(BlockType::Empty));
+        super::deadline_scope::select(body);
         super::agent_deadline::error(body, static_data);
         body.instruction(&Instruction::Else);
     }
@@ -72,8 +74,8 @@ pub(super) fn emit_agent_invoke(
         source_len_local,
     );
 
-    if deadline {
-        super::agent_deadline::arm(body, indices);
+    if scoped_deadline {
+        super::deadline_scope::arm(body, indices, deadline);
     }
 
     // invoke(capability-id, input): push cap `(ptr, len)` then input `(ptr,
@@ -104,9 +106,10 @@ pub(super) fn emit_agent_invoke(
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(async_invoke.function_index));
     super::cooperative_wait::emit_await_call(body, indices);
-    if deadline {
+    if scoped_deadline {
         body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
         body.instruction(&Instruction::If(BlockType::Empty));
+        super::deadline_scope::select(body);
         // Ignore a late result written while subtask.cancel resolved the call.
         super::agent_deadline::error(body, static_data);
         body.instruction(&Instruction::End);
@@ -122,7 +125,7 @@ pub(super) fn emit_agent_invoke(
     if static_data.agent_is_workflow_agent(agent_id) {
         emit_agent_suspend_sentinel_check(body, indices);
     }
-    if deadline {
+    if scoped_deadline {
         body.instruction(&Instruction::End);
     }
 }

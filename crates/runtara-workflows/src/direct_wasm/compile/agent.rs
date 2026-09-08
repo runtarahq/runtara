@@ -331,6 +331,11 @@ pub(super) fn emit_agent_plan(
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
             }
+            super::deadline_scope::propagate(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(4)),
+            );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -439,6 +444,11 @@ pub(super) fn emit_agent_plan(
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
             }
+            super::deadline_scope::propagate(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(2 + u32::from(durable_checkpoint))),
+            );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -476,8 +486,8 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
-            if timeout_ms.is_some() {
-                super::agent_deadline::clamp_retry(body, indices);
+            if indices.monotonic_now.is_some() {
+                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
             }
             // Retry audit is keyed by attempt number and upserts in core, so it
             // remains idempotent across a crash/replay. Recording before the
@@ -512,8 +522,8 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
-            if timeout_ms.is_some() {
-                super::agent_deadline::clamp_retry(body, indices);
+            if indices.monotonic_now.is_some() {
+                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
             }
             emit_agent_retry_sleep(
                 body,
@@ -542,8 +552,8 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
-            if timeout_ms.is_some() {
-                super::agent_deadline::clamp_retry(body, indices);
+            if indices.monotonic_now.is_some() {
+                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
             }
             emit_agent_retry_sleep(
                 body,
@@ -581,8 +591,8 @@ pub(super) fn emit_agent_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target.map(|target| target.nested(3)),
-            handled_target.map(|target| target.nested(3)),
+            failure_target.map(|target| target.nested(3 + u32::from(durable_checkpoint))),
+            handled_target.map(|target| target.nested(3 + u32::from(durable_checkpoint))),
         );
         body.instruction(&Instruction::End);
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
@@ -663,6 +673,11 @@ pub(super) fn emit_agent_plan(
                 }),
             );
         }
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(u32::from(durable_checkpoint))),
+        );
         emit_agent_invoke_error_branch(
             body,
             indices,
@@ -684,8 +699,8 @@ pub(super) fn emit_agent_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target,
-            handled_target,
+            failure_target.map(|target| target.nested(u32::from(durable_checkpoint))),
+            handled_target.map(|target| target.nested(u32::from(durable_checkpoint))),
         );
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
     }

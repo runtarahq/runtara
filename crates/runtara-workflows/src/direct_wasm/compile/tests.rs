@@ -2166,7 +2166,18 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
-        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let (resolve, world) = build_direct_component_resolve_scoped(
+            &[],
+            super::super::component::WorkflowAbi::CliRunHttp,
+            false,
+            None,
+            &Default::default(),
+            false,
+            &Default::default(),
+            true,
+            core_config.static_data.needs_monotonic_clock(),
+        )
+        .expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
         Parser::new(0).parse_all(&core).any(|payload| {
             matches!(payload, Ok(Payload::CodeSectionEntry(ref body))
@@ -2211,7 +2222,18 @@ fn direct_core_emits_value_store_retain_for_loops() {
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
-        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let (resolve, world) = build_direct_component_resolve_scoped(
+            &[],
+            super::super::component::WorkflowAbi::CliRunHttp,
+            false,
+            None,
+            &Default::default(),
+            false,
+            &Default::default(),
+            true,
+            core_config.static_data.needs_monotonic_clock(),
+        )
+        .expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
         let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
         let index = direct_core_import(&imports, STDLIB_MODULE, "value-store-retain-scoped");
@@ -11091,7 +11113,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
-        tag.contains("cooperative-waits=shared-v4"),
+        tag.contains("cooperative-waits=shared-v5"),
         "recompilation must replace artifacts with duplicated wait code: {tag}"
     );
     assert!(tag.contains("parent-cancel=v1"));

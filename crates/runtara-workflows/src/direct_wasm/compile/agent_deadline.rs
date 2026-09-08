@@ -78,7 +78,7 @@ fn emit_remaining(body: &mut Function, now: u32) {
     body.instruction(&Instruction::LocalSet(REMAINING));
 }
 
-fn subtract_saturating(body: &mut Function, budget: u32, elapsed: u32) {
+pub(super) fn subtract_saturating(body: &mut Function, budget: u32, elapsed: u32) {
     body.instruction(&Instruction::LocalGet(budget));
     body.instruction(&Instruction::LocalGet(elapsed));
     body.instruction(&Instruction::I64GtU);
@@ -93,20 +93,8 @@ fn subtract_saturating(body: &mut Function, budget: u32, elapsed: u32) {
     body.instruction(&Instruction::End);
 }
 
-pub(super) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
-    // Re-read after connection preparation so its time is part of the budget.
-    remaining(body, indices);
-    body.instruction(&Instruction::LocalGet(REMAINING));
-    body.instruction(&Instruction::Call(
-        indices.timer_sleep_async.expect("Agent timer"),
-    ));
-    body.instruction(&Instruction::LocalSet(
-        super::cooperative_wait::DEADLINE_STATUS,
-    ));
-}
-
-pub(super) fn clamp_retry(body: &mut Function, indices: &DirectCoreFunctionIndices) {
-    remaining(body, indices);
+pub(super) fn clamp_retry(body: &mut Function, indices: &DirectCoreFunctionIndices, own: bool) {
+    super::deadline_scope::choose(body, indices, own);
     body.instruction(&Instruction::LocalGet(REMAINING));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
     body.instruction(&Instruction::I64LtU);

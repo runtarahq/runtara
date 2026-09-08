@@ -7413,6 +7413,7 @@ struct CheckpointingRuntimeHost {
     input: Vec<u8>,
     custom_events: Mutex<Vec<(String, Vec<u8>)>>,
     advance_clock_on_step_end: Mutex<Option<(String, u64)>>,
+    delay_on_step_end: Mutex<Option<(String, u64)>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     completed: Mutex<Option<Vec<u8>>>,
     sleeps: Mutex<Vec<String>>,
@@ -7453,6 +7454,7 @@ impl CheckpointingRuntimeHost {
             input: input.to_vec(),
             custom_events: Mutex::new(Vec::new()),
             advance_clock_on_step_end: Mutex::new(None),
+            delay_on_step_end: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
@@ -7542,6 +7544,13 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        let delay = self.delay_on_step_end.lock().unwrap().clone();
+        if kind == "step_debug_end"
+            && let Some((step, elapsed)) = delay
+            && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == step
+        {
+            tokio::time::sleep(Duration::from_millis(elapsed)).await;
+        }
         if kind == "step_debug_end"
             && let Some((step, elapsed)) = self.advance_clock_on_step_end.lock().unwrap().as_ref()
             && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == *step

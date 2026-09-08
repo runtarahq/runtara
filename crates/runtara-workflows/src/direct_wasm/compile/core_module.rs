@@ -831,6 +831,15 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     // 162-163: monotonic start instant (ns) and initial live budget (ms).
     (2, ValType::I64),
+    // 164-173: enclosing scope owner, clock, payload, selected unwind and scratch.
+    (3, ValType::I64),
+    (2, ValType::I32),
+    (1, ValType::I64),
+    (2, ValType::I32),
+    (2, ValType::I64),
+    // 174-178: enclosing deadline saved for Split aggregation.
+    (3, ValType::I64),
+    (2, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

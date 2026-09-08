@@ -280,6 +280,7 @@ pub(super) fn emit_agent_error_route_or_fail(
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
+    super::deadline_scope::propagate(body, indices, failure_target);
     if let Some(error_plan) = error_plan {
         emit_error_steps(
             body,

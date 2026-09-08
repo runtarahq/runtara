@@ -1235,3 +1235,26 @@ E128 is unchanged. This does not qualify inherited expiry ownership, recovery
 that continues an enclosing loop, scoped parallel cancellation, preparation,
 cleanup grace, or arbitrary wall-clock correction while parked. Full current
 coverage and verification are recorded in the implementation document.
+
+
+### Inherited loop deadline qualification · 2026-09-08
+
+The current worktree selects the earliest enclosing While/Split budget during
+sequential child I/O and at loop boundaries, using the standard monotonic clock
+for live elapsed time. A guest-local owner and unwind reason prevent a child
+handler, retry, or Split aggregation from consuming its parent's expiry. The
+owning loop restores its parent scope before recovery. Durable epoch records,
+completed-loop markers and parked-time semantics remain intact; retry wakes are
+now clamped before checkpointing too.
+
+New composed tests exercise nested scope precedence, ordinary controls, root
+Cancel, backoff/replay, CPU-loop interruption with a frozen epoch, recovery after
+expiry, AI provider/memory I/O and two nested Embed levels. AUDIT-05 now separates
+real final-body overrun from a wall-clock jump and retains its mixed-loop,
+aggregation, wake-clamp and replay checks. The patterns page reflects the current
+clock model. See `cooperative-cancellation-implementation.md` for exact evidence.
+
+This is partial G5/G6/G7 qualification. Parallel scope timers, own Embed/AI/tool
+budgets, preparation waits, bounded cleanup grace, E2E, soak and controlled size/
+timing comparisons remain required. Public Agent/Embed timeout syntax still
+returns E128. Existing loop zero-timeout behavior remains disabled.

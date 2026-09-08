@@ -169,6 +169,7 @@ pub(super) struct DirectCoreStaticData {
     pub(super) agent_timeout_error: DirectDataSegment,
     pub(super) agent_deadline_state_error: DirectDataSegment,
     agent_timeouts: BTreeMap<u32, u64>,
+    monotonic_clock: bool,
     pub(super) while_timeout_error: DirectDataSegment,
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
@@ -290,7 +291,7 @@ impl DirectCoreStaticData {
         );
 
         let agent_timeouts = super::manifest::agent_timeouts(graph, child_workflows);
-        let timeout_bytes = if agent_timeouts.is_empty() {
+        let timeout_bytes = if !super::manifest::needs_monotonic_clock(graph, child_workflows) {
             String::new()
         } else {
             AGENT_TIMEOUT_FIELDS.concat()
@@ -387,6 +388,7 @@ impl DirectCoreStaticData {
             agent_timeout_error,
             agent_deadline_state_error,
             agent_timeouts,
+            monotonic_clock: super::manifest::needs_monotonic_clock(graph, child_workflows),
             while_timeout_error,
             split_timeout_error,
             step_ids,
@@ -410,7 +412,7 @@ impl DirectCoreStaticData {
     }
 
     pub(super) fn needs_monotonic_clock(&self) -> bool {
-        !self.agent_timeouts.is_empty()
+        self.monotonic_clock
     }
 
     pub(super) fn agent_timeout(&self, agent_id: u32) -> Option<u64> {

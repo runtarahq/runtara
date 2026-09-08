@@ -1069,7 +1069,7 @@ fn assert_timeout_failure(exit: InvokeExit, expected_code: &str) {
     };
     assert_eq!(
         error.code, expected_code,
-        "failure must be the enclosing loop timeout"
+        "failure must be the enclosing loop timeout: {error:?}"
     );
 }
 
@@ -1156,7 +1156,7 @@ fn audit_05_final_body_overrun_fails_without_suspending() {
         let (_temp, artifact) =
             compile_configured_tracking("audit-final-overrun", graph, vec![], None, true);
         let host = audit_deadline_host(1_000_000);
-        *host.advance_clock_on_step_end.lock().unwrap() = Some(("body_finish".into(), 1_001));
+        *host.delay_on_step_end.lock().unwrap() = Some(("body_finish".into(), 1_001));
         assert_timeout_failure(
             run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec()),
             if split {
@@ -1441,4 +1441,73 @@ fn audit_05_aggregated_inner_failure_does_not_leak_its_budget() {
         run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec()),
         1_060_000,
     );
+}
+
+#[test]
+fn audit_05_epoch_jump_does_not_expire_a_live_monotonic_loop_budget() {
+    for split in [false, true] {
+        let mut graph = timeout_graph(0, split);
+        graph["steps"]["loop"]["subgraph"] =
+            json!({"entryPoint":"body_finish","steps":{"body_finish":finish("body_finish")}});
+        let (_temp, artifact) =
+            compile_configured_tracking("audit-clock-jump", graph, vec![], None, true);
+        let host = audit_deadline_host(1_000_000);
+        *host.advance_clock_on_step_end.lock().unwrap() = Some(("body_finish".into(), 100_000));
+        assert_eq!(
+            completed(run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec())),
+            json!({"ok":true})
+        );
+    }
+}
+
+#[test]
+fn audit_05_nested_recovery_preserves_the_owning_scopes_parent_outputs() {
+    let pre = |value| {
+        json!({"id":"pre","stepType":"Filter","config":{
+        "value":immediate(json!([value])),"condition":condition(true)}})
+    };
+    let handler = || {
+        json!({"id":"handled","stepType":"Finish","inputMapping":{
+        "marker":{"valueType":"reference","value":"steps.pre.outputs.items.0"},
+        "code":{"valueType":"reference","value":"steps.__error.code"},
+        "owner":{"valueType":"reference","value":"steps.__error.stepId"}}})
+    };
+    for outer in ["While", "Split"] {
+        for inner in ["While", "Split"] {
+            let leaf =
+                json!({"entryPoint":"body_finish","steps":{"body_finish":finish("body_finish")}});
+            let mut inner_step = audit_loop("inner", inner, 1, leaf);
+            inner_step["config"]["timeout"] = json!(2_000);
+            let inner_graph = json!({"entryPoint":"pre","steps":{
+                "pre":pre(7),"inner":inner_step,"handled":handler(),"done":finish("done")},
+                "executionPlan":[{"fromStep":"pre","toStep":"inner"},{"fromStep":"inner","toStep":"done"},
+                    {"fromStep":"inner","toStep":"handled","label":"onError"}]});
+            let mut outer_step = audit_loop("outer", outer, 1, inner_graph);
+            outer_step["config"]["timeout"] = json!(500);
+            let graph = json!({"entryPoint":"pre","steps":{"pre":pre(42),"outer":outer_step,"handled":handler(),"done":finish("done")},
+                "executionPlan":[{"fromStep":"pre","toStep":"outer"},{"fromStep":"outer","toStep":"done"},
+                    {"fromStep":"outer","toStep":"handled","label":"onError"}]});
+            let (_temp, artifact) =
+                compile_configured_tracking("audit-recovery-context", graph, vec![], None, true);
+            let host = audit_deadline_host(1_000_000);
+            *host.delay_on_step_end.lock().unwrap() = Some(("body_finish".into(), 600));
+            assert_eq!(
+                completed(run_invoke_once(
+                    &artifact.wasm_path,
+                    host.clone(),
+                    b"{}".to_vec()
+                )),
+                json!({"marker":42,"code":if outer == "While" { "WHILE_TIMEOUT" } else { "SPLIT_TIMEOUT" },"owner":"outer"})
+            );
+            assert!(
+                host.custom_events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(kind, payload)| kind == "step_debug_end"
+                        && serde_json::from_slice::<Value>(payload).unwrap()["step_id"]
+                            == "body_finish")
+            );
+        }
+    }
 }

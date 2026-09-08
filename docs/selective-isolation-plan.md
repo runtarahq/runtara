@@ -511,8 +511,38 @@ that forward/backward fixture wall-clock changes do not change a live budget.
 The arithmetic test executes the actual emitter with controlled clock readings.
 Persisted time while parked still follows the existing epoch/scheduler contract.
 
-The next compiler work is inherited deadline ownership and unwind/recovery:
-intersect enclosing budgets without allowing an inner handler to consume an outer
-expiry, then qualify parallel sibling survival and cleanup grace. Keep E128 until
-those contracts pass. This expands G5/G7/G9 evidence; the full G1–G10 gates and
-paired performance/E2E/soak work remain open.
+Inherited ownership and sequential unwind/recovery are implemented in the next
+stage below. Parallel sibling survival, complete timeout ownership for Embed/AI,
+interruptible preparation and cleanup grace remain required before removing E128.
+The full G1–G10 gates and paired performance/E2E/soak work remain open.
+
+
+### Inherited deadlines and recovery ownership · 2026-09-08
+
+The emitter now carries the earliest enclosing While/Split budget as guest locals:
+a manifest-wide owner, monotonic start/duration and error payload. Loop and Embed
+frames restore it; a separate selected reason survives unwind. Parent expiry
+bypasses child Agent handlers, Split aggregation/retries and Embed attempt
+checkpointing. Only the owning loop consumes the reason before recovery. No
+host task registry, new WIT cancellation interface, product flag or extra Store
+is involved. Existing standard Await owns and resolves the pending timer/I/O.
+
+Live loop checks use the standard monotonic clock, including untimed inner loops.
+Persisted epoch deadlines still govern parked/restarted time. Agent retry delays
+intersect the enclosing live budget, and persisted retry deadlines are clamped
+before saving as well as before returning wakes. Completed-loop replay remains
+outside that loop's old budget. Existing zero-disabled loop syntax is unchanged.
+
+Qualification includes nested shorter/longer budgets, durable and non-durable
+Agents, ordinary HTTP errors/success, root Cancel, sequential Split aggregation
+and retry, untimed CPU loops with a frozen epoch clock, recovery after expiry,
+AI single-shot/turn/load/summarize/save I/O, and two nested Embed levels with
+pending headers/body. Existing AUDIT-05 replay, aggregation and mixed-scope tests
+remain required, including a separate real-overrun and wall-clock-jump control.
+The implementation document records completed commands and remaining limits.
+
+Next: qualify inherited timers with live parallel windows and sibling survival,
+complete own Embed/AI/tool deadlines and their retry/preparation waits, then
+bounded cancellation cleanup and the remaining public Stop/E2E/soak/measurement
+work. E128 remains until the complete contract passes; this stage does not close
+G5, G6 or the full G1–G10 matrix.

@@ -137,11 +137,17 @@ fn executor() -> &'static WorkflowExecutor {
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Shape {
     Root,
     Published(usize),
     InlineWhile(usize),
+    InheritedWhile {
+        depth: usize,
+        inner: Option<u64>,
+        agent: Option<u64>,
+        split: Option<(bool, u32)>,
+    },
 }
 
 fn compile(
@@ -207,6 +213,43 @@ fn compile_shaped(
                 "executionPlan":[{"fromStep":"loop","toStep":"finish"}]});
         }
     }
+    if let Shape::InheritedWhile {
+        depth,
+        inner,
+        split,
+        ..
+    } = shape
+    {
+        if let Some((aggregate, retries)) = split {
+            graph = json!({"durable":durable,"entryPoint":"items","steps":{
+                "items":{"id":"items","stepType":"Split",
+                    "config":{"value":{"valueType":"immediate","value":[{},{}]},"sequential":true,
+                        "dontStopOnFailed":aggregate,"maxRetries":retries,"retryDelay":60_000},"subgraph":graph},
+                "finish":{"id":"finish","stepType":"Finish","inputMapping":{"bad":{"valueType":"immediate","value":"continued split"}}},
+                "handled":{"id":"handled","stepType":"Finish","inputMapping":{"bad":{"valueType":"immediate","value":"inner split handler"}}}},
+                "executionPlan":[{"fromStep":"items","toStep":"finish"},
+                    {"fromStep":"items","toStep":"handled","label":"onError"}]});
+        }
+        for i in 0..depth {
+            let id = if i + 1 == depth { "outer" } else { "loop" };
+            let budget = if i + 1 == depth { Some(timeout) } else { inner };
+            graph = json!({"durable":false,"entryPoint":"pre","steps":{
+                "pre":{"id":"pre","stepType":"Agent","agentId":"utils","capabilityId":"return-input",
+                    "maxRetries":0,"inputMapping":{"value":{"valueType":"immediate","value":i}}},
+                id:{"id":id,"stepType":"While","condition":{"type":"operation","op":"EQ",
+                    "arguments":[{"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]},
+                    "config":{"maxIterations":1,"timeout":budget},"subgraph":graph},
+                "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                    "result":{"valueType":"reference","value":format!("steps.{id}.outputs.outputs")}}},
+                "handled":{"id":"handled","stepType":"Finish","inputMapping":{
+                    "code":{"valueType":"reference","value":"steps.__error.code"},
+                    "retryable":{"valueType":"reference","value":"steps.__error.retryable"},
+                    "stepId":{"valueType":"reference","value":"steps.__error.stepId"},
+                    "parent":{"valueType":"reference","value":"steps.pre.outputs"}}}},
+                "executionPlan":[{"fromStep":"pre","toStep":id},{"fromStep":id,"toStep":"finish"},
+                    {"fromStep":id,"toStep":"handled","label":"onError"}]});
+        }
+    }
     let published = matches!(shape, Shape::Published(_));
     assert!(!published || !durable);
     let abi = if published {
@@ -236,11 +279,32 @@ fn compile_shaped(
             scope = &mut scope["steps"]["loop"]["subgraph"];
         }
     }
-    scope["steps"]["fetch"]["timeout"] = timeout.into();
+    let own_timeout = if let Shape::InheritedWhile {
+        depth,
+        agent,
+        split,
+        ..
+    } = shape
+    {
+        for i in 0..depth {
+            let id = if i == 0 { "outer" } else { "loop" };
+            scope = &mut scope["steps"][id]["subgraph"];
+        }
+        if split.is_some() {
+            scope = &mut scope["steps"]["items"]["subgraph"];
+        }
+        agent
+    } else {
+        Some(timeout)
+    };
+    if let Some(timeout) = own_timeout {
+        scope["steps"]["fetch"]["timeout"] = timeout.into();
+    }
+
     let graph = serde_json::from_value(graph)?;
     // Explicitly prove there is no public gate bypass or hidden product flag.
     compiled.support_report = super::super::support::analyze_direct_wasm_support(&graph);
-    assert!(!compiled.support_report.supported);
+    assert_eq!(compiled.support_report.supported, own_timeout.is_none());
     let manifest = super::super::manifest::build_direct_workflow_manifest(&graph)?;
     let manifest_json = manifest.to_canonical_json()?;
     let support = serde_json::to_vec(&compiled.support_report)?;
@@ -534,7 +598,7 @@ async fn run_shaped(
             .await?;
             return Ok(());
         }
-        if durable && matches!(response, Response::Error) && timeout != 0 {
+        if durable && retries > 0 && matches!(response, Response::Error) && timeout != 0 {
             anyhow::ensure!(
                 matches!(exit, InvokeExit::Suspended(_)),
                 "expected durable park: {exit:?}"
@@ -542,7 +606,13 @@ async fn run_shaped(
             let initial = host.checkpoints.lock().unwrap().clone();
             let budgets: Vec<_> = initial
                 .iter()
-                .filter(|(key, _)| key.contains("agent-deadline"))
+                .filter(|(key, _)| {
+                    key.contains(if matches!(shape, Shape::InheritedWhile { .. }) {
+                        "loop-deadline"
+                    } else {
+                        "agent-deadline"
+                    })
+                })
                 .collect();
             assert_eq!(budgets.len(), 1);
             let budget = u64::from_le_bytes(budgets[0].1.as_slice().try_into()?);
@@ -584,6 +654,27 @@ async fn run_shaped(
         let layers = match shape {
             Shape::Published(depth) => depth,
             Shape::InlineWhile(depth) if success => depth,
+            Shape::InheritedWhile { depth, .. }
+                if success || matches!(response, Response::Error) && retries == 0 =>
+            {
+                depth
+            }
+            Shape::InheritedWhile {
+                depth,
+                inner,
+                agent,
+                ..
+            } => {
+                if agent
+                    .is_some_and(|value| value < timeout && inner.is_none_or(|inner| value < inner))
+                {
+                    depth
+                } else if inner.is_some_and(|value| value < timeout) {
+                    depth - 1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         };
         for _ in 0..layers {
@@ -603,10 +694,23 @@ async fn run_shaped(
                 output,
                 if matches!(response, Response::Error) && retries == 0 {
                     json!({"code":"HTTP_5XX","retryable":true,"stepId":"fetch"})
+                } else if let Shape::InheritedWhile { depth, inner, agent, .. } = shape {
+                    if agent.is_some_and(|value| {
+                        value < timeout && inner.is_none_or(|inner| value < inner)
+                    }) {
+                        json!({"code":"AGENT_TIMEOUT","retryable":false,"stepId":"fetch"})
+                    } else {
+                        let id = if inner.is_some_and(|value| value < timeout) {
+                            "loop"
+                        } else {
+                            "outer"
+                        };
+                        json!({"code":"WHILE_TIMEOUT","retryable":null,"stepId":id,"parent":if id == "outer" { depth - 1 } else { 0 }})
+                    }
                 } else {
                     json!({"code":"AGENT_TIMEOUT","retryable":false,"stepId":"fetch"})
                 },
-                "complete output: {complete_output}"
+                "complete output: {complete_output}; shape: {shape:?}, durable: {durable}"
             );
         }
         assert_eq!(
@@ -634,8 +738,21 @@ async fn run_shaped(
                 "a retry restarted the two-second budget: {elapsed:?}"
             );
         }
-        if !durable {
+        if !durable && !matches!(shape, Shape::InheritedWhile { .. }) {
             assert!(host.checkpoints.lock().unwrap().is_empty());
+        }
+        if matches!(shape, Shape::InheritedWhile { .. })
+            && matches!(response, Response::Hang)
+            && output["code"] != "AGENT_TIMEOUT"
+        {
+            assert!(
+                !host
+                    .checkpoints
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .any(|key| key.contains("attempt"))
+            );
         }
         if matches!(
             response,
@@ -803,6 +920,173 @@ async fn agent_deadline_inventory_includes_inline_nested_definitions() -> anyhow
         for response in [Response::Hang, Response::Ok, Response::Error] {
             run_shaped(response, 200, false, 0, 0, Shape::InlineWhile(depth)).await?;
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_inherited_while_owns_pending_child_cancellation() -> anyhow::Result<()> {
+    for durable in [false, true] {
+        for (depth, inner, agent) in [
+            (1, None, None),
+            (2, None, None),
+            (2, Some(60_000), Some(60_000)),
+            (2, Some(50), Some(60_000)),
+            (2, Some(60_000), Some(50)),
+        ] {
+            run_shaped(
+                Response::Hang,
+                200,
+                durable,
+                3,
+                60_000,
+                Shape::InheritedWhile {
+                    depth,
+                    inner,
+                    agent,
+                    split: None,
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_inherited_timeout_bypasses_split_aggregation_and_retry()
+-> anyhow::Result<()> {
+    for durable in [false, true] {
+        for aggregate in [false, true] {
+            for split_retries in [0, 3] {
+                run_shaped(
+                    Response::Hang,
+                    200,
+                    durable,
+                    3,
+                    60_000,
+                    Shape::InheritedWhile {
+                        depth: 1,
+                        inner: None,
+                        agent: None,
+                        split: Some((aggregate, split_retries)),
+                    },
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_inherited_scopes_preserve_success_error_and_root_cancel()
+-> anyhow::Result<()> {
+    for durable in [false, true] {
+        for response in [Response::Ok, Response::Error, Response::RootCancel] {
+            run_shaped(
+                response,
+                60_000,
+                durable,
+                0,
+                60_000,
+                Shape::InheritedWhile {
+                    depth: 2,
+                    inner: None,
+                    agent: None,
+                    split: None,
+                },
+            )
+            .await?;
+        }
+        run_shaped(
+            Response::Hang,
+            200,
+            durable,
+            0,
+            60_000,
+            Shape::InheritedWhile {
+                depth: 2,
+                inner: Some(60_000),
+                agent: Some(50),
+                split: None,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_inherited_budget_interrupts_untimed_cpu_loop_with_frozen_epoch()
+-> anyhow::Result<()> {
+    let condition = json!({"type":"operation","op":"EQ", "arguments":[
+        {"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]});
+    let graph = json!({"durable":false,"entryPoint":"outer","steps":{
+        "outer":{"id":"outer","stepType":"While","condition":condition,
+            "config":{"maxIterations":1,"timeout":50},"subgraph":{
+                "entryPoint":"inner","steps":{
+                    "inner":{"id":"inner","stepType":"While","condition":condition,
+                        "config":{"maxIterations":4294967295_u64},"subgraph":{
+                            "entryPoint":"done","steps":{"done":{"id":"done","stepType":"Finish"}}}},
+                    "bad":{"id":"bad","stepType":"Finish","inputMapping":{
+                        "wrong":{"valueType":"immediate","value":"inner handler"}}}},
+                "executionPlan":[{"fromStep":"inner","toStep":"bad","label":"onError"}]}},
+        "recovery":{"id":"recovery","stepType":"While","condition":condition,
+            "config":{"maxIterations":3},"subgraph":{
+                "entryPoint":"done","steps":{"done":{"id":"done","stepType":"Finish"}}}},
+        "handled":{"id":"handled","stepType":"Finish","inputMapping":{
+            "code":{"valueType":"reference","value":"steps.__error.code"},
+            "stepId":{"valueType":"reference","value":"steps.__error.stepId"}}}},
+        "executionPlan":[{"fromStep":"outer","toStep":"recovery","label":"onError"},
+            {"fromStep":"recovery","toStep":"handled"}]});
+    let temp = tempfile::tempdir()?;
+    let mut compiled = compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "inherited-cpu".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph)?,
+            child_workflows: vec![],
+            output_dir: temp.path().into(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        super::super::component::WorkflowAbi::InvokeHostImports,
+        false,
+    )?;
+    let components = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?;
+    compose_direct_workflow(&mut compiled, &components)?;
+    let host = Arc::new(Host::new());
+    host.clock_override.store(1_000_000, Ordering::SeqCst);
+    let InvokeExit::Completed(output) = invoke(&compiled, host).await? else {
+        anyhow::bail!("expected outer recovery")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output)?,
+        json!({"code":"WHILE_TIMEOUT","stepId":"outer"})
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_inherited_budget_bounds_backoff_and_durable_replay() -> anyhow::Result<()> {
+    for durable in [false, true] {
+        run_shaped(
+            Response::Error,
+            4_000,
+            durable,
+            3,
+            60_000,
+            Shape::InheritedWhile {
+                depth: 1,
+                inner: None,
+                agent: None,
+                split: None,
+            },
+        )
+        .await?;
     }
     Ok(())
 }

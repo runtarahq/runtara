@@ -127,6 +127,7 @@ pub(super) fn emit_retry_park_until_deadline(
 }
 
 fn clamp_deadline(body: &mut WasmFunction, deadline: Option<u32>) {
+    super::loop_deadline::clamp(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL, None);
     if let Some(deadline) = deadline {
         body.instruction(&Instruction::LocalGet(deadline));
         body.instruction(&Instruction::LocalGet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));

@@ -2250,3 +2250,75 @@ Verification on the pinned toolchain and freshly rebuilt components:
 
 No new latency/size benchmark, resource soak, or server/database E2E is claimed in
 this stage.
+
+
+## Inherited deadline ownership and sequential unwind (2026-09-08)
+
+While/Split budgets now participate in a guest-owned enclosing scope. The emitter
+selects the earliest remaining monotonic duration, remembers its manifest-wide
+loop owner, and carries its static timeout payload through unwind. Equal remaining
+budgets retain the outer owner. An Agent's own timeout participates in the same
+selection; a shorter Agent budget still reaches that Agent's normal error path.
+Standard Component Model Await cancels and resolves the selected pending call.
+No host graph interpreter, task registry, new cancellation import, or child Store
+was added.
+
+Loop and Embed frames preserve the active scope; Split aggregation also snapshots
+it in its existing failure frame. A selected enclosing reason bypasses child
+Agent retries/handlers, ordinary item aggregation, and Embed retry checkpointing.
+The owner consumes that reason only after restoring its parent scope and before
+running recovery. Untimed inner loops check the enclosing budget at cooperative
+boundaries. This covers DSL loops, not arbitrary non-cooperating CPU code inside
+an Agent capability.
+
+Running loop time now follows `wasi:clocks/monotonic-clock.now`. Epoch deadlines
+remain eight-byte durable records for replay and scheduler wakes. Entering a live
+scope reconstructs a duration capped at its authored timeout. Completed scopes
+are not reinstalled. Retry sleeps intersect the enclosing live duration; the
+common retry-park lowering clamps the persisted wake to the enclosing epoch
+budget before saving it. Time spent parked still depends on the epoch/scheduler
+contract. Existing zero-disabled While/Split timeout syntax is unchanged. Cache
+identity is `cooperative-waits=shared-v5`.
+
+The new tests exposed two error-routing defects: durable Agent recovery omitted
+the open checkpoint branch from its branch depth, and consuming a nested failure
+through Split aggregation/retry could leave the shared fatal-error flag set. Both
+are fixed. Durable Split bodies now account for their open cache-miss branch too.
+Loop frames also retain their own parent steps: a hanging-child regression first
+returned the inner scope's prior output from the outer handler. Distinct prior
+values now survive live timeout unwind in all four While/Split nesting pairs.
+The final-body-overrun test now delays an actual debug callback; a separate test
+advances only the epoch clock and requires normal completion. This distinguishes
+elapsed work from clock correction instead of using a clock jump to simulate work.
+
+Composed qualification covers one/two While levels, shorter Agent/inner budgets,
+durable and non-durable child Agents, zero-retry and retry-enabled recovery,
+sequential Split aggregation with/without retries, ordinary HTTP error/success,
+root Cancel, and inherited backoff with early/expired durable replay. A public
+Agent-free workflow holds epoch time fixed, times out an untimed CPU loop, then
+runs another untimed loop in recovery to prove the old scope was removed.
+Production I/O tests also cover AI single-shot, chat-turn, memory-load,
+summarization and memory-save calls, and two nested Embed layers during pending
+headers or response body. They require the enclosing timeout handler, socket
+cleanup, no extra requests, no child-attempt checkpoint for enclosing cancellation,
+and no acknowledgement of a nonexistent root command.
+
+Live parallel windows and sibling preservation still need inherited timer
+qualification. Own Embed/AI/tool deadlines, all preparation/retry wait sites,
+cleanup grace/non-cooperation escalation, public server E2E, resource soak and
+controlled paired performance measurements remain open. AI tool propagation is
+wired before tool-result feedback, but this stage's provider I/O matrix does not
+independently qualify every tool-arm shape. E128 stays in place; no complete
+cancellation rollout is claimed.
+
+Verification on the final source:
+
+- Compiler library tests: 605 passed.
+- Feature-gated direct workflow execution suite: 387 passed, three manual
+  benchmarks ignored.
+- Feature-gated workflows Clippy, Rust formatting and `git diff --check`: passed.
+- Updated patterns page JavaScript: syntax checked with Node.
+
+This stage reuses the previously built Agent/stdlib/runtime bundle; none of those
+component sources changed. No new component build, visual browser inspection,
+size/latency benchmark, resource soak, or database/server E2E is claimed here.
