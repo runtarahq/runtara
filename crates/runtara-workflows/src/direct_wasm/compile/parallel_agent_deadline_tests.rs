@@ -332,6 +332,30 @@ async fn parallel_split_aggregates_each_agent_deadline() -> anyhow::Result<()> {
 #[tokio::test]
 async fn parallel_split_preserves_peer_after_preparation_consumes_own_budget() -> anyhow::Result<()>
 {
+    split_preparation_survivor(Preparation::DelayFirst(Duration::from_millis(400))).await
+}
+#[tokio::test]
+async fn pending_preparation_services_an_earlier_agents_deadline() -> anyhow::Result<()> {
+    split_preparation_survivor(Preparation::PeerBeforeSecond(Duration::from_millis(400))).await
+}
+#[tokio::test]
+async fn pending_preparation_buffers_peer_success_without_reinvoking() -> anyhow::Result<()> {
+    split_preparation_survivor(Preparation::ReturnBeforeSecond(Duration::from_millis(400))).await
+}
+#[tokio::test]
+async fn pending_preparation_root_cancel_resolves_lookup_and_peer_before_ack() -> anyhow::Result<()>
+{
+    split_preparation_survivor(Preparation::CancelSecond(Duration::from_millis(400))).await
+}
+#[tokio::test]
+async fn pending_preparation_parent_timeout_cleans_window_before_reporting() -> anyhow::Result<()> {
+    split_preparation_survivor(Preparation::ParentSecond(Duration::from_millis(400))).await
+}
+async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<()> {
+    let pending_lookup = !matches!(preparation, Preparation::DelayFirst(_));
+    let peer_success = matches!(preparation, Preparation::ReturnBeforeSecond(_));
+    let root_cancel = matches!(preparation, Preparation::CancelSecond(_));
+    let parent_timeout = matches!(preparation, Preparation::ParentSecond(_));
     let dir = tempfile::tempdir()?;
     let mut graph = split_graph(0, 2);
     graph["steps"]["items"]["config"]["dontStopOnFailed"] = true.into();
@@ -344,6 +368,9 @@ async fn parallel_split_preserves_peer_after_preparation_consumes_own_budget() -
         json!({"valueType":"reference","value":"data.connection"});
     graph["steps"]["finish"]["inputMapping"] =
         json!({"result":{"valueType":"reference","value":"steps.items"}});
+    if parent_timeout {
+        graph["steps"]["items"]["config"]["timeout"] = 800.into();
+    }
     let result = compile_graph(dir.path(), graph.clone())?;
     graph["steps"]["items"]["subgraph"]["steps"]["fetch"]["timeout"] = 1_000.into();
     let compiled = reemit_parallel(result, graph)?;
@@ -351,34 +378,79 @@ async fn parallel_split_preserves_peer_after_preparation_consumes_own_budget() -
         let host = Arc::new(Host::new());
         // The first invocation spends 400ms resolving its descriptor. The
         // second starts later, so it retains budget when the first expires.
-        let mut server = live_peer_server_prepared(
+        let mut server = live_peer_server_preparation(
             host.clone(),
             body,
-            true,
+            !pending_lookup,
             1,
             200,
-            Some(Duration::from_millis(400)),
+            Some(preparation),
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        if root_cancel {
+            *host.cancel_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+        }
+        if parent_timeout {
+            *host.failure_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+        }
+        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        if parent_timeout {
+            let InvokeExit::Failed(error) = exit else {
+                anyhow::bail!("{exit:?}");
+            };
+            assert_eq!(error.code, "SPLIT_TIMEOUT");
+            assert!(host.failure_observed.load(Ordering::SeqCst));
+            assert_eq!(server.children.load(Ordering::SeqCst), 1);
+            assert_eq!(server.closed.load(Ordering::SeqCst), 1);
+            tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
+            continue;
+        }
+        if root_cancel {
+            assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
+            assert!(host.acknowledged.load(Ordering::SeqCst));
+            assert_eq!(server.children.load(Ordering::SeqCst), 1);
+            assert_eq!(server.closed.load(Ordering::SeqCst), 1);
+            tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
+            continue;
+        }
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}");
         };
-        tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
         let value: Value = serde_json::from_slice(&bytes)?;
-        assert_eq!(value["result"]["stats"]["success"], 1, "{value}");
-        assert_eq!(value["result"]["stats"]["error"], 1, "{value}");
-        assert!(
-            value["result"]["data"]["error"]
-                .to_string()
-                .contains("AGENT_TIMEOUT"),
+        assert_eq!(
+            value["result"]["stats"]["success"],
+            if peer_success { 2 } else { 1 },
             "{value}"
         );
         assert_eq!(
-            *server.requests.lock().unwrap(),
-            vec![json!({"event":"target_closed","requests":2})]
+            value["result"]["stats"]["error"],
+            if peer_success { 0 } else { 1 },
+            "{value}"
         );
-        assert_eq!(server.closed.load(Ordering::SeqCst), 1);
+        if !peer_success {
+            assert!(
+                value["result"]["data"]["error"]
+                    .to_string()
+                    .contains("AGENT_TIMEOUT"),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            *server.requests.lock().unwrap(),
+            vec![
+                json!({"event":if peer_success {"target_returned"} else {"target_closed"},"requests":if pending_lookup { 1 } else { 2 }})
+            ]
+        );
+        tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
+        assert_eq!(
+            server.closed.load(Ordering::SeqCst),
+            usize::from(!peer_success)
+        );
+        assert_eq!(
+            server.children.load(Ordering::SeqCst),
+            2,
+            "each Agent invokes exactly once"
+        );
     }
     Ok(())
 }

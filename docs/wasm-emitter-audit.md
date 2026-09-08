@@ -1486,3 +1486,43 @@ E128. The implementation adds 32 bytes to each parallel slot and three i32 value
 to shared helper state; this is layout accounting, not a measured runtime-memory,
 latency or binary-size result. Include these costs in the planned paired
 benchmarks before making performance claims.
+
+
+### AUDIT-16 · Earlier Agent deadlines during later connection preparation
+
+A composed Split reproduction returned two `AGENT_TIMEOUT` errors when only the
+first item needed to expire. The first item's HTTP request was pending, while
+the second item's connection lookup waited for that socket to close. The
+preparation wait watched its own deadline but did not service the earlier Agent's
+budget; the second lookup therefore expired before the first was cancelled.
+
+The shared guest Await helper now uses the active parallel window's waitable
+set during preparation. It reuses the nearest-Agent timer and event handling:
+an earlier expiry is recorded in that call's original slot, and a returned call
+is buffered for normal assembly. Neither event ends the unrelated preparation
+wait. Await resolves its own calls/timers on exit and leaves the shared set for
+the window to close. Buffered calls remain detached until the scheduler drops
+their resolved handles. No peer-handle transfers or additional preparation set
+are needed. Closing a window clears its timed-window flag, preventing later
+sequential waits from scanning old slots.
+
+| Case | Required behavior | Test in `compile/parallel_agent_deadline_tests.rs` |
+| --- | --- | --- |
+| Later metadata response is held until an earlier HTTP call closes | Service the earlier Agent's deadline while the lookup remains live; later item succeeds | `pending_preparation_services_an_earlier_agents_deadline` |
+| Earlier call returns while the later metadata lookup remains live | Buffer success and invoke each Agent exactly once | `pending_preparation_buffers_peer_success_without_reinvoking` |
+| Root cancellation arrives with HTTP and metadata calls pending | Resolve both sockets before lifecycle acknowledgement; no item recovery | `pending_preparation_root_cancel_resolves_lookup_and_peer_before_ack` |
+| Enclosing Split budget expires with HTTP and metadata calls pending | Resolve both sockets before reporting `SPLIT_TIMEOUT`; bypass item-error aggregation | `pending_preparation_parent_timeout_cleans_window_before_reporting` |
+
+The metadata response is gated by the first call's completion/closure, rather
+than released after an arbitrary sleep. Root acknowledgement and parent failure
+reporting additionally wait for all fixture connections to close while the Store
+is alive. Pending HTTP headers and partial bodies are covered. These cases reuse
+the existing server fixture and public component interfaces; only the private
+Agent-timeout emission bypasses E128.
+
+No guest state fields, helper functions in the emitted core, WIT interfaces,
+host tasks or agent wrappers are added. Await scans for the nearest deadline
+when a timed window is active; helper code size and preparation latency still
+need the planned paired measurements. Simultaneous completion/timeout/parent
+races, deeper mixed handled exits, independent cleanup grace and public release
+qualification remain open. E128 remains in place.

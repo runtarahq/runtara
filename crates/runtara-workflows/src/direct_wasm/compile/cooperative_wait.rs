@@ -299,8 +299,19 @@ fn close_wait(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     }
     body.instruction(&Instruction::LocalGet(SET));
     body.instruction(&Instruction::If(BlockType::Empty));
+    parallel_deadline::close_timer(body, indices);
+    // A preparation wait shares the active window's set. Only a standalone
+    // Await owns its set; the window will drop its set after every call resolves.
+    body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
+    body.instruction(&Instruction::LocalGet(SET));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::LocalGet(SET));
     body.instruction(&Instruction::Call(indices.waitable_set_drop.unwrap()));
+    body.instruction(&Instruction::End);
     set_zero(body, SET);
     body.instruction(&Instruction::End);
 }
@@ -534,6 +545,7 @@ pub(super) fn emit_window_close(body: &mut Function, indices: &DirectCoreFunctio
     body.instruction(&Instruction::LocalGet(super::DIRECT_PSPLIT_WS_LOCAL));
     body.instruction(&Instruction::Call(indices.waitable_set_drop.unwrap()));
     set_zero(body, WINDOW_ACTIVE);
+    set_zero(body, parallel_deadline::ENABLED);
 }
 
 pub(super) fn emit_window_boundary(body: &mut Function, indices: &DirectCoreFunctionIndices) {
@@ -644,7 +656,7 @@ pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunction
     body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::Loop(BlockType::Empty));
-    parallel_deadline::arm(body, indices);
+    parallel_deadline::arm(body, indices, super::DIRECT_PSPLIT_WS_LOCAL);
     body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
     body.instruction(&Instruction::LocalGet(parallel_deadline::ENABLED));
     body.instruction(&Instruction::I32Or);
@@ -725,15 +737,6 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
     body.instruction(&Instruction::LocalSet(DEADLINE_STATUS));
     body.instruction(&Instruction::Else);
     load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
-    parallel_deadline::timer_handle(body);
-    body.instruction(&Instruction::I32Eq);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
-    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
-    body.instruction(&Instruction::I32Const(RETURNED));
-    body.instruction(&Instruction::LocalSet(parallel_deadline::TIMER_STATUS));
-    body.instruction(&Instruction::Else);
-    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
     body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -743,11 +746,10 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::LocalGet(parallel_deadline::ENABLED));
     body.instruction(&Instruction::If(BlockType::Empty));
-    parallel_deadline::remember_returned(body, indices);
+    parallel_deadline::observe_event(body, indices);
     body.instruction(&Instruction::Else);
     close_deadline(body, indices);
     helper_return(body, 0);
-    body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
@@ -811,7 +813,16 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::I32Const(4));
     body.instruction(&Instruction::I32ShrU);
     body.instruction(&Instruction::LocalSet(TARGET));
+    body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
+    body.instruction(&Instruction::LocalGet(parallel_deadline::ENABLED));
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::If(BlockType::Result(
+        wasm_encoder::ValType::I32,
+    )));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::Else);
     body.instruction(&Instruction::Call(indices.waitable_set_new.unwrap()));
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::LocalSet(SET));
     body.instruction(&Instruction::LocalGet(TARGET));
     body.instruction(&Instruction::LocalGet(SET));
@@ -829,7 +840,10 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::LocalGet(TARGET));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
+    parallel_deadline::arm(body, indices, SET);
     body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::LocalGet(parallel_deadline::ENABLED));
+    body.instruction(&Instruction::I32Or);
     body.instruction(&Instruction::If(BlockType::Empty));
     // Drain all ready events before selecting expiry. An already-ready target
     // wins the deadline tie, independently of waitable-set notification order.
@@ -859,6 +873,14 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     close_wait(body, indices);
     helper_return(body, 4);
     body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(parallel_deadline::TIMER_STATUS));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    parallel_deadline::select_expired(body, indices);
+    // Re-arm before blocking: another Agent may now own the nearest deadline.
+    body.instruction(&Instruction::Br(1));
     body.instruction(&Instruction::End);
     if !indices.omit_runtime {
         body.instruction(&Instruction::LocalGet(TIMER));
@@ -904,21 +926,41 @@ fn observe_await_event(body: &mut Function, indices: &DirectCoreFunctionIndices)
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::If(BlockType::Empty));
     load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
-    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
-    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
     body.instruction(&Instruction::LocalGet(TARGET));
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
     set_zero(body, TARGET);
     body.instruction(&Instruction::Else);
     load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
     deadline_handle(body);
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
     body.instruction(&Instruction::I32Const(RETURNED));
     body.instruction(&Instruction::LocalSet(DEADLINE_STATUS));
     body.instruction(&Instruction::Else);
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::LocalGet(TIMER));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
     set_zero(body, TIMER);
+    body.instruction(&Instruction::Else);
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
+    set_zero(body, WINDOW_TIMER);
+    body.instruction(&Instruction::Else);
+    parallel_deadline::observe_event(body, indices);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);

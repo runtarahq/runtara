@@ -751,3 +751,25 @@ by three i32 values and each existing parallel slot by 32 bytes; include untimed
 workflows as well as timed and nested workloads in the paired artifact-size,
 single-step, full-run, memory and soak comparisons. No new WIT import, agent
 binary, host registry or product flag is introduced by this emitter change.
+
+
+### Service earlier deadlines during preparation · 2026-09-08
+
+The pending-preparation overlap identified above now has a composed reproduction
+and a shared-wait fix. An earlier Agent can time out or return while the next
+connection lookup is pending. Its outcome is retained in its original slot;
+the lookup continues. Root cancellation and an enclosing Split timeout resolve
+both kinds of call before acknowledgement/reporting. AUDIT-16 lists four new
+regressions covering headers/body and cleanup while the Store remains alive.
+
+Await shares the active window's waitable set without transferring peer handles
+or allocating a separate preparation set. The window retains ownership of that
+set. Await shares the existing nearest-deadline selection and slot event handling. This uses the same seven emitted helpers and
+19 state parameters; the cache marker advances to `shared-v14`. Measure the extra
+window scans and helper bytes in the existing paired benchmarks, including
+connection-heavy windows and untimed controls.
+
+Keep G5/G6 and E128 open for simultaneous readiness/expiry races, deeper mixed
+handled exits, concurrent retries and independent cleanup grace. The full G1–G10,
+publication, compatibility-retirement, Linux/soak/performance and PR requirements
+remain unchanged.

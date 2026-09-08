@@ -87,11 +87,13 @@ pub(crate) fn close_timer(body: &mut Function, indices: &DirectCoreFunctionIndic
     set_zero(body, OWNER);
 }
 
-pub(crate) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+pub(crate) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices, set: u32) {
     if indices.monotonic_now.is_none() {
         return;
     }
     body.instruction(&Instruction::LocalGet(ENABLED));
+    body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
+    body.instruction(&Instruction::I32And);
     body.instruction(&Instruction::LocalGet(TIMER_STATUS));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::I32And);
@@ -142,7 +144,7 @@ pub(crate) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalTee(HANDLE));
     body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::LocalGet(HANDLE));
-    body.instruction(&Instruction::LocalGet(super::super::DIRECT_PSPLIT_WS_LOCAL));
+    body.instruction(&Instruction::LocalGet(set));
     body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
@@ -220,13 +222,9 @@ fn deliver(body: &mut Function, indices: &DirectCoreFunctionIndices, slot: u32) 
     helper_return(body, 0);
 }
 
-pub(crate) fn select_or_deliver(body: &mut Function, indices: &DirectCoreFunctionIndices) {
-    body.instruction(&Instruction::LocalGet(ENABLED));
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::LocalGet(TIMER_STATUS));
-    body.instruction(&Instruction::I32Const(RETURNED));
-    body.instruction(&Instruction::I32Eq);
-    body.instruction(&Instruction::If(BlockType::Empty));
+/// Select a due Agent without returning from the current preparation wait.
+/// Its resolved handle/result stay in the ordinary slot for later assembly.
+pub(crate) fn select_expired(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     if !indices.omit_runtime {
         poll(body, indices, false);
     }
@@ -258,6 +256,34 @@ pub(crate) fn select_or_deliver(body: &mut Function, indices: &DirectCoreFunctio
     body.instruction(&Instruction::Unreachable);
     body.instruction(&Instruction::End);
     error(body, CURSOR);
+    slot_store(body, CURSOR, READY, 1);
+    close_timer(body, indices);
+}
+
+/// A pending-window event observed by either the main window or a preparation
+/// wait. It must not drop the call handle before the scheduler consumes it.
+pub(crate) fn observe_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    timer_handle(body);
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::LocalSet(TIMER_STATUS));
+    body.instruction(&Instruction::Else);
+    remember_returned(body, indices);
+    body.instruction(&Instruction::End);
+}
+
+pub(crate) fn select_or_deliver(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    body.instruction(&Instruction::LocalGet(ENABLED));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(TIMER_STATUS));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    select_expired(body, indices);
     deliver(body, indices, CURSOR);
     body.instruction(&Instruction::End);
     for_each_slot(body, |body| {

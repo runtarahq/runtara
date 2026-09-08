@@ -222,6 +222,32 @@ async fn live_peer_server_prepared(
     status: u16,
     preparation_delay: Option<Duration>,
 ) -> anyhow::Result<Server> {
+    live_peer_server_preparation(
+        host,
+        body,
+        hold_peer,
+        fast_calls,
+        status,
+        preparation_delay.map(Preparation::DelayFirst),
+    )
+    .await
+}
+#[derive(Clone, Copy)]
+enum Preparation {
+    DelayFirst(Duration),
+    PeerBeforeSecond(Duration),
+    ReturnBeforeSecond(Duration),
+    CancelSecond(Duration),
+    ParentSecond(Duration),
+}
+async fn live_peer_server_preparation(
+    host: Arc<Host>,
+    body: bool,
+    hold_peer: bool,
+    fast_calls: usize,
+    status: u16,
+    preparation: Option<Preparation>,
+) -> anyhow::Result<Server> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let children = Arc::new(AtomicUsize::new(0));
@@ -231,11 +257,17 @@ async fn live_peer_server_prepared(
     let started = Arc::new(tokio::sync::Notify::new());
     let target_closed = Arc::new(tokio::sync::Notify::new());
     let fast_seen = Arc::new(AtomicUsize::new(0));
+    let preparing_second = Arc::new(tokio::sync::Notify::new());
     let observations = Arc::new(Mutex::new(Vec::new()));
     let requests = observations.clone();
     let task = tokio::spawn(async move {
         let mut calls = tokio::task::JoinSet::new();
-        for _ in 0..1 + fast_calls + 2 * usize::from(preparation_delay.is_some()) {
+        for _ in 0..1 + fast_calls + 2 * usize::from(preparation.is_some())
+            - usize::from(matches!(
+                preparation,
+                Some(Preparation::CancelSecond(_) | Preparation::ParentSecond(_))
+            ))
+        {
             let (mut stream, _) = listener.accept().await?;
             let (host, count, cleanup, started) = (
                 host.clone(),
@@ -245,6 +277,7 @@ async fn live_peer_server_prepared(
             );
             let target_closed = target_closed.clone();
             let fast_seen = fast_seen.clone();
+            let preparing_second = preparing_second.clone();
             let observations = observations.clone();
             calls.spawn(async move {
                 let mut bytes = Vec::new();
@@ -266,20 +299,42 @@ async fn live_peer_server_prepared(
                 let headers = std::str::from_utf8(&bytes[..end])?;
                 if headers.lines().next().unwrap().contains("/metadata ") {
                     let slow = headers.contains("slow-prep");
-                    if slow { tokio::time::sleep(preparation_delay.unwrap()).await; }
+                    if slow {
+                        let (Preparation::DelayFirst(delay) | Preparation::PeerBeforeSecond(delay) | Preparation::ReturnBeforeSecond(delay) | Preparation::CancelSecond(delay) | Preparation::ParentSecond(delay)) = preparation.unwrap();
+                        tokio::time::sleep(delay).await;
+                    } else if matches!(preparation, Some(Preparation::CancelSecond(_) | Preparation::ParentSecond(_))) {
+                        tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
+                        if matches!(preparation, Some(Preparation::CancelSecond(_))) { host.cancel.store(true, Ordering::SeqCst); }
+                        await_peer_close(&mut stream).await?;
+                        return Ok(());
+                    } else if matches!(preparation, Some(Preparation::PeerBeforeSecond(_) | Preparation::ReturnBeforeSecond(_))) {
+                        preparing_second.notify_one();
+                        // This response can only complete after the earlier
+                        // Agent has been cancelled while this lookup is live.
+                        tokio::time::timeout(Duration::from_secs(3), target_closed.notified()).await?;
+                    }
                     write_peer_response(&mut stream, &json!({"connectionId":if slow { "slow-prep" } else { "fast-prep" },"integrationId":"http_bearer","status":"ACTIVE","resources":[],"metadata":null})).await?;
                     return Ok(());
                 }
                 let request: Value = serde_json::from_slice(&bytes[end..end+length])?;
                 count.fetch_add(1, Ordering::SeqCst);
                 if request["url"].as_str().unwrap().ends_with("/slow") {
+                    if matches!(preparation, Some(Preparation::ReturnBeforeSecond(_))) {
+                        tokio::time::timeout(Duration::from_secs(2), preparing_second.notified()).await?;
+                        write_peer_response(&mut stream, &json!({"status":200,"headers":{},"body":{"ok":true}})).await?;
+                        observations.lock().unwrap().push(json!({"event":"target_returned","requests":count.load(Ordering::SeqCst)}));
+                        started.notify_one();
+                        target_closed.notify_one();
+                        return Ok(());
+                    }
                     if body { stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n{").await?; }
                     started.notify_one();
                     await_peer_close(&mut stream).await?;
                     cleanup.fetch_add(1, Ordering::SeqCst);
                     observations.lock().unwrap().push(json!({"event":"target_closed","requests":count.load(Ordering::SeqCst)}));
                     target_closed.notify_one();
-                    if let Some(done) = host.failure_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
+                    if !matches!(preparation, Some(Preparation::ParentSecond(_)))
+                        && let Some(done) = host.failure_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
                     if let Some(done) = host.recovery_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
                 } else {
                     // Release success only once the sibling is waiting for headers/body.
@@ -294,6 +349,14 @@ async fn live_peer_server_prepared(
         }
         while let Some(result) = calls.join_next().await {
             result??;
+        }
+        if let Some(done) = host.cancel_cleanup.lock().unwrap().as_ref() {
+            done.notify_one();
+        }
+        if matches!(preparation, Some(Preparation::ParentSecond(_)))
+            && let Some(done) = host.failure_cleanup.lock().unwrap().as_ref()
+        {
+            done.notify_one();
         }
         Ok(())
     });

@@ -2730,3 +2730,43 @@ no guest Rust agent, WIT or component-host source. The standalone component-host
 suite, authenticated server E2E, Linux run, visual browser review, paired size/
 latency measurements and soak were not rerun here. Existing publication, cleanup
 grace and compatibility-retirement gates remain open.
+
+
+### Service parallel deadlines inside Await · 2026-09-08
+
+The existing Await helper now shares the window's waitable set when a timed
+parallel window is active. It services the window's nearest Agent deadline while
+waiting for connection preparation, buffering returned/expired peer outcomes in
+their existing slots. On exit it resolves its own calls/timers while retaining
+the shared set for the window. Root/parent cleanup owns all calls. No peer-handle
+transfers or additional preparation sets are required. A closed window clears
+its timed flag before later waits can reuse scratch memory.
+
+Four composed regressions cover earlier Agent expiry, successful peer return,
+root cancellation and enclosing Split timeout while a later lookup is pending.
+The root acknowledgement and parent failure callbacks require all fixture
+sockets to close before reporting, while the Store still exists. The fixture
+runs both pending headers and partial bodies. See AUDIT-16 for names and limits.
+No agent/host/WIT changes or new state fields were required. Shared helper count
+and state width remain seven and 19; the emitted cache marker is now
+`cooperative-waits=shared-v14`. Performance and cleanup-grace qualification remain
+open.
+
+
+Final validation for this stage: 652 feature-gated compiler library tests passed
+in 213.86s, and 395 workflow execution integration tests passed in 559.38s (three
+manual benchmarks ignored). Feature-gated Clippy, formatting, diff whitespace and
+the interactive guide's JavaScript syntax checks passed. This includes the four
+new preparation regressions and the existing deterministic wait-event tests.
+
+The existing sequential pending-HTTP fixture initially expired its 200ms budget
+before observing a request. Reverting the emitter sources to the previous commit
+reproduced the same failure. That test now allows a one-second budget while
+retaining its exact request-count and socket-cleanup assertions; the separate
+zero-budget test is unchanged. This was a regression diagnostic, not a paired
+performance measurement.
+
+Agent components were reused from the existing rebuilt set; no Agent, WIT or
+production host source changed. Dedicated component-host tests, authenticated
+server E2E, browser visual review, Linux/soak and paired performance measurements
+were not rerun for this stage. E128 and the remaining release gates stay open.

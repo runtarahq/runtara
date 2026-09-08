@@ -33,6 +33,7 @@ struct Host {
     clock_override: AtomicU64,
     cancel: AtomicBool,
     acknowledged: AtomicBool,
+    cancel_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
     recovery_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
     recovery_observed: AtomicBool,
     checkpoint_fault: Mutex<Option<CheckpointFault>>,
@@ -50,6 +51,7 @@ impl Host {
             clock_override: AtomicU64::new(0),
             cancel: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
+            cancel_cleanup: Mutex::new(None),
             recovery_cleanup: Mutex::new(None),
             recovery_observed: AtomicBool::new(false),
             checkpoint_fault: Mutex::new(None),
@@ -199,6 +201,12 @@ impl RuntimeHost for Host {
             (kind.as_str(), command.as_str()),
             ("cancel", "root-cancel") | ("pause", "response-pause")
         ));
+        let cleanup = self.cancel_cleanup.lock().unwrap().clone();
+        if let Some(cleanup) = cleanup {
+            tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
+                .await
+                .map_err(|_| "cancellation acknowledgement preceded pending call cleanup")?;
+        }
         assert!(!self.acknowledged.swap(true, Ordering::SeqCst));
         Ok(true)
     }
@@ -845,7 +853,8 @@ async fn run_shaped(
                 2
             } else {
                 usize::from(timeout != 0)
-            }
+            },
+            "timeout={timeout}, durable={durable}, retries={retries}, shape={shape:?}"
         );
         if matches!(
             response,
@@ -904,7 +913,9 @@ async fn run_shaped(
 async fn agent_deadline_cancels_pending_http_before_recovery() -> anyhow::Result<()> {
     for durable in [false, true] {
         for retries in [0, 5] {
-            run(Response::Hang, 200, durable, retries, 60_000).await?;
+            // Leave room for first component activation before requiring an
+            // observed pending request. The zero-budget case is tested below.
+            run(Response::Hang, 1_000, durable, retries, 60_000).await?;
         }
     }
     Ok(())
