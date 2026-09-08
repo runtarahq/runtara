@@ -218,6 +218,9 @@ fn emit_embed_retry_delay(
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
+    if indices.monotonic_now.is_some() {
+        super::agent_deadline::clamp_wait(body, indices, false, DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL);
+    }
 }
 
 fn emit_embed_retry_sleep(

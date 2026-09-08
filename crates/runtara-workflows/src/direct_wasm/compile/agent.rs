@@ -215,8 +215,8 @@ pub(super) fn emit_agent_plan(
         super::agent_deadline::enter(
             body,
             indices,
-            static_data,
-            step_id,
+            &static_data.agent_deadline_state_error,
+            static_data.step_id(step_id).expect("planned Agent"),
             (source_ptr_local, source_len_local),
             timeout,
             durable_checkpoint,

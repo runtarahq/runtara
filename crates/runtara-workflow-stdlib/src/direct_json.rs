@@ -1112,7 +1112,7 @@ impl DirectJsonManifest {
         })
     }
 
-    /// Deadline identity for a loop or Agent invocation. The exported name is
+    /// Deadline identity for a loop, Agent or Embed invocation. The exported name is
     /// retained for compatibility; loop timer/completion keys remain unchanged.
     /// Agents use their normal result checkpoint as the completion record.
     pub fn loop_deadline_key(
@@ -1124,14 +1124,24 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse loop deadline source: {err}"))?;
         let step = self.step(step_id, &source)?;
-        if !matches!(step.step_type.as_str(), "While" | "Split" | "Agent") {
+        if !matches!(
+            step.step_type.as_str(),
+            "While" | "Split" | "Agent" | "EmbedWorkflow"
+        ) {
             return Err(format!("direct step '{step_id}' is not a loop"));
         }
-        let kind = if step.step_type == "Agent" {
+        let kind = if matches!(step.step_type.as_str(), "Agent" | "EmbedWorkflow") {
             if complete {
-                return Err("Agent completion uses its result checkpoint".into());
+                return Err(format!(
+                    "{} completion uses its result checkpoint",
+                    step.step_type
+                ));
             }
-            "agent-deadline"
+            if step.step_type == "Agent" {
+                "agent-deadline"
+            } else {
+                "embed-deadline"
+            }
         } else if complete {
             "loop-complete"
         } else {

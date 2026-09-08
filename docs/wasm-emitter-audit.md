@@ -1293,3 +1293,19 @@ async 0.2.0 interface is selected automatically for new artifacts, with 0.1.0
 bindings retained for existing binaries. This does not add per-agent wrappers
 or move workflow decisions into the host. The implementation record provides
 the verification results and remaining gaps; E128 remains in place.
+
+
+### Embed-owned timeout qualification · 2026-09-08
+
+The normal inline Embed emitter now applies a total deadline across child work
+and retries using the shared guest scope. Its own timeout returns
+`EMBED_TIMEOUT` after cleanup and parent-frame restoration; inherited timeout
+reasons bypass child recovery. Durable keys preserve the original budget across
+parks and completed result checkpoints bypass later expiry. Retry sleeps and
+Delay wakes stay within the enclosing budget.
+
+Eight private-emitter tests cover pending I/O, nested/parallel children, parent
+precedence, zero/overflow, replay, backoff, early wakes and malformed state. See
+`compile/embed_deadline_tests.rs` and the implementation record. Public E128
+rejection remains until the remaining tool/publication, race and grace contracts
+are qualified; this is not a claim that all authored Embed timeouts are released.

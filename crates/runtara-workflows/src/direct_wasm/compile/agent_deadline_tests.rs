@@ -14,12 +14,17 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "embed_deadline_tests.rs"]
+mod embed;
+
 struct Host {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     started: Instant,
     clock_override: AtomicU64,
     cancel: AtomicBool,
     acknowledged: AtomicBool,
+    recovery_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    recovery_observed: AtomicBool,
 }
 impl Host {
     fn new() -> Self {
@@ -29,6 +34,8 @@ impl Host {
             clock_override: AtomicU64::new(0),
             cancel: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
+            recovery_cleanup: Mutex::new(None),
+            recovery_observed: AtomicBool::new(false),
         }
     }
 }
@@ -46,11 +53,22 @@ impl RuntimeHost for Host {
     async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
-    async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
+    async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        if kind == "step_debug_start"
+            && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == "handled"
+        {
+            let cleanup = self.recovery_cleanup.lock().unwrap().clone();
+            if let Some(cleanup) = cleanup {
+                tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
+                    .await
+                    .map_err(|_| "Embed recovery preceded child cleanup")?;
+                self.recovery_observed.store(true, Ordering::SeqCst);
+            }
+        }
         Ok(())
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {
-        Ok(false)
+        Ok(self.recovery_cleanup.lock().unwrap().is_some())
     }
     async fn breakpoint_pause(&self) -> Result<(), String> {
         Err("unexpected breakpoint".into())

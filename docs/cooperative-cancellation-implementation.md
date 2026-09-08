@@ -2443,3 +2443,61 @@ The full `direct_wasm_execute` integration suite also passed: 395 tests, with
 three manual benchmarks ignored. After strengthening the recovery-time cleanup
 assertion, its three preparation tests were rerun and passed; the final compiler
 suite and feature-gated Clippy run include that fixture revision.
+
+
+## Embed-owned cooperative budgets (2026-09-08)
+
+The ordinary inline `EmbedWorkflow` run-plan path now initializes its own total
+budget on a result-checkpoint miss. It reuses Agent budget arithmetic,
+`deadline_scope` ownership and the standard cooperative waits. Child attempts
+share the same deadline; nested frames preserve it. The owning Embed resolves
+its child work, restores the parent scope and routes `EMBED_TIMEOUT` with
+`retryable: false`. An earlier enclosing deadline propagates past the Embed's
+handler instead. A zero budget skips the child, and successful checkpoint replay
+bypasses an expired budget.
+
+Durable Embed budgets use an eight-byte epoch deadline under the existing
+structured key scheme with the new `embed-deadline` kind. The shared stdlib key
+function retains its old WIT name and preserves Agent/loop keys. Definition,
+invocation and namespace identities stay separate; retries reuse the same
+budget. Malformed state returns `EMBED_DEADLINE_STATE`. Live elapsed time uses
+WASI monotonic clocks; durable Delay/retry wakes are clamped to the scope.
+
+This also fixes Embed retry backoff under an inherited scope: the shared wait
+clamp bounds the sleep, and the post-wait boundary checks expiry before starting
+another child attempt. Own expiry bypasses retry checkpointing and child
+recovery. No host scope registry, task API, additional Store or product switch
+is introduced. The compiler cache identity is `cooperative-waits=shared-v8`.
+New Embed error strings are included only in artifacts containing an Embed
+budget; existing local slots and scope frames are reused.
+
+Eight private-emitter tests in `compile/embed_deadline_tests.rs` exercise zero
+budgets, hanging headers/partial bodies, root Cancel, ordinary failures, success,
+u64 saturation, completed replay, non-durable retry sleep, durable retry parking,
+early Delay resume, malformed deadline state, absent recovery handlers, nested
+Embed retries, two overlapping Split child calls, and both parent/child deadline
+orderings. Recovery debug callbacks require socket closure while the workflow
+is still running. The tests supply the complete child closure and assert the
+specific support rejection and validator E128 before privately emitting the
+candidate, so they introduce no production opt-in.
+
+The final compiler regression run passed 618 tests; the final strengthened Embed
+matrix passed all eight tests. The shared stdlib suite passed 237 tests with one
+existing ignored test. All 27 Agent components and both shared workflow
+components rebuilt with metadata; the feature-gated real-component cancellation
+suite passed all 86 tests. These are execution/compatibility results, not new
+performance measurements.
+
+E128 remains in place. This qualifies the ordinary inline Embed run-plan path;
+Embed-as-AI-tool budgets, runtime-free publication with owned Embed deadlines,
+full completion-race/cleanup-grace qualification, other preparation gaps,
+individual timed-Agent sibling preservation and the remaining G1–G10 gates are
+still open. It does not complete the cancellation plan or its E2E, soak and paired
+measurement requirements.
+
+Final integration verification: `direct_wasm_execute` passed all 395 tests
+(three manual benchmarks ignored). Feature-gated all-target workflows/stdlib
+Clippy, Rust formatting, `git diff --check` and patterns-page JavaScript syntax
+passed. The final eight-test Embed rerun includes the explicit E128 assertion
+and child-aware support analysis. No browser visual check, database/server E2E,
+resource soak or controlled size/latency run is claimed for this stage.

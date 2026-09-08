@@ -588,3 +588,20 @@ The published-child timeout fixture puts the budget on its calling parent;
 runtime-bearing published graphs remain subject to existing safety validation.
 Own Agent preparation budgets have private-emitter coverage while E128 stays
 in force. This adds G5/G6 evidence without closing their remaining gates.
+
+
+### Embed-owned budget progress · 2026-09-08
+
+The normal inline Embed run-plan now owns a total cooperative budget across
+child I/O and retries. It uses the same monotonic arithmetic, durable deadline
+keys, scope ownership and wake clamping as the existing implementation. Expiry
+resolves child work before `EMBED_TIMEOUT` recovery; an earlier parent deadline
+bypasses child handlers. Durable result hits remain complete on later replay.
+
+Private-emitter coverage includes nested Embed and overlapping Split children,
+zero/saturating budgets, root Cancel, ordinary errors, absent recovery, malformed
+state, early Delay resume and durable/non-durable backoff. See the implementation
+record for exact results. E128 remains: Embed-as-tool budgets, runtime-free
+publication with own Embed deadlines, completion races and cleanup grace still
+require qualification before releasing the authored timeout field. This advances
+G5/G6/G7 without declaring them complete.

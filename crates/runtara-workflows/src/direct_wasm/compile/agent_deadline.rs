@@ -1,7 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Agent-owned total budget. A result checkpoint bypasses this scope; attempts
-//! share its absolute deadline, including time spent in retry backoff.
+//! Shared Agent/Embed budget initialization and arithmetic, plus Agent error
+//! construction. A result checkpoint bypasses the budget; attempts share its
+//! absolute deadline, including time spent in retry backoff.
 use super::abi::{push_retptr_arg, push_retptr_i64_load, return_if_retptr_error};
 use super::*;
 use wasm_encoder::{BlockType, Function, Instruction, MemArg};
@@ -14,8 +15,8 @@ const BUDGET_MS: u32 = 163;
 pub(super) fn enter(
     body: &mut Function,
     indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    step_id: &str,
+    state_error: &DirectDataSegment,
+    step: &DirectDataSegment,
     source: (u32, u32),
     timeout: u64,
     durable: bool,
@@ -27,8 +28,8 @@ pub(super) fn enter(
         super::loop_deadline::load_budget(
             body,
             indices,
-            &static_data.agent_deadline_state_error,
-            static_data.step_id(step_id).expect("planned Agent"),
+            state_error,
+            step,
             source,
             timeout,
             DEADLINE,
@@ -94,13 +95,23 @@ pub(super) fn subtract_saturating(body: &mut Function, budget: u32, elapsed: u32
 }
 
 pub(super) fn clamp_retry(body: &mut Function, indices: &DirectCoreFunctionIndices, own: bool) {
+    clamp_wait(body, indices, own, DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL);
+}
+
+/// Clamp a wait to the earliest applicable live budget.
+pub(super) fn clamp_wait(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    own: bool,
+    duration: u32,
+) {
     super::deadline_scope::choose(body, indices, own);
     body.instruction(&Instruction::LocalGet(REMAINING));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+    body.instruction(&Instruction::LocalGet(duration));
     body.instruction(&Instruction::I64LtU);
     body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::LocalGet(REMAINING));
-    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+    body.instruction(&Instruction::LocalSet(duration));
     body.instruction(&Instruction::End);
 }
 

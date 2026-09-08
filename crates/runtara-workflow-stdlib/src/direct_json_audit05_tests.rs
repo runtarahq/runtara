@@ -57,17 +57,26 @@ fn audit_05_timer_records_separate_definition_invocation_and_terminal_state() {
 
 #[test]
 fn agent_deadline_identity_is_distinct_and_stable_across_attempts() {
+    step_deadline_identity("Agent", "agent-deadline");
+}
+
+#[test]
+fn embed_deadline_identity_is_distinct_and_stable_across_attempts() {
+    step_deadline_identity("EmbedWorkflow", "embed-deadline");
+}
+
+fn step_deadline_identity(step_type: &str, kind: &str) {
     let manifest = DirectJsonManifest::parse(
         &serde_json::to_vec(&json!({"graph":{"steps":[
-            {"id":"fetch","stepType":"Agent","nestedGraphs":[{"role":"embed.child","graph":{
-                "steps":[{"id":"fetch","stepType":"Agent"}]}}]}
+            {"id":"fetch","stepType":step_type,"nestedGraphs":[{"role":"embed.child","graph":{
+                "steps":[{"id":"fetch","stepType":step_type}]}}]}
         ]}}))
         .unwrap(),
     )
     .unwrap();
     let root = source(json!([]), json!([]), "");
     let key = manifest.loop_deadline_key("fetch", &root, false).unwrap();
-    assert!(key.starts_with("runtara:v2:[\"agent-deadline\","));
+    assert!(key.starts_with(&format!("runtara:v2:[\"{kind}\",")));
     assert!(manifest.loop_deadline_key("fetch", &root, true).is_err());
     for attempt in [0, 1, 2, u32::MAX] {
         let mut context: Value = serde_json::from_slice(&root).unwrap();

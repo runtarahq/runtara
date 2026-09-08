@@ -520,6 +520,11 @@ fn emit_embed_workflow_child_with_retry(
             max_retries,
             retry_delay_ms,
         );
+        super::loop_deadline::check(
+            body,
+            indices,
+            Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 1 }),
+        );
         emit_embed_workflow_child_attempt(
             body,
             indices,
@@ -595,6 +600,7 @@ pub(super) fn emit_embed_workflow_plan(
     breakpoint: bool,
     max_retries: u32,
     retry_delay_ms: u64,
+    timeout_ms: Option<u64>,
     child_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
@@ -754,6 +760,43 @@ pub(super) fn emit_embed_workflow_plan(
         route_len_local,
     );
 
+    // Embed owners use negative mapping IDs; loop owners are positive and
+    // zero is reserved for an Agent-owned deadline. Mapping IDs are global.
+    let deadline_owner = -(i64::from(input_mapping_id) + 1);
+    if let Some(timeout) = timeout_ms {
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::Block(BlockType::Empty));
+        super::agent_deadline::enter(
+            body,
+            indices,
+            &static_data.embed_deadline_state_error,
+            step_id_segment,
+            (
+                DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL,
+                DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL,
+            ),
+            timeout,
+            durable,
+        );
+        super::agent_deadline::remaining(body, indices);
+        super::deadline_scope::enter(
+            body,
+            indices,
+            deadline_owner,
+            &static_data.embed_timeout_error,
+            super::agent_deadline::REMAINING,
+        );
+        if durable {
+            super::loop_deadline::include_epoch(body, super::agent_deadline::DEADLINE);
+        }
+        super::loop_deadline::check(
+            body,
+            indices,
+            Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+        );
+    }
+
     let child_variables = DirectVariables::Locals {
         ptr_local: DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
         len_local: DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
@@ -780,6 +823,17 @@ pub(super) fn emit_embed_workflow_plan(
         workflow_log_kind,
         workflow_error_kind,
     );
+    if timeout_ms.is_some() {
+        // Includes synchronous child work and final assembly before accepting
+        // success. Preserve a previously selected reason until its owner claims.
+        super::deadline_scope::break_if_selected(body, indices, 0);
+        super::loop_deadline::check(
+            body,
+            indices,
+            Some(DirectFailureTarget::EmbedWorkflow { branch_depth: 0 }),
+        );
+        body.instruction(&Instruction::End);
+    }
     pop_embed_workflow_frame(
         body,
         steps_ptr_local,
@@ -796,6 +850,23 @@ pub(super) fn emit_embed_workflow_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(data_len_local));
 
+    if timeout_ms.is_some() {
+        body.instruction(&Instruction::LocalGet(super::deadline_scope::SELECTED));
+        body.instruction(&Instruction::I64Const(deadline_owner));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        for (dst, src) in [
+            (output_ptr_local, super::deadline_scope::SELECTED_PTR),
+            (output_len_local, super::deadline_scope::SELECTED_LEN),
+        ] {
+            body.instruction(&Instruction::LocalGet(src));
+            body.instruction(&Instruction::LocalSet(dst));
+        }
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        super::deadline_scope::claim(body, deadline_owner);
+        body.instruction(&Instruction::End);
+    }
     super::deadline_scope::propagate(body, indices, failure_target);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));

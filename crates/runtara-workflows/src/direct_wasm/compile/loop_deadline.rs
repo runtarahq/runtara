@@ -99,6 +99,12 @@ pub(super) fn enter(
     body.instruction(&Instruction::LocalSet(DIRECT_LOOP_NOW_MS_LOCAL));
     body.instruction(&Instruction::End);
     super::deadline_scope::enter(body, indices, owner, error, DIRECT_LOOP_NOW_MS_LOCAL);
+    include_epoch(body, deadline_local);
+    body.instruction(&Instruction::End);
+}
+
+/// Add a persisted scope budget to wake clamping; the caller restores its frame.
+pub(super) fn include_epoch(body: &mut WasmFunction, deadline_local: u32) {
     // Add this deadline to the enclosing minimum. Frame restoration removes it.
     body.instruction(&Instruction::LocalGet(DIRECT_ACTIVE_DEADLINE_FLAG_LOCAL));
     body.instruction(&Instruction::I32Eqz);
@@ -112,7 +118,6 @@ pub(super) fn enter(
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::LocalSet(DIRECT_ACTIVE_DEADLINE_FLAG_LOCAL));
-    body.instruction(&Instruction::End);
 }
 
 /// Called only on successful exit, before the enclosing scope is restored.

@@ -137,7 +137,7 @@ pub(super) fn select(body: &mut Function) {
     body.instruction(&Instruction::LocalSet(SELECTED));
 }
 
-/// Called after the owning loop frame has been restored, before its recovery.
+/// Called after the owning scope frame has been restored, before its recovery.
 pub(super) fn claim(body: &mut Function, id: i64) {
     body.instruction(&Instruction::LocalGet(SELECTED));
     body.instruction(&Instruction::I64Const(id));

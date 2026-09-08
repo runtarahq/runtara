@@ -11122,7 +11122,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
-        tag.contains("cooperative-waits=shared-v7"),
+        tag.contains("cooperative-waits=shared-v8"),
         "recompilation must replace artifacts with duplicated wait code: {tag}"
     );
     assert!(tag.contains("parent-cancel=v1"));

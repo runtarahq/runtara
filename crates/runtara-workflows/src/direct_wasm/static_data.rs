@@ -168,6 +168,8 @@ pub(super) struct DirectCoreStaticData {
     pub(super) loop_deadline_state_error: DirectDataSegment,
     pub(super) agent_timeout_error: DirectDataSegment,
     pub(super) agent_deadline_state_error: DirectDataSegment,
+    pub(super) embed_timeout_error: DirectDataSegment,
+    pub(super) embed_deadline_state_error: DirectDataSegment,
     agent_timeouts: BTreeMap<u32, u64>,
     monotonic_clock: bool,
     pub(super) while_timeout_error: DirectDataSegment,
@@ -315,6 +317,32 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let has_embed_timeout = super::manifest::has_embed_timeout(graph, child_workflows);
+        let embed_timeout_error = DirectDataSegment::new(
+            offset,
+            if !has_embed_timeout {
+                b""
+            } else {
+                br#"{"code":"EMBED_TIMEOUT","message":"EmbedWorkflow step exceeded its configured timeout","category":"timeout","severity":"error","retryable":false}"#
+            },
+        );
+        offset = align_i32(
+            checked_offset_add(offset, embed_timeout_error.data.len())?,
+            16,
+        );
+        let embed_deadline_state_error = DirectDataSegment::new(
+            offset,
+            if !has_embed_timeout {
+                b""
+            } else {
+                br#"{"code":"EMBED_DEADLINE_STATE","message":"EmbedWorkflow deadline checkpoint must contain exactly eight bytes","category":"permanent","severity":"error","retryable":false}"#
+            },
+        );
+        offset = align_i32(
+            checked_offset_add(offset, embed_deadline_state_error.data.len())?,
+            16,
+        );
+
         let loop_deadline_state_error =
             DirectDataSegment::new(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR);
         offset = align_i32(
@@ -387,6 +415,8 @@ impl DirectCoreStaticData {
             loop_deadline_state_error,
             agent_timeout_error,
             agent_deadline_state_error,
+            embed_timeout_error,
+            embed_deadline_state_error,
             agent_timeouts,
             monotonic_clock: super::manifest::needs_monotonic_clock(graph, child_workflows),
             while_timeout_error,
@@ -469,6 +499,8 @@ impl DirectCoreStaticData {
             &self.loop_deadline_state_error,
             &self.agent_timeout_error,
             &self.agent_deadline_state_error,
+            &self.embed_timeout_error,
+            &self.embed_deadline_state_error,
             &self.while_timeout_error,
             &self.split_timeout_error,
         ];

@@ -1631,6 +1631,14 @@ pub(super) fn needs_monotonic_clock(
     graphs.extend(children.iter().map(|child| &child.graph));
     while let Some(graph) = graphs.pop() {
         if graph.agents.iter().any(|agent| agent.timeout.is_some())
+            || graph.steps.iter().any(|step| {
+                step.step_type == "EmbedWorkflow"
+                    && step
+                        .body
+                        .get("timeout")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some()
+            })
             || graph.whiles.iter().any(|value| {
                 value
                     .value
@@ -1649,6 +1657,34 @@ pub(super) fn needs_monotonic_clock(
             return true;
         }
         for step in &graph.steps {
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    false
+}
+
+/// Whether the artifact contains an Embed-owned budget, including nested definitions.
+pub(super) fn has_embed_timeout(
+    root: &DirectGraphManifest,
+    children: &[DirectChildWorkflowGraphManifest],
+) -> bool {
+    let mut graphs = vec![root];
+    graphs.extend(children.iter().map(|child| &child.graph));
+    while let Some(graph) = graphs.pop() {
+        for step in &graph.steps {
+            if step.step_type == "EmbedWorkflow"
+                && step
+                    .body
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+            {
+                return true;
+            }
             graphs.extend(
                 step.nested_graphs
                     .iter()

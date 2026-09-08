@@ -377,6 +377,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint,
             max_retries,
             retry_delay_ms,
+            timeout_ms,
             child_plan,
             error_plan,
             ..
@@ -387,6 +388,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint: *breakpoint,
             max_retries: *max_retries,
             retry_delay_ms: *retry_delay_ms,
+            timeout_ms: *timeout_ms,
             child_plan: child_plan.clone(),
             next_plan,
             error_plan: error_plan.clone(),
