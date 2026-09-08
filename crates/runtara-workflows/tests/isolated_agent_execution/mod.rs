@@ -20,7 +20,50 @@ use runtara_workflows::direct_wasm::{
     DirectCompilationResult, compose_direct_workflow_with_isolated_agents,
 };
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// Drive wasmtime epochs from a dedicated thread, the way production's
+/// `spawn_epoch_ticker` does.
+///
+/// A `tokio::time::interval` task shares the runtime it is meant to interrupt:
+/// when the machine is oversubscribed, or every worker sits inside a
+/// synchronous guest call, the tick that makes a stored cancel flag visible can
+/// arrive seconds late and a cancellation assertion times out for no reason
+/// beyond load. An OS thread cannot be starved that way. Dropping the guard
+/// stops the thread, so a test leaves nothing behind.
+struct EpochTicker {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EpochTicker {
+    fn spawn(engine: Arc<wasmtime::Engine>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("test-epoch-ticker".into())
+            .spawn(move || {
+                while !stop_for_thread.load(Ordering::Acquire) {
+                    std::thread::sleep(runtara_component_host::EPOCH_TICK);
+                    engine.increment_epoch();
+                }
+            })
+            .expect("epoch ticker thread");
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 fn limits() -> PackageLimits {
     PackageLimits {
@@ -355,13 +398,7 @@ async fn run_composed(
     };
     let input = serde_json::to_vec(&input).unwrap();
     let (host, _rx) = super::wasm_performance_baseline::host(&input);
-    let ticker = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(runtara_component_host::EPOCH_TICK);
-        loop {
-            tick.tick().await;
-            engine.increment_epoch();
-        }
-    });
+    let ticker = EpochTicker::spawn(engine);
     let run_spec = WorkflowRunSpec {
         runtime: Some(host.clone()),
         ..spec()
@@ -412,8 +449,7 @@ async fn run_composed(
             "checkpoint replay must launch no children"
         );
     }
-    ticker.abort();
-    let _ = ticker.await;
+    drop(ticker);
     tasks.shutdown().await.unwrap();
     assert_eq!(tasks.retained_result_bytes(), 0);
     let recorded = contexts.lock().unwrap().clone();

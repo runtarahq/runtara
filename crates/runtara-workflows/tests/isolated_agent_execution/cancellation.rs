@@ -212,13 +212,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
         4,
     )
     .unwrap();
-    let ticker = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(runtara_component_host::EPOCH_TICK);
-        loop {
-            tick.tick().await;
-            engine.increment_epoch();
-        }
-    });
+    let ticker = super::EpochTicker::spawn(engine);
     let input = serde_json::to_vec(&input).unwrap();
     let (host, captured) = super::super::wasm_performance_baseline::host(&input);
     let root_cancel = Arc::new(AtomicBool::new(false));
@@ -323,8 +317,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
         arrivals.try_recv().is_err(),
         "unexpected extra HTTP request"
     );
-    ticker.abort();
-    let _ = ticker.await;
+    drop(ticker);
     server.abort();
     let _ = server.await;
     result.exit
