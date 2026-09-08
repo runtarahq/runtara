@@ -2,6 +2,9 @@
 use super::*;
 use crate::direct_wasm::WorkflowAbi;
 
+#[path = "agent_tool_deadline_tests.rs"]
+mod agent_tool;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Child {
     Success,
@@ -107,6 +110,7 @@ struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
     children: Arc<AtomicUsize>,
+    child_requests: Arc<Mutex<Vec<Value>>>,
     closed: Arc<AtomicUsize>,
 }
 impl Drop for Server {
@@ -129,6 +133,8 @@ impl Server {
         let url = format!("http://{}", listener.local_addr()?);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let children = Arc::new(AtomicUsize::new(0));
+        let child_requests = Arc::new(Mutex::new(Vec::new()));
+        let child_inputs = child_requests.clone();
         let closed = Arc::new(AtomicUsize::new(0));
         let (seen, count, cleanup) = (requests.clone(), children.clone(), closed.clone());
         let task = tokio::spawn(async move {
@@ -167,6 +173,7 @@ impl Server {
                         .as_str()
                         .is_some_and(|url| url.ends_with("/child"))
                     {
+                        child_inputs.lock().unwrap().push(envelope.clone());
                         let index = count.fetch_add(1, Ordering::SeqCst);
                         let operation = *script
                             .get(index)
@@ -228,6 +235,7 @@ impl Server {
             url,
             requests,
             children,
+            child_requests,
             closed,
         })
     }

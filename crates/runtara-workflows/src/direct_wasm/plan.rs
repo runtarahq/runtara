@@ -242,13 +242,14 @@ pub(super) enum DirectAiToolPlan {
     Agent {
         agent_id: u32,
         agent_component_id: String,
+        step_id: String,
+        durable: bool,
         /// The advertised tool name (the edge label; the synthetic
         /// `<toolset>_search`/`_invoke` name for MCP meta-tools). Names the
         /// per-CALL checkpoint scope `{ai_step}.tool.{label}.{call}` when the
         /// target is a workflow-agent.
         label: String,
-        /// Legacy tool Agent timeout. Supported artifacts always leave this
-        /// unset because Agent per-step timeouts are rejected before compile.
+        /// Guest-owned budget for one replay-stable model tool call.
         timeout_ms: Option<u64>,
     },
     /// Run a composed child workflow with the LLM-provided arguments as its input
@@ -1059,6 +1060,8 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        step_id: tool_agent.step_id.clone(),
+                        durable: tool_agent.durable,
                         label: name.clone(),
                         timeout_ms: tool_agent.timeout,
                     });
@@ -1079,6 +1082,8 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        step_id: tool_agent.step_id.clone(),
+                        durable: tool_agent.durable,
                         label: name.clone(),
                         // MCP tool providers carry their own transport timeout;
                         // this is typically None (no per-call override).
@@ -3614,6 +3619,8 @@ mod tests {
         let agent_tool = DirectAiToolPlan::Agent {
             agent_id: 1,
             agent_component_id: "utils".into(),
+            step_id: "lookup".into(),
+            durable: true,
             label: "lookup".into(),
             timeout_ms: None,
         };

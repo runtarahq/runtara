@@ -734,6 +734,8 @@ pub(super) fn emit_ai_agent_loop_plan(
             DirectAiToolPlan::Agent {
                 agent_id,
                 agent_component_id,
+                step_id: tool_step_id,
+                durable,
                 label,
                 timeout_ms,
             } => {
@@ -744,28 +746,18 @@ pub(super) fn emit_ai_agent_loop_plan(
                 let tool_capability = static_data
                     .agent_capability_id(*agent_id)
                     .expect("AiAgent tool has a static capability id");
-                // Compatibility path for decoded legacy manifests. Supported
-                // compiler output always leaves this unset: Agent `timeout` is
-                // rejected before compilation rather than treated as a
-                // best-effort tool-call deadline. The merge overwrites
-                // DIRECT_AI_TOOL_ARGS in place only for a legacy manifest.
-                if let Some(ms) = timeout_ms {
-                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
-                    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));
-                    body.instruction(&Instruction::I64Const(*ms as i64));
-                    push_retptr_arg(body);
-                    body.instruction(&Instruction::Call(indices.stdlib_ai_tool_args_with_timeout));
-                    emit_retptr_error_or_return(
+                if let Some(timeout) = timeout_ms {
+                    super::agent_tool_deadline::enter(
                         body,
                         indices,
-                        None,
-                        route_ptr_local,
-                        route_len_local,
-                    );
-                    load_retptr_list(
-                        body,
-                        DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-                        DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+                        static_data,
+                        *agent_id,
+                        tool_step_id,
+                        step_id,
+                        label,
+                        *durable,
+                        *timeout,
+                        (source_ptr_local, source_len_local),
                     );
                 }
                 // A workflow-agent tool shares this instance's checkpoint
@@ -821,7 +813,9 @@ pub(super) fn emit_ai_agent_loop_plan(
                 super::deadline_scope::propagate(
                     body,
                     indices,
-                    failure_target.map(|target| target.nested(5)),
+                    failure_target.map(|target| {
+                        target.nested(5 + u32::from(*durable && timeout_ms.is_some()))
+                    }),
                 );
                 // A tool failure is fed back to the LLM as the tool result (the
                 // error envelope) and the loop continues, rather than failing the
@@ -833,6 +827,9 @@ pub(super) fn emit_ai_agent_loop_plan(
                     DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
                     DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
                 );
+                if timeout_ms.is_some() {
+                    super::agent_tool_deadline::finish(body, indices, *durable);
+                }
             }
             DirectAiToolPlan::Embed {
                 step_id: embed_step_id,

@@ -44,7 +44,10 @@ Implemented and covered by focused tests:
 
 **Public Agent/Embed timeout syntax still returns E128.** Internal timeout
 fixtures deliberately bypass that validation rejection to exercise the emitter;
-their success does not mean users can already author those timeouts. No product
+their success does not mean users can already author those timeouts. AUDIT-28
+fixes the Agent-as-AI-tool path, which previously only injected a capability
+argument. AI memory and synthetic MCP provider metadata still drops the
+referenced Agent budget, so blanket public acceptance would remain incorrect. No product
 feature flag or optional cancellation backend has been added.
 
 ### Remaining work to reach the goal
@@ -52,7 +55,7 @@ feature flag or optional cancellation backend has been added.
 | Work | Completion criterion |
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
-| Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
+| Public timeout support | Agent-as-AI-tool budget enforcement is implemented (AUDIT-28). Carry and enforce the referenced Agent timeout for AI memory and synthetic MCP provider calls, then remove E128 deliberately and move deadline coverage through public validation/compilation/composition, including zero/overflow/inherited budgets, replay and cleanup escalation. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
@@ -2184,3 +2187,61 @@ Agent/Embed timeouts still return E128. Full owner-loss/recovery and partition
 coverage, mixed-version safety, the remaining composed race/CPU/durable nesting
 matrix, obsolete-path compatibility work, controlled size/time/DB-cost reports,
 Linux soak, upstream migration integration and the PR remain outstanding.
+
+
+### AUDIT-28 · Agent tools need real guest deadlines
+
+**Status: Agent-as-AI-tool enforcement implemented; E128 remains.** Public-timeout
+review found that `DirectAiToolPlan::Agent` carried `timeout_ms`, but the tool arm
+only called `ai-tool-args-with-timeout`. Its invocation site was excluded from
+Agent deadline selection. This could modify an HTTP capability's own timeout
+argument; it did not establish workflow-owned cancellation or a predictable
+per-call budget. Removing E128 without correcting this path would expose that
+mismatch to authored workflows.
+
+The tool plan now carries its definition step and effective durability. A small
+guest emitter helper reuses the existing Agent budget, scoped source and
+checkpoint operations. It identifies a tool call using the existing AI step,
+tool label and replay-stable call counter. The shared Agent invoke/connection
+preparation path selects the earliest own or enclosing deadline and resolves
+standard cancellation before returning timeout feedback. The old argument-merge
+call and its unused compiler import-index plumbing are removed; the stdlib export
+remains available to previously compiled artifacts.
+
+A durable result checkpoint bypasses both invocation and its old budget on
+replay. A pending budget survives pause and includes elapsed parked time; a new
+model-selected call starts its own budget. Own timeout becomes a non-retryable
+`AGENT_TIMEOUT` tool result. The model may explicitly select another call, while
+root cancellation or enclosing timeout escapes the tool loop without feedback or
+new model work. Capability arguments retain their own meaning, including the
+HTTP I/O timeout. The compiler cache tag advances from `shared-v17` to
+`shared-v18`; old stored workflow artifacts are not rewritten.
+
+| Contract | Test |
+| --- | --- |
+| Zero budget sends no HTTP and yields typed, non-retryable feedback | `agent_tool_zero_budget_is_typed_feedback_without_invocation` |
+| Pending headers/body close before subsequent model work; a later selected call has a fresh budget; the HTTP timeout stays 90,000 ms | `agent_tool_closes_headers_and_body_and_gives_next_call_a_fresh_budget` |
+| Root Cancel and enclosing While timeout bypass tool feedback | `agent_tool_root_cancel_and_parent_timeout_bypass_model_feedback` |
+| Completed calls replay after pause without another effect or model decision | `agent_tool_completed_calls_replay_after_pause_without_reinvoking` |
+| A pending budget expires while paused; only a new second call may invoke | `agent_tool_pending_budget_survives_pause_without_granting_extra_time` |
+| Malformed durable budgets fail before new tool I/O or model feedback | `agent_tool_corrupt_pending_budget_fails_before_dispatch_or_model_feedback` |
+| Maximum unsigned budget preserves success and provider errors | `agent_tool_maximum_budget_and_provider_errors_preserve_results` |
+
+The seven new tests pass with normally composed components (durable and
+non-durable matrices where applicable). A negative control that removed the
+`AiTool` invocation site's own deadline selection failed the zero-budget test
+with `unexpected child request 0`; the production selection was then restored.
+The tests still use the existing private emitter harness because validation and
+direct-support gates intentionally continue to reject Agent/Embed timeout syntax.
+The full feature-gated compiler library suite passed 682 tests, the public AI
+execution selection passed 19 tests, and feature-gated all-target Clippy passed.
+Commands and skipped checks are in the implementation record.
+
+The same inventory found additional public-enablement work in
+`manifest::ai_agent_memory_provider` / `ai_agent_mcp_edges`: they extract provider
+identity/connections but do not carry the referenced Agent timeout, and generated
+`memory.load`, `memory.save` and `agent.tool.mcp` entries set `timeout: None`.
+Those metadata and invocation paths require explicit budgets and tests. The
+Agent-tool fix does not establish those contracts, complete G5, or justify
+removing E128. Public validation, public component import inference and supported
+export modes also need to be tested together when that gate is removed.

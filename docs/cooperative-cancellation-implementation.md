@@ -3344,3 +3344,81 @@ The full component/compiler matrices, baseline/candidate size and latency
 measurements and Linux soak were not rerun for this native lifecycle change.
 No G1–G10 completion is claimed. E128 remains, and the audit's consolidated
 remaining-work table still governs final qualification and upstream/PR work.
+
+
+### Guest deadlines for Agent tools · 2026-09-08
+
+Public-timeout review found an unqualified invocation path: the AI-loop Agent
+tool arm injected `timeout_ms` through `ai-tool-args-with-timeout`, while
+`emit_agent_invoke` selected an own budget only for ordinary `Step` sites.
+Consequently, simply dropping E128 would not provide the same deadline contract
+for an Agent invoked as a model tool. AUDIT-28 records the finding and contract.
+
+The Agent tool plan now carries its original definition step and effective
+manifest durability. `agent_tool_deadline` reuses scoped source construction,
+Agent budget arithmetic and the common checkpoint helpers. It scopes each call
+by the existing AI step, tool label and replay-stable call counter. The shared
+Agent invoke/connection-preparation path also selects deadlines for `AiTool`.
+A local timeout becomes non-retryable `AGENT_TIMEOUT` model feedback after
+standard subtask cleanup. Root cancellation or enclosing expiry escapes without
+new feedback or model work. Capability inputs keep their authored values.
+
+Durable completed results bypass their old budgets on replay. Pending budgets
+persist through pause and include parked time; the next model-selected call
+gets its own budget. The new result checkpoint also covers the gap between tool
+completion and the enclosing AI turn snapshot. No new authored syntax, product
+flag, task resource, host bookkeeping, guest import or runtime component source
+is introduced. The old timeout argument-merge compiler call/index fields are
+removed, while the stdlib export remains available for old artifacts. The cache
+tag advances to `cooperative-waits=shared-v18`; parked/registered artifacts are
+not rewritten.
+
+Verification:
+
+- Seven new composed Agent-tool tests pass (7.95s), covering durable/non-durable
+  zero budgets, headers/body cleanup, fresh subsequent calls, maximum unsigned
+  budgets, provider errors, root/enclosing selection, completed replay, expired
+  pending replay and malformed budget checkpoints. HTTP envelopes retain their
+  explicitly authored 90,000 ms I/O timeout when the workflow budget is 400 ms.
+- A negative control removed `AiTool` from own-deadline selection. The zero-budget
+  regression failed with `unexpected child request 0` (1.15s). The original
+  source was restored before all subsequent tests.
+- The complete feature-gated compiler library suite passed **682 tests** in
+  412.38s. This includes the seven new tests, so counts must not be summed.
+- The public `direct_wasm_execute` AI selection passed **19 tests** in 14.00s
+  (379 tests filtered out). It covers existing AI workflows and capability
+  `turnTimeout`; it does not enable or prove authored Agent/Embed timeout syntax.
+- Feature-gated workflows all-target Clippy with `-D warnings` passed (4.15s).
+  Formatting and diff whitespace checks passed. The commit uses the normal
+  formatting/workspace all-target Clippy hook without bypass.
+- The first expanded test compilation found another shared HTTP fixture
+  constructor that needed the new request-capture field. After updating that
+  constructor, the expanded and full suites above passed.
+
+Commands use the pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, the existing isolated native target and previously built
+matching Agent/shared components:
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_tool:: -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute ai_agent -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+```
+
+Logs are `/private/tmp/cooperative-agent-tool-deadline-expanded.log`,
+`/private/tmp/cooperative-agent-tool-negative.log`,
+`/private/tmp/cooperative-agent-tool-full-lib.log`,
+`/private/tmp/cooperative-agent-tool-public-ai-tests.log` and
+`/private/tmp/cooperative-agent-tool-clippy.log`.
+
+E128 and direct-support rejection remain. These authored-budget tests still use
+the existing private emitter harness; no success is claimed for public timeout
+validation/compilation. The review additionally found that AI memory and
+synthetic MCP provider construction drops the referenced Agent timeout and
+sets generated invocation metadata to `None`. Carrying and enforcing those
+budgets is the next public-enablement work. Then move the deadline corpus onto
+public compilation and verify component import inference and export modes.
+The remaining G1–G10 work, full public execution matrix, authenticated E2E,
+component rebuilds, paired size/latency report and Linux soak were not repeated
+or completed by this compiler stage.

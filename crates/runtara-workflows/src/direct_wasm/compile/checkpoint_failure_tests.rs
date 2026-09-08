@@ -365,6 +365,7 @@ async fn live_peer_server_preparation(
         url,
         requests,
         children,
+        child_requests: Default::default(),
         closed,
     })
 }

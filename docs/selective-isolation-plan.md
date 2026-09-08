@@ -1017,3 +1017,23 @@ record carry the current evidence. Extend qualification to owner loss/recovery,
 partitions, database clock changes, small pools, concurrent transitions and load.
 Include the new indexed deadline scan and lease writes in G10 measurements.
 Do not retire E128 or close G1–G10 on this lifecycle evidence.
+
+
+### Agent-tool deadline prerequisite · 2026-09-08
+
+Before retiring E128, enforce the budget at every execution site represented by
+an authored Agent definition. The Agent-as-AI-tool path previously injected
+`timeout_ms` into capability input while excluding `AiTool` from guest deadline
+selection. It now uses the shared Agent budget/cancellation/checkpoint helpers,
+with existing per-model-call scope identity and typed timeout feedback. Replayed
+completed calls skip both invocation and old budget; pending budgets include
+parked time; root and enclosing cancellation bypass feedback. No capability input
+is overwritten. AUDIT-28 maps this stage's tests and negative control.
+
+Still carry the referenced timeout into AI memory load/save and synthetic MCP
+provider metadata and enforce it at those invocation sites. These paths currently
+set their generated Agent timeout to `None`. Keep E128 until their exact behavior
+is proven. Then migrate private deadline fixtures onto public validation,
+compilation and component composition, verify import inference/export modes and
+run the affected acceptance corpus. Advancing the compiler cache tag to
+`shared-v18` does not recompile registered or parked artifacts or close G1–G10.

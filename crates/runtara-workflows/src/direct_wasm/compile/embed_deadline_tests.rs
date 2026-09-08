@@ -132,7 +132,10 @@ pub(super) fn reemit(
             .support_report
             .unsupported
             .iter()
-            .any(|feature| feature.feature == "embed-workflow-timeout")
+            .any(|feature| matches!(
+                feature.feature.as_str(),
+                "embed-workflow-timeout" | "agent-timeout"
+            ))
     );
     assert!(
         crate::validation::validate_workflow(
