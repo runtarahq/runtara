@@ -260,8 +260,7 @@ pub(super) fn emit_agent_plan(
             // 2. Read-only lookup of this attempt's checkpoint -> HIT_FLAG.
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+            super::checkpoint::emit_get_checkpoint(body, indices);
             emit_get_checkpoint_has_value(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
 
@@ -381,9 +380,7 @@ pub(super) fn emit_agent_plan(
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-            return_if_retptr_error(body, indices);
+            super::checkpoint::emit_checkpoint(body, indices);
             body.instruction(&Instruction::End); // fresh-failure If
             body.instruction(&Instruction::End); // hit/miss If
         } else {

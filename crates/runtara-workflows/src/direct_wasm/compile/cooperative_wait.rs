@@ -63,7 +63,7 @@ const STATE: [u32; 16] = [
     DEADLINE_STATUS,
 ];
 pub(super) const HELPER_PARAMS: usize = STATE.len();
-pub(super) const HELPER_COUNT: usize = 6;
+pub(super) const HELPER_COUNT: usize = 7;
 
 #[derive(Clone, Copy)]
 pub(super) enum Helper {
@@ -73,6 +73,7 @@ pub(super) enum Helper {
     WindowCancel,
     Await,
     WindowWait,
+    Fail,
 }
 
 impl Helper {
@@ -83,6 +84,7 @@ impl Helper {
         Self::WindowCancel,
         Self::Await,
         Self::WindowWait,
+        Self::Fail,
     ];
 
     pub(super) fn needs_runtime(self) -> bool {
@@ -195,6 +197,7 @@ pub(super) fn helper_body(helper: Helper, indices: &DirectCoreFunctionIndices) -
             emit_await_call(&mut body, &inline);
         }
         Helper::WindowWait => emit_window_wait(&mut body, &inline),
+        Helper::Fail => close_and_fail(&mut body, &inline),
     }
     helper_return(&mut body, 0);
     body.instruction(&Instruction::End);
@@ -342,6 +345,35 @@ fn close_all(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         body.instruction(&Instruction::End);
     });
     emit_window_close(body, indices);
+    body.instruction(&Instruction::End);
+}
+
+/// A terminal storage error owns the entire invocation. Preserve its result
+/// across standard subtask cancellation: resolving callees can write results,
+/// and no lifecycle poll may replace the original storage diagnostic.
+fn close_and_fail(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    for (local, offset) in [(0, 0), (1, 4), (2, 8)] {
+        load(body, 0, offset);
+        body.instruction(&Instruction::LocalSet(local));
+    }
+    close_all(body, indices);
+    for (local, offset) in [(0, 0), (1, 4), (2, 8)] {
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalGet(local));
+        body.instruction(&Instruction::I32Store(mem(offset)));
+    }
+    helper_return(body, 1);
+}
+
+/// Used after synchronous checkpoint calls. With no active handles the same
+/// shared helper simply forwards the error; hostless/synchronous cores retain
+/// their ABI-specific terminal path.
+pub(super) fn emit_checkpoint_error(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    load_tag(body, 0, 0);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    if !call_helper(body, indices, Helper::Fail) {
+        emit_fail_if_retptr_error_inplace(body, indices);
+    }
     body.instruction(&Instruction::End);
 }
 

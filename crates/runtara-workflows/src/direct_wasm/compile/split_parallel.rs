@@ -571,8 +571,7 @@ fn emit_durable_attempt_lookup(
     emit_build_attempt_key(body, indices, slot_ptr_local);
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+    super::checkpoint::emit_get_checkpoint(body, indices);
     emit_get_checkpoint_has_value(body);
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
     body.instruction(&Instruction::LocalGet(slot_ptr_local));
@@ -606,9 +605,7 @@ fn emit_durable_checkpoint_attempt(body: &mut WasmFunction, indices: &DirectCore
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-    return_if_retptr_error(body, indices);
+    super::checkpoint::emit_checkpoint(body, indices);
 }
 
 /// Re-fire the agent invoke for a timed-out item into `slot+RESULT_OFFSET`,
@@ -922,9 +919,7 @@ pub(super) fn emit_parallel_split_items(
         load_retptr_list(body, route_ptr_local, route_len_local);
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-        skip_on_error(body);
+        super::checkpoint::emit_get_checkpoint(body, indices);
         super::abi::emit_get_checkpoint_has_value(body);
         body.instruction(&Instruction::BrIf(0)); // HIT -> skip launch
     }
@@ -1170,9 +1165,7 @@ pub(super) fn emit_parallel_split_items(
                     emit_build_attempt_key(body, indices, route_ptr_local);
                     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
                     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
-                    push_retptr_arg(body);
-                    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-                    return_if_retptr_error(body, indices);
+                    super::checkpoint::emit_get_checkpoint(body, indices);
                     load_retptr_option_list(
                         body,
                         DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,

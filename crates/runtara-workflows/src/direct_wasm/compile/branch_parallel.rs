@@ -1536,9 +1536,7 @@ fn emit_branch_launch(
         load_retptr_list(body, route_ptr_local, route_len_local);
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-        skip_on_error(body);
+        super::checkpoint::emit_get_checkpoint(body, indices);
         emit_get_checkpoint_has_value(body);
         body.instruction(&Instruction::BrIf(0)); // HIT -> skip launch
     }

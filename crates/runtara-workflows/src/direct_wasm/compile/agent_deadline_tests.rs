@@ -20,6 +20,13 @@ mod embed;
 #[path = "embed_tool_deadline_tests.rs"]
 mod embed_tool;
 
+struct CheckpointFault {
+    pattern: String,
+    write: bool,
+    skip: usize,
+    remaining: usize,
+}
+
 struct Host {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     started: Instant,
@@ -28,7 +35,10 @@ struct Host {
     acknowledged: AtomicBool,
     recovery_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
     recovery_observed: AtomicBool,
-    checkpoint_fault: Mutex<Option<(String, bool)>>,
+    checkpoint_fault: Mutex<Option<CheckpointFault>>,
+    checkpoint_calls: Mutex<Vec<(String, bool)>>,
+    failure_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    failure_observed: AtomicBool,
     checkpoint_signal: Mutex<Option<String>>,
     custom_signals: Mutex<HashMap<String, Vec<u8>>>,
 }
@@ -43,9 +53,39 @@ impl Host {
             recovery_cleanup: Mutex::new(None),
             recovery_observed: AtomicBool::new(false),
             checkpoint_fault: Mutex::new(None),
+            checkpoint_calls: Mutex::new(Vec::new()),
+            failure_cleanup: Mutex::new(None),
+            failure_observed: AtomicBool::new(false),
             checkpoint_signal: Mutex::new(None),
             custom_signals: Mutex::new(HashMap::new()),
         }
+    }
+    fn fail_checkpoints(&self, pattern: &str, write: bool) {
+        *self.checkpoint_fault.lock().unwrap() = Some(CheckpointFault {
+            pattern: pattern.into(),
+            write,
+            skip: 0,
+            remaining: usize::MAX,
+        });
+    }
+    fn checkpoint_error(&self, key: &str, write: bool) -> bool {
+        self.checkpoint_calls
+            .lock()
+            .unwrap()
+            .push((key.into(), write));
+        let mut fault = self.checkpoint_fault.lock().unwrap();
+        let Some(fault) = fault.as_mut() else {
+            return false;
+        };
+        if fault.write != write || !key.contains(&fault.pattern) || fault.remaining == 0 {
+            return false;
+        }
+        if fault.skip > 0 {
+            fault.skip -= 1;
+            return false;
+        }
+        fault.remaining -= 1;
+        true
     }
 }
 #[async_trait::async_trait]
@@ -60,6 +100,13 @@ impl RuntimeHost for Host {
         Ok(())
     }
     async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
+        let cleanup = self.failure_cleanup.lock().unwrap().clone();
+        if let Some(cleanup) = cleanup {
+            tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
+                .await
+                .map_err(|_| "storage failure preceded peer cleanup")?;
+            self.failure_observed.store(true, Ordering::SeqCst);
+        }
         Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
@@ -106,13 +153,7 @@ impl RuntimeHost for Host {
         Ok(self.custom_signals.lock().unwrap().get(&key).cloned())
     }
     async fn get_checkpoint(&self, key: String) -> Result<Option<Vec<u8>>, String> {
-        if self
-            .checkpoint_fault
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|(prefix, write)| !*write && key.starts_with(prefix))
-        {
+        if self.checkpoint_error(&key, false) {
             return Err("fixture checkpoint read failure".into());
         }
         Ok(self.checkpoints.lock().unwrap().get(&key).cloned())
@@ -122,13 +163,7 @@ impl RuntimeHost for Host {
         key: String,
         state: Vec<u8>,
     ) -> Result<RuntimeCheckpointResult, String> {
-        if self
-            .checkpoint_fault
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|(prefix, write)| *write && key.starts_with(prefix))
-        {
+        if self.checkpoint_error(&key, true) {
             return Err("fixture checkpoint write failure".into());
         }
         let pending_signal = self

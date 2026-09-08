@@ -8093,9 +8093,16 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
         .iter()
         .position(|op| *op == SplitCheckpointOp::CallGetCheckpoint)
         .expect("checkpoint lookup");
+    // Error reporting can also load offset 8 (the error string length).
+    // Select the cached option's pointer/length pair, not that error-arm load.
     let cached_ptr_index = ops[lookup_index + 1..]
-        .iter()
-        .position(|op| *op == SplitCheckpointOp::LoadCachedPtr)
+        .windows(2)
+        .position(|pair| {
+            pair == [
+                SplitCheckpointOp::LoadCachedPtr,
+                SplitCheckpointOp::LoadCachedLen,
+            ]
+        })
         .map(|offset| lookup_index + 1 + offset)
         .expect("cached Split payload pointer load");
     let replay_else_index = ops[cached_ptr_index + 1..]
@@ -11122,7 +11129,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
-        tag.contains("cooperative-waits=shared-v11"),
+        tag.contains("cooperative-waits=shared-v12"),
         "recompilation must replace artifacts with duplicated wait code: {tag}"
     );
     assert!(tag.contains("parent-cancel=v1"));

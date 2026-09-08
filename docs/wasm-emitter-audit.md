@@ -24,8 +24,8 @@ controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. All **77 audit tests pass**, with **none
-ignored**. There are also **42 passing unit tests**: 8 graph-analysis tests for
+The original seven findings and subsequent follow-ups are documented below.
+All **77 original audit tests pass**, with **none ignored**. There are also **42 passing unit tests**: 8 graph-analysis tests for
 AUDIT-01, 6 arena tests for AUDIT-02, 7 identity tests and 1 compiler-version test
 for AUDIT-03, 6 configuration tests and 1 compiler-version test for AUDIT-04,
 2 timer-identity tests for AUDIT-05, 5 compiler tests, 2 backoff tests and 1 server
@@ -1408,3 +1408,37 @@ frame reuses existing locals and the guest operand stack; its code/stack overhea
 still belongs in the planned size and latency comparison. Other inline callback
 boundaries, deeper mixed recovery/parallel cases, full own AI budgets and cleanup
 grace remain subject to the plan's qualification gates. E128 is unchanged.
+
+### AUDIT-14 · Checkpoint failures outside the shared durable path
+
+Three composed reproductions reported successful completion despite a storage
+failure: an Agent attempt lookup treated the error as a cache miss, parallel
+prelaunch discarded a transient lookup error and read again during assembly,
+and a breakpoint write error allowed the step to run.
+
+All emitted `get-checkpoint` and `checkpoint` calls now use two shared lowering
+helpers. On error, a shared guest function preserves the original diagnostic,
+resolves the active window's component calls with standard subtask cancellation,
+and returns failure. It does not poll another signal while preserving this
+error. Successful checkpoint signal handling remains at its existing safe
+boundaries, including deferred retry handling. No host task bookkeeping or
+per-agent cancellation wrapper is added.
+
+| Case | Required behavior | Test in `compile/checkpoint_failure_tests.rs` |
+| --- | --- | --- |
+| Ordinary Agent or parallel Split attempt read fails | No fresh invoke; preserve the storage error | `attempt_checkpoint_read_failure_never_reinvokes` |
+| Failed attempt cannot be saved | Preserve the write error; no retry or successful Finish | `attempt_checkpoint_write_failure_stops_retry_and_finish` |
+| Parallel prelaunch has a one-shot read fault | Fail on that read rather than repeating it as a new lookup | `parallel_prelaunch_preserves_transient_checkpoint_failure` |
+| Debug breakpoint cannot be saved | Do not execute the marked step | `breakpoint_checkpoint_failure_prevents_step_execution` |
+| A read fails after another parallel call was queued | Resolve queued calls and report the original error | `checkpoint_failure_resolves_queued_parallel_calls` |
+| One parallel branch finishes while its peer waits for HTTP headers/body, then result saving fails | Peer socket closes before the guest reports failure | `checkpoint_failure_resolves_live_parallel_io_before_reporting` |
+
+The live-peer test gates the successful response on the other request already
+being pending. Its `runtime.fail` callback requires the server's socket-close
+notification while the Store still exists, so Store destruction alone cannot
+pass it. This is a terminal storage-failure path: it does not establish selective
+step timeout or sibling-preserving recovery. A failed write cannot undo the
+completed external request. Retrying Split items retain the existing sequential
+fallback; their tests do not claim concurrent retries. Malformed attempt payloads,
+other non-checkpoint preparation failures and deeper mixed nesting need separate
+qualification. No performance or bounded cleanup-grace claim is made here.

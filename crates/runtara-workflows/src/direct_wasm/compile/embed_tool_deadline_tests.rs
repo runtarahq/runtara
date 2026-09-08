@@ -6,6 +6,7 @@ use crate::direct_wasm::WorkflowAbi;
 enum Child {
     Success,
     Permanent,
+    Retryable,
     Headers,
     Body,
     Cancel,
@@ -183,7 +184,7 @@ impl Server {
                             cleanup.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
-                        json!({"status":if operation == Child::Permanent {400} else {200},"headers":{},"body":{"ok":operation == Child::Success}})
+                        json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":{"ok":operation == Child::Success}})
                     } else {
                         let index = {
                             let mut requests = seen.lock().unwrap();
@@ -554,7 +555,7 @@ async fn ai_response_checkpoint_failures_prevent_tool_dispatch() -> anyhow::Resu
     let compiled = compiled(dir.path(), true, None, None)?;
     for write in [false, true] {
         let host = Arc::new(Host::new());
-        *host.checkpoint_fault.lock().unwrap() = Some((RESPONSE_PREFIX.into(), write));
+        host.fail_checkpoints(RESPONSE_PREFIX, write);
         let mut server = Server::start(host.clone(), vec![], 1).await?;
         let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
         server.check().await?;
@@ -674,7 +675,7 @@ async fn shared_checkpoint_errors_stop_ordinary_agent_execution() -> anyhow::Res
     )?;
     for write in [false, true] {
         let host = Arc::new(Host::new());
-        *host.checkpoint_fault.lock().unwrap() = Some(("runtara:v2:[\"agent\",".into(), write));
+        host.fail_checkpoints("runtara:v2:[\"agent\",", write);
         let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
         let exit = invoke_with_env(&compiled, host, server.env()).await?;
         server.check().await?;
@@ -818,3 +819,6 @@ async fn await_peer_close(stream: &mut tokio::net::TcpStream) -> anyhow::Result<
         }
     }
 }
+
+#[path = "checkpoint_failure_tests.rs"]
+mod checkpoint_failure;

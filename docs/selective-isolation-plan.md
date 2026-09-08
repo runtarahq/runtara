@@ -708,3 +708,23 @@ adds saved guest values/code at Embed attempt boundaries; measure ordinary
 Embed, nested AI and deep nesting in the existing paired size/latency matrix.
 This advances the caller-state and cancellation gates without closing G1–G10 or
 retiring E128.
+
+### Shared checkpoint failures and pending calls · 2026-09-08
+
+The raw checkpoint-call inventory above is now centralized: ordinary attempt
+replay, parallel prelaunch/attempt reads, loop budgets and breakpoint writes use
+shared checked read/write lowering. A shared guest failure helper preserves the
+storage diagnostic while resolving the active window through standard Component
+Model cancellation. Successful retry checkpoint signals retain their existing
+deferral; no host task interface, new Store or product flag is introduced.
+
+Six composed regression groups cover failed reads/writes, one-shot prelaunch
+faults, breakpoints, queued parallel calls and live sibling HTTP headers/body
+cleanup before failure reporting. See AUDIT-14 and the active implementation
+record. Retrying Split items still fall back to sequential execution; this does
+not qualify concurrent retries or selective cancellation with a surviving peer.
+
+Keep malformed stored attempt payloads, non-checkpoint preparation errors,
+deeper mixed nesting, cleanup grace and G1–G10 open. Include the additional shared
+function and checked call sites in the paired artifact-size/latency comparison;
+there is no new WIT import, agent binary change or per-Agent wrapper.

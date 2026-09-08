@@ -2650,3 +2650,39 @@ the original budgets and assertions unchanged. These results establish functiona
 regression coverage, not a timing guarantee under contention. Browser visual
 checks, database/server E2E, resource soak and paired performance were not run
 for this stage.
+
+## Centralize checkpoint failures and owned-window cleanup (2026-09-08)
+
+Every raw emitter checkpoint read/write now passes through the shared helpers in
+`compile/checkpoint.rs`. An additional shared core failure function saves the
+canonical error fields before resolving outstanding handles through the existing
+standard cancellation helper, then restores and reports the original error. It
+uses the existing guest state/locals and avoids lifecycle polling that could
+replace the storage diagnostic. The artifact identity advances to
+`cooperative-waits=shared-v12`; no agent WIT, host implementation, component
+packaging or per-agent adapter changes.
+
+The three initial regressions failed by returning Completed: an unreadable
+attempt checkpoint, a transient parallel prelaunch lookup and a failed breakpoint
+write. Six final test groups also qualify failed attempt writes, queued Split and
+branch calls, and a pending branch peer at both HTTP headers/body waits. The peer
+must close before `runtime.fail` returns, while the Store is still alive.
+
+Retrying Split items retain sequential fallback, so parallel attempt-read tests
+use zero retries to exercise the actual window. Storage failures remain terminal;
+these tests do not establish sibling-preserving timeout recovery, malformed
+checkpoint payload handling, deeper mixed frames or cleanup grace. The original
+G1–G10 completion requirements, benchmarks, E128 and remaining E2E/soak work stay
+open. See AUDIT-14 for the case-to-test mapping.
+
+Verification: the final serial compiler suite passed **642 tests**, and the
+workflow integration suite passed **395 tests** (three existing manual benchmarks
+ignored). Feature-enabled all-target Clippy with `-D warnings`, formatting,
+diff checks and patterns-page JavaScript syntax passed. The first full compiler
+run exposed 12 helper tests that assumed Await/WindowWait were the last emitted
+functions, plus one test that confused the error string length with a cached
+payload pointer. The harness now uses registry positions and the cached
+pointer/length pair; the complete rerun passed without weakening behavioral
+assertions. Existing agent/shared component artifacts were reused because their
+source and WIT did not change. No new paired measurements, browser visual checks,
+database/server E2E, standalone component-host suite or soak ran in this stage.

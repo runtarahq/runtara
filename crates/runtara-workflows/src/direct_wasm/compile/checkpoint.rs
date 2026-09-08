@@ -18,6 +18,22 @@ use super::abi::{
 };
 use super::{DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices};
 
+/// Stack input: checkpoint key pointer/length. Leave the successful canonical
+/// result at retptr; a storage error resolves pending guest calls and exits.
+pub(super) fn emit_get_checkpoint(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+    super::cooperative_wait::emit_checkpoint_error(body, indices);
+}
+
+/// Stack input: checkpoint key and state pointer/length pairs. Signal handling
+/// is deliberately separate: retry persistence defers it until a safe boundary.
+pub(super) fn emit_checkpoint(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+    super::cooperative_wait::emit_checkpoint_error(body, indices);
+}
+
 pub(super) fn emit_checkpoint_lookup(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -28,9 +44,7 @@ pub(super) fn emit_checkpoint_lookup(
 ) {
     body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-    return_if_retptr_error(body, indices);
+    emit_get_checkpoint(body, indices);
 
     emit_get_checkpoint_has_value(body);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -49,9 +63,7 @@ pub(super) fn emit_checkpoint_save(
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-    return_if_retptr_error(body, indices);
+    emit_checkpoint(body, indices);
     emit_checkpoint_signal_handling(body, indices);
 }
 

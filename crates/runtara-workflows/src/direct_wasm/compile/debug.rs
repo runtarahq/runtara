@@ -438,8 +438,7 @@ pub(super) fn emit_step_breakpoint(
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));
     push_segment_args(body, &static_data.breakpoint_hit_state);
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+    super::checkpoint::emit_checkpoint(body, indices);
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));

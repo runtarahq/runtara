@@ -61,9 +61,19 @@ fn emitted_helper(context: Context) -> Vec<u8> {
             _ => {}
         }
     }
-    // Await and WindowWait are the last two helpers in either runtime mode.
-    // Export the actual Await without changing its body or importing a test
-    // implementation of the algorithm.
+    // Export helpers by their emitted registry positions, without assuming
+    // Await/WindowWait remain the last functions when another helper is added.
+    let helpers: Vec<_> = Helper::ALL
+        .into_iter()
+        .filter(|helper| !matches!(context, Context::Callable) || !helper.needs_runtime())
+        .collect();
+    let helper_index = |helper: Helper| {
+        imported + defined - helpers.len() as u32
+            + helpers
+                .iter()
+                .position(|candidate| *candidate as usize == helper as usize)
+                .unwrap() as u32
+    };
     let mut out = Module::new();
     for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
         let payload = payload.unwrap();
@@ -78,8 +88,12 @@ fn emitted_helper(context: Context) -> Vec<u8> {
                 };
                 exports.export(export.name, kind, export.index);
             }
-            exports.export("test-await", ExportKind::Func, imported + defined - 2);
-            exports.export("test-window", ExportKind::Func, imported + defined - 1);
+            exports.export("test-await", ExportKind::Func, helper_index(Helper::Await));
+            exports.export(
+                "test-window",
+                ExportKind::Func,
+                helper_index(Helper::WindowWait),
+            );
             exports.export("test-memory", ExportKind::Memory, 0);
             out.section(&exports);
         } else if let Some((id, range)) = payload.as_section() {

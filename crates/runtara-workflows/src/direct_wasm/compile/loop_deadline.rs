@@ -48,9 +48,7 @@ fn key(
 fn lookup(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalGet(DIRECT_LOOP_KEY_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_LOOP_KEY_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-    return_if_retptr_error(body, indices);
+    super::checkpoint::emit_get_checkpoint(body, indices);
     emit_get_checkpoint_has_value(body);
 }
 
