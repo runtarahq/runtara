@@ -8,6 +8,9 @@ mod agent_tool;
 #[path = "mcp_tool_deadline_tests.rs"]
 mod mcp_tool;
 
+#[path = "memory_deadline_tests.rs"]
+mod memory;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Child {
     Success,
@@ -163,6 +166,8 @@ impl Server {
                     })
                     .unwrap_or(0);
                 let request_line = headers.lines().next().unwrap();
+                let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
+                let object_model = path.starts_with("/schemas") || path.starts_with("/instances");
                 let metadata = request_line.contains("/metadata ");
                 let mcp_metadata = request_line.contains("/mcp-conn/metadata ");
                 let mcp_params = request_line.starts_with("GET /fixture/mcp-conn ");
@@ -171,15 +176,21 @@ impl Server {
                     anyhow::ensure!(n > 0, "incomplete body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
+                let mut response_status = 200;
                 let response = if metadata {
                     json!({"connectionId":if mcp_metadata {"mcp-conn"} else {"conn"},"integrationId":if mcp_metadata {"mcp"} else {"openai_api_key"},"status":"ACTIVE","resources":[],"metadata":null})
                 } else if mcp_params {
                     json!({"parameters":{"url":"http://fixture.test/child"}})
                 } else {
-                    let envelope: Value = serde_json::from_slice(&bytes[end..end + length])?;
-                    if envelope["url"]
-                        .as_str()
-                        .is_some_and(|url| url.ends_with("/child"))
+                    let envelope: Value = if object_model {
+                        json!({"url":path,"body":if length == 0 {Value::Null} else {serde_json::from_slice(&bytes[end..end + length])?}})
+                    } else {
+                        serde_json::from_slice(&bytes[end..end + length])?
+                    };
+                    if object_model
+                        || envelope["url"]
+                            .as_str()
+                            .is_some_and(|url| url.ends_with("/child"))
                     {
                         child_inputs.lock().unwrap().push(envelope.clone());
                         let index = count.fetch_add(1, Ordering::SeqCst);
@@ -199,20 +210,41 @@ impl Server {
                             cleanup.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
-                        let payload = match envelope["body"]["method"].as_str() {
-                            Some("initialize") => {
-                                json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
+                        let payload = if object_model {
+                            if matches!(operation, Child::Permanent | Child::Retryable) {
+                                response_status = if operation == Child::Permanent {
+                                    400
+                                } else {
+                                    503
+                                };
+                                json!({"error":"fixture storage failure"})
+                            } else if path.starts_with("/schemas") {
+                                json!({"success":true,"schema":{}})
+                            } else if path.starts_with("/instances/query") {
+                                json!({"success":true,"instances":[]})
+                            } else {
+                                json!({"success":true,"id":"memory"})
                             }
-                            Some("notifications/initialized") => Value::Null,
-                            Some("tools/list") => {
-                                json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
+                        } else {
+                            match envelope["body"]["method"].as_str() {
+                                Some("initialize") => {
+                                    json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
+                                }
+                                Some("notifications/initialized") => Value::Null,
+                                Some("tools/list") => {
+                                    json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
+                                }
+                                Some("tools/call") => {
+                                    json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
+                                }
+                                _ => json!({"ok":operation == Child::Success}),
                             }
-                            Some("tools/call") => {
-                                json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
-                            }
-                            _ => json!({"ok":operation == Child::Success}),
                         };
-                        json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
+                        if object_model {
+                            payload
+                        } else {
+                            json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
+                        }
                     } else {
                         let index = {
                             let mut requests = seen.lock().unwrap();
@@ -225,6 +257,9 @@ impl Server {
                             .ok_or_else(|| anyhow::anyhow!("unexpected model call {index}"))?
                     }
                 };
+                if let Some(delay) = response.get("fixture_delay_ms").and_then(Value::as_u64) {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
                 if let Some(pending) = response.get("fixture_pending").and_then(Value::as_str) {
                     if pending == "body" {
                         stream
@@ -242,7 +277,7 @@ impl Server {
                 stream
                     .write_all(
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {response_status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         )
                         .as_bytes(),
@@ -267,6 +302,7 @@ impl Server {
                 format!("{}/proxy", self.url),
             ),
             ("CONNECTION_SERVICE_URL".into(), self.url.clone()),
+            ("RUNTARA_OBJECT_MODEL_URL".into(), self.url.clone()),
             ("RUNTARA_TENANT_ID".into(), "fixture".into()),
         ])
     }

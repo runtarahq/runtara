@@ -3493,3 +3493,96 @@ still unfinished. No component rebuild, full public execution matrix, native
 server/database E2E, final paired performance measurements or Linux soak was run
 for this compiler-only stage. It does not close G1–G10, update registered/parked
 artifacts, integrate upstream migrations or create the PR.
+
+
+### Shared guest budgets and checkpoints for AI memory · 2026-09-08
+
+AUDIT-30 extends the same guest invocation contract to memory load/save. Memory
+edge discovery retains the referenced Agent; generated metadata carries its
+budget, definition identity, effective durability and connection. The memory plan
+passes that identity to the common Agent budget helper. The AI caller remains the
+configuration/error owner, and memory summarization retains its own AI provider.
+
+`agent_tool_deadline` is generalized to `agent_call_deadline`; model tools and
+memory reuse its budget/result-checkpoint implementation. Memory adds only a
+pure stdlib source operation, `agent-aux-scope-source`, to distinguish load/save
+from authored tool names and preserve caller/loop/definition context. It does not
+provide a host cancellation handle or manage native tasks. Standard subtask
+cancellation, connection preparation and own/root/enclosing selection remain in
+the shared Agent invoke path. The new compiler tag is `shared-v20`.
+
+Verification completed before the broad boundary checks:
+
+- All 27 Agent components and both shared components rebuilt through
+  `scripts/build-agent-components.sh` with the pinned toolchain and existing
+  isolated component target. Log: `/private/tmp/cooperative-memory-components.log`.
+- The focused memory selection passed **14 tests** in **36.35s**, including seven
+  new composed tests, the provider/summarization metadata matrix and existing
+  memory compilation/arena/connection coverage. Final output is checked as well
+  as call counts. Log: `/private/tmp/cooperative-memory-focused.log`.
+- An initial completed-replay fixture took the timeout route with its 400 ms live
+  budget before the intended first checkpoint. Its live budget is now 2,000 ms;
+  controlled epoch jumps still expire old budgets, and the test asserts distinct
+  3,000/12,000 ms absolute budgets for load/save and no repeated I/O/model work.
+  The isolated replay rerun passed (1.18s), followed by the full focused selection.
+- A negative control removed `MemoryLoad`/`MemorySave` from own-deadline selection.
+  The zero-budget test attempted storage I/O and returned `OBJECT_MODEL_HTTP_ERROR`
+  instead of `AGENT_TIMEOUT` (1.00s). Selection was restored before broad checks.
+  Log: `/private/tmp/cooperative-memory-negative.log`.
+- The stdlib library suite passed **242 tests**, with **one existing manual
+  performance benchmark ignored** (0.16s). This includes the stronger namespace
+  test comparing the actual cache prefixes across loop iterations, and the
+  existing tool source tests. Log: `/private/tmp/cooperative-memory-stdlib.log`.
+
+Commands use the pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, the existing isolated native target and the rebuilt matching
+Agent/shared component directory:
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib memory_ -- --test-threads=1
+cargo test -p runtara-workflow-stdlib --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-component-host --features component-integration-tests --test dispatcher --test cooperative_cancellation -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute ai_agent -- --test-threads=1
+cargo clippy -p runtara-workflows -p runtara-workflow-stdlib -p runtara-component-host --features runtara-workflows/direct-wasm-integration-tests,runtara-component-host/component-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Broader verification:
+
+- The complete feature-gated compiler library run passed **697 tests** in
+  **486.09s**. A later test-only addition checks local memory recovery inside a
+  While and continuation outside it. The final memory selection passed **15
+  tests** in **40.59s**, including that added regression and all earlier memory
+  cases; this is not a single full 698-test run, and the overlapping counts must
+  not be added.
+- All **92** component cancellation tests passed in **62.65s** against the rebuilt
+  components. The initial six dispatcher tests failed because their fixture
+  hardcoded the workspace target directory and ignored the configured isolated
+  component directory. The shared dispatcher fixture now honors
+  `RUNTARA_AGENT_COMPONENTS_DIR`, with its existing workspace fallback. All **six
+  dispatcher tests** then passed in **2.24s**, including production-bundle dispatch
+  coverage. This changes test setup, not host execution behavior.
+- The public AI selection passed **19 tests** in **14.41s**, with 379 filtered out.
+  It verifies accepted AI workflows; public Agent/Embed timeout syntax remains
+  rejected by E128.
+
+- Feature-gated workflows/stdlib/component-host all-target Clippy with
+  `-D warnings` passed in **16.19s**. Formatting and whitespace checks passed.
+  The local commit uses the normal formatting/workspace all-target Clippy hook
+  without bypass.
+
+Broad-check logs are `/private/tmp/cooperative-memory-full-lib.log`,
+`/private/tmp/cooperative-memory-component-host.log`,
+`/private/tmp/cooperative-memory-dispatcher.log`,
+`/private/tmp/cooperative-memory-final-focused.log`,
+`/private/tmp/cooperative-memory-public-ai.log` and
+`/private/tmp/cooperative-memory-clippy.log`.
+
+The full public execution matrix, native server/database E2E, stored-artifact
+compatibility inventory, paired size/timing measurements and Linux soak were not
+run in this memory stage. Public Agent/Embed timeouts still return E128; private
+emitter success is not a public-support claim. G1–G10, upstream migration
+integration and PR work remain open. This stage is kept local; no push is made.

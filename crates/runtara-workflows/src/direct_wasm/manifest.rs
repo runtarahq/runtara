@@ -1163,8 +1163,7 @@ fn step_manifest(
             // Conversation memory: record the provider agent's load-memory and
             // save-memory entries plus a conversation-id mapping. The loop loads
             // history before the turns and saves the final history after.
-            if let (true, Some((mem_agent, mem_conn, mem_conn_ref))) =
-                (has_memory, ai_agent_memory_provider(graph, &step.id))
+            if let (true, Some(provider)) = (has_memory, ai_agent_memory_provider(graph, &step.id))
             {
                 let memory = step.config.as_ref().and_then(|c| c.memory.as_ref());
                 let mut conversation = serde_json::Map::new();
@@ -1182,7 +1181,7 @@ fn step_manifest(
                     purpose: "memory.conversation".to_string(),
                     value: serde_json::Value::Object(conversation),
                 });
-                let mem_agent = canonicalize_direct_agent_id(&mem_agent);
+                let mem_agent = canonicalize_direct_agent_id(&provider.agent_id);
                 for (purpose, capability) in [
                     ("memory.load", "load-memory"),
                     ("memory.save", "save-memory"),
@@ -1195,17 +1194,22 @@ fn step_manifest(
                         purpose: purpose.to_string(),
                         agent_id: mem_agent.clone(),
                         capability_id: capability.to_string(),
-                        connection_id: mem_conn.clone(),
-                        connection_ref: connection_ref_json(mem_conn_ref.as_ref())?,
-                        durable: inherited_durable && step.durable.unwrap_or(true),
+                        connection_id: provider.connection_id.clone(),
+                        connection_ref: connection_ref_json(provider.connection_ref.as_ref())?,
+                        durable: inherited_durable
+                            && if provider.timeout.is_some() {
+                                provider.durable.unwrap_or(true)
+                            } else {
+                                step.durable.unwrap_or(true)
+                            },
                         rate_limited: false,
                         is_workflow_agent: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
                         retry_delay: None,
-                        timeout: None,
-                        timeout_step_id: None,
+                        timeout: provider.timeout,
+                        timeout_step_id: provider.timeout.map(|_| provider.id.clone()),
                     });
                 }
                 // Summarize-strategy compaction runs the `ai-tools`
@@ -1392,23 +1396,15 @@ fn connection_ref_json(
     connection_ref.map(canonical_json).transpose()
 }
 
-/// The AiAgent's memory provider: the agent id, literal connection id, and
-/// resolvable `connection_ref` of the Agent step on the `memory`-labelled edge,
-/// if any. Both connection forms are carried so a memory-storage connection can
-/// be a caller-supplied / rotated ref, not only a compile-time literal.
-type MemoryProvider = (String, Option<String>, Option<MappingValue>);
-
-fn ai_agent_memory_provider(graph: &ExecutionGraph, step_id: &str) -> Option<MemoryProvider> {
+/// The Agent definition on the AI step's memory edge. Retain its identity,
+/// budget, durability and connection together, as for synthetic MCP tools.
+fn ai_agent_memory_provider<'a>(graph: &'a ExecutionGraph, step_id: &str) -> Option<&'a AgentStep> {
     let edge = graph
         .execution_plan
         .iter()
         .find(|edge| edge.from_step == step_id && edge.label.as_deref() == Some("memory"))?;
     match graph.steps.get(&edge.to_step) {
-        Some(Step::Agent(agent)) => Some((
-            agent.agent_id.clone(),
-            agent.connection_id.clone(),
-            agent.connection_ref.clone(),
-        )),
+        Some(Step::Agent(agent)) => Some(agent),
         _ => None,
     }
 }
@@ -2585,6 +2581,63 @@ mod tests {
                 assert!(!String::from_utf8_lossy(&bytes).contains("timeoutStepId"));
                 let decoded: DirectWorkflowManifest = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(decoded, untimed);
+            }
+        }
+    }
+
+    #[test]
+    fn memory_budget_belongs_to_storage_provider_not_summarization() {
+        for graph_durable in [false, true] {
+            for provider_durable in [false, true] {
+                let mut graph: ExecutionGraph =
+                    serde_json::from_str(include_str!("../../tests/fixtures/ai_agent_memory.json"))
+                        .unwrap();
+                graph.durable = Some(graph_durable);
+                let Some(Step::Agent(provider)) = graph.steps.get_mut("mem") else {
+                    panic!("memory")
+                };
+                provider.timeout = Some(400);
+                provider.durable = Some(provider_durable);
+                provider.connection_ref = Some(serde_json::from_value(serde_json::json!({"valueType":"reference","value":"data.memoryConnection"})).unwrap());
+                let Some(Step::AiAgent(ai)) = graph.steps.get_mut("ai") else {
+                    panic!("AI")
+                };
+                ai.durable = Some(!provider_durable);
+                let config = ai.config.as_mut().unwrap();
+                config.memory.as_mut().unwrap().compaction = Some(
+                    serde_json::from_value(
+                        serde_json::json!({"maxMessages":2,"strategy":"summarize"}),
+                    )
+                    .unwrap(),
+                );
+                let manifest = build_direct_workflow_manifest(&graph).unwrap();
+                let storage = manifest
+                    .graph
+                    .agents
+                    .iter()
+                    .filter(|agent| matches!(agent.purpose.as_str(), "memory.load" | "memory.save"))
+                    .collect::<Vec<_>>();
+                assert_eq!(storage.len(), 2);
+                for agent in storage {
+                    assert_eq!(agent.step_id, "ai");
+                    assert_eq!(agent.timeout_step_id.as_deref(), Some("mem"));
+                    assert_eq!(agent.timeout, Some(400));
+                    assert_eq!(agent.durable, graph_durable && provider_durable);
+                    assert_eq!(
+                        agent.connection_ref.as_ref().unwrap()["value"],
+                        "data.memoryConnection"
+                    );
+                }
+                let summarize = manifest
+                    .graph
+                    .agents
+                    .iter()
+                    .find(|agent| agent.purpose == "memory.summarize")
+                    .unwrap();
+                assert_eq!(summarize.agent_id, "ai-tools");
+                assert_eq!(summarize.timeout, None);
+                assert_eq!(summarize.timeout_step_id, None);
+                assert_eq!(summarize.connection_id.as_deref(), Some("openai-conn"));
             }
         }
     }

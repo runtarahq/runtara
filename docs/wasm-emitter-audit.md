@@ -7,9 +7,9 @@ and durable suspend/resume through the production invoke ABI.
 ## Current progress · 2026-09-08
 
 Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`
-(remote: `origin/feat/cooperative-cancellation-progress`). AUDIT-29 extends the
-Agent-tool implementation committed as `62e051ed` to synthetic MCP tools.
-AI memory load/save budget enforcement remains unfinished.
+(remote: `origin/feat/cooperative-cancellation-progress`). AUDIT-30 extends
+the shared Agent-tool machinery to AI memory load/save. The preceding synthetic
+MCP stage is committed as `6de29584`; this memory stage is being kept local.
 
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
@@ -52,16 +52,17 @@ fixtures deliberately bypass that validation rejection to exercise the emitter;
 their success does not mean users can already author those timeouts. AUDIT-28
 fixes the Agent-as-AI-tool path, which previously only injected a capability
 argument. AUDIT-29 extends the same deadline path to synthetic MCP tools.
-AI memory provider metadata still drops the referenced Agent budget, so blanket
-public acceptance would remain incorrect. No product feature flag or optional
-cancellation backend has been added.
+AUDIT-30 also carries and enforces the memory storage provider budget. Public
+validation, import inference and export-mode qualification still need to move
+through the normal compiler entry points before E128 is retired. No product
+feature flag or optional cancellation backend has been added.
 
 ### Remaining work to reach the goal
 
 | Work | Completion criterion |
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
-| Public timeout support | Agent-as-AI-tool and synthetic MCP budget enforcement are implemented (AUDIT-28/29). Carry and enforce the referenced Agent timeout for AI memory calls, then remove E128 deliberately and move deadline coverage through public validation/compilation/composition, including zero/overflow/inherited budgets, replay and cleanup escalation. |
+| Public timeout support | Agent tools, synthetic MCP tools and AI memory calls use shared guest budget enforcement (AUDIT-28/29/30). Qualify public compilation/import inference and supported export modes, then remove E128 deliberately and move deadline coverage through public validation/compilation/composition, including zero/overflow/inherited budgets, replay and cleanup escalation. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
@@ -78,26 +79,24 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| AI memory deadlines (AUDIT-30) | 697-test compiler library run; final 15-test memory selection; 242 stdlib tests (one manual benchmark ignored); 92 component cancellation tests; six dispatcher tests; 19 public AI tests passed | The final memory selection includes one regression added after the full library run; overlapping counts are not summed. Public timeout syntax and final release qualification remain open. |
 | Synthetic MCP deadlines (AUDIT-29) | 689 feature-gated compiler library tests passed in 416.76s; final 14-test MCP selection passed in 13.07s; public AI selection passed 19 tests in 8.62s | The final MCP rerun includes stronger exact provider-error assertions. Its tests are included in the library count. E128 remains, and native server E2E/benchmarks were not rerun. |
 | Agent-as-AI-tool deadlines (`62e051ed`, AUDIT-28) | 682 feature-gated compiler library tests passed in 412.38s; 19 public AI execution tests passed in 14.00s; feature-gated all-target Clippy passed | The seven new Agent-tool regressions are included in the 682, not additional tests. Timeout regressions use private emission while E128 remains. Public AI tests cover currently accepted workflows. |
 | Physical ownership and remote emergency grace (`b932f1c6` / `d3fc2a6a`, AUDIT-26/27) | 354 distinct selected environment tests passed across the recorded runs; authenticated owner/peer HTTP header/body E2E passed | Extended E2E also observed lease renewal during a 32-second pending request and shutdown of an unrelated peer. This is lifecycle evidence from the earlier native stage, not a fresh run against `62e051ed` or a performance benchmark. |
 | Documentation checkpoint (`4ecb4f9b`) | Source and recorded results reviewed; diff whitespace checked | No runtime changes or Rust test reruns in that documentation-only commit. |
 
-The immediate implementation work is to preserve the referenced Agent's timeout
-and definition identity when constructing `memory.load` and `memory.save` metadata.
-These entries currently set `timeout: None`. Memory calls also need shared guest
-budget/checkpoint handling. Synthetic MCP calls now reuse the Agent-tool deadline
-path (AUDIT-29). Durable call identities must
-keep memory operations distinct from user-defined tools and preserve pending
-budgets and completed results across replay. This remains design work, not a
-completed fix or a new host task-management API.
+The immediate follow-up is public timeout enablement and qualification. Agent
+tools, synthetic MCP and memory load/save now preserve the referenced budget and
+use the shared guest invocation path. Memory has an explicit auxiliary namespace
+separate from model-selected tools; completed results and pending budgets have
+composed replay coverage. The storage budget does not become an LLM summarization
+budget.
 
-Required regressions for those paths include zero/maximum budgets, cancellation
-while I/O is pending, root/enclosing deadline propagation, independent subsequent
-calls, completed and pending replay, malformed persisted budgets and unchanged
-provider errors/capability arguments. After those pass, public enablement must
-exercise validation, import inference, compilation, composition and supported
-export modes together. E128 must not be removed solely on private-emitter results.
+Move the deadline corpus through public validation, import inference, compilation,
+composition and supported export modes together, including inherited/zero/maximum
+budgets, retries, durable nesting and cleanup escalation. E128 must not be removed
+solely because private-emitter tests pass. The existing race/CPU and recovery
+qualification work in the remaining-work table still applies.
 
 The full G1–G10 matrix, final paired size/performance report and Linux soak remain
 unfinished. Recent upstream `main` has not been integrated into this branch;
@@ -2333,3 +2332,62 @@ checkpoint handling. Public timeout validation/import inference/export modes,
 full G1–G10 qualification, artifact compatibility, paired benchmarks, Linux soak
 and upstream/PR work remain open. The implementation record lists this stage's
 broader validation and skipped checks.
+
+
+### AUDIT-30 · AI memory load/save share guest deadline enforcement
+
+**Status: memory budget enforcement implemented; public E128 remains.** The memory
+edge now retains its complete Agent definition. Synthetic load/save metadata
+preserves the provider timeout, definition identity, connection binding and
+effective durability. The AI caller still owns configuration lookup and error
+routing. Summarization keeps its separate AI provider and receives no storage
+Agent timeout.
+
+The former `agent_tool_deadline` helper is now `agent_call_deadline`: tools and
+memory share budget initialization and completed-result checkpoints. Memory sites
+participate in the existing Agent invocation's deadline selection and standard
+subtask cancellation. The added stdlib `agent-aux-scope-source` function constructs
+only a guest source namespace from manifest identity; it introduces no host
+cancellation API or task registry. Its structured domain distinguishes load/save
+from each other and from authored tool labels, while preserving caller variables,
+loop ancestry and graph-definition lookup. Existing tool scoping uses the same
+source-preservation helper. The compiler cache tag advances to `shared-v20`.
+
+Load and save each receive a fresh budget for their own invocation, including
+storage schema/query/write requests. The model turn and compaction between them
+do not consume the save budget. A local timeout takes the AI step's existing
+error route; root Cancel and enclosing expiry bypass that route. Completed memory
+results replay without storage calls. Pending budgets include parked time and
+malformed persisted values fail before new I/O. Cancellation of a pending storage
+write does not establish that the remote write was rolled back or never committed.
+
+| Contract | Regression test |
+| --- | --- |
+| Zero budget prevents memory and model work | `memory_zero_budget_skips_storage_and_model` |
+| Timeout closes load/save schema, query and write I/O before recovery | `memory_deadline_closes_each_load_and_save_io_before_recovery` |
+| Root Cancel and enclosing While expiry bypass local AI recovery | `memory_root_cancel_and_parent_expiry_bypass_local_recovery` |
+| Local memory recovery completes inside While and execution continues outside it | `memory_own_timeout_recovers_inside_parent_and_continues_outside` |
+| Save starts fresh after a model turn longer than the storage budget | `memory_save_has_fresh_budget_after_a_long_model_turn` |
+| Completed load/save replay without repeating I/O or model calls | `memory_completed_load_and_save_replay_without_repeating_io_or_model` |
+| Pending load/save budgets expire across pause; malformed budgets fail before new calls | `memory_pending_budgets_expire_during_pause_and_reject_corruption` |
+| Maximum unsigned budgets preserve provider errors and successful output | `memory_maximum_budget_preserves_storage_errors_and_success` |
+| Memory namespace preserves context and separates operations, tool names and iterations | `memory_scope_source_preserves_context_and_separates_calls` |
+| Provider durability/connection/definition survive lowering; storage timeout does not reach summarization | `memory_budget_belongs_to_storage_provider_not_summarization` |
+
+The initial focused memory selection passed 14 tests in 36.35s; the final
+selection passed 15 tests in 40.59s, including the later local-recovery regression.
+A negative control removed
+memory sites from own-deadline selection; the zero-budget test attempted storage
+I/O and produced `OBJECT_MODEL_HTTP_ERROR` instead of `AGENT_TIMEOUT` (1.00s).
+Production selection was restored before broader checks. The initial completed
+replay fixture reached its 400 ms timeout before the intended first checkpoint;
+its live budget is now 2,000 ms while epoch jumps still expire old budgets. The
+separate replay regression then passed in 1.18s, and the focused run above also
+asserts the final output is unchanged.
+
+All 27 Agent components and both shared workflow components were rebuilt with the
+pinned toolchain. The stdlib library suite passed 242 tests with one existing
+manual performance benchmark ignored. Broader compiler, component-host and public
+AI results are recorded in the implementation record. Public Agent/Embed timeout
+syntax, remaining G1–G10 qualification, stored-artifact compatibility, controlled
+size/time/DB-cost measurements, Linux soak and upstream/PR work remain open.

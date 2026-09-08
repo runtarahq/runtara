@@ -285,6 +285,9 @@ pub(super) enum DirectAiToolPlan {
 /// mapping used to build the load/save inputs.
 #[derive(Debug, Clone)]
 pub(super) struct DirectAiMemoryPlan {
+    pub(super) step_id: String,
+    pub(super) durable: bool,
+    pub(super) timeout_ms: Option<u64>,
     pub(super) load_agent_id: u32,
     pub(super) save_agent_id: u32,
     pub(super) agent_component_id: String,
@@ -1150,6 +1153,13 @@ fn step_run_plan_inner(
                             agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                         });
                     Some(DirectAiMemoryPlan {
+                        step_id: load
+                            .timeout_step_id
+                            .as_ref()
+                            .unwrap_or(&load.step_id)
+                            .clone(),
+                        durable: load.durable,
+                        timeout_ms: load.timeout,
                         load_agent_id: load.id,
                         save_agent_id: save.id,
                         agent_component_id: canonicalize_direct_agent_id(&load.agent_id),

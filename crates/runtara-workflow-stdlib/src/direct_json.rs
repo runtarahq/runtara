@@ -2649,20 +2649,29 @@ impl DirectJsonManifest {
         call_counter: u32,
         source: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let mut source: Value = serde_json::from_slice(source)
+        let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
         let prefix = tool_call_cache_prefix(ai_step_id, label, call_counter, &source);
-        let object = source
-            .as_object_mut()
-            .ok_or("tool source must be an object")?;
-        let variables = object
-            .entry("variables")
-            .or_insert_with(|| serde_json::json!({}));
-        variables
-            .as_object_mut()
-            .ok_or("tool source variables must be an object")?
-            .insert("_cache_key_prefix".into(), prefix.into());
-        serde_json::to_vec(&source).map_err(|err| format!("failed to serialize tool source: {err}"))
+        source_with_cache_prefix(source, prefix)
+    }
+
+    /// Memory load/save have one call per AI activation, independent of the
+    /// model's tool-call counter. Keep their durable ancestry in a distinct
+    /// domain so authored tool labels cannot alias memory budgets or results.
+    pub fn agent_aux_scope_source(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        if !matches!(agent.capability_id.as_str(), "load-memory" | "save-memory") {
+            return Err("auxiliary Agent scope requires a memory capability".into());
+        }
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse auxiliary Agent source: {err}"))?;
+        let parts = serde_json::json!([agent.step_id, agent.agent_id, agent.capability_id]);
+        let prefix = child_scope_v2(&source, "agent-aux", parts.clone())
+            .unwrap_or_else(|| child_cache_prefix(&format!("agent-aux:{parts}"), &source));
+        source_with_cache_prefix(source, prefix)
     }
 
     /// Resolve an Agent's connection to ONE concrete connection id, evaluated
@@ -5798,6 +5807,20 @@ fn ai_turn_checkpoint_key(
         Some(prefix) => format!("{prefix}::{base}"),
         None => base,
     })
+}
+
+fn source_with_cache_prefix(mut source: Value, prefix: String) -> Result<Vec<u8>, String> {
+    let object = source
+        .as_object_mut()
+        .ok_or("scoped source must be an object")?;
+    let variables = object
+        .entry("variables")
+        .or_insert_with(|| serde_json::json!({}));
+    variables
+        .as_object_mut()
+        .ok_or("scoped source variables must be an object")?
+        .insert("_cache_key_prefix".into(), prefix.into());
+    serde_json::to_vec(&source).map_err(|err| format!("failed to serialize scoped source: {err}"))
 }
 
 fn tool_call_cache_prefix(
@@ -11947,6 +11970,59 @@ mod tests {
             br#"{"variables":[]}"#,
         ] {
             assert!(DirectJsonManifest::tool_scope_source("ai", "tool", 0, input).is_err());
+        }
+    }
+
+    #[test]
+    fn memory_scope_source_preserves_context_and_separates_calls() {
+        let mut manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).unwrap();
+        let mut load = manifest.agents[&0].clone();
+        load.agent_id = "object-model".into();
+        load.step_id = "ai".into();
+        load.capability_id = "load-memory".into();
+        let mut save = load.clone();
+        save.capability_id = "save-memory".into();
+        let mut other = load.clone();
+        other.step_id = "ai.tool.memory.load.0".into();
+        manifest.agents.insert(1, load);
+        manifest.agents.insert(2, save);
+        manifest.agents.insert(3, other);
+        for version in [1, 2] {
+            let original = json!({"data":{"keep":42},"steps":{"previous":{"outputs":true}},
+                "variables":{"_durable_key_version":version,"_workflow_id":"workflow",
+                    "_cache_key_prefix":"outer","_loop_path":[["items",3]],
+                    "_manifest_graph_path":[["embedWorkflow","child"]],"custom":"kept"}});
+            let source = serde_json::to_vec(&original).unwrap();
+            let load = manifest.agent_aux_scope_source(1, &source).unwrap();
+            assert_eq!(load, manifest.agent_aux_scope_source(1, &source).unwrap());
+            assert_ne!(load, manifest.agent_aux_scope_source(2, &source).unwrap());
+            assert_ne!(load, manifest.agent_aux_scope_source(3, &source).unwrap());
+            for label in ["load-memory", "memory.load", "memory_load", "agent-aux"] {
+                assert_ne!(
+                    load,
+                    DirectJsonManifest::tool_scope_source("ai", label, 0, &source).unwrap()
+                );
+            }
+            let mut decoded: Value = serde_json::from_slice(&load).unwrap();
+            decoded["variables"]["_cache_key_prefix"] =
+                original["variables"]["_cache_key_prefix"].clone();
+            assert_eq!(decoded, original);
+            let mut another_iteration = original.clone();
+            another_iteration["variables"]["_loop_path"] = json!([["items", 4]]);
+            // Legacy scoping uses loop indices; current scoping uses the path.
+            another_iteration["variables"]["_loop_indices"] = json!([4]);
+            let another = manifest
+                .agent_aux_scope_source(1, &serde_json::to_vec(&another_iteration).unwrap())
+                .unwrap();
+            assert_ne!(
+                serde_json::from_slice::<Value>(&load).unwrap()["variables"]["_cache_key_prefix"],
+                serde_json::from_slice::<Value>(&another).unwrap()["variables"]["_cache_key_prefix"],
+            );
+        }
+        assert!(manifest.agent_aux_scope_source(0, b"{}").is_err());
+        assert!(manifest.agent_aux_scope_source(99, b"{}").is_err());
+        for source in [b"null".as_slice(), b"[]", b"{\"variables\":42}", b"invalid"] {
+            assert!(manifest.agent_aux_scope_source(1, source).is_err());
         }
     }
 

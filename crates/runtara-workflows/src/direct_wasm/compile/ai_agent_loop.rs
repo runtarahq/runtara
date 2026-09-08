@@ -228,6 +228,19 @@ pub(super) fn emit_ai_agent_loop_plan(
         let load_capability = static_data
             .agent_capability_id(memory.load_agent_id)
             .expect("AiAgent memory load has a static capability id");
+        if let Some(timeout) = memory.timeout_ms {
+            super::agent_call_deadline::enter_memory(
+                body,
+                indices,
+                static_data,
+                memory.load_agent_id,
+                &memory.step_id,
+                memory.durable,
+                timeout,
+                (source_ptr_local, source_len_local),
+            );
+        }
+        let memory_depth = u32::from(memory.durable && memory.timeout_ms.is_some());
         emit_agent_invoke(
             body,
             indices,
@@ -244,7 +257,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         super::deadline_scope::propagate(
             body,
             indices,
-            failure_target.map(|target| target.nested(0)),
+            failure_target.map(|target| target.nested(memory_depth)),
         );
         emit_agent_invoke_error_branch(
             body,
@@ -267,14 +280,21 @@ pub(super) fn emit_ai_agent_loop_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target,
-            handled_target,
+            failure_target.map(|target| target.nested(memory_depth)),
+            handled_target.map(|target| target.nested(memory_depth)),
         );
         load_agent_retptr_list(
             body,
-            DIRECT_AI_TURN_OUT_PTR_LOCAL,
-            DIRECT_AI_TURN_OUT_LEN_LOCAL,
+            DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+            DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
         );
+        if memory.timeout_ms.is_some() {
+            super::agent_call_deadline::finish(body, indices, memory.durable);
+        }
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_RESULT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_RESULT_LEN_LOCAL));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
         // state = ai-memory-initial-state(load_output)
         body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
@@ -747,7 +767,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                     .agent_capability_id(*agent_id)
                     .expect("AiAgent tool has a static capability id");
                 if let Some(timeout) = timeout_ms {
-                    super::agent_tool_deadline::enter(
+                    super::agent_call_deadline::enter_tool(
                         body,
                         indices,
                         static_data,
@@ -828,7 +848,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                     DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
                 );
                 if timeout_ms.is_some() {
-                    super::agent_tool_deadline::finish(body, indices, *durable);
+                    super::agent_call_deadline::finish(body, indices, *durable);
                 }
             }
             DirectAiToolPlan::Embed {
@@ -1186,6 +1206,19 @@ pub(super) fn emit_ai_agent_loop_plan(
         let save_capability = static_data
             .agent_capability_id(memory.save_agent_id)
             .expect("AiAgent memory save has a static capability id");
+        if let Some(timeout) = memory.timeout_ms {
+            super::agent_call_deadline::enter_memory(
+                body,
+                indices,
+                static_data,
+                memory.save_agent_id,
+                &memory.step_id,
+                memory.durable,
+                timeout,
+                (source_ptr_local, source_len_local),
+            );
+        }
+        let memory_depth = u32::from(memory.durable && memory.timeout_ms.is_some());
         emit_agent_invoke(
             body,
             indices,
@@ -1202,7 +1235,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         super::deadline_scope::propagate(
             body,
             indices,
-            failure_target.map(|target| target.nested(0)),
+            failure_target.map(|target| target.nested(memory_depth)),
         );
         emit_agent_invoke_error_branch(
             body,
@@ -1225,14 +1258,18 @@ pub(super) fn emit_ai_agent_loop_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target,
-            handled_target,
+            failure_target.map(|target| target.nested(memory_depth)),
+            handled_target.map(|target| target.nested(memory_depth)),
         );
         load_agent_retptr_list(
             body,
             DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
             DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
         );
+        if memory.timeout_ms.is_some() {
+            super::agent_call_deadline::finish(body, indices, memory.durable);
+        }
+
         // Memory-save debug-end (failures took the agent-error branch above).
         emit_ai_memory_debug_event(
             body,

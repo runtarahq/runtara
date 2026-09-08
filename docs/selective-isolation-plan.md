@@ -1056,3 +1056,24 @@ pending replay before enabling public timeout syntax. Keep memory summarization'
 AI provider contract separate from the storage Agent's timeout. The `shared-v19`
 cache tag does not rewrite registered artifacts or establish compatibility and
 performance qualification; all remaining G1–G10 requirements still apply.
+
+
+### Memory deadline progress · 2026-09-08
+
+Memory load/save now preserves the referenced Agent's budget, definition identity,
+connection and effective durability. The shared `agent_call_deadline` emitter
+handles memory and model tools; the memory namespace is a distinct guest stdlib
+source transformation, not a host cancellation resource. Storage load/save have
+separate budgets and completed checkpoints. The storage deadline does not apply
+to the model turn or summarization. AUDIT-30 lists composed cancellation, recovery,
+replay, malformed-budget, output and namespace tests plus the negative control.
+
+The next step is to exercise timeout handling through public validation and
+compilation, including automatic timer/clock imports, supported export/no-host
+modes and durable nested calls. Include collisions between generated MCP tool
+names and ordinary tool labels in the public validation corpus. Preserve separate own/root/enclosing outcomes and
+emergency-abort semantics. Keep E128 until these contracts are qualified; do not
+infer public support from private emission. G1–G10, old-artifact inventory,
+upstream migration integration and paired benchmarks/soak remain unfinished.
+The `shared-v20` compiler tag requires recompilation for newly generated logic;
+it does not rewrite registered or parked artifacts.

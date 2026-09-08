@@ -3,9 +3,8 @@
 //! Builds a tmp `bundles/` directory by copying the freshly-built
 //! `runtara_agent_crypto.wasm` and the source `meta.json` together, then runs
 //! the dispatcher against it. The explicit component integration suite fails
-//! closed if the .wasm is missing — run
-//! `cargo component build --release --target wasm32-wasip2 -p
-//! runtara-agent-crypto` first.
+//! closed if the .wasm is missing — run `scripts/build-agent-components.sh`
+//! first. `RUNTARA_AGENT_COMPONENTS_DIR` selects an isolated component build.
 
 use std::path::PathBuf;
 
@@ -21,7 +20,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn crypto_wasm_path() -> PathBuf {
-    let p = workspace_root().join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm");
+    let p = component_dir().join("runtara_agent_crypto.wasm");
     assert!(
         p.exists(),
         "component-integration-tests requires {}; run scripts/build-agent-components.sh",
@@ -30,8 +29,14 @@ fn crypto_wasm_path() -> PathBuf {
     p
 }
 
+fn component_dir() -> PathBuf {
+    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"))
+}
+
 /// Build a one-agent bundle dir (mirrors the production layout) and return its
-/// path. Returns `None` if the crypto .wasm hasn't been built yet. The
+/// path. Fails if the crypto .wasm hasn't been built yet. The
 /// `meta.json` sidecar is emitted on the fly by calling the agent crate's
 /// host-only `agent_info()` and serializing — same source-of-truth the
 /// production `runtara-agent-bundle-emit` binary uses.
@@ -213,13 +218,13 @@ async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Res
 }
 
 /// Production bundle-shaped load: point the dispatcher at
-/// `target/wasm32-wasip2/release/` (where the bundle script stages all 23
+/// the selected component directory (where the bundle script stages all Agent
 /// `.wasm` + `.meta.json` pairs), verify every loaded capability is routed,
 /// and assert the count matches expectations. The explicit suite fails if the
 /// bundle has not been built.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
-    let bundle_dir = workspace_root().join("target/wasm32-wasip2/release");
+    let bundle_dir = component_dir();
     let crypto_wasm = bundle_dir.join("runtara_agent_crypto.wasm");
     let crypto_meta = bundle_dir.join("runtara_agent_crypto.meta.json");
     assert!(

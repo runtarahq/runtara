@@ -137,6 +137,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_agent_scope_input: Option<u32>,
     stdlib_agent_tool_scope_input: Option<u32>,
     stdlib_tool_scope_source: Option<u32>,
+    stdlib_agent_aux_scope_source: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
     stdlib_agent_retry_sleep_key: Option<u32>,
     stdlib_agent_attempt_result_key: Option<u32>,
@@ -595,6 +596,10 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_scope_input,
                 "stdlib.agent-scope-input",
             )?,
+            stdlib_agent_aux_scope_source: require_import(
+                self.stdlib_agent_aux_scope_source,
+                "stdlib.agent-aux-scope-source",
+            )?,
             stdlib_tool_scope_source: require_import(
                 self.stdlib_tool_scope_source,
                 "stdlib.tool-scope-source",
@@ -797,6 +802,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_agent_scope_input: u32,
     pub(super) stdlib_agent_tool_scope_input: u32,
     pub(super) stdlib_tool_scope_source: u32,
+    pub(super) stdlib_agent_aux_scope_source: u32,
     pub(super) stdlib_agent_cache_key: u32,
     pub(super) stdlib_agent_retry_sleep_key: u32,
     pub(super) stdlib_agent_attempt_result_key: u32,
@@ -1246,6 +1252,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_connection_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-scope-input") {
         import_indices.stdlib_agent_scope_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-aux-scope-source") {
+        import_indices.stdlib_agent_aux_scope_source = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "tool-scope-source") {
         import_indices.stdlib_tool_scope_source = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-tool-scope-input") {

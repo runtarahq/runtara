@@ -1,13 +1,13 @@
 // Copyright (C) 2026 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Timed AI tools reuse the Agent budget/invocation and checkpoint machinery.
-//! Each model call has its own replay-stable source namespace, as Embed tools do.
+//! AI tools and memory calls share Agent budget initialization and result checkpoints.
+//! Their source namespaces are distinct; connection resolution keeps the caller source.
 use super::abi::{load_retptr_list, push_retptr_arg, push_segment_args, return_if_retptr_error};
 use super::*;
 use wasm_encoder::{Function, Instruction};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn enter(
+pub(super) fn enter_tool(
     body: &mut Function,
     indices: &DirectCoreFunctionIndices,
     data: &DirectCoreStaticData,
@@ -34,6 +34,44 @@ pub(super) fn enter(
         DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
         DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
     );
+    enter_scoped(body, indices, data, agent, step, durable, timeout);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn enter_memory(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    data: &DirectCoreStaticData,
+    agent: u32,
+    step: &str,
+    durable: bool,
+    timeout: u64,
+    source: (u32, u32),
+) {
+    body.instruction(&Instruction::I32Const(agent as i32));
+    body.instruction(&Instruction::LocalGet(source.0));
+    body.instruction(&Instruction::LocalGet(source.1));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_aux_scope_source));
+    return_if_retptr_error(body, indices);
+    load_retptr_list(
+        body,
+        DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+        DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+    );
+    enter_scoped(body, indices, data, agent, step, durable, timeout);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enter_scoped(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    data: &DirectCoreStaticData,
+    agent: u32,
+    step: &str,
+    durable: bool,
+    timeout: u64,
+) {
     if durable {
         super::agent_io::emit_agent_cache_key(
             body,
@@ -58,7 +96,7 @@ pub(super) fn enter(
         body,
         indices,
         &data.agent_deadline_state_error,
-        data.step_id(step).expect("Agent tool step"),
+        data.step_id(step).expect("Agent definition step"),
         (
             DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
             DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
@@ -71,7 +109,8 @@ pub(super) fn enter(
 pub(super) fn finish(body: &mut Function, indices: &DirectCoreFunctionIndices, durable: bool) {
     if durable {
         // Parent expiry propagates before this point. Only a completed local
-        // result (including a local timeout) is replayable model feedback.
+        // result is replayable. Tools capture local errors as model feedback;
+        // memory errors take the existing AI error route before this point.
         super::checkpoint::emit_checkpoint_save(
             body,
             indices,

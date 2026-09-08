@@ -44,7 +44,10 @@ pub(super) fn emit_agent_invoke(
     super::cooperative_wait::emit_poll_before_call(body, indices);
     let deadline = matches!(
         site,
-        AgentInvocationSite::Step(_) | AgentInvocationSite::AiTool(_)
+        AgentInvocationSite::Step(_)
+            | AgentInvocationSite::AiTool(_)
+            | AgentInvocationSite::MemoryLoad
+            | AgentInvocationSite::MemorySave
     ) && static_data.agent_timeout(agent_id).is_some();
     let scoped_deadline = indices.monotonic_now.is_some();
     if scoped_deadline {
