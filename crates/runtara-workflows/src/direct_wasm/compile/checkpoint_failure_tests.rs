@@ -2,6 +2,13 @@
 use super::*;
 
 fn compile_graph(dir: &Path, graph: Value) -> anyhow::Result<DirectCompilationResult> {
+    compile_graph_with_events(dir, graph, false)
+}
+fn compile_graph_with_events(
+    dir: &Path,
+    graph: Value,
+    track_events: bool,
+) -> anyhow::Result<DirectCompilationResult> {
     let mut result = compile_direct_workflow_with_abi(
         DirectCompilationInput {
             workflow_id: "checkpoint-failure".into(),
@@ -10,7 +17,7 @@ fn compile_graph(dir: &Path, graph: Value) -> anyhow::Result<DirectCompilationRe
             execution_graph: serde_json::from_value(graph)?,
             child_workflows: vec![],
             output_dir: dir.into(),
-            track_events: false,
+            track_events,
             agent_catalog: None,
             agent_slug: None,
         },
@@ -187,7 +194,34 @@ async fn attempt_checkpoint_write_failure_stops_retry_and_finish() -> anyhow::Re
     Ok(())
 }
 
-async fn live_peer_server(host: Arc<Host>, body: bool) -> anyhow::Result<Server> {
+async fn live_peer_server(host: Arc<Host>, body: bool, hold_peer: bool) -> anyhow::Result<Server> {
+    live_peer_server_chain(host, body, hold_peer, 1).await
+}
+async fn live_peer_server_chain(
+    host: Arc<Host>,
+    body: bool,
+    hold_peer: bool,
+    fast_calls: usize,
+) -> anyhow::Result<Server> {
+    live_peer_server_status(host, body, hold_peer, fast_calls, 200).await
+}
+async fn live_peer_server_status(
+    host: Arc<Host>,
+    body: bool,
+    hold_peer: bool,
+    fast_calls: usize,
+    status: u16,
+) -> anyhow::Result<Server> {
+    live_peer_server_prepared(host, body, hold_peer, fast_calls, status, None).await
+}
+async fn live_peer_server_prepared(
+    host: Arc<Host>,
+    body: bool,
+    hold_peer: bool,
+    fast_calls: usize,
+    status: u16,
+    preparation_delay: Option<Duration>,
+) -> anyhow::Result<Server> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let children = Arc::new(AtomicUsize::new(0));
@@ -195,9 +229,13 @@ async fn live_peer_server(host: Arc<Host>, body: bool) -> anyhow::Result<Server>
     let closed = Arc::new(AtomicUsize::new(0));
     let cleanup = closed.clone();
     let started = Arc::new(tokio::sync::Notify::new());
+    let target_closed = Arc::new(tokio::sync::Notify::new());
+    let fast_seen = Arc::new(AtomicUsize::new(0));
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let requests = observations.clone();
     let task = tokio::spawn(async move {
         let mut calls = tokio::task::JoinSet::new();
-        for _ in 0..2 {
+        for _ in 0..1 + fast_calls + 2 * usize::from(preparation_delay.is_some()) {
             let (mut stream, _) = listener.accept().await?;
             let (host, count, cleanup, started) = (
                 host.clone(),
@@ -205,6 +243,9 @@ async fn live_peer_server(host: Arc<Host>, body: bool) -> anyhow::Result<Server>
                 cleanup.clone(),
                 started.clone(),
             );
+            let target_closed = target_closed.clone();
+            let fast_seen = fast_seen.clone();
+            let observations = observations.clone();
             calls.spawn(async move {
                 let mut bytes = Vec::new();
                 let mut buffer = [0; 4096];
@@ -222,6 +263,13 @@ async fn live_peer_server(host: Arc<Host>, body: bool) -> anyhow::Result<Server>
                     anyhow::ensure!(n > 0, "incomplete fixture body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
+                let headers = std::str::from_utf8(&bytes[..end])?;
+                if headers.lines().next().unwrap().contains("/metadata ") {
+                    let slow = headers.contains("slow-prep");
+                    if slow { tokio::time::sleep(preparation_delay.unwrap()).await; }
+                    write_peer_response(&mut stream, &json!({"connectionId":if slow { "slow-prep" } else { "fast-prep" },"integrationId":"http_bearer","status":"ACTIVE","resources":[],"metadata":null})).await?;
+                    return Ok(());
+                }
                 let request: Value = serde_json::from_slice(&bytes[end..end+length])?;
                 count.fetch_add(1, Ordering::SeqCst);
                 if request["url"].as_str().unwrap().ends_with("/slow") {
@@ -229,13 +277,17 @@ async fn live_peer_server(host: Arc<Host>, body: bool) -> anyhow::Result<Server>
                     started.notify_one();
                     await_peer_close(&mut stream).await?;
                     cleanup.fetch_add(1, Ordering::SeqCst);
-                    host.failure_cleanup.lock().unwrap().as_ref().unwrap().notify_one();
+                    observations.lock().unwrap().push(json!({"event":"target_closed","requests":count.load(Ordering::SeqCst)}));
+                    target_closed.notify_one();
+                    if let Some(done) = host.failure_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
+                    if let Some(done) = host.recovery_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
                 } else {
                     // Release success only once the sibling is waiting for headers/body.
-                    tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
-                    let response = serde_json::to_vec(&json!({"status":200,"headers":{},"body":{"ok":true}}))?;
-                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",response.len()).as_bytes()).await?;
-                    stream.write_all(&response).await?;
+                    if fast_seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                        tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
+                    }
+                    if hold_peer { tokio::time::timeout(Duration::from_secs(3), target_closed.notified()).await?; }
+                    write_peer_response(&mut stream, &json!({"status":status,"headers":{},"body":{"ok":true}})).await?;
                 }
                 Ok::<_,anyhow::Error>(())
             });
@@ -248,10 +300,28 @@ async fn live_peer_server(host: Arc<Host>, body: bool) -> anyhow::Result<Server>
     Ok(Server {
         task,
         url,
-        requests: Arc::new(Mutex::new(vec![])),
+        requests,
         children,
         closed,
     })
+}
+
+async fn write_peer_response(
+    stream: &mut tokio::net::TcpStream,
+    response: &Value,
+) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(response)?;
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(&bytes).await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -265,7 +335,7 @@ async fn checkpoint_failure_resolves_live_parallel_io_before_reporting() -> anyh
         let host = Arc::new(Host::new());
         host.fail_checkpoints("runtara:v2:[\"agent\",", true);
         *host.failure_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
-        let mut server = live_peer_server(host.clone(), body).await?;
+        let mut server = live_peer_server(host.clone(), body, false).await?;
         let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
         server.check().await?;
         assert_storage_error(exit, true);
@@ -277,3 +347,6 @@ async fn checkpoint_failure_resolves_live_parallel_io_before_reporting() -> anyh
     }
     Ok(())
 }
+
+#[path = "parallel_agent_deadline_tests.rs"]
+mod parallel_agent_deadline;

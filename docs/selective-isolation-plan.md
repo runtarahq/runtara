@@ -728,3 +728,26 @@ Keep malformed stored attempt payloads, non-checkpoint preparation errors,
 deeper mixed nesting, cleanup grace and G1–G10 open. Include the additional shared
 function and checked call sites in the paired artifact-size/latency comparison;
 there is no new WIT import, agent binary change or per-Agent wrapper.
+
+
+### Parallel Agent budgets and scheduler error unwind · 2026-09-08
+
+Private emitted timeout coverage now exercises actual parallel windows, rather
+than the former timed-Agent sequential fallback. Both branch execution paths and
+Split reuse per-slot budgets and one nearest-deadline standard timer. A timed
+call can resolve without cancelling its unrelated pending peer; the fast branch
+can advance several calls while the timed call waits. Ordinary scheduler failures
+now reach their enclosing handler and resolve pending peers before that handler
+runs. A Split fixture also delays one item’s connection preparation, then verifies
+that it expires while the later item succeeds after observing its socket close.
+AUDIT-15 lists the six composed regression groups and their limits.
+
+Keep G5/G6 and E128 open. Next qualify timeouts during pending preparation,
+including an already-launched Agent expiring while a later Agent's connection
+lookup is still pending. That wait must service the earlier invocation's budget
+without cancelling the later invocation. Also qualify root/parent/completion
+races, nested handled exits, concurrent retries and independent cleanup grace. The shared helper state grows
+by three i32 values and each existing parallel slot by 32 bytes; include untimed
+workflows as well as timed and nested workloads in the paired artifact-size,
+single-step, full-run, memory and soak comparisons. No new WIT import, agent
+binary, host registry or product flag is introduced by this emitter change.

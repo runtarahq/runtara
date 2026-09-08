@@ -492,11 +492,7 @@ pub(super) fn concurrent_branch_pools(
             agent_id,
             max_retries,
             ..
-        } => {
-            !static_data.agent_is_workflow_agent(*agent_id)
-                && static_data.agent_timeout(*agent_id).is_none()
-                && *max_retries == 0
-        }
+        } => !static_data.agent_is_workflow_agent(*agent_id) && *max_retries == 0,
         _ => true, // sync steps have no invoke
     });
     if !ok {
@@ -684,7 +680,6 @@ fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunP
                 && match node {
                     DirectRunPlan::Agent { agent_id, .. } => {
                         !static_data.agent_is_workflow_agent(*agent_id)
-                            && static_data.agent_timeout(*agent_id).is_none()
                     }
                     DirectRunPlan::Log { .. }
                     | DirectRunPlan::Filter { .. }
@@ -776,6 +771,16 @@ fn emit_branch_scheduler(
     super::cooperative_wait::emit_window_open(body);
     super::cooperative_wait::emit_poll_before_call(body, indices);
 
+    // Capture errors at the window boundary, so branching to an outer handler
+    // cannot bypass peer cancellation and lifecycle-deferral release.
+    let outer_failure_target = failure_target;
+    let failure_target = Some(DirectFailureTarget::StepError { branch_depth: 0 });
+    let handled_target = handled_target.map(|target| target.nested(1));
+    super::step_error::push_step_error_frame(body);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(super::DIRECT_STEP_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::Block(BlockType::Empty));
+
     // ── SCHEDULER LOOP ────────────────────────────────────────────────────────
     body.instruction(&Instruction::Block(BlockType::Empty)); // $sched_done
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $sched
@@ -855,8 +860,8 @@ fn emit_branch_scheduler(
                     route_len_local,
                     workflow_log_kind,
                     workflow_error_kind,
-                    failure_target,
-                    handled_target,
+                    failure_target.map(|target| target.nested(6)),
+                    handled_target.map(|target| target.nested(6)),
                 );
                 body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
                 body.instruction(&Instruction::I32Const(b as i32 * DIRECT_PSPLIT_SLOT_STRIDE));
@@ -938,8 +943,8 @@ fn emit_branch_scheduler(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
-                failure_target,
-                handled_target,
+                failure_target.map(|target| target.nested(6)),
+                handled_target.map(|target| target.nested(6)),
             );
             body.instruction(&Instruction::End); // L3
         }
@@ -1057,6 +1062,30 @@ fn emit_branch_scheduler(
     super::cooperative_wait::emit_window_close(body, indices);
 
     super::cooperative_wait::emit_window_boundary(body, indices);
+    body.instruction(&Instruction::End); // error capture
+
+    body.instruction(&Instruction::LocalGet(super::DIRECT_STEP_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_STEP_ERROR_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_ptr_local));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_STEP_ERROR_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_len_local));
+    super::step_error::pop_step_error_frame(body);
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::cooperative_wait::emit_window_unwind(body, indices);
+    if let Some(target) = outer_failure_target {
+        super::split::emit_split_append_error_payload_and_continue(
+            body,
+            indices,
+            target.nested(1),
+            route_ptr_local,
+            route_len_local,
+        );
+    } else {
+        super::emit_runtime_fail_return(body, indices, route_ptr_local, route_len_local);
+    }
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1563,6 +1592,27 @@ fn emit_branch_launch(
     body.instruction(&Instruction::LocalGet(route_len_local));
     body.instruction(&Instruction::BrIf(0)); // -> $skip
 
+    let own_deadline = static_data.agent_timeout(branch.agent_id).is_some();
+    super::cooperative_wait::parallel_deadline::begin(
+        body,
+        indices,
+        static_data,
+        branch.agent_id,
+        branch.step_id,
+        (source_ptr_local, source_len_local),
+        branch.durable_checkpoint,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+    );
+    if own_deadline {
+        super::cooperative_wait::parallel_deadline::check_before_io(
+            body,
+            indices,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            0,
+            failure_target.map(|t| t.nested(1)),
+        );
+    }
+
     // connection injection (in-band `_connection`); no-op when connectionless.
     if static_data.agent_has_connection(branch.agent_id) {
         body.instruction(&Instruction::I32Const(branch.agent_id as i32));
@@ -1577,12 +1627,22 @@ fn emit_branch_launch(
         body.instruction(&Instruction::If(BlockType::Empty));
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        super::agent_io::emit_connection_description(body, indices, false);
-        super::cooperative_wait::emit_window_preparation_timeout(
-            body,
-            indices,
-            failure_target.map(|target| target.nested(2)),
-        );
+        super::agent_io::emit_connection_description(body, indices, own_deadline);
+        if own_deadline {
+            super::cooperative_wait::parallel_deadline::preparation_done(
+                body,
+                indices,
+                DIRECT_PSPLIT_LAUNCH_LOCAL,
+                1,
+                failure_target.map(|t| t.nested(2)),
+            );
+        } else {
+            super::cooperative_wait::emit_window_preparation_timeout(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(2)),
+            );
+        }
         load_retptr_tag(body);
         body.instruction(&Instruction::BrIf(1)); // -> $skip
         load_retptr_list(body, route_ptr_local, route_len_local);
@@ -1619,6 +1679,16 @@ fn emit_branch_launch(
         indices,
         failure_target.map(|target| target.nested(1)),
     );
+
+    if own_deadline {
+        super::cooperative_wait::parallel_deadline::check_before_io(
+            body,
+            indices,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            0,
+            failure_target.map(|t| t.nested(1)),
+        );
+    }
 
     // slot.state = AGENT_READY, then async-invoke into slot+RESULT_OFFSET.
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));

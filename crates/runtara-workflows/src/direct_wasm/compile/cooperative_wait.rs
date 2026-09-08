@@ -4,6 +4,9 @@
 //! and before the wait event at 216; neither asynchronous completion can
 //! overwrite the other. Handles stay in guest locals; there is no host task
 //! interface. Nonempty runtime results still use canonical ABI allocation.
+#[path = "parallel_deadline.rs"]
+pub(super) mod parallel_deadline;
+
 use wasm_encoder::{BlockType, Function, Instruction, MemArg};
 
 use super::abi::{
@@ -44,7 +47,7 @@ const POLL_INTERVAL_MS: i64 = 1_000;
 // values. No globals, heap frame, or host-owned tasks are needed.
 // Scratch cursors/handles are deliberately excluded. STATUS is the packed
 // input to Await; the final extra result describes entry control flow.
-const STATE: [u32; 16] = [
+const STATE: [u32; 19] = [
     TARGET,
     SET,
     TIMER,
@@ -61,6 +64,9 @@ const STATE: [u32; 16] = [
     WINDOW_BEGIN,
     super::DIRECT_PSPLIT_WS_LOCAL,
     DEADLINE_STATUS,
+    parallel_deadline::ENABLED,
+    parallel_deadline::OWNER,
+    parallel_deadline::TIMER_STATUS,
 ];
 pub(super) const HELPER_PARAMS: usize = STATE.len();
 pub(super) const HELPER_COUNT: usize = 7;
@@ -175,7 +181,7 @@ fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
 
 pub(super) fn helper_body(helper: Helper, indices: &DirectCoreFunctionIndices) -> Function {
     // Keep the emitter's canonical absolute local indices. Parameters occupy
-    // its first 16 i32 slots and are copied to the state locals before use.
+    // its leading i32 slots and are copied to the state locals before use.
     let mut body = Function::new(super::core_module::drop_leading_locals(
         super::core_module::CANONICAL_LOCAL_GROUPS,
         HELPER_PARAMS as u32,
@@ -331,6 +337,7 @@ fn close_all(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         return;
     }
     close_wait(body, indices);
+    parallel_deadline::close_timer(body, indices);
     body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
     body.instruction(&Instruction::If(BlockType::Empty));
     for_each_slot(body, |body| {
@@ -512,10 +519,14 @@ pub(super) fn emit_window_open(body: &mut Function) {
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DEFER_BOUNDARY));
     set_zero(body, WINDOW_TIMER);
+    set_zero(body, parallel_deadline::ENABLED);
+    set_zero(body, parallel_deadline::OWNER);
+    set_zero(body, parallel_deadline::TIMER_STATUS);
 }
 
 /// Close an already drained window, retaining pause intent through assembly.
 pub(super) fn emit_window_close(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    parallel_deadline::close_timer(body, indices);
     body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
     body.instruction(&Instruction::If(BlockType::Empty));
     cancel_and_drop(body, indices, WINDOW_TIMER);
@@ -582,6 +593,15 @@ pub(super) fn emit_window_deadline_boundary(
     body.instruction(&Instruction::End);
 }
 
+/// A branch failure leaving its scheduler must resolve that window before the
+/// enclosing error handler runs. A parent deadline may already have closed it.
+pub(super) fn emit_window_unwind(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    assert!(call_helper(body, indices, Helper::WindowCancel));
+    body.instruction(&Instruction::End);
+}
+
 fn cancel_window_deadline(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     if !indices.omit_runtime {
         poll(body, indices, false);
@@ -624,7 +644,10 @@ pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunction
     body.instruction(&Instruction::Call(indices.waitable_join.unwrap()));
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::Loop(BlockType::Empty));
+    parallel_deadline::arm(body, indices);
     body.instruction(&Instruction::LocalGet(DEADLINE_STATUS));
+    body.instruction(&Instruction::LocalGet(parallel_deadline::ENABLED));
+    body.instruction(&Instruction::I32Or);
     body.instruction(&Instruction::If(BlockType::Empty));
     // Deliver already-ready calls before selecting expiry, regardless of the
     // notification order. The caller drains/assembles one ordinary event per
@@ -647,6 +670,7 @@ pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunction
     cancel_window_deadline(body, indices);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
+    parallel_deadline::select_or_deliver(body, indices);
     if !indices.omit_runtime {
         body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
         body.instruction(&Instruction::I32Eqz);
@@ -701,6 +725,15 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
     body.instruction(&Instruction::LocalSet(DEADLINE_STATUS));
     body.instruction(&Instruction::Else);
     load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    parallel_deadline::timer_handle(body);
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+    body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::LocalSet(parallel_deadline::TIMER_STATUS));
+    body.instruction(&Instruction::Else);
+    load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
     body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -708,8 +741,14 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
     body.instruction(&Instruction::Call(indices.subtask_drop.unwrap()));
     set_zero(body, WINDOW_TIMER);
     body.instruction(&Instruction::Else);
+    body.instruction(&Instruction::LocalGet(parallel_deadline::ENABLED));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    parallel_deadline::remember_returned(body, indices);
+    body.instruction(&Instruction::Else);
     close_deadline(body, indices);
     helper_return(body, 0);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
@@ -726,6 +765,7 @@ pub(super) fn emit_forget_returned(body: &mut Function) {
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
         clear_slot_handle(body);
+        parallel_deadline::reset_slot(body, CURSOR);
         body.instruction(&Instruction::End);
     });
 }

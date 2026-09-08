@@ -9,8 +9,8 @@ use wasm_encoder::{BlockType, Function, Instruction, MemArg};
 
 pub(super) const DEADLINE: u32 = 160;
 pub(super) const REMAINING: u32 = 161;
-const START_NS: u32 = 162;
-const BUDGET_MS: u32 = 163;
+pub(super) const START_NS: u32 = 162;
+pub(super) const BUDGET_MS: u32 = 163;
 
 pub(super) fn enter(
     body: &mut Function,

@@ -2686,3 +2686,47 @@ pointer/length pair; the complete rerun passed without weakening behavioral
 assertions. Existing agent/shared component artifacts were reused because their
 source and WIT did not change. No new paired measurements, browser visual checks,
 database/server E2E, standalone component-host suite or soak ran in this stage.
+
+
+### Parallel Agent deadline lowering · 2026-09-08
+
+The guest's existing parallel slots now carry each timed Agent's original
+monotonic start/budget, ready state and timeout error descriptor. One standard
+async timer selects the nearest active Agent deadline. Ready call handles remain
+owned by their slots until the normal scheduler drops and assembles them; the
+shared cleanup resolves them on root/parent cancellation or scope failure. A
+memoized result does not restart its Agent budget during assembly.
+
+Branch dispatch and memoized assembly now adjust outer error/handled branch
+depths consistently. A scheduler error capture reuses the shared window cleanup
+before forwarding an ordinary failure to an outer handler, and avoids repeating
+cleanup when an enclosing deadline already resolved the window. This fixes an
+HTTP failure that previously reached recovery with a live peer request.
+
+Six composed regression groups cover pending HTTP headers/body with a surviving
+peer, a fast three-call sibling chain, ordinary-error cleanup before recovery,
+zero/maximum budgets and completed replay, parallel Split timeout aggregation,
+and a surviving Split item after the earlier item spent budget on connection
+preparation.
+See AUDIT-15 for exact test names and pending qualification. Public E128 remains;
+this is not a completed timeout-release or bounded-grace gate. No agent component
+or host protocol changed in this stage. Parallel slots grow from 176 to 208 bytes,
+shared helper state from 16 to 19 i32 values, and the emitter cache marker advances
+to `cooperative-waits=shared-v13`. Paired size/latency and soak measurements remain
+required, including the untimed path.
+
+
+Validation for this stage: the full feature-gated compiler library suite passed
+647 tests in 188.60s. After adding the final Split preparation/survival fixture
+and extending its shared test server, the affected checkpoint/parallel group
+passed 13 tests in 10.45s; no production code changed after the full library run.
+The workflow execution integration suite passed 395 tests in 527.92s, with its
+three manual benchmarks ignored. The macro crate passed 60 tests (four example
+doctests remain ignored). Final feature-gated Clippy, formatting, diff whitespace
+and the interactive guide's JavaScript syntax checks passed.
+
+Agent components were reused from the existing rebuilt set: this stage changes
+no guest Rust agent, WIT or component-host source. The standalone component-host
+suite, authenticated server E2E, Linux run, visual browser review, paired size/
+latency measurements and soak were not rerun here. Existing publication, cleanup
+grace and compatibility-retirement gates remain open.

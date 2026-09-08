@@ -1442,3 +1442,47 @@ completed external request. Retrying Split items retain the existing sequential
 fallback; their tests do not claim concurrent retries. Malformed attempt payloads,
 other non-checkpoint preparation failures and deeper mixed nesting need separate
 qualification. No performance or bounded cleanup-grace claim is made here.
+
+
+### AUDIT-15 · Agent budgets in parallel windows and error-scope cleanup
+
+Timed Agents were excluded from parallel eligibility. The private timeout
+emitter therefore serialized these graphs, so a passing sequential timeout test
+could not establish that one invocation can expire while a sibling remains live.
+The existing guest window now records each Agent's original budget in its slot
+and uses one standard timer for the nearest pending Agent deadline. Returned
+calls are retained in their slots for the ordinary scheduler to assemble. The
+same lowering serves branch and Split invocations; agent exports remain entirely
+on `agent_component!`, with no additional host task interface or agent wrapper.
+
+The new composed fixtures also exposed an existing scheduler error-routing bug:
+assembly and synchronous dispatch did not account for all enclosing Wasm blocks,
+so a failure could be lost before reaching an enclosing handler. Correcting that
+branch depth exposed another issue: leaving the scheduler could skip cancellation
+of pending peers. A window-level error capture now invokes the shared window
+cleanup before forwarding the original error to the enclosing scope.
+
+| Case | Required behavior | Test in `compile/parallel_agent_deadline_tests.rs` |
+| --- | --- | --- |
+| Timed branch waits for HTTP headers or a partial body while an untimed peer remains pending | Cancel the timed call; the peer can return after observing that cancellation | `timed_branch_preserves_live_http_sibling_and_recovers` |
+| A fast branch contains three successive calls while another Agent waits | Advance all three calls before the other Agent expires | `timed_branch_scheduler_keeps_fast_sibling_advancing` |
+| Ordinary HTTP 503 leaves a scheduler for an outer `onError` handler | Preserve `HTTP_5XX`; close the pending sibling socket before recovery begins | `ordinary_branch_failure_cleans_live_peer_before_outer_handler` |
+| Zero or maximum unsigned Agent budget, both branch execution paths and durability settings | Zero issues no HTTP for that Agent; maximum does not overflow; durable completed replay issues no new calls | `parallel_agent_zero_budget_and_maximum_budget` |
+| Parallel Split with `dontStopOnFailed`, zero, finite and maximum item budgets | Aggregate each expired item as `AGENT_TIMEOUT`; maximum-budget items succeed | `parallel_split_aggregates_each_agent_deadline` |
+| First Split item spends part of its budget resolving a connection while a later item starts fresh | Preparation consumes the first item’s budget; that item times out and the second succeeds after its socket closes | `parallel_split_preserves_peer_after_preparation_consumes_own_budget` |
+
+The ordinary-error cleanup test enables step events and waits for the server's
+socket-close notification at the recovery step's start, while the Store is still
+alive. The sibling-survival fixture requires both actual requests to have started
+before releasing the successful peer. The fast-chain fixture records four actual
+requests before the target closes. These are executable composed-WASM checks,
+not assertions about a handwritten model of the scheduler.
+
+Qualification remains incomplete: cancellation during pending connection
+preparation, parent/root versus completion
+races, nested handled exits, concurrent retries and independently bounded cleanup
+grace still need coverage. Public Agent/Embed timeout syntax continues to return
+E128. The implementation adds 32 bytes to each parallel slot and three i32 values
+to shared helper state; this is layout accounting, not a measured runtime-memory,
+latency or binary-size result. Include these costs in the planned paired
+benchmarks before making performance claims.

@@ -850,6 +850,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // 174-178: enclosing deadline saved for Split aggregation.
     (3, ValType::I64),
     (2, ValType::I32),
+    // 179-181: timed-window flag, selected slot and owned timer status.
+    (3, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

@@ -212,6 +212,18 @@ pub(super) fn emit_agent_plan(
 
     let timeout_ms = static_data.agent_timeout(agent_id);
     if let Some(timeout) = timeout_ms {
+        // A launched parallel call already owns its original budget and result.
+        // Do not create a fresh budget while assembling its memoized outcome.
+        if let Some(slot) = memo_slot_ptr_local {
+            body.instruction(&Instruction::LocalGet(slot));
+            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I32Eqz);
+            body.instruction(&Instruction::If(BlockType::Empty));
+        }
         super::agent_deadline::enter(
             body,
             indices,
@@ -221,6 +233,9 @@ pub(super) fn emit_agent_plan(
             timeout,
             durable_checkpoint,
         );
+        if memo_slot_ptr_local.is_some() {
+            body.instruction(&Instruction::End);
+        }
     }
 
     let invoke = indices

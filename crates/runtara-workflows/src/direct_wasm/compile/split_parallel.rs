@@ -176,11 +176,7 @@ pub(super) fn parallel_agent_body<'a>(
     // shape stops the workflow from starting at all, and an Agent's maxRetries
     // defaults to 3, so the overwhelming majority of authored Splits carry a
     // retry policy they never opted into.
-    if *breakpoint
-        || *agent_retries > 0
-        || static_data.agent_is_workflow_agent(*agent_id)
-        || static_data.agent_timeout(*agent_id).is_some()
-    {
+    if *breakpoint || *agent_retries > 0 || static_data.agent_is_workflow_agent(*agent_id) {
         return None;
     }
     // Any continuation after the Agent is fine: the launch pass only fronts
@@ -945,6 +941,34 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::LocalGet(route_len_local));
     body.instruction(&Instruction::BrIf(0)); // -> $skip
 
+    let own_deadline = static_data.agent_timeout(parallel.agent_id).is_some();
+    emit_slot_ptr(
+        body,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+        DIRECT_PSPLIT_CHUNK_START_LOCAL,
+        DIRECT_PSPLIT_SLOTS_LOCAL,
+        DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+    );
+    super::cooperative_wait::parallel_deadline::begin(
+        body,
+        indices,
+        static_data,
+        parallel.agent_id,
+        parallel.step_id,
+        (source_ptr_local, source_len_local),
+        parallel.durable_checkpoint,
+        DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+    );
+    if own_deadline {
+        super::cooperative_wait::parallel_deadline::check_before_io(
+            body,
+            indices,
+            DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+            0,
+            fresh_failure_target.map(|t| t.nested(5)),
+        );
+    }
+
     // connection injection (in-band `_connection`); no-op when connectionless.
     if static_data.agent_has_connection(parallel.agent_id) {
         body.instruction(&Instruction::I32Const(parallel.agent_id as i32));
@@ -959,12 +983,22 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::If(BlockType::Empty));
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        super::agent_io::emit_connection_description(body, indices, false);
-        super::cooperative_wait::emit_window_preparation_timeout(
-            body,
-            indices,
-            fresh_failure_target.map(|target| target.nested(6)),
-        );
+        super::agent_io::emit_connection_description(body, indices, own_deadline);
+        if own_deadline {
+            super::cooperative_wait::parallel_deadline::preparation_done(
+                body,
+                indices,
+                DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+                1,
+                fresh_failure_target.map(|t| t.nested(6)),
+            );
+        } else {
+            super::cooperative_wait::emit_window_preparation_timeout(
+                body,
+                indices,
+                fresh_failure_target.map(|target| target.nested(6)),
+            );
+        }
         load_retptr_tag(body);
         body.instruction(&Instruction::BrIf(1)); // -> $skip
         load_retptr_list(body, route_ptr_local, route_len_local);
@@ -980,6 +1014,16 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::BrIf(1)); // -> $skip
         load_retptr_list(body, output_ptr_local, output_len_local);
         body.instruction(&Instruction::End);
+    }
+
+    if own_deadline {
+        super::cooperative_wait::parallel_deadline::check_before_io(
+            body,
+            indices,
+            DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+            0,
+            fresh_failure_target.map(|t| t.nested(5)),
+        );
     }
 
     // slot_ptr = slots + (i - chunk_start) * STRIDE  -> route_ptr_local
