@@ -1060,7 +1060,11 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
-                        step_id: tool_agent.step_id.clone(),
+                        step_id: tool_agent
+                            .timeout_step_id
+                            .as_ref()
+                            .unwrap_or(&tool_agent.step_id)
+                            .clone(),
                         durable: tool_agent.durable,
                         label: name.clone(),
                         timeout_ms: tool_agent.timeout,
@@ -1082,11 +1086,15 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
-                        step_id: tool_agent.step_id.clone(),
+                        step_id: tool_agent
+                            .timeout_step_id
+                            .as_ref()
+                            .unwrap_or(&tool_agent.step_id)
+                            .clone(),
                         durable: tool_agent.durable,
                         label: name.clone(),
-                        // MCP tool providers carry their own transport timeout;
-                        // this is typically None (no per-call override).
+                        // The referenced Agent owns this workflow budget;
+                        // capability transport timeouts retain their own meaning.
                         timeout_ms: tool_agent.timeout,
                     });
                 }
@@ -3816,6 +3824,7 @@ mod tests {
             max_retries,
             retry_delay,
             timeout: None,
+            timeout_step_id: None,
         }
     }
 

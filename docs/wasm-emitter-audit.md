@@ -6,11 +6,10 @@ and durable suspend/resume through the production invoke ABI.
 
 ## Current progress · 2026-09-08
 
-Progress checkpoint against implementation commit `62e051ed5001c28936381b4a544665be62f32e1e`
-on the separate branch `feat/cooperative-cancellation-progress` (remote:
-`origin/feat/cooperative-cancellation-progress`). Implementation through this
-commit is committed and pushed. This documentation checkpoint adds no runtime
-changes; the AI memory/MCP follow-up described below has not been implemented.
+Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`
+(remote: `origin/feat/cooperative-cancellation-progress`). AUDIT-29 extends the
+Agent-tool implementation committed as `62e051ed` to synthetic MCP tools.
+AI memory load/save budget enforcement remains unfinished.
 
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
@@ -52,16 +51,17 @@ Implemented and covered by focused tests:
 fixtures deliberately bypass that validation rejection to exercise the emitter;
 their success does not mean users can already author those timeouts. AUDIT-28
 fixes the Agent-as-AI-tool path, which previously only injected a capability
-argument. AI memory and synthetic MCP provider metadata still drops the
-referenced Agent budget, so blanket public acceptance would remain incorrect. No product
-feature flag or optional cancellation backend has been added.
+argument. AUDIT-29 extends the same deadline path to synthetic MCP tools.
+AI memory provider metadata still drops the referenced Agent budget, so blanket
+public acceptance would remain incorrect. No product feature flag or optional
+cancellation backend has been added.
 
 ### Remaining work to reach the goal
 
 | Work | Completion criterion |
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
-| Public timeout support | Agent-as-AI-tool budget enforcement is implemented (AUDIT-28). Carry and enforce the referenced Agent timeout for AI memory and synthetic MCP provider calls, then remove E128 deliberately and move deadline coverage through public validation/compilation/composition, including zero/overflow/inherited budgets, replay and cleanup escalation. |
+| Public timeout support | Agent-as-AI-tool and synthetic MCP budget enforcement are implemented (AUDIT-28/29). Carry and enforce the referenced Agent timeout for AI memory calls, then remove E128 deliberately and move deadline coverage through public validation/compilation/composition, including zero/overflow/inherited budgets, replay and cleanup escalation. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
@@ -74,19 +74,20 @@ per-stage tests and historical measurements. Later entries supersede earlier
 "remaining" statements when they record the corresponding implementation and
 evidence; the table above is the consolidated current work list.
 
-### Latest verified implementation checkpoint (`62e051ed`)
+### Recorded verification checkpoints
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Synthetic MCP deadlines (AUDIT-29) | 689 feature-gated compiler library tests passed in 416.76s; final 14-test MCP selection passed in 13.07s; public AI selection passed 19 tests in 8.62s | The final MCP rerun includes stronger exact provider-error assertions. Its tests are included in the library count. E128 remains, and native server E2E/benchmarks were not rerun. |
 | Agent-as-AI-tool deadlines (`62e051ed`, AUDIT-28) | 682 feature-gated compiler library tests passed in 412.38s; 19 public AI execution tests passed in 14.00s; feature-gated all-target Clippy passed | The seven new Agent-tool regressions are included in the 682, not additional tests. Timeout regressions use private emission while E128 remains. Public AI tests cover currently accepted workflows. |
 | Physical ownership and remote emergency grace (`b932f1c6` / `d3fc2a6a`, AUDIT-26/27) | 354 distinct selected environment tests passed across the recorded runs; authenticated owner/peer HTTP header/body E2E passed | Extended E2E also observed lease renewal during a 32-second pending request and shutdown of an unrelated peer. This is lifecycle evidence from the earlier native stage, not a fresh run against `62e051ed` or a performance benchmark. |
-| Documentation checkpoint | Source and recorded results reviewed; diff whitespace checked | Rust tests, component builds, server E2E and benchmarks are not rerun for this documentation-only update. The normal pre-commit hook remains enabled; it skips Rust checks when no Rust files are staged. |
+| Documentation checkpoint (`4ecb4f9b`) | Source and recorded results reviewed; diff whitespace checked | No runtime changes or Rust test reruns in that documentation-only commit. |
 
 The immediate implementation work is to preserve the referenced Agent's timeout
-and definition identity when constructing `memory.load`, `memory.save` and
-synthetic MCP search/invoke metadata. These entries currently set `timeout: None`.
-Memory calls also need shared guest budget/checkpoint handling; synthetic MCP
-calls should reuse the Agent-tool deadline path. Durable call identities must
+and definition identity when constructing `memory.load` and `memory.save` metadata.
+These entries currently set `timeout: None`. Memory calls also need shared guest
+budget/checkpoint handling. Synthetic MCP calls now reuse the Agent-tool deadline
+path (AUDIT-29). Durable call identities must
 keep memory operations distinct from user-defined tools and preserve pending
 budgets and completed results across replay. This remains design work, not a
 completed fix or a new host task-management API.
@@ -2280,3 +2281,55 @@ Those metadata and invocation paths require explicit budgets and tests. The
 Agent-tool fix does not establish those contracts, complete G5, or justify
 removing E128. Public validation, public component import inference and supported
 export modes also need to be tested together when that gate is removed.
+
+
+### AUDIT-29 · Synthetic MCP tools retain the provider's guest budget
+
+**Status: implemented in the private emitter path; E128 remains.** MCP search and
+invoke already await cancellable HTTP. Their generated invocation metadata was
+losing the referenced Agent timeout and definition identity. Merely copying the
+budget exposed a second gap: the static data table interned authored edge labels
+(`mcp.github`) but not the synthetic names (`github_search` / `github_invoke`)
+needed to construct replay-stable tool scopes.
+
+MCP edge discovery now retains the referenced Agent definition. Generated entries
+carry its timeout, effective durability and an optional `timeoutStepId`; the
+existing `stepId` still identifies the AI caller for configuration lookup and
+error attribution. The plan selects the definition identity for budget keys.
+Static data interns timed synthetic tool names, and both calls use the existing
+Agent-tool budget/checkpoint/invoke path. There is no MCP-specific cancellation
+handler, host task registry, new guest import or component runtime change.
+The compiler cache tag advances to `shared-v19`. Untimed entries omit the new
+optional field and retain their prior durability metadata.
+
+Each model-selected call receives its own budget across MCP initialization,
+notification and actual RPC. A local timeout yields non-retryable `AGENT_TIMEOUT`
+feedback attributed to the owning AI step. It does not change the transport's
+30,000 ms timeout or tool arguments. Root cancellation and enclosing expiry bypass
+feedback and subsequent model work. Completed calls replay without repeating
+RPCs; pending budgets retain elapsed parked time. Search and invoke receive
+independent durable scopes, even within one model response.
+
+| Contract | Regression test |
+| --- | --- |
+| Zero budgets dispatch neither synthetic capability | `mcp_tool_zero_budget_skips_both_synthetic_capabilities` |
+| Cancel initialization, notification and tool RPC; observe header/body closure and a fresh subsequent call without overwriting I/O arguments | `mcp_tool_cancels_each_rpc_phase_and_next_call_has_a_fresh_budget` |
+| Root Cancel and enclosing While timeout escape the model loop | `mcp_tool_root_cancel_and_parent_timeout_skip_further_model_work` |
+| Completed and pending replay preserve independent search/invoke budgets | `mcp_tool_completed_and_pending_replay_preserve_independent_budgets` |
+| Malformed budgets fail before RPC or model feedback | `mcp_tool_corrupt_budget_fails_before_rpc_or_model_feedback` |
+| Maximum unsigned budget preserves provider errors and successful results | `mcp_tool_maximum_budget_preserves_provider_errors_and_success` |
+| Referenced definition, connection ref and effective durability survive desugaring; untimed manifests omit the optional field and still deserialize | `synthetic_mcp_budget_uses_provider_definition_and_effective_durability` |
+
+All 14 MCP-related tests passed in 14.09s, including the six new composed tests
+and one metadata test. A negative control removed the synthetic timeout
+propagation; the zero-budget test failed with `unexpected child request 0`
+(1.17s). Production propagation was restored before broader verification.
+The first composed run caught the missing synthetic static strings. A subsequent
+root-cancel fixture assertion also needed to await the server task's observation
+of socket EOF rather than assume it had been scheduled before guest completion.
+
+AI memory load/save still needs its own namespace and shared guest budget/result
+checkpoint handling. Public timeout validation/import inference/export modes,
+full G1–G10 qualification, artifact compatibility, paired benchmarks, Linux soak
+and upstream/PR work remain open. The implementation record lists this stage's
+broader validation and skipped checks.

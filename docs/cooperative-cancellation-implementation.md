@@ -3422,3 +3422,74 @@ public compilation and verify component import inference and export modes.
 The remaining G1–G10 work, full public execution matrix, authenticated E2E,
 component rebuilds, paired size/latency report and Linux soak were not repeated
 or completed by this compiler stage.
+
+
+### Referenced Agent budgets for synthetic MCP calls · 2026-09-08
+
+AUDIT-29 closes the MCP metadata/interning portion of the missing AI auxiliary
+provider paths. MCP edge discovery retains the referenced Agent definition;
+synthetic search/invoke entries now carry its timeout, effective durability and
+optional definition identity. The caller identity remains unchanged for
+configuration lookup and error feedback. Timed synthetic names are interned so
+both dispatch arms can reuse the existing scoped Agent-tool deadline/checkpoint
+helper. No component/WIT implementation, host API, task registry or capability
+argument is changed. The compiler cache tag advances to `shared-v19`.
+
+The composed tests exercise initialization, initialized notification and actual
+MCP requests through the existing HTTP fixture, including pending headers/body,
+root Cancel, enclosing While expiry, fresh calls, completed and pending replay,
+malformed budgets, maximum unsigned budgets and provider errors. Search and invoke
+within one model response have separate durable budgets. A metadata matrix checks
+graph/provider durability independently of the AI caller's setting, preserves the
+provider connection ref and confirms the optional field is absent from untimed
+serialized manifests.
+
+Verification for this stage:
+
+- The 14-test MCP selection passed in 14.09s, including six new composed tests and
+  one new metadata test. These are part of the library suite, not extra counts.
+- A negative control removed `timeout: provider.timeout` from synthetic metadata.
+  The zero-budget test failed with `unexpected child request 0` (1.17s). Production
+  metadata was restored before the full library run.
+- The feature-gated compiler library suite passed **689 tests** in **416.76s**.
+  After that run was compiled, the provider-error regression was strengthened
+  from excluding `AGENT_TIMEOUT` to requiring `MCP_HTTP_ERROR` and `retryable: true`;
+  the final focused run below verifies those stronger assertions.
+- The final MCP selection passed all **14 tests** in **13.07s**, including the
+  stronger exact provider-error assertions.
+- The public AI execution selection passed **19 tests** in **8.62s**, with 379
+  filtered out. This checks currently accepted AI workflows, not public Agent or
+  Embed timeout support.
+- Feature-gated all-target Clippy with `-D warnings` passed in **4.21s**;
+  formatting and diff whitespace checks passed. The commit uses the normal
+  formatting/workspace all-target Clippy hook without bypass.
+- The initial tests caught missing synthetic tool-name static segments. The
+  root-cancel socket-closure assertion was also corrected to wait for the fixture
+  server's bounded observation of EOF after guest completion.
+
+Commands use the pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, the existing isolated native target and matching previously
+built Agent/shared components:
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib mcp_ -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute ai_agent -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Logs are `/private/tmp/cooperative-mcp-tool-expanded.log`,
+`/private/tmp/cooperative-mcp-tool-negative.log`,
+`/private/tmp/cooperative-mcp-tool-full-lib.log`,
+`/private/tmp/cooperative-mcp-tool-final-focused.log`,
+`/private/tmp/cooperative-mcp-tool-public-ai.log` and
+`/private/tmp/cooperative-mcp-tool-clippy.log`.
+
+The timeout fixtures still use private emission and normal component composition;
+E128 remains. AI memory load/save metadata and its budget/checkpoint scopes are
+still unfinished. No component rebuild, full public execution matrix, native
+server/database E2E, final paired performance measurements or Linux soak was run
+for this compiler-only stage. It does not close G1–G10, update registered/parked
+artifacts, integrate upstream migrations or create the PR.

@@ -5,6 +5,9 @@ use crate::direct_wasm::WorkflowAbi;
 #[path = "agent_tool_deadline_tests.rs"]
 mod agent_tool;
 
+#[path = "mcp_tool_deadline_tests.rs"]
+mod mcp_tool;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Child {
     Success,
@@ -159,14 +162,19 @@ impl Server {
                             .map(|n| n.trim().parse::<usize>().unwrap())
                     })
                     .unwrap_or(0);
-                let metadata = headers.lines().next().unwrap().contains("/metadata ");
+                let request_line = headers.lines().next().unwrap();
+                let metadata = request_line.contains("/metadata ");
+                let mcp_metadata = request_line.contains("/mcp-conn/metadata ");
+                let mcp_params = request_line.starts_with("GET /fixture/mcp-conn ");
                 while bytes.len() < end + length {
                     let n = stream.read(&mut buffer).await?;
                     anyhow::ensure!(n > 0, "incomplete body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
                 let response = if metadata {
-                    json!({"connectionId":"conn","integrationId":"openai_api_key","status":"ACTIVE","resources":[],"metadata":null})
+                    json!({"connectionId":if mcp_metadata {"mcp-conn"} else {"conn"},"integrationId":if mcp_metadata {"mcp"} else {"openai_api_key"},"status":"ACTIVE","resources":[],"metadata":null})
+                } else if mcp_params {
+                    json!({"parameters":{"url":"http://fixture.test/child"}})
                 } else {
                     let envelope: Value = serde_json::from_slice(&bytes[end..end + length])?;
                     if envelope["url"]
@@ -191,7 +199,20 @@ impl Server {
                             cleanup.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
-                        json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":{"ok":operation == Child::Success}})
+                        let payload = match envelope["body"]["method"].as_str() {
+                            Some("initialize") => {
+                                json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
+                            }
+                            Some("notifications/initialized") => Value::Null,
+                            Some("tools/list") => {
+                                json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
+                            }
+                            Some("tools/call") => {
+                                json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
+                            }
+                            _ => json!({"ok":operation == Child::Success}),
+                        };
+                        json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
                     } else {
                         let index = {
                             let mut requests = seen.lock().unwrap();

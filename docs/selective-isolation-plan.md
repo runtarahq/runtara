@@ -1030,10 +1030,29 @@ completed calls skip both invocation and old budget; pending budgets include
 parked time; root and enclosing cancellation bypass feedback. No capability input
 is overwritten. AUDIT-28 maps this stage's tests and negative control.
 
-Still carry the referenced timeout into AI memory load/save and synthetic MCP
-provider metadata and enforce it at those invocation sites. These paths currently
-set their generated Agent timeout to `None`. Keep E128 until their exact behavior
-is proven. Then migrate private deadline fixtures onto public validation,
+Still carry the referenced timeout into AI memory load/save metadata and enforce
+it at those invocation sites. Synthetic MCP propagation is implemented in the
+following stage. Memory still sets generated Agent timeouts to `None`. Keep E128
+until its behavior is proven. Then migrate private deadline fixtures onto public validation,
 compilation and component composition, verify import inference/export modes and
 run the affected acceptance corpus. Advancing the compiler cache tag to
 `shared-v18` does not recompile registered or parked artifacts or close G1–G10.
+
+
+### Synthetic MCP deadline progress · 2026-09-08
+
+MCP search/invoke metadata now preserves the referenced Agent budget, definition
+identity and effective durability. Timed synthetic names are interned for the
+shared tool scope builder. Both calls use the existing guest Agent-tool deadline,
+checkpoint and cancellation path; no new host or guest task-management API is
+introduced. AUDIT-29 records composed initialization/notification/RPC cancellation,
+root and parent propagation, durable replay, malformed budgets, provider errors
+and a negative control. Capability transport timeouts and arguments are preserved.
+
+Keep E128 and G5/G7 open. AI memory load/save remains the immediate missing
+provider path. Give these operations an explicit guest namespace distinct from
+model-selected tools, reuse budget/checkpoint helpers, and verify completed and
+pending replay before enabling public timeout syntax. Keep memory summarization's
+AI provider contract separate from the storage Agent's timeout. The `shared-v19`
+cache tag does not rewrite registered artifacts or establish compatibility and
+performance qualification; all remaining G1–G10 requirements still apply.

@@ -528,10 +528,21 @@ fn collect_static_step_ids(
     // Intern edge labels too (string-interning map). An AiAgent tool edge's label
     // is the advertised tool name; WaitForSignal-as-tool builds its per-call
     // signal id `…/{ai_step}.tool.{label}.{call}` and so needs the label segment.
-    for edge in &graph.edges {
-        if let Some(label) = &edge.label
-            && !step_ids.contains_key(label)
-        {
+    // Synthetic MCP tool labels have no matching edge label. Timed calls use
+    // those names in the same replay-stable scope builder as ordinary tools.
+    let labels = graph
+        .edges
+        .iter()
+        .filter_map(|edge| edge.label.as_ref())
+        .chain(
+            graph
+                .agents
+                .iter()
+                .filter(|agent| agent.purpose == "agent.tool.mcp" && agent.timeout.is_some())
+                .filter_map(|agent| agent.name.as_ref()),
+        );
+    for label in labels {
+        if !step_ids.contains_key(label) {
             let segment = DirectDataSegment::new(*offset, label.as_bytes());
             *offset = align_i32(checked_offset_add(*offset, label.len())?, 16);
             step_ids.insert(label.clone(), segment);
@@ -849,6 +860,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            timeout_step_id: None,
         }
     }
 }
