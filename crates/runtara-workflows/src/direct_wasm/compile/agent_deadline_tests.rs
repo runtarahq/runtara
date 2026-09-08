@@ -140,6 +140,7 @@ fn executor() -> &'static WorkflowExecutor {
 #[derive(Clone, Copy, Debug)]
 enum Shape {
     Root,
+    Preparation(bool),
     Published(usize),
     InlineWhile(usize),
     InheritedWhile {
@@ -195,6 +196,9 @@ fn compile_shaped(
             "stepId":{"valueType":"reference","value":"steps.__error.stepId"}}}},
         "executionPlan":[{"fromStep":"fetch","toStep":"finish"},
             {"fromStep":"fetch","toStep":"handled","label":"onError"}]});
+    if matches!(shape, Shape::Preparation(_)) {
+        graph["steps"]["fetch"]["connectionId"] = "conn".into();
+    }
     if !recover {
         graph["steps"].as_object_mut().unwrap().remove("handled");
         graph["executionPlan"]
@@ -327,7 +331,7 @@ fn compile_shaped(
         compiled.omit_runtime,
         slug,
         &pools,
-        false,
+        matches!(shape, Shape::Preparation(_)),
         &Default::default(),
         true,
         true,
@@ -452,13 +456,21 @@ fn wrap_published(
 }
 
 async fn invoke(compiled: &DirectCompilationResult, host: Arc<Host>) -> anyhow::Result<InvokeExit> {
+    invoke_with_env(compiled, host, HashMap::new()).await
+}
+
+async fn invoke_with_env(
+    compiled: &DirectCompilationResult,
+    host: Arc<Host>,
+    env: HashMap<String, String>,
+) -> anyhow::Result<InvokeExit> {
     let executor = executor();
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
     Ok(executor
         .execute_invoke(
             &pre,
             WorkflowRunSpec {
-                env: HashMap::new(),
+                env,
                 stderr: None,
                 timeout: Duration::from_secs(5),
                 cancel: None,
@@ -518,6 +530,19 @@ async fn run_shaped(
                 let n = stream.read(&mut buffer).await?;
                 anyhow::ensure!(n > 0, "request ended before headers");
                 request.extend_from_slice(&buffer[..n]);
+            }
+            if let Shape::Preparation(partial) = shape {
+                anyhow::ensure!(
+                    std::str::from_utf8(&request)?
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .contains("/metadata"),
+                    "Agent invoked after cancelled preparation"
+                );
+                if partial {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").await?;
+                }
             }
             let attempt = req.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
@@ -582,7 +607,10 @@ async fn run_shaped(
             true,
             shape,
         )?;
-        let mut exit = invoke(&compiled, host.clone()).await?;
+        let env = if matches!(shape, Shape::Preparation(_)) {
+            HashMap::from([("CONNECTION_SERVICE_URL".into(),url.clone()),("RUNTARA_TENANT_ID".into(),"fixture".into())])
+        } else { HashMap::new() };
+        let mut exit = invoke_with_env(&compiled, host.clone(), env).await?;
         if matches!(response, Response::RootCancel) {
             anyhow::ensure!(
                 matches!(exit, InvokeExit::Suspended(_)),
@@ -1087,6 +1115,35 @@ async fn agent_deadline_inherited_budget_bounds_backoff_and_durable_replay() -> 
             },
         )
         .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_deadline_interrupts_connection_preparation_without_invocation() -> anyhow::Result<()>
+{
+    for durable in [false, true] {
+        for partial in [false, true] {
+            run_shaped(
+                Response::Hang,
+                500,
+                durable,
+                3,
+                0,
+                Shape::Preparation(partial),
+            )
+            .await?;
+            run_shaped(
+                Response::RootCancel,
+                5_000,
+                durable,
+                3,
+                0,
+                Shape::Preparation(partial),
+            )
+            .await?;
+        }
+        run_shaped(Response::Hang, 0, durable, 3, 0, Shape::Preparation(false)).await?;
     }
     Ok(())
 }

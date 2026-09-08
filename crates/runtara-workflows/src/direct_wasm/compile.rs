@@ -1138,7 +1138,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v6,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v7,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1757,7 +1757,7 @@ fn build_direct_component_resolve_scoped(
         workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
-        workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
+        workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.2.0;\n");
     }
     if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
         workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");

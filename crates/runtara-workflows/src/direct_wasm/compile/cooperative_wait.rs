@@ -561,6 +561,23 @@ fn cancel_window_deadline(body: &mut Function, indices: &DirectCoreFunctionIndic
     helper_return(body, 4);
 }
 
+/// A timed-out preparation Await owns only its lookup handle. Resolve the
+/// enclosing window's peers before forwarding the selected scope's reason.
+pub(super) fn emit_window_preparation_timeout(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    failure_target: Option<super::DirectFailureTarget>,
+) {
+    if indices.monotonic_now.is_none() {
+        return;
+    }
+    body.instruction(&Instruction::LocalGet(TIMED_OUT));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    assert!(call_helper(body, indices, Helper::WindowCancel));
+    super::deadline_scope::propagate(body, indices, failure_target.map(|target| target.nested(1)));
+    body.instruction(&Instruction::End);
+}
+
 /// Wait for one event. A polling timer is internal to this wait and never
 /// decrements the window's call count or advances a branch cursor.
 pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunctionIndices) {

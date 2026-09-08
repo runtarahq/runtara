@@ -158,15 +158,12 @@ pub(crate) fn resolver_from_env(
         .map(|host| Arc::new(host) as Arc<dyn ConnectionResolverHost>)
 }
 
-fn require_host(
-    store: &mut StoreContextMut<'_, WorkflowState>,
-) -> wasmtime::Result<Arc<dyn ConnectionResolverHost>> {
-    store.data().connection_resolver_host().cloned().ok_or_else(|| {
+fn require_host(state: &WorkflowState) -> wasmtime::Result<Arc<dyn ConnectionResolverHost>> {
+    state.connection_resolver_host().cloned().ok_or_else(|| {
         wasmtime::format_err!(
             "workflow imports {CONNECTION_RESOLVER_INTERFACE_NAME} but connection resolution is \
              unavailable: {}",
-            store
-                .data()
+            state
                 .connection_resolver_error()
                 .unwrap_or("resolver was not configured")
         )
@@ -176,18 +173,32 @@ fn require_host(
 /// Bind the universal connection resolver to the run-scoped HTTP host.
 pub fn add_connection_resolver_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Result<()> {
     let mut inst = linker.instance(CONNECTION_RESOLVER_INTERFACE_NAME)?;
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent("describe", |accessor, (connection_id,): (String,)| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.describe(connection_id).await,)) })
+    })?;
+    inst.func_wrap_concurrent(
+        "resolve-resource",
+        |accessor, (connection_id, request): (String, Vec<u8>)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move { Ok((host?.resolve_resource(connection_id, request).await,)) })
+        },
+    )?;
+    // Already-built artifacts keep the synchronous 0.1 contract. Registration
+    // depends only on the artifact's ABI version, never a workflow feature flag.
+    let mut legacy =
+        linker.instance(runtara_workflow_wit::LEGACY_CONNECTION_RESOLVER_INTERFACE_NAME)?;
+    legacy.func_wrap_async(
         "describe",
-        |mut store: StoreContextMut<'_, WorkflowState>, (connection_id,): (String,)| {
-            let host = require_host(&mut store);
+        |store: StoreContextMut<'_, WorkflowState>, (connection_id,): (String,)| {
+            let host = require_host(store.data());
             Box::new(async move { Ok((host?.describe(connection_id).await,)) })
         },
     )?;
-    inst.func_wrap_async(
+    legacy.func_wrap_async(
         "resolve-resource",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (connection_id, request): (String, Vec<u8>)| {
-            let host = require_host(&mut store);
+        |store: StoreContextMut<'_, WorkflowState>, (connection_id, request): (String, Vec<u8>)| {
+            let host = require_host(store.data());
             Box::new(async move { Ok((host?.resolve_resource(connection_id, request).await,)) })
         },
     )?;

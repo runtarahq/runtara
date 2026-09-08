@@ -6936,6 +6936,19 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
             func: function,
         },
     );
+    let (resolver_interface, describe) = imported_wit_function(
+        &resolve,
+        world,
+        "runtara:connection-resolver/resolver",
+        "describe",
+    );
+    let (resolver_module, resolver_name) = resolve.wasm_import_name(
+        ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
+        WasmImport::Func {
+            interface: Some(resolver_interface),
+            func: describe,
+        },
+    );
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
     Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(&core)
@@ -6962,11 +6975,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                     {
                         agent_connection_id_index = Some(next_function_index);
                     }
-                    if import
-                        .module
-                        .contains("runtara:connection-resolver/resolver")
-                        && import.name == "describe"
-                    {
+                    if import.module == resolver_module && import.name == resolver_name {
                         connection_describe_index = Some(next_function_index);
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
@@ -11113,7 +11122,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
-        tag.contains("cooperative-waits=shared-v6"),
+        tag.contains("cooperative-waits=shared-v7"),
         "recompilation must replace artifacts with duplicated wait code: {tag}"
     );
     assert!(tag.contains("parent-cancel=v1"));

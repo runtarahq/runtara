@@ -1485,3 +1485,7 @@ pub use scoped_execution::{RootExecutionCoordinator, RootLifecycleDecision};
 #[cfg(test)]
 #[path = "workflow/test_support.rs"]
 mod test_support;
+
+#[cfg(test)]
+#[path = "workflow/connection_resolver_tests.rs"]
+mod connection_resolver_tests;

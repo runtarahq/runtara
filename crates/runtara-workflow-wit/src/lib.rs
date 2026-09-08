@@ -25,10 +25,14 @@ pub const RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.4.0
 pub const LEGACY_RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.3.0";
 
 /// WIT package name for safe runtime connection resolution.
-pub const CONNECTION_RESOLVER_PACKAGE: &str = "runtara:connection-resolver@0.1.0";
+pub const CONNECTION_RESOLVER_PACKAGE: &str = "runtara:connection-resolver@0.2.0";
 
 /// Fully-qualified component import name of the connection resolver.
-pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = "runtara:connection-resolver/resolver@0.1.0";
+pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = "runtara:connection-resolver/resolver@0.2.0";
+
+/// Previous synchronous contract, retained for already-built workflow artifacts.
+pub const LEGACY_CONNECTION_RESOLVER_INTERFACE_NAME: &str =
+    "runtara:connection-resolver/resolver@0.1.0";
 
 /// WIT package name for the neutral shared ABI vocabulary.
 pub const ABI_PACKAGE: &str = "runtara:abi@0.1.0";
@@ -51,7 +55,7 @@ pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib
 /// WIT text for `runtara:workflow-runtime@0.4.0`.
 pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runtime.wit");
 
-/// WIT text for `runtara:connection-resolver@0.1.0`.
+/// WIT text for `runtara:connection-resolver@0.2.0`.
 pub const CONNECTION_RESOLVER_WIT: &str =
     include_str!("../wit/connection-resolver/runtara-connection-resolver.wit");
 
@@ -188,6 +192,10 @@ mod tests {
                 interface.functions.contains_key(function),
                 "missing connection resolver function {function}"
             );
+            assert!(matches!(
+                interface.functions[function].kind,
+                wit_parser::FunctionKind::AsyncFreestanding
+            ));
         }
 
         let world_id = package.worlds["connection-resolver"];

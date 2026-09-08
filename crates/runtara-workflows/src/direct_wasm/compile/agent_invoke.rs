@@ -72,8 +72,16 @@ pub(super) fn emit_agent_invoke(
         input_len_local,
         source_ptr_local,
         source_len_local,
+        deadline,
     );
 
+    let preparation_deadline = scoped_deadline && static_data.agent_has_connection(agent_id);
+    if preparation_deadline {
+        body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        super::agent_deadline::error(body, static_data);
+        body.instruction(&Instruction::Else);
+    }
     if scoped_deadline {
         super::deadline_scope::arm(body, indices, deadline);
     }
@@ -112,6 +120,10 @@ pub(super) fn emit_agent_invoke(
         super::deadline_scope::select(body);
         // Ignore a late result written while subtask.cancel resolved the call.
         super::agent_deadline::error(body, static_data);
+        body.instruction(&Instruction::End);
+    }
+
+    if preparation_deadline {
         body.instruction(&Instruction::End);
     }
 

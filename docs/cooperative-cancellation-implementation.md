@@ -2387,3 +2387,59 @@ Own Embed/AI/tool budgets, interruptible preparation, individual timed-Agent sib
 survival, cleanup grace/non-cooperation, authenticated server/multi-owner E2E,
 resource soak, controlled paired measurements and superseded-path retirement
 remain open. E128 stays in place for Agent/Embed timeout syntax.
+
+## Interruptible connection preparation (2026-09-08)
+
+All 27 Agents retain the shared `agent_component!` export/dispatch macro. This
+stage moves connection-metadata waiting onto the same emitted cooperative wait
+used by invocation. `agent_io::emit_connection_description` is shared by the
+sequential Agent/AI path, Split preparation and branch preparation. It arms the
+earliest applicable budget and resolves the pending lookup before returning a
+timeout. Callers skip descriptor injection and Agent invocation on that result;
+parallel preparation also resolves the enclosing window before propagating its
+selected scope's timeout. No custom host task management is added.
+
+The resolver WIT is now async-typed 0.2.0 for both `describe` and
+`resolve-resource`, with concurrent host bindings. Existing 0.1.0 binaries keep
+their synchronous host bindings and use the same resolver implementation and
+per-run caches. This version change is required because the async function kind
+is part of the Component Model type; changing a binding under the old interface
+would break linking. New compilation uses 0.2.0 without feature selection.
+The compiler cache identity advances to `cooperative-waits=shared-v7`.
+
+Preparation coverage includes root Cancel and enclosing While expiry during
+metadata headers and partial bodies across sequential Agent, AI, two inline
+Embed layers, an actual published workflow-agent, Split, scheduled branches and
+wavefront branches. Parallel fixtures require a live peer before metadata blocks.
+They forbid actual Agent invocation, retry checkpoints and failure publication.
+The published-child budget belongs to its calling parent: existing validation
+of runtime-bearing published graphs has not been weakened for the fixture.
+Private-emitter tests additionally cover own Agent budgets, zero budgets, root
+Cancel priority and durable/non-durable execution. E128 remains public policy.
+
+A production-linker fixture executes old and new resolver ABIs, calls both
+resolver functions twice and requires exactly one HTTP request per operation,
+preserving results and the per-run cache contract. The normal AI connection
+resolution control also passes. All 27 Agent components and both shared workflow
+components were rebuilt successfully with metadata using the pinned toolchain.
+
+This does not qualify arbitrary preparation work or CPU transformations, own
+Embed/AI/tool budgets, targeted timed-Agent sibling preservation, remaining
+cleanup-grace cases, authenticated server/multi-owner E2E, resource soak or
+controlled paired size/latency measurements. Those plan gates remain open.
+
+Verification: 610 compiler library tests pass. The strengthened preparation
+matrix passes all 28 cases in three tests, observing socket closure inside the
+live recovery callback or cancellation acknowledgement. Ten private-emitter own
+Agent preparation cases pass as part of the compiler suite. The feature-gated
+real-component cancellation suite passes all 86 tests, including shared export
+and error-contract coverage for all 27 Agents. Resolver compatibility passes for
+both ABI versions; 60 macro tests and six WIT tests pass (four macro doctests are
+intentionally ignored). Feature-gated all-target workflows/component-host Clippy,
+formatting, diff checks and patterns-page JavaScript syntax pass. No browser
+visual check, database/server E2E, soak or controlled benchmark was run here.
+
+The full `direct_wasm_execute` integration suite also passed: 395 tests, with
+three manual benchmarks ignored. After strengthening the recovery-time cleanup
+assertion, its three preparation tests were rerun and passed; the final compiler
+suite and feature-gated Clippy run include that fixture revision.

@@ -48,6 +48,14 @@ impl RuntimeHost for Host {
         self.inner.fail(error).await
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        if self.scenario == Scenario::PreparationDeadline
+            && kind == "step_debug_start"
+            && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == "handled"
+        {
+            tokio::time::timeout(Duration::from_secs(2), self.wait_closed())
+                .await
+                .map_err(|_| "preparation recovery preceded HTTP cleanup")?;
+        }
         if self.scenario == Scenario::ParallelDeadlineAfterAssemble
             && kind == "step_debug_end"
             && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == "b"
@@ -61,7 +69,10 @@ impl RuntimeHost for Host {
         self.inner.custom_event(kind, payload).await
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {
-        Ok(self.scenario == Scenario::ParallelDeadlineAfterAssemble)
+        Ok(matches!(
+            self.scenario,
+            Scenario::ParallelDeadlineAfterAssemble | Scenario::PreparationDeadline
+        ))
     }
     async fn breakpoint_pause(&self) -> Result<(), String> {
         self.inner.breakpoint_pause().await
@@ -236,6 +247,7 @@ enum Scenario {
     TimedParallelSplitBody,
     ParallelBranches,
     ParallelDeadlineAfterAssemble,
+    PreparationDeadline,
     WavefrontBranches,
     ParallelSignalReadFailure,
     PauseBranches,
@@ -358,10 +370,21 @@ fn compile_nested_agents(
 }
 
 fn compile_nested_agents_with_children(
+    graph: ExecutionGraph,
+    children: Vec<runtara_workflows::ChildWorkflowInput>,
+    depth: usize,
+    dir: &std::path::Path,
+) -> anyhow::Result<runtara_workflows::direct_wasm::DirectCompilationResult> {
+    compile_nested_agents_with_parent(graph, children, depth, dir, false, Ok)
+}
+
+fn compile_nested_agents_with_parent(
     mut graph: ExecutionGraph,
     mut children: Vec<runtara_workflows::ChildWorkflowInput>,
     depth: usize,
     dir: &std::path::Path,
+    track_events: bool,
+    wrap_parent: impl FnOnce(ExecutionGraph) -> anyhow::Result<ExecutionGraph>,
 ) -> anyhow::Result<runtara_workflows::direct_wasm::DirectCompilationResult> {
     use runtara_workflows::direct_wasm::{
         compile_direct_workflow_with_abi, compose_direct_workflow_with_extra_dirs,
@@ -447,6 +470,7 @@ fn compile_nested_agents_with_children(
             }, "executionPlan":[{"fromStep":"call","toStep":"finish"},{"fromStep":"call","toStep":"handled","label":"onError"}]
         }))?;
     }
+    let graph = wrap_parent(graph)?;
     let mut parent = compile_direct_workflow_with_abi(
         DirectCompilationInput {
             workflow_id: "parent-of-nested-http".into(),
@@ -455,7 +479,7 @@ fn compile_nested_agents_with_children(
             execution_graph: graph,
             child_workflows: vec![],
             output_dir: dir.join("parent"),
-            track_events: false,
+            track_events,
             agent_catalog: Some(Arc::new(
                 runtara_dsl::agent_meta::AgentCatalog::from_agents(agents),
             )),
@@ -1599,3 +1623,5 @@ async fn emitted_expired_parallel_scope_stops_fast_branch_before_next_request() 
 {
     run_with_deadline(Scenario::ParallelDeadlineAfterAssemble, true).await
 }
+
+mod preparation;

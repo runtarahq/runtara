@@ -569,3 +569,22 @@ stage does not close individual timed-Agent sibling survival, nested concurrent
 scope ownership, interruptible preparation, own Embed/AI/tool budgets, cleanup
 grace or G1–G10. E128 and the separate remaining parallel eligibility constraints
 remain until their contracts are implemented and qualified.
+
+### Connection preparation progress · 2026-09-08
+
+Connection metadata lookup now uses the shared emitted cancellation/deadline
+wait before Agent invocation. Sequential Agent/AI, inline Embed, published-child,
+Split and branch paths share this implementation. Expiry skips invocation and
+unwinds to its owning scope; a parallel window resolves pending peers first.
+This covers pending metadata headers and partial bodies, not every possible
+preparation operation or CPU-bound transformation.
+
+The resolver interface advances to async-typed 0.2.0. The host retains 0.1.0
+bindings for existing binaries; new compilation selects 0.2.0 without flags.
+Both versions execute against the same HTTP resolver and per-run caches.
+No host graph scheduler or per-agent cancellation wrapper is introduced.
+
+The published-child timeout fixture puts the budget on its calling parent;
+runtime-bearing published graphs remain subject to existing safety validation.
+Own Agent preparation budgets have private-emitter coverage while E128 stays
+in force. This adds G5/G6 evidence without closing their remaining gates.

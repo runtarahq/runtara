@@ -367,7 +367,7 @@ fn emit_world_wit(
         out.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
-        out.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
+        out.push_str("    import runtara:connection-resolver/resolver@0.2.0;\n");
     }
     if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
         out.push_str("    import runtara:host-io/timers@0.1.0;\n");
@@ -540,7 +540,7 @@ mod tests {
         assert!(with.has_connections);
         assert!(
             with.world_wit
-                .contains("import runtara:connection-resolver/resolver@0.1.0;")
+                .contains("import runtara:connection-resolver/resolver@0.2.0;")
         );
         assert!(
             with.wac_source.contains(" ... }"),

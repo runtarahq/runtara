@@ -1276,3 +1276,20 @@ Individual timed-Agent sibling preservation, overlapping nested scopes,
 interruptible preparation, own Embed/AI/tool deadlines and cleanup grace are not
 fully qualified. Agent/Embed timeout syntax remains E128-gated. The implementation
 record lists final verification; this stage adds no controlled benchmark claim.
+
+### Connection preparation qualification · 2026-09-08
+
+The shared compiler path now awaits connection metadata through the standard
+Component Model cancellation helper. A hung lookup can be interrupted before
+Agent invocation, including metadata headers and partial response bodies.
+Sequential, AI, inline Embed, published-child, Split and branch paths use this
+same helper. Inherited expiry resolves pending peers and returns to the owning
+scope instead of invoking the Agent or entering its retry/error path.
+
+Tests live in `tests/cooperative_workflow_cancellation/preparation.rs` and
+`compile/agent_deadline_tests.rs`; resolver ABI/cache compatibility is covered in
+`runtara-component-host/src/workflow/connection_resolver_tests.rs`. The resolver's
+async 0.2.0 interface is selected automatically for new artifacts, with 0.1.0
+bindings retained for existing binaries. This does not add per-agent wrappers
+or move workflow decisions into the host. The implementation record provides
+the verification results and remaining gaps; E128 remains in place.

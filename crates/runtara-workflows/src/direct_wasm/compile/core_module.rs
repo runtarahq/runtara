@@ -336,11 +336,16 @@ pub(super) fn emit_direct_core_module(
             let WorldItem::Interface { id, .. } = import else {
                 continue;
             };
-            let Some(agent_id) = agent_id_for_import(resolve, Some(name)) else {
-                continue;
-            };
+            let agent_id = agent_id_for_import(resolve, Some(name));
             for function in resolve.interfaces[*id].functions.values() {
-                if function.name != "invoke" {
+                let agent_invoke = agent_id.is_some() && function.name == "invoke";
+                let describe = super::core_imports::is_connection_resolver_import(
+                    resolve,
+                    Some(name),
+                    function,
+                    "describe",
+                );
+                if !agent_invoke && !describe {
                     continue;
                 }
                 let async_mangling =
@@ -364,13 +369,18 @@ pub(super) fn emit_direct_core_module(
                     &field,
                     wasm_encoder::EntityType::Function(type_index),
                 );
-                import_indices.agent_invokes_async.insert(
-                    agent_id.clone(),
-                    super::DirectAgentInvokeImport {
-                        function_index: imported_function_count,
-                        params: signature.params.clone(),
-                    },
-                );
+                if let Some(agent_id) = &agent_id {
+                    import_indices.agent_invokes_async.insert(
+                        agent_id.clone(),
+                        super::DirectAgentInvokeImport {
+                            function_index: imported_function_count,
+                            params: signature.params.clone(),
+                        },
+                    );
+                } else {
+                    import_indices.connection_resolver_describe_async =
+                        Some(imported_function_count);
+                }
                 imported_function_count += 1;
             }
         }

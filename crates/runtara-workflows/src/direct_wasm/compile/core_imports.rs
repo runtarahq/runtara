@@ -42,7 +42,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_durable_sleep: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
     runtime_durable_sleep_checkpoint: Option<u32>,
-    connection_resolver_describe: Option<u32>,
+    pub(super) connection_resolver_describe_async: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
     stdlib_value_store_scope: Option<u32>,
@@ -179,8 +179,8 @@ impl DirectCoreImportIndices {
             cooperative_helper_body: false,
             abi,
             omit_runtime,
-            connection_resolver_describe: require_connection_resolver(
-                self.connection_resolver_describe,
+            connection_resolver_describe_async: require_connection_resolver(
+                self.connection_resolver_describe_async,
                 has_connections,
             )?,
             runtime_load_input: require_runtime(
@@ -669,7 +669,7 @@ pub(super) struct DirectCoreFunctionIndices {
     /// return value. Runtime index fields hold a poison sentinel and must never
     /// be called (see [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
-    pub(super) connection_resolver_describe: u32,
+    pub(super) connection_resolver_describe_async: u32,
     pub(super) runtime_load_input: u32,
     // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
@@ -906,7 +906,7 @@ fn is_stdlib_import(
             .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
 }
 
-fn is_connection_resolver_import(
+pub(super) fn is_connection_resolver_import(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
     function: &WitFunction,
@@ -997,8 +997,6 @@ pub(super) fn import_core_function(
         })
     {
         import_indices.monotonic_now = Some(function_index);
-    } else if is_connection_resolver_import(resolve, interface, function, "describe") {
-        import_indices.connection_resolver_describe = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "load-input") {
         import_indices.runtime_load_input = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "complete") {

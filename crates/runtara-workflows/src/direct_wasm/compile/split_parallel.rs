@@ -964,8 +964,12 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::If(BlockType::Empty));
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.connection_resolver_describe));
+        super::agent_io::emit_connection_description(body, indices, false);
+        super::cooperative_wait::emit_window_preparation_timeout(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(6)),
+        );
         load_retptr_tag(body);
         body.instruction(&Instruction::BrIf(1)); // -> $skip
         load_retptr_list(body, route_ptr_local, route_len_local);
