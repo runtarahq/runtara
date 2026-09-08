@@ -566,9 +566,17 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
     let runner = h.runner(Some(bounds("utils")));
     let mut options = h.options(&artifact.wasm_path).await;
     options.timeout = Duration::from_secs(1);
+    // Prepare before the gate exists, exactly as `dispatch_prepared` does. A
+    // gate built around `try_launch_detached` would spend its handoff budget on
+    // artifact reading and precompilation, so a slow host could expire it
+    // during the assertions below and report a start that never happened.
+    let prepared = runner.try_prepare_launch(&options).await.unwrap();
     let gate = StartGate::new(Duration::from_secs(10));
     options.start_gate = Some(gate.clone());
-    let handle = runner.try_launch_detached(&options).await.unwrap();
+    let handle = runner
+        .try_launch_prepared_detached(&options, prepared)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert!(runner.is_running(&handle).await);
     assert!(
