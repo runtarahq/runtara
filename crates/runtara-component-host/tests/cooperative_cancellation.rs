@@ -351,3 +351,7 @@ mod real_hubspot;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_sharepoint_shopify.rs"]
 mod real_sharepoint_shopify;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/deadline.rs"]
+mod deadline;

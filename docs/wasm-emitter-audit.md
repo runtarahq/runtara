@@ -1102,3 +1102,18 @@ walk now records it at every nesting level. The publication regression test
 checks durability, event/logging/error paths, signals, breakpoints and nested
 Split timeout rejection. This is import/safety analysis, not Agent/Embed timeout
 implementation; E128 remains in force.
+
+### Agent/Embed timeout follow-up · deadline race contract · 2026-09-08
+
+E128 remains in force. A new standard-component deadline fixture supplies
+executable rules for the missing timeout path: completion wins when completion
+and expiry are observed ready together; once expiry is selected, a normal value
+returned during cancellation cleanup is too late to replace it. Cleanup precedes
+continuation and target component reuse; the sibling test operation survives.
+
+`runtara-component-host/tests/cooperative_cancellation/deadline.rs` contains six
+built-HTTP cases, a synthetic return-during-cleanup case and two negative mutation
+checks. These prove the primitive selection/cleanup contract, not emitted Agent
+or Embed deadline semantics. Authored zero/overflow behavior, durable budget
+restoration, inheritance, retries/recovery and emergency grace still require
+integration evidence. See the cooperative cancellation implementation record.

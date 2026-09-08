@@ -415,3 +415,16 @@ Split timeout features now participate in runtime ownership analysis, including
 nested scopes, and negative publication cases cover the listed runtime requirements.
 Embed retries, durable callable suspension, targeted/time-based cancellation,
 full lifecycle/resource qualification and current paired measurements remain open.
+
+### Deadline contract progress (2026-09-08)
+
+A standard Component Model fixture now defines deadline selection before emitter
+integration: observe both readiness sources, accept completion when both are
+observed ready, otherwise select expiry and resolve/drop the target before
+continuation. A normal value returned during cancellation cleanup cannot undo
+selected expiry. Nine tests cover real HTTP waits, unused timer cleanup,
+component reuse, zero remaining time, maximum timer duration and deliberately
+broken race handling. The sibling is fixture I/O. This is G5 contract evidence,
+not a released DSL feature: scoped deadline/reason propagation, inherited/durable
+budgets, recovery routing, root-cancel interaction and emergency grace still need
+compiler and runtime qualification. E128 remains unchanged.

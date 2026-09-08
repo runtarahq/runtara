@@ -31,6 +31,45 @@ pub(super) fn compose_agent(
     second_capability: &str,
     second: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
+    compose_agent_with_parent(
+        include_str!("http-parent.wat"),
+        agent_id,
+        capability,
+        input,
+        second_capability,
+        second,
+    )
+}
+
+pub(super) fn compose_agent_with_parent(
+    parent: &str,
+    agent_id: &str,
+    capability: &str,
+    input: &[u8],
+    second_capability: &str,
+    second: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let bytes = std::fs::read(agent_path(agent_id)?)?;
+    compose_agent_bytes(
+        parent,
+        agent_id,
+        capability,
+        input,
+        second_capability,
+        second,
+        &bytes,
+    )
+}
+
+pub(super) fn compose_agent_bytes(
+    parent: &str,
+    agent_id: &str,
+    capability: &str,
+    input: &[u8],
+    second_capability: &str,
+    second: &[u8],
+    bytes: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
         input.len() <= 16 * 1024 * 1024
             && second.len() <= 24576
@@ -41,10 +80,8 @@ pub(super) fn compose_agent(
     let second_offset = 8192.max((2048 + input.len() + 15) & !15);
     let heap = 32768.max((second_offset + second.len() + 15) & !15);
     let pages = 2.max((heap + 65536).div_ceil(65536));
-    let agent = agent_path(agent_id)?;
-    let bytes = std::fs::read(&agent)?;
     let mut has_callback_lift = false;
-    for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
         if let wasmparser::Payload::ComponentCanonicalSection(section) = payload? {
             for function in section {
                 if let wasmparser::CanonicalFunction::Lift { options, .. } = function? {
@@ -60,7 +97,7 @@ pub(super) fn compose_agent(
     anyhow::ensure!(
         has_callback_lift,
         "{} has no callback lift; rebuild this worktree with scripts/build-agent-components.sh in its own CARGO_TARGET_DIR and point RUNTARA_AGENT_COMPONENTS_DIR at that output",
-        agent.display()
+        agent_id
     );
     let escape = |bytes: &[u8]| {
         bytes
@@ -68,7 +105,7 @@ pub(super) fn compose_agent(
             .map(|byte| format!("\\{byte:02x}"))
             .collect::<String>()
     };
-    let parent = include_str!("http-parent.wat")
+    let parent = parent
         .replace("{{AGENT}}", agent_id)
         .replace("{{SECOND_INPUT_OFFSET}}", &second_offset.to_string())
         .replace("{{HEAP}}", &heap.to_string())
@@ -95,7 +132,7 @@ pub(super) fn compose_agent(
         graph.types_mut(),
     )?;
     let socket = graph.register_package(package)?;
-    let package = Package::from_bytes("test:http", None, bytes, graph.types_mut())?;
+    let package = Package::from_bytes("test:http", None, bytes.to_vec(), graph.types_mut())?;
     let plug = graph.register_package(package)?;
     wac_graph::plug(&mut graph, vec![plug], socket)?;
     Ok(graph.encode(EncodeOptions::default())?)

@@ -1767,3 +1767,76 @@ No provider credentials, database/server E2E or fresh performance/capacity
 measurements were used. This expands G2/G6 coverage; timer-only callable retry
 failures, the complete construct matrix, timeout cancellation and the remaining
 release gates still require their own qualification.
+
+## Deadline selection contract before compiler integration (2026-09-08)
+
+A composed WAT parent now exercises deadline-driven cancellation using the
+existing production `runtara:host-io/timers.sleep` import and standard Component
+Model waitable sets, polling, cancellation and drop. Its target is the actual
+built HTTP Agent in the same Store. The sibling is test I/O; the `ready-barrier`
+import only arranges readiness and cannot select an outcome or cancel a task.
+This is an executable contract fixture, **not emitted DSL timeout support**.
+
+The tested selection rules are:
+
+1. Observe ready target/timer events before choosing. If target completion is
+   ready in that observation, accept it even when the deadline timer is also
+   ready. The test requires both actual completion events, not just an elapsed
+   delay, and uses a readiness bitmask to prove the tie condition.
+2. If only the timer is ready, select timeout, cancel the target through
+   `canon subtask.cancel`, await its actual resolution and then drop its handle.
+   A synthetic Agent proves that the callee may return a normal value during
+   cleanup (`RETURNED`, rather than `CANCELLED`). That late value does not change
+   the already-selected timeout outcome.
+3. Cancel/drop an unused timer after successful target completion. Preserve the
+   sibling, wait for its result and invoke the same target component again.
+   Timeout cases keep the endpoint response pending until local socket closure;
+   they do not wait for remote completion. The subsequent successful HTTP call
+   demonstrates continuation and component reuse after cleanup.
+
+Six real-HTTP cases cover pending headers, a partial body, completion before a
+60-second deadline, both events ready, an already-due timer and `u64::MAX` timer
+input. The zero value represents **zero remaining time**, not the semantics of
+an authored `timeout: 0`. The maximum-wait case proves that this timer can be
+cancelled without overflow; it does not prove absolute deadline arithmetic or
+persistence. A seventh case uses a synthetic cancellation callback that returns
+normally after releasing its native test request. Two mutation tests verify that
+ending the readiness drain after one event or accepting the late cleanup result
+violates the contract. All selection and task cleanup remain in the guest.
+
+Fixtures live in `runtara-component-host/tests/cooperative_cancellation/`:
+`deadline.rs`, `deadline-parent.wat` and `return-during-cancel.wat`. Existing Agent
+composition tests reuse the same bounded parent-template/composition helper;
+there is no per-provider implementation or product selector. The test transport
+for the synthetic callback is deliberately separate from the six production HTTP
+Agent proofs.
+
+Next compiler work must carry a scoped deadline/reason through shared waits,
+restore enclosing state after recovery, and route a timeout through the timed
+step's existing error path. Root Cancel must still terminate the root, and a
+selected local timeout must prevent ordinary retry in that expired scope. Define
+budget start/zero behavior, queued-call expiry, persistence across durable retries,
+inherited minimum budgets, CPU cooperation and independent emergency grace in the emitted tests
+before retiring E128. The fixture's continuation call is not new authored
+cancellation-handler syntax and does not qualify that complete DSL contract.
+
+Fixture globals expose observations for assertions; compiler integration must
+keep deadline state per invocation and scope alongside the shared wait locals.
+
+Validation with Rust 1.97 on the final source:
+
+- A clean `scripts/build-agent-components.sh` build produced all 27 Agents and
+  both shared workflow components, including metadata.
+- All nine deadline contract cases passed against those rebuilt components.
+- Full component cancellation suite: 86 passed, including existing provider,
+  synchronous/callback ABI and stalled-cleanup coverage.
+- Feature-gated all-target component-host Clippy, formatting and
+  `git diff --check` passed.
+
+During the final checks, prior native/Agent build outputs disappeared and the
+HTTP cases reported missing components. Source files remained intact. No caches
+were removed by this task; components were rebuilt under a task-specific
+`/private/tmp` target and the final suite was rerun successfully. The native check
+directory was also rebuilt. No production emitter/runtime behavior or validation
+acceptance changed; no fresh size/timing/capacity measurements or server/database
+E2E were run for this contract stage.
