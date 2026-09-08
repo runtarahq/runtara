@@ -29,6 +29,11 @@ Implemented and covered by focused tests:
 - Stop/cancel integrates with the environment lifecycle and has runner plus
   PostgreSQL coverage. Accepted terminal outcomes are preserved; emergency abort
   does not fabricate a guest cleanup acknowledgement.
+- Authenticated single-server Stop closes HTTP while waiting for response
+  headers or a response body, persists cancellation, and rejects unauthorized
+  callers. The new two-server regression currently fails: Stop through a newly
+  started peer returns success without closing the owner's HTTP request within
+  four seconds. Ownership/startup recovery remains under investigation (AUDIT-23).
 - The unreachable concurrent Split retry emitter is retired. Existing sequential
   retry/replay behavior remains covered, with 32 byte-identical before/after
   compiler artifacts and passing parallel/retry execution suites (AUDIT-22).
@@ -44,7 +49,7 @@ feature flag or optional cancellation backend has been added.
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
-| Server and persistence E2E | Exercise authenticated Cancel/Stop through a running server, execution-owner routing across instances, status/acknowledgement publication and emergency escalation. Runner/database tests alone do not establish this boundary. |
+| Server and persistence E2E | Single-server authenticated header/body cancellation now passes. Diagnose and fix the failing two-server peer-Stop regression (AUDIT-23), then complete execution-owner routing, status/acknowledgement publication and emergency escalation qualification. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
 | Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
@@ -1880,3 +1885,68 @@ Existing regression coverage used for this cleanup includes:
 Final commands and results are recorded in the implementation record. The broader
 obsolete isolation/task inventory and artifact compatibility gates remain open;
 removing this unreachable retry lowering does not complete them or retire E128.
+
+### AUDIT-23 · Authenticated server cancellation and unresolved peer-Stop failure
+
+**Status: single-server cases pass; the two-server reproducer fails. No production
+fix is included in this progress snapshot.** The new
+[`e2e/test_cooperative_cancellation.py`](../e2e/test_cooperative_cancellation.py)
+uses the real server, public workflow create/compile/execute/Stop APIs, normally
+composed WASM and the HTTP proxy. It generates an isolated OIDC/JWKS fixture in
+memory and starts fresh PostgreSQL and Valkey containers. It does not require
+existing credentials. Cleanup stops only its own processes and containers;
+fixture databases and logs are retained.
+
+| Case | Required behavior | Observed result |
+| --- | --- | --- |
+| Stop while HTTP response headers are withheld | Close the request, persist `cancelled`, acknowledge the signal and remove the execution registry entry | Pass on the owning server |
+| Stop while a partial response body stalls | Same cooperative cleanup contract | Pass on the owning server |
+| Missing/invalid authentication, wrong tenant, or viewer role | Return 401/403 without persisting cancellation or closing the request | Pass in both single-server cases; checks also pass before the failing peer Stop |
+| Retrying HTTP with success/error continuations | Cancellation must produce neither a retry nor either continuation | Pass in the completed single-server cases |
+| Duplicate Stop after cancellation | Return success without another launch | Pass in the completed single-server cases |
+| Start peer B after server A reaches pending HTTP, then Stop through B | Reach the live execution and close its request within the four-second fixture bound | **Fail:** Stop returns HTTP 200, but A's request stays open beyond the bound |
+| Peer Stop during a partial response body | Same cross-server contract | Not reached: the script stops at the preceding failed assertion |
+
+The first completed single-server run reported 1.018s (headers) and 1.027s (body).
+The expanded run repeated those passes at 1.072s and 1.047s before failing the
+peer/header case. These are individual fixture durations including status checks
+and duplicate Stop, not controlled cancellation latency benchmarks. A passing
+case requires pending signals to be acknowledged, no remaining registry row, and
+a termination reason other than `aborted`; emergency termination cannot count as
+proof of cooperative cleanup.
+
+The cross-server setup starts B only after A's HTTP request is pending. B shares
+the isolated databases and data directory. This also exercises startup recovery,
+so the failure does **not yet isolate** signal delivery, runner ownership or
+startup reconciliation as the cause. A successful Stop response alone does not
+establish that the active request was cancelled. The next implementation work is
+to inspect the persisted launch/registry state and recovery path, fix the existing
+whole-execution lifecycle boundary, and rerun all four cases. This finding does
+not justify introducing host-side workflow graph orchestration or per-step task
+management.
+
+Verification recorded for this stage:
+
+- `cargo build -p runtara-server --bin runtara-server` passed using the pinned
+  toolchain, `SQLX_OFFLINE=true`, the isolated native target and previously built
+  Agent components (5m44s).
+- The initial two-case authenticated E2E run passed; the expanded four-case run
+  failed as described above. The reproducer deliberately retains its failing
+  assertion and is not silently skipped or treated as a passing test.
+- Python syntax and `git diff --check` are checked for this snapshot. No new
+  production Rust, WIT or migration changes are included; the full Rust suite,
+  component builds, final benchmarks and Linux soak are not rerun for it.
+
+To reproduce with a built server and components:
+
+```sh
+python3 -u e2e/test_cooperative_cancellation.py \
+  --server /absolute/path/to/runtara-server \
+  --components /absolute/path/to/wasm32-wasip2/release
+```
+
+Prerequisites are Docker with `pgvector/pgvector:pg18` and
+`valkey/valkey:8-alpine`, Python with `cryptography`, and the matching server and
+Agent builds. The script prints its retained fixture directory. This snapshot is
+on `feat/cooperative-cancellation-progress`, separate from `main`; upstream
+integration, the PR and the other completion criteria above remain outstanding.
