@@ -1077,3 +1077,23 @@ infer public support from private emission. G1–G10, old-artifact inventory,
 upstream migration integration and paired benchmarks/soak remain unfinished.
 The `shared-v20` compiler tag requires recompilation for newly generated logic;
 it does not rewrite registered or parked artifacts.
+
+
+### Public qualification progress · 2026-09-08
+
+AUDIT-31 rejects ordinary tool labels that collide with MCP-generated search or
+invoke names. The check is shared by validation and direct compilation, applies
+inside nested and preloaded child graphs, and preserves separate AI namespaces.
+This prevents an ambiguous name from selecting the wrong provider and budget.
+The three private deadline fixture builders now use production timer/clock
+inference instead of unconditional imports; their composed execution corpus is
+the qualification step before public timeout acceptance.
+
+Next remove E128 only together with public-path coverage: compile the authored
+Agent/Embed budgets directly, without compiling an untimed graph and privately
+re-emitting it. Preserve the current absent/zero/overflow budget, durable replay,
+root/enclosing cancellation, published/no-runtime and cleanup-escalation cases.
+Keep unsupported export/safety shapes rejected by their specific existing gates.
+No product selector or alternate backend is introduced. This qualification does
+not close the remaining lifecycle, compatibility, performance, soak or upstream
+integration gates. Commit locally; push only on a new explicit request.

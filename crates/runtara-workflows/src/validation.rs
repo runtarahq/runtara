@@ -424,7 +424,7 @@ pub enum ValidationError {
     },
 
     // === AI Agent Errors ===
-    /// AI Agent step has duplicate tool edge labels.
+    /// AI Agent step has duplicate tool labels, including generated MCP names.
     AiAgentDuplicateToolLabel { step_id: String, label: String },
     /// AI Agent step has an invalid tool edge label (must be alphanumeric + underscore).
     AiAgentInvalidToolLabel { step_id: String, label: String },
@@ -1105,7 +1105,7 @@ impl std::fmt::Display for ValidationError {
             ValidationError::AiAgentDuplicateToolLabel { step_id, label } => {
                 write!(
                     f,
-                    "[E110] AI Agent step '{}' has duplicate tool edge label '{}'",
+                    "[E110] AI Agent step '{}' has duplicate tool label '{}' (including generated MCP names)",
                     step_id, label
                 )
             }
@@ -5736,6 +5736,42 @@ fn extract_template_static_references_from_condition_argument(
 // Phase 11: AI Agent Validation
 // ============================================================================
 
+/// MCP meta-tools and authored tool labels share one model-visible namespace.
+/// Keep this check shared with direct compilation, which can run without the
+/// catalog-backed validator. Report each colliding name once in stable order.
+pub(crate) fn ai_agent_mcp_tool_name_collisions(
+    graph: &ExecutionGraph,
+    step_id: &str,
+) -> Vec<String> {
+    let labels: HashSet<&str> = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id)
+        .filter_map(|edge| edge.label.as_deref())
+        .collect();
+    let ordinary_labels: HashSet<&str> = labels
+        .iter()
+        .copied()
+        .filter(|label| {
+            !matches!(*label, "next" | "onError" | "memory") && !label.starts_with("mcp.")
+        })
+        .collect();
+    let mut collisions = Vec::new();
+    for toolset in labels.iter().filter_map(|label| label.strip_prefix("mcp.")) {
+        if toolset.is_empty() {
+            continue;
+        }
+        for operation in ["search", "invoke"] {
+            let name = format!("{toolset}_{operation}");
+            if ordinary_labels.contains(name.as_str()) {
+                collisions.push(name);
+            }
+        }
+    }
+    collisions.sort();
+    collisions
+}
+
 /// Validate AI Agent steps for correct configuration.
 fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
@@ -5791,6 +5827,15 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                             });
                     }
                 }
+            }
+
+            for label in ai_agent_mcp_tool_name_collisions(graph, step_id) {
+                result
+                    .errors
+                    .push(ValidationError::AiAgentDuplicateToolLabel {
+                        step_id: step_id.clone(),
+                        label,
+                    });
             }
 
             // === Memory edge validation ===
@@ -6563,6 +6608,197 @@ mod tests {
             "no MCP errors expected, got: {:?}",
             result.errors
         );
+    }
+
+    fn mcp_with_ordinary_tool(label: &str, reverse: bool) -> ExecutionGraph {
+        let mut graph: ExecutionGraph =
+            serde_json::from_str(include_str!("../tests/fixtures/ai_agent_mcp.json")).unwrap();
+        graph.steps.insert(
+            "ordinary".into(),
+            create_agent_step("ordinary", "transform", None),
+        );
+        graph
+            .execution_plan
+            .push(edge("ai", "ordinary", Some(label)));
+        if reverse {
+            graph.execution_plan.reverse();
+        }
+        graph
+    }
+
+    #[test]
+    fn mcp_generated_names_reject_ordinary_tool_collisions_in_either_order() {
+        for label in ["github_search", "github_invoke"] {
+            for reverse in [false, true] {
+                for timeout in [None, Some(0), Some(400)] {
+                    let mut graph = mcp_with_ordinary_tool(label, reverse);
+                    let Step::Agent(provider) = graph.steps.get_mut("mcp_github").unwrap() else {
+                        unreachable!()
+                    };
+                    provider.timeout = timeout;
+                    let result = validate_workflow(&graph, &test_catalog());
+                    let collisions: Vec<_> = result
+                        .errors
+                        .iter()
+                        .filter(|error| {
+                            matches!(error, ValidationError::AiAgentDuplicateToolLabel { .. })
+                        })
+                        .collect();
+                    assert_eq!(
+                        collisions.len(),
+                        1,
+                        "{label}, reverse={reverse}, timeout={timeout:?}: {:?}",
+                        result.errors
+                    );
+                    assert!(
+                        matches!(collisions[0], ValidationError::AiAgentDuplicateToolLabel { step_id, label: actual } if step_id == "ai" && actual == label)
+                    );
+                    assert_eq!(collisions[0].code(), "E110");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_generated_names_allow_distinct_labels_and_separate_callers() {
+        for label in [
+            "github",
+            "github_search_extra",
+            "github_invoke_extra",
+            "other_search",
+        ] {
+            let graph = mcp_with_ordinary_tool(label, false);
+            let support = crate::direct_wasm::analyze_direct_wasm_support(&graph);
+            assert!(support.supported, "{label}: {support:?}");
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                !result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::AiAgentDuplicateToolLabel { .. }
+                )),
+                "{label}: {:?}",
+                result.errors
+            );
+        }
+        for label in ["github_search", "github_invoke"] {
+            let mut graph = mcp_with_ordinary_tool(label, false);
+            graph
+                .steps
+                .insert("other_ai".into(), ai_agent_with_connection("other_ai"));
+            graph.execution_plan.last_mut().unwrap().from_step = "other_ai".into();
+            graph
+                .execution_plan
+                .push(edge("ai", "other_ai", Some("next")));
+            graph
+                .execution_plan
+                .retain(|edge| !(edge.from_step == "ai" && edge.to_step == "finish"));
+            graph
+                .execution_plan
+                .push(edge("other_ai", "finish", Some("next")));
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                !result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::AiAgentDuplicateToolLabel { .. }
+                )),
+                "{label}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_generated_names_rejected_in_nested_graphs_and_public_compilation() {
+        use crate::direct_wasm::{
+            DirectCompilationInput, DirectCompileError, compile_direct_workflow,
+        };
+        use serde_json::json;
+
+        for label in ["github_search", "github_invoke"] {
+            for scope in ["root", "While", "Split", "EmbedWorkflow"] {
+                let child = mcp_with_ordinary_tool(label, false);
+                let mut children = Vec::new();
+                let graph = match scope {
+                    "While" | "Split" => {
+                        let step = if scope == "While" {
+                            json!({"id":"outer","stepType":"While","config":{"maxIterations":1},
+                                "condition":{"type":"operation","op":"EQ","arguments":[{"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]},"subgraph":child})
+                        } else {
+                            json!({"id":"outer","stepType":"Split","config":{"value":{"valueType":"immediate","value":[{}]},"sequential":true},"subgraph":child})
+                        };
+                        serde_json::from_value(json!({"entryPoint":"outer","steps":{
+                            "outer":step,"finish":{"id":"finish","stepType":"Finish"}},
+                            "executionPlan":[{"fromStep":"outer","toStep":"finish"}]}))
+                        .unwrap()
+                    }
+                    "EmbedWorkflow" => {
+                        children.push(crate::ChildWorkflowInput {
+                            step_id: "outer".into(),
+                            workflow_id: "child".into(),
+                            version_requested: "latest".into(),
+                            version_resolved: 1,
+                            execution_graph: child,
+                        });
+                        serde_json::from_value(json!({"entryPoint":"outer","steps":{
+                            "outer":{"id":"outer","stepType":"EmbedWorkflow","childWorkflowId":"child","childVersion":"latest"},
+                            "finish":{"id":"finish","stepType":"Finish"}},
+                            "executionPlan":[{"fromStep":"outer","toStep":"finish"}]})).unwrap()
+                    }
+                    _ => child,
+                };
+                let closure_children: Vec<_> = children
+                    .iter()
+                    .map(|child| ClosureChildGraph {
+                        workflow_id: child.workflow_id.clone(),
+                        version: child.version_resolved,
+                        execution_graph: child.execution_graph.clone(),
+                    })
+                    .collect();
+                let result =
+                    validate_workflow_closure("root", &graph, &test_catalog(), &closure_children);
+                let expected_origin = (scope == "EmbedWorkflow").then_some(("child", 1));
+                assert!(
+                    result
+                        .errors()
+                        .any(|(origin, error)| origin == expected_origin
+                            && matches!(error,
+                    ValidationError::AiAgentDuplicateToolLabel { step_id, label: actual }
+                    if step_id == "ai" && actual == label)),
+                    "{scope}: {result:?}"
+                );
+
+                let dir = tempfile::tempdir().unwrap();
+                let error = compile_direct_workflow(DirectCompilationInput {
+                    workflow_id: "mcp-name-collision".into(),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: graph,
+                    child_workflows: children,
+                    output_dir: dir.path().into(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                })
+                .unwrap_err();
+                let DirectCompileError::Unsupported { report } = error else {
+                    panic!("expected a public support rejection for {scope}: {error:?}");
+                };
+                assert!(
+                    report
+                        .unsupported
+                        .iter()
+                        .any(|feature| feature.feature == "ai-agent-tool-name-collision"
+                            && feature.step_id.as_deref() == Some("ai")
+                            && feature.reason.contains(label)),
+                    "{scope}: {report:?}"
+                );
+                assert_eq!(
+                    std::fs::read_dir(dir.path()).unwrap().count(),
+                    0,
+                    "invalid graph must not produce artifacts: {scope}"
+                );
+            }
+        }
     }
 
     #[test]

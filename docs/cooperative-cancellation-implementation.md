@@ -3586,3 +3586,69 @@ compatibility inventory, paired size/timing measurements and Linux soak were not
 run in this memory stage. Public Agent/Embed timeouts still return E128; private
 emitter success is not a public-support claim. G1–G10, upstream migration
 integration and PR work remain open. This stage is kept local; no push is made.
+
+
+### Public name validation and inferred deadline imports · 2026-09-08
+
+AUDIT-31 addresses a provider-selection ambiguity before public timeout
+qualification. `mcp.github` and an ordinary `github_search` or `github_invoke`
+edge previously passed the raw-label duplicate check. The advertised names could
+resolve to the ordinary tool first, carrying a different provider/budget.
+Validation and direct compilation now share the generated-name collision check.
+E110 reports the advertised name; direct compilation rejects the graph before
+writing artifacts, including nested/preloaded child graphs without a catalog.
+Existing distinct labels and separate AI caller namespaces remain supported.
+
+Three regressions cover both generated names, both edge orders, absent/zero/
+positive provider budgets, separate AI callers, neighboring non-colliding labels,
+root/While/Split/preloaded Embed graphs, closure error attribution, and public
+compiler rejection with no output files. Before the fix the collision regression
+failed with zero E110 errors instead of one. The initial positive fixture also
+failed because it asserted complete catalog validation against a fixture catalog
+that intentionally lacks MCP; its final assertion concerns name errors, while
+support-gate checks separately verify non-colliding compilation eligibility.
+The focused three-test run passed before the final closure-attribution assertion
+was added; the full feature-gated suite verifies that final assertion.
+
+All three private deadline builders now infer timer/clock imports through the
+same functions used by production compilation. This tests whether composed Agent,
+Embed, nested/parallel, published workflow, AI tool, MCP and memory cases depend
+on the old unconditional imports. It does not remove E128 or make private emission
+a public compiler success. There is no host change, new task API, ABI change,
+feature flag or component rebuild in this stage; the existing matching components
+from the memory stage are reused.
+
+Commands use the pinned toolchain with `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, the existing isolated native target and
+`RUNTARA_AGENT_COMPONENTS_DIR=/private/tmp/runtara-cooperative-components-cc06f801/wasm32-wasip2/release`:
+
+```sh
+cargo test -p runtara-workflows --lib mcp_generated_names -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute ai_agent -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+The complete feature-gated compiler library passed **701 tests** in **485.04s**,
+including the final closure-attribution assertions and all deadline fixtures using
+production import inference. The accepted public AI execution selection passed
+**19 tests** in **8.69s** (379 filtered out); it executed workflows against local
+scripted services, rather than returning early through an environment guard.
+
+Feature-gated workflows all-target Clippy with `-D warnings` passed in **5.42s**.
+Formatting and whitespace checks passed. The local commit uses the normal
+formatting/workspace all-target Clippy hook without bypass.
+
+Logs: `/private/tmp/cooperative-mcp-collision-before.log`,
+`/private/tmp/cooperative-mcp-collision-focused.log`, and
+`/private/tmp/cooperative-public-qualification-lib.log`,
+`/private/tmp/cooperative-public-qualification-ai.log`, and
+`/private/tmp/cooperative-public-qualification-clippy.log`.
+
+Public Agent/Embed timeout syntax is still rejected. The next step is public-path
+acceptance and removal of private fixture re-emission, keeping the existing
+export/no-runtime safety gates. Native server/database E2E, old-artifact inventory,
+paired measurements, Linux soak, upstream/migration integration and the remaining
+G1–G10 work are not established by this validation stage. No push is authorized.

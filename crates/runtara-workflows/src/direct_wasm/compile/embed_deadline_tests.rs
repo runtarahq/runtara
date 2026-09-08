@@ -188,8 +188,11 @@ pub(super) fn reemit(
                     || agent.connection_ref.is_some()
             }),
             &Default::default(),
-            true,
-            true,
+            crate::direct_wasm::plan::needs_cooperative_timers(&manifest),
+            crate::direct_wasm::manifest::needs_monotonic_clock(
+                &manifest.graph,
+                &manifest.child_workflows,
+            ),
         );
     fs::write(&result.workflow_logic_wasm_path, bytes)?;
     fs::write(&result.manifest_path, manifest_json)?;

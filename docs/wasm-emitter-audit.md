@@ -6,10 +6,11 @@ and durable suspend/resume through the production invoke ABI.
 
 ## Current progress · 2026-09-08
 
-Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`
-(remote: `origin/feat/cooperative-cancellation-progress`). AUDIT-30 extends
-the shared Agent-tool machinery to AI memory load/save. The preceding synthetic
-MCP stage is committed as `6de29584`; this memory stage is being kept local.
+Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`.
+The memory deadline stage is committed locally as `ce58265e`; the latest pushed
+stage remains `6de29584`. AUDIT-31 closes an MCP tool-name collision that could
+select the wrong provider/budget, and tests now use production timer-import
+inference. Subsequent work stays local unless a push is explicitly requested.
 
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
@@ -79,6 +80,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Name validation and inferred imports (AUDIT-31) | 701 feature-gated compiler library tests passed in 485.04s; 19 public AI tests passed in 8.69s | Includes the three new name-collision regressions and the deadline corpus with production timer/clock inference. E128 remains; timeout execution still uses private emission. |
 | AI memory deadlines (AUDIT-30) | 697-test compiler library run; final 15-test memory selection; 242 stdlib tests (one manual benchmark ignored); 92 component cancellation tests; six dispatcher tests; 19 public AI tests passed | The final memory selection includes one regression added after the full library run; overlapping counts are not summed. Public timeout syntax and final release qualification remain open. |
 | Synthetic MCP deadlines (AUDIT-29) | 689 feature-gated compiler library tests passed in 416.76s; final 14-test MCP selection passed in 13.07s; public AI selection passed 19 tests in 8.62s | The final MCP rerun includes stronger exact provider-error assertions. Its tests are included in the library count. E128 remains, and native server E2E/benchmarks were not rerun. |
 | Agent-as-AI-tool deadlines (`62e051ed`, AUDIT-28) | 682 feature-gated compiler library tests passed in 412.38s; 19 public AI execution tests passed in 14.00s; feature-gated all-target Clippy passed | The seven new Agent-tool regressions are included in the 682, not additional tests. Timeout regressions use private emission while E128 remains. Public AI tests cover currently accepted workflows. |
@@ -2391,3 +2393,50 @@ manual performance benchmark ignored. Broader compiler, component-host and publi
 AI results are recorded in the implementation record. Public Agent/Embed timeout
 syntax, remaining G1–G10 qualification, stored-artifact compatibility, controlled
 size/time/DB-cost measurements, Linux soak and upstream/PR work remain open.
+
+
+### AUDIT-31 — MCP tool-name collisions and production timer inference
+
+**Status:** collision rejected by validation and direct compilation; the composed
+deadline corpus passes with production import inference. Public Agent/Embed timeout syntax remains
+behind E128.
+
+An edge named `mcp.github` advertises `github_search` and `github_invoke` to the
+model. Previously an ordinary tool edge could use either advertised name without
+an E110 error: validation compared only the raw labels. The plan resolves ordinary
+tool edges before synthetic providers, so a returned tool name could select the
+ordinary Agent/Embed and its budget instead of the MCP provider. This affects
+untimed workflows too; the fix does not depend on timeout syntax becoming public.
+
+Validation and the direct compiler now share the collision check, scoped to one
+AI caller. Validation returns existing E110 with the conflicting model-visible
+name. Direct compilation reports `ai-agent-tool-name-collision` before writing
+artifacts, including for callers that bypass catalog validation. Rename the
+ordinary edge (for example `local_github_search`) or the toolset (for example
+`mcp.remote_github`) to give the model unambiguous names. No dispatch priority,
+provider deadline or host execution behavior is changed.
+
+| Contract | Regression test |
+| --- | --- |
+| Search/invoke collisions fail in either edge order, with absent/zero/positive provider budgets | `mcp_generated_names_reject_ordinary_tool_collisions_in_either_order` |
+| Distinct labels and the same name under separate AI callers are not name collisions | `mcp_generated_names_allow_distinct_labels_and_separate_callers` |
+| Root, While, Split and preloaded Embed children reject collisions through closure validation and public compilation; no output artifacts are written | `mcp_generated_names_rejected_in_nested_graphs_and_public_compilation` |
+
+The first regression failed before the fix with zero E110 errors instead of one.
+The test catalog intentionally lacks MCP metadata, so these validation assertions
+isolate name errors; direct support/compilation assertions do not require a
+catalog. This does not claim that arbitrary provider metadata validates.
+
+The Agent, Embed and parallel deadline fixture builders previously forced both
+timer and monotonic-clock imports on. They now call the same manifest-based
+inference functions as production compilation. Their existing composed tests
+therefore exercise inferred imports across ordinary, nested, published, AI tool,
+MCP and memory deadlines. This still uses private emission for rejected timeout
+syntax; it is not evidence of public acceptance. The full feature-gated compiler library passed **701 tests** in **485.04s**;
+the public AI selection passed **19 tests** in **8.69s**. Lint and command details
+are recorded in the implementation record.
+
+E128 removal and migration of the private fixtures onto public compilation remain
+next. G1–G10, registered-artifact compatibility, upstream/migration integration,
+paired measurements and Linux soak remain open. This stage changes validation and
+tests only; no Agent/shared guest component rebuild or new compiler ABI is needed.

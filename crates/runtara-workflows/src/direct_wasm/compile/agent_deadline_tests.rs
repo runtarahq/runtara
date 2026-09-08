@@ -475,8 +475,11 @@ fn compile_shaped(
         &pools,
         matches!(shape, Shape::Preparation(_)),
         &Default::default(),
-        true,
-        true,
+        crate::direct_wasm::plan::needs_cooperative_timers(&manifest),
+        crate::direct_wasm::manifest::needs_monotonic_clock(
+            &manifest.graph,
+            &manifest.child_workflows,
+        ),
     );
     fs::write(&compiled.workflow_logic_wasm_path, bytes)?;
     fs::write(&compiled.manifest_path, manifest_json)?;

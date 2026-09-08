@@ -547,6 +547,23 @@ fn collect_graph_support_inner(
     let graph_durable = graph.durable.unwrap_or(inherited_durable);
     let direct_control = supports_direct_control_graph(graph, child_workflows);
 
+    // An advertised synthetic name must never dispatch to an ordinary edge.
+    // The public compiler also accepts graphs without catalog validation.
+    for (step_id, step) in &graph.steps {
+        if matches!(step, Step::AiAgent(_)) {
+            for name in crate::validation::ai_agent_mcp_tool_name_collisions(graph, step_id) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step_id.clone()),
+                    step_type: Some("AiAgent".into()),
+                    feature: "ai-agent-tool-name-collision".into(),
+                    reason: format!(
+                        "AI Agent tool label '{name}' collides with a generated MCP tool name; rename the ordinary tool label or the MCP toolset"
+                    ),
+                });
+            }
+        }
+    }
+
     // Dangling edges — an endpoint naming no step in `steps` — are the real
     // cause of a coverage-invariant failure: the edge can never be consumed, or
     // it routes into a missing step, so `supports_direct_control_graph` returns
