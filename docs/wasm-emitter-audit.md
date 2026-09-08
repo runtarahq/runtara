@@ -1344,3 +1344,34 @@ The corrupt-budget test rejects 1-, 7- and 9-byte pending deadline records witho
 Nested AI loops inside these tool children also need explicit frame/arena
 qualification. E128 remains until these and the remaining timeout contracts are
 qualified. See the implementation record for checks actually run.
+
+### Pending model decision replay and storage failures · 2026-09-08
+
+The pending-response gap identified above is now fixed in the shared durable AI
+loop. It saves the successful model response before any tools and reuses it after
+suspension. An early resume cannot ask the model to choose different tool IDs,
+arguments or order for the same partially executed turn. Completed-turn keys and
+published workflow-agent tool identities retain their previous formulas.
+
+| Case | Verified behavior | Execution test |
+| --- | --- | --- |
+| Response checkpoint read fails | Stop before model or child I/O | `ai_response_checkpoint_failures_prevent_tool_dispatch` |
+| Response checkpoint write fails | Stop after the model response, before any child | Same test, write variant |
+| Pause reported when response is saved | No tool starts; resume consumes that response | `ai_response_pause_after_persistence_replays_before_tool_dispatch` |
+| Saved response is empty, malformed or lacks required fields | Non-retryable `AI_TURN_RESPONSE_STATE`; no model/child I/O | `ai_response_corrupt_checkpoint_fails_without_model_or_child_io` |
+| Agent tool followed by a signal tool | Early resumes retain the wait identity; signal delivery preserves tool IDs, order and results | `ai_response_preserves_agent_and_signal_tool_decisions_across_resume` |
+| Embed tool followed by a parked Embed tool | Restore the decision without another model request; retain the completed result and original pending budget | `embed_tool_resume_reuses_completed_call_and_original_pending_budget` |
+| Ordinary Agent checkpoint storage fails | Failed lookup prevents I/O; failed save prevents successful continuation | `shared_checkpoint_errors_stop_ordinary_agent_execution` |
+
+Checkpoint error propagation is shared with other durable step paths. A failed
+result save cannot undo an already completed HTTP request; this change prevents
+incorrect successful continuation, not duplicate external effects after a crash.
+Provider calls interrupted before their response can be persisted may also run
+again. Nested AI frames, full timeout qualification and external-effect
+idempotency remain separate concerns.
+
+New native tests verify distinct legacy/v2 response/completed-turn keys and
+response shape validation, including large history, unknown tool indices and
+argument values, malformed JSON, missing fields and integer overflow. The new
+response checkpoint adds storage and validation cost; the plan now requires
+explicit AI-loop measurements. No new performance result is asserted here.

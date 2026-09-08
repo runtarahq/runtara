@@ -943,6 +943,18 @@ mod component {
             direct_json::DirectJsonManifest::ai_turn_cache_key(&step_id, iteration, &source)
         }
 
+        fn ai_turn_response_key(
+            step_id: String,
+            iteration: u32,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_turn_response_key(&step_id, iteration, &source)
+        }
+
+        fn ai_turn_response_validate(response: Vec<u8>) -> Result<(), String> {
+            direct_json::DirectJsonManifest::ai_turn_response_validate(&response)
+        }
+
         fn ai_turn_snapshot(
             state: Vec<u8>,
             pending: Vec<u8>,

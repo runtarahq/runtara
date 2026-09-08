@@ -28,6 +28,9 @@ struct Host {
     acknowledged: AtomicBool,
     recovery_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
     recovery_observed: AtomicBool,
+    checkpoint_fault: Mutex<Option<(String, bool)>>,
+    checkpoint_signal: Mutex<Option<String>>,
+    custom_signals: Mutex<HashMap<String, Vec<u8>>>,
 }
 impl Host {
     fn new() -> Self {
@@ -39,6 +42,9 @@ impl Host {
             acknowledged: AtomicBool::new(false),
             recovery_cleanup: Mutex::new(None),
             recovery_observed: AtomicBool::new(false),
+            checkpoint_fault: Mutex::new(None),
+            checkpoint_signal: Mutex::new(None),
+            custom_signals: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -96,10 +102,19 @@ impl RuntimeHost for Host {
     async fn check_signals(&self) -> Result<bool, String> {
         Ok(false)
     }
-    async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+    async fn poll_custom_signal(&self, key: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.custom_signals.lock().unwrap().get(&key).cloned())
     }
     async fn get_checkpoint(&self, key: String) -> Result<Option<Vec<u8>>, String> {
+        if self
+            .checkpoint_fault
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(prefix, write)| !*write && key.starts_with(prefix))
+        {
+            return Err("fixture checkpoint read failure".into());
+        }
         Ok(self.checkpoints.lock().unwrap().get(&key).cloned())
     }
     async fn checkpoint(
@@ -107,6 +122,27 @@ impl RuntimeHost for Host {
         key: String,
         state: Vec<u8>,
     ) -> Result<RuntimeCheckpointResult, String> {
+        if self
+            .checkpoint_fault
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(prefix, write)| *write && key.starts_with(prefix))
+        {
+            return Err("fixture checkpoint write failure".into());
+        }
+        let pending_signal = self
+            .checkpoint_signal
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|prefix| key.starts_with(prefix.as_str()))
+            .map(|_| RuntimeSignalInfo {
+                signal_type: "pause".into(),
+                command_id: "response-pause".into(),
+                payload: vec![],
+                checkpoint_id: None,
+            });
         let mut values = self.checkpoints.lock().unwrap();
         let existing = values.get(&key).cloned();
         if !state.is_empty() {
@@ -115,7 +151,7 @@ impl RuntimeHost for Host {
         Ok(RuntimeCheckpointResult {
             found: existing.is_some(),
             state: existing.unwrap_or(state),
-            pending_signal: None,
+            pending_signal,
             custom_signal: None,
         })
     }
@@ -124,7 +160,10 @@ impl RuntimeHost for Host {
         kind: String,
         command: String,
     ) -> Result<bool, String> {
-        assert_eq!((kind.as_str(), command.as_str()), ("cancel", "root-cancel"));
+        assert!(matches!(
+            (kind.as_str(), command.as_str()),
+            ("cancel", "root-cancel") | ("pause", "response-pause")
+        ));
         assert!(!self.acknowledged.swap(true, Ordering::SeqCst));
         Ok(true)
     }

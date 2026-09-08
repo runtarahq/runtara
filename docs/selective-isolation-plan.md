@@ -641,3 +641,47 @@ Resume must restore the exact tool IDs, order and arguments without another
 model request; test a different next provider reply and a failure between tool
 calls. This applies once in the shared AI loop to every tool kind, rather than
 adding separate persistence code to individual Agents or transports.
+
+### Pending AI turn decisions and checkpoint failures · 2026-09-08
+
+The shared durable AI loop now checkpoints the model's returned decision under
+`ai_turn_response` before dispatching any tool. Completed-turn snapshots retain
+their existing keys and semantics. Resume restores the saved decision, including
+its tool IDs, ordering, arguments and conversation, without another model call
+for that pending turn. This resolves the repeated-response limitation recorded
+above for inline Embed tools; Agent and WaitForSignal tools use the same path.
+A pause immediately after saving the response leaves all tools unstarted.
+
+The existing shared checkpoint lookup/save helpers now propagate storage errors
+instead of treating a failed read as a miss or continuing after a failed write.
+A malformed saved decision returns non-retryable `AI_TURN_RESPONSE_STATE` before
+dispatch. The corruption, storage failure, signal-resume and partially parked
+turn tests are in `compile/embed_tool_deadline_tests.rs`; verification is recorded
+in the implementation document. AI-inside-tool frame/arena isolation and the
+remaining timeout, publication, race and grace gates remain open.
+
+Extend paired measurements with durable AI loops of 1/10/100 turns, one and
+multiple tools per turn, small and growing conversations, and pending-turn
+resume. Report response-checkpoint lookup/write latency and bytes separately
+from completed-turn snapshots. The new path adds one decision lookup per live
+pending turn and one response write per fresh model result, retaining another
+copy of that response until normal checkpoint cleanup. Cache hits do not rewrite
+the response. Quantify database growth, guest validation work, cold artifact cost
+and avoided provider requests on resume; these costs are not yet measured.
+
+For the next nested-AI qualification, exercise an outer AI loop whose inline
+Embed tool contains another AI loop, including two tools in one outer turn,
+multiple inner turns, repeated outer calls, errors, parent/own cancellation and
+park/resume. Verify the outer conversation, pending results, call counter and
+heap watermark after the child returns; test large histories near the arena
+interning boundary. Reuse the existing guest frame discipline at the child
+boundary so this does not become another per-Agent wrapper or host task layer.
+
+The shared checkpoint helper fix is not a complete raw-call inventory: ordinary
+Agent attempt replay and parallel Split attempt replay still read checkpoints
+outside that helper; debug checkpoint handling is separate too. Add fault tests
+for those sites and for the parallel launch paths that defer errors until their
+window is drained. Preserve peer cleanup before returning a storage failure;
+do not turn a read error into a new attempt or silently report successful
+checkpoint completion. Their qualification remains part of the durable/error
+and resource-cleanup gates.

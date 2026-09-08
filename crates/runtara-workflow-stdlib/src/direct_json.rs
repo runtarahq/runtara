@@ -1829,19 +1829,66 @@ impl DirectJsonManifest {
         iteration: u32,
         source: &[u8],
     ) -> Result<String, String> {
-        let source: Value = serde_json::from_slice(source)
-            .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
-        if let Some(key) =
-            durable_key_v2(&source, "ai_turn", serde_json::json!([step_id, iteration]))
+        ai_turn_checkpoint_key(step_id, iteration, source, "ai_turn", "turn")
+    }
+
+    /// A model decision is saved before any tool dispatch, independently of
+    /// the completed-turn snapshot (which also contains the tool results).
+    pub fn ai_turn_response_key(
+        step_id: &str,
+        iteration: u32,
+        source: &[u8],
+    ) -> Result<String, String> {
+        ai_turn_checkpoint_key(
+            step_id,
+            iteration,
+            source,
+            "ai_turn_response",
+            "turn-response",
+        )
+    }
+
+    /// Reject damaged persisted decisions before dispatch or model I/O. Keep
+    /// unknown fields and argument values intact for forward compatibility.
+    pub fn ai_turn_response_validate(response: &[u8]) -> Result<(), String> {
+        let invalid = || {
+            serde_json::json!({"code":"AI_TURN_RESPONSE_STATE","message":"Invalid persisted AI turn response","category":"permanent","severity":"error","retryable":false}).to_string()
+        };
+        let value: Value = serde_json::from_slice(response).map_err(|_| invalid())?;
+        if !value["chat_history"].is_array()
+            || !value["tool_call_log"].is_array()
+            || !value["iterations"]
+                .as_u64()
+                .is_some_and(|n| n <= u64::from(u32::MAX))
         {
-            return Ok(key);
+            return Err(invalid());
         }
-        let indices_suffix = wait_loop_indices_suffix(&source);
-        let base = format!("{step_id}.turn.{iteration}{indices_suffix}");
-        Ok(match Self::source_cache_key_prefix(&source) {
-            Some(prefix) => format!("{prefix}::{base}"),
-            None => base,
-        })
+        match value["action"].as_str() {
+            Some("complete")
+                if value.get("response").is_some()
+                    && value
+                        .get("tool_calls")
+                        .is_none_or(|calls| calls.as_array().is_some_and(Vec::is_empty)) =>
+            {
+                Ok(())
+            }
+            Some("tools")
+                if value["tool_calls"].as_array().is_some_and(|calls| {
+                    !calls.is_empty()
+                        && calls.iter().all(|call| {
+                            call["tool_call_id"].is_string()
+                                && call["name"].is_string()
+                                && call["tool_index"]
+                                    .as_u64()
+                                    .is_some_and(|n| n <= u64::from(u32::MAX))
+                                && call.get("arguments").is_some()
+                        })
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(invalid()),
+        }
     }
 
     /// Per-turn durability: wrap the post-turn loop state for the turn
@@ -5733,6 +5780,26 @@ pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
     }
 }
 
+fn ai_turn_checkpoint_key(
+    step_id: &str,
+    iteration: u32,
+    source: &[u8],
+    kind: &str,
+    legacy_kind: &str,
+) -> Result<String, String> {
+    let source: Value = serde_json::from_slice(source)
+        .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
+    if let Some(key) = durable_key_v2(&source, kind, serde_json::json!([step_id, iteration])) {
+        return Ok(key);
+    }
+    let indices_suffix = wait_loop_indices_suffix(&source);
+    let base = format!("{step_id}.{legacy_kind}.{iteration}{indices_suffix}");
+    Ok(match DirectJsonManifest::source_cache_key_prefix(&source) {
+        Some(prefix) => format!("{prefix}::{base}"),
+        None => base,
+    })
+}
+
 fn tool_call_cache_prefix(
     ai_step_id: &str,
     label: &str,
@@ -9282,6 +9349,84 @@ mod tests {
             DirectJsonManifest::ai_turn_snapshot(state, b"[]", 7, true).expect("complete snapshot");
         assert!(DirectJsonManifest::ai_turn_snapshot_complete(&complete).unwrap());
         assert!(DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 2).is_err());
+    }
+
+    #[test]
+    fn ai_turn_response_keys_are_distinct_and_replay_stable() {
+        for version in [1, 2] {
+            let source = serde_json::to_vec(&json!({"variables":{"_durable_key_version":version,"_workflow_id":"wf","_cache_key_prefix":"parent","_loop_indices":[2],"_loop_path":[["items",2]]}})).unwrap();
+            let response = DirectJsonManifest::ai_turn_response_key("ai", 1, &source).unwrap();
+            assert_eq!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("ai", 1, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_cache_key("ai", 1, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("ai", 2, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("other", 1, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("ai", 1, b"{}").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn ai_turn_response_validation_keeps_decisions_and_rejects_corruption() {
+        let complete = json!({"action":"complete","chat_history":[],"iterations":1,"tool_call_log":[],"response":null});
+        let tools = json!({"action":"tools","chat_history":[{"content":"x".repeat(80_000)}],"iterations":u32::MAX,"tool_call_log":[],"tool_calls":[{"tool_call_id":"one","name":"unknown","arguments":null,"tool_index":u32::MAX}],"future_field":true});
+        for value in [&complete, &tools] {
+            assert!(
+                DirectJsonManifest::ai_turn_response_validate(&serde_json::to_vec(value).unwrap())
+                    .is_ok()
+            );
+        }
+        let mut damaged = vec![
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"action":"complete"}),
+        ];
+        for (field, value) in [
+            ("action", json!("invalid")),
+            ("chat_history", json!(null)),
+            ("iterations", json!(u64::MAX)),
+            ("tool_call_log", json!({})),
+            ("tool_calls", json!([])),
+        ] {
+            let mut candidate = tools.clone();
+            candidate[field] = value;
+            damaged.push(candidate);
+        }
+        for field in ["tool_call_id", "name", "arguments", "tool_index"] {
+            let mut candidate = tools.clone();
+            candidate["tool_calls"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            damaged.push(candidate);
+        }
+        let mut overflow = tools.clone();
+        overflow["tool_calls"][0]["tool_index"] = json!(u64::MAX);
+        damaged.push(overflow);
+        for bytes in damaged
+            .iter()
+            .map(|value| serde_json::to_vec(value).unwrap())
+            .chain([vec![], vec![0], b"{".to_vec()])
+        {
+            let error = DirectJsonManifest::ai_turn_response_validate(&bytes).unwrap_err();
+            let error: Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(error["code"], "AI_TURN_RESPONSE_STATE");
+            assert_eq!(error["retryable"], false);
+        }
     }
 
     #[test]

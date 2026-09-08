@@ -424,6 +424,34 @@ pub(super) fn emit_ai_agent_loop_plan(
         body.instruction(&Instruction::End); // close lookup If(found)
     }
 
+    if durable_checkpoint {
+        push_segment_args(body, step_id_segment);
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_ITER_LOCAL));
+        body.instruction(&Instruction::LocalGet(source_ptr_local));
+        body.instruction(&Instruction::LocalGet(source_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_response_key));
+        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+        load_retptr_list(
+            body,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+        );
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+            DIRECT_AI_TURN_OUT_PTR_LOCAL,
+            DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        );
+        // TOOL_MATCH is unused until dispatch. Preserve whether this response
+        // needs a first write without retaining another heap or stack frame.
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_MATCH_LOCAL));
+        body.instruction(&Instruction::Else);
+    }
+    let turn_failure_depth = 2 + u32::from(durable_checkpoint);
     // turn_input = ai-turn-next-input(base, state, pending)
     body.instruction(&Instruction::LocalGet(DIRECT_AI_BASE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_AI_BASE_LEN_LOCAL));
@@ -454,7 +482,11 @@ pub(super) fn emit_ai_agent_loop_plan(
         source_len_local,
         super::agent_invoke::AgentInvocationSite::AiTurn,
     );
-    super::deadline_scope::propagate(body, indices, failure_target.map(|target| target.nested(2)));
+    super::deadline_scope::propagate(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(turn_failure_depth)),
+    );
     emit_agent_invoke_error_branch(
         body,
         indices,
@@ -477,15 +509,37 @@ pub(super) fn emit_ai_agent_loop_plan(
         workflow_log_kind,
         workflow_error_kind,
         // Inside Block($outer) + Loop($turn): rejoining handlers and Split
-        // failure collectors must branch out through two extra blocks.
-        failure_target.map(|target| target.nested(2)),
-        handled_target.map(|target| target.nested(2)),
+        // failure collectors must also leave a pending-response cache miss.
+        failure_target.map(|target| target.nested(turn_failure_depth)),
+        handled_target.map(|target| target.nested(turn_failure_depth)),
     );
     load_agent_retptr_list(
         body,
         DIRECT_AI_TURN_OUT_PTR_LOCAL,
         DIRECT_AI_TURN_OUT_LEN_LOCAL,
     );
+
+    if durable_checkpoint {
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_MATCH_LOCAL));
+        body.instruction(&Instruction::End); // pending-response lookup
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_response_validate));
+        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_MATCH_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_checkpoint_save(
+            body,
+            indices,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+            DIRECT_AI_TURN_OUT_PTR_LOCAL,
+            DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::End);
+    }
 
     // Carry the turn output forward as the next turn's loop state; reset pending.
     body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));

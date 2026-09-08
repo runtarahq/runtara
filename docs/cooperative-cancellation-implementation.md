@@ -2548,3 +2548,58 @@ cancellation tests and all 395 workflow integration tests passed (three manual
 benchmarks ignored). Final feature-gated all-target Clippy, formatting, diff and
 patterns-page JavaScript syntax checks pass. Browser visual checks,
 database/server E2E, soak and controlled benchmarks were not run for this stage.
+
+## Persist AI decisions before tool dispatch (2026-09-08)
+
+The shared durable AI loop now loads or saves each successful `chat-turn`
+response under a separate `ai_turn_response` checkpoint. Saving happens before
+any tool dispatch and uses the existing checkpoint/signal machinery. A pause at
+that write leaves the decision durable and every tool unstarted. A pending-turn
+resume uses its original response without a provider call; its completed-turn
+snapshot is still written after tool results are assembled. Non-durable loops
+retain their authored behavior. The response cache hit is validated but is not
+rewritten.
+
+The stdlib's additive response-key and response-validation exports preserve the
+existing completed-turn key formula. Validation rejects corrupt decisions with
+`AI_TURN_RESPONSE_STATE` before model or tool I/O. It permits unknown fields and
+argument values and bounds the stored iteration/tool-index integers to their
+wire representation. The compiler reuses existing local slots, adjusts error
+unwind depth through the cache-miss branch, and advances its artifact cache tag
+to `cooperative-waits=shared-v10`. No host interface or task registry is added.
+
+This also fixes the shared checkpoint lookup/save helpers: failed reads no longer
+become cache misses, and failed writes no longer allow execution to continue.
+The storage error terminates execution. This cannot reverse an HTTP side effect
+whose result failed to save; external idempotency and interruption before model
+response persistence remain separate concerns.
+
+The twelve composed tool tests now include both read/write storage faults, a
+pause immediately after response persistence, malformed saved responses, a
+mixed Agent/WaitForSignal turn with repeated early resume and exact tool IDs,
+and generic Agent checkpoint faults. The earlier parked-Embed proof now permits
+only the initial decision and final answer provider calls, rather than scripting
+the same decision repeatedly. Native tests cover key separation, replay identity
+and malformed/large response shapes. E128 and the remaining G1–G10 gates stay
+open; nested AI tool frame/arena behavior still needs qualification.
+
+Cost: a fresh durable turn adds a response-checkpoint lookup/write and stores its
+response separately from the completed-turn snapshot. Resume avoids a provider
+call for an already persisted pending turn. The measurement plan now includes
+1/10/100-turn AI loops, checkpoint bytes/latencies and growing conversations.
+No new benchmark, database/server E2E or soak result is claimed at this stage.
+
+Scope of the storage fix: this stage changes the shared lookup/save helpers.
+Raw attempt-replay reads in `agent.rs` and `split_parallel.rs`, debug checkpoint
+handling and deferred parallel-launch failures still need dedicated fault and
+peer-cleanup qualification. The plan records that inventory; this stage does
+not establish storage-failure correctness for every emitted call site.
+
+Verification: all 27 Agent and both shared workflow components rebuilt. The full
+compiler suite passed 628 tests; the final 12-test tool matrix also passed after
+adding generic checkpoint faults and exact mixed Agent/signal-tool replay.
+Stdlib passed 241 tests (one existing ignored) plus its doctest. All 86
+real-component cancellation tests and all 395 workflow integration tests passed
+(three manual benchmarks ignored). Final feature-gated all-target Clippy,
+formatting, diff checks and patterns-page JavaScript syntax passed. No browser
+visual check or additional performance/E2E/soak result is claimed for this stage.

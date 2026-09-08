@@ -464,6 +464,9 @@ interface json {
         iteration: u32,
         source: list<u8>,
     ) -> result<string, string>;
+    // Persisted model decision, before tools, separate from completed turns.
+    ai-turn-response-key: func(step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
+    ai-turn-response-validate: func(response: list<u8>) -> result<_, string>;
     // Per-turn durability: wrap the post-turn loop state
     // ({state, pending, toolCalls, complete}) for the turn checkpoint.
     ai-turn-snapshot: func(

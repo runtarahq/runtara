@@ -376,12 +376,8 @@ async fn embed_tool_resume_reuses_completed_call_and_original_pending_budget() -
         json!({"id":"first","function":{"name":"run_child","arguments":"{\"pause\":false}"}}),
         json!({"id":"second","function":{"name":"run_child","arguments":"{\"pause\":true}"}}),
     ]);
-    let mut server = Server::scripted(
-        host.clone(),
-        vec![Child::Success],
-        vec![turn.clone(), turn.clone(), turn, model_done()],
-    )
-    .await?;
+    let mut server =
+        Server::scripted(host.clone(), vec![Child::Success], vec![turn, model_done()]).await?;
     for now in [1_000, 1_100] {
         host.clock_override.store(now, Ordering::SeqCst);
         let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
@@ -408,8 +404,12 @@ async fn embed_tool_resume_reuses_completed_call_and_original_pending_budget() -
     );
     assert_eq!(server.children.load(Ordering::SeqCst), 1);
     let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
-    let feedback = tool_feedback(&requests[3]);
+    assert_eq!(
+        requests.len(),
+        2,
+        "pending decision replays without a model request"
+    );
+    let feedback = tool_feedback(&requests[1]);
     assert_eq!(feedback.len(), 2);
     assert_eq!(
         feedback[0],
@@ -523,8 +523,7 @@ async fn embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io() -
             json!({"id":"first","function":{"name":"run_child","arguments":"{\"pause\":false}"}}),
             json!({"id":"second","function":{"name":"run_child","arguments":"{\"pause\":true}"}}),
         ]);
-        let mut server =
-            Server::scripted(host.clone(), vec![Child::Success], vec![turn.clone(), turn]).await?;
+        let mut server = Server::scripted(host.clone(), vec![Child::Success], vec![turn]).await?;
         let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
@@ -542,9 +541,260 @@ async fn embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io() -
         assert_eq!(server.children.load(Ordering::SeqCst), 1);
         assert_eq!(
             server.requests.lock().unwrap().len(),
-            2,
-            "no feedback call after corrupted budget"
+            1,
+            "no model or feedback call after corrupted budget"
         );
     }
+    Ok(())
+}
+
+const RESPONSE_PREFIX: &str = "runtara:v2:[\"ai_turn_response\",";
+
+#[tokio::test]
+async fn ai_response_checkpoint_failures_prevent_tool_dispatch() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let compiled = compiled(dir.path(), true, None, None)?;
+    for write in [false, true] {
+        let host = Arc::new(Host::new());
+        *host.checkpoint_fault.lock().unwrap() = Some((RESPONSE_PREFIX.into(), write));
+        let mut server = Server::start(host.clone(), vec![], 1).await?;
+        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        server.check().await?;
+        let InvokeExit::Failed(error) = exit else {
+            anyhow::bail!("{exit:?}")
+        };
+        assert!(
+            error.message.contains(if write {
+                "fixture checkpoint write failure"
+            } else {
+                "fixture checkpoint read failure"
+            }),
+            "{error:?}"
+        );
+        assert_eq!(server.children.load(Ordering::SeqCst), 0);
+        assert_eq!(server.requests.lock().unwrap().len(), usize::from(write));
+        assert!(
+            !host
+                .checkpoints
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with(RESPONSE_PREFIX))
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn ai_response_pause_after_persistence_replays_before_tool_dispatch() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let compiled = compiled(dir.path(), true, None, None)?;
+    let host = Arc::new(Host::new());
+    *host.checkpoint_signal.lock().unwrap() = Some(RESPONSE_PREFIX.into());
+    let mut server = Server::start(host.clone(), vec![Child::Success], 1).await?;
+    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    server.check().await?;
+    assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
+    assert!(host.acknowledged.load(Ordering::SeqCst));
+    assert_eq!(server.children.load(Ordering::SeqCst), 0);
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    *host.checkpoint_signal.lock().unwrap() = None;
+    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    server.check().await?;
+    let InvokeExit::Completed(bytes) = exit else {
+        anyhow::bail!("{exit:?}")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes)?,
+        json!({"answer":"done"})
+    );
+    assert_eq!(server.children.load(Ordering::SeqCst), 1);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "resume must consume the saved tool decision, not ask the model again"
+    );
+    assert_eq!(tool_feedback(&requests[1]), vec![json!({"ok":true})]);
+    let messages = requests[1]["body"]["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == "call_0")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ai_response_corrupt_checkpoint_fails_without_model_or_child_io() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let compiled = compiled(dir.path(), true, None, None)?;
+    let host = Arc::new(Host::new());
+    *host.checkpoint_signal.lock().unwrap() = Some(RESPONSE_PREFIX.into());
+    let mut server = Server::start(host.clone(), vec![], 1).await?;
+    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
+    *host.checkpoint_signal.lock().unwrap() = None;
+    let key = host
+        .checkpoints
+        .lock()
+        .unwrap()
+        .keys()
+        .find(|key| key.starts_with(RESPONSE_PREFIX))
+        .unwrap()
+        .clone();
+    for bytes in [
+        vec![],
+        b"null".to_vec(),
+        b"{".to_vec(),
+        br#"{"action":"tools","tool_calls":[]}"#.to_vec(),
+    ] {
+        host.checkpoints.lock().unwrap().insert(key.clone(), bytes);
+        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        server.check().await?;
+        assert!(
+            matches!(exit,InvokeExit::Failed(ref error) if error.code == "AI_TURN_RESPONSE_STATE" && !error.retryable),
+            "{exit:?}"
+        );
+        assert_eq!(server.children.load(Ordering::SeqCst), 0);
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_checkpoint_errors_stop_ordinary_agent_execution() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let compiled = super::compile(
+        dir.path(),
+        "http://fixture.test/child",
+        u64::MAX,
+        true,
+        0,
+        0,
+        false,
+    )?;
+    for write in [false, true] {
+        let host = Arc::new(Host::new());
+        *host.checkpoint_fault.lock().unwrap() = Some(("runtara:v2:[\"agent\",".into(), write));
+        let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
+        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        server.check().await?;
+        let InvokeExit::Failed(error) = exit else {
+            anyhow::bail!("{exit:?}")
+        };
+        assert!(
+            error.message.contains(if write {
+                "fixture checkpoint write failure"
+            } else {
+                "fixture checkpoint read failure"
+            }),
+            "{error:?}"
+        );
+        // A failed read prevents I/O. A failed save cannot undo I/O, but must
+        // prevent the graph from returning a successful Finish.
+        assert_eq!(server.children.load(Ordering::SeqCst), usize::from(write));
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -> anyhow::Result<()>
+{
+    let dir = tempfile::tempdir()?;
+    let mut graph: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/ai_agent_wait_tool.json"
+    ))?;
+    graph["steps"]["ai"]["connectionId"] = "conn".into();
+    graph["steps"]["ai"]["config"]["userPrompt"] = json!({"valueType":"immediate","value":"go"});
+    graph["steps"]["echo"] = json!({"id":"echo","stepType":"Agent","agentId":"utils","capabilityId":"return-input","inputMapping":{}});
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fromStep":"ai","toStep":"echo","label":"echo"}));
+    let mut compiled = compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "ai-response-signals".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph)?,
+            child_workflows: vec![],
+            output_dir: dir.path().into(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )?;
+    compose_direct_workflow(
+        &mut compiled,
+        std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?,
+    )?;
+    let host = Arc::new(Host::new());
+    let turn = model_tools(vec![
+        json!({"id":"echo-id","function":{"name":"echo","arguments":"{\"value\":\"first\"}"}}),
+        json!({"id":"approval-id","function":{"name":"get_approval","arguments":"{\"case_id\":42,\"summary\":\"keep this decision\"}"}}),
+    ]);
+    let mut server = Server::scripted(host.clone(), vec![], vec![turn, model_done()]).await?;
+    let mut wait_key = None;
+    for _ in 0..2 {
+        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        server.check().await?;
+        let InvokeExit::Suspended(wakes) = exit else {
+            anyhow::bail!("{exit:?}")
+        };
+        let [runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait)] = wakes.as_slice()
+        else {
+            anyhow::bail!("{wakes:?}")
+        };
+        if let Some(key) = &wait_key {
+            assert_eq!(key, &wait.checkpoint_id);
+        } else {
+            wait_key = Some(wait.checkpoint_id.clone());
+        }
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "early resume restores the same decision"
+        );
+    }
+    host.custom_signals
+        .lock()
+        .unwrap()
+        .insert(wait_key.unwrap(), br#"{"approved":true}"#.to_vec());
+    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    server.check().await?;
+    let InvokeExit::Completed(bytes) = exit else {
+        anyhow::bail!("{exit:?}")
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes)?,
+        json!({"answer":"done"})
+    );
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let feedback = requests[1]["body"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["content"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(feedback.len(), 2);
+    assert_eq!(feedback[0], "first");
+    assert_eq!(
+        serde_json::from_str::<Value>(feedback[1])?,
+        json!({"status":"received","human_response":{"approved":true}})
+    );
+    let ids = requests[1]["body"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["tool_call_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![json!("echo-id"), json!("approval-id")]);
     Ok(())
 }

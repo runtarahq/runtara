@@ -30,6 +30,7 @@ pub(super) fn emit_checkpoint_lookup(
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+    return_if_retptr_error(body, indices);
 
     emit_get_checkpoint_has_value(body);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -50,6 +51,7 @@ pub(super) fn emit_checkpoint_save(
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+    return_if_retptr_error(body, indices);
     emit_checkpoint_signal_handling(body, indices);
 }
 
