@@ -454,3 +454,6 @@ async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<
     }
     Ok(())
 }
+
+#[path = "parallel_cleanup_alarm_tests.rs"]
+mod cleanup_alarm;

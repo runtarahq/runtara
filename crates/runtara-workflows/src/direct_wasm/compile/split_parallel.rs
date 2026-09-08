@@ -499,7 +499,7 @@ pub(super) fn emit_drain_pending(
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::I32Load(mem32()));
     body.instruction(&Instruction::Call(subtask_drop));
-    super::cooperative_wait::emit_forget_returned(body);
+    super::cooperative_wait::emit_forget_returned(body, indices);
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Sub);
@@ -610,6 +610,8 @@ fn emit_durable_checkpoint_attempt(body: &mut WasmFunction, indices: &DirectCore
 #[allow(clippy::too_many_arguments)]
 fn emit_pool_reinvoke(
     body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    own_deadline: bool,
     invoke_pool: &[&super::DirectAgentInvokeImport],
     capability_id: &super::DirectDataSegment,
     call_site: u32,
@@ -621,6 +623,12 @@ fn emit_pool_reinvoke(
     status_local: u32,
 ) {
     let emit_call = |body: &mut WasmFunction, member: &super::DirectAgentInvokeImport| {
+        super::cooperative_wait::parallel_deadline::start_call_alarm(
+            body,
+            indices,
+            own_deadline,
+            slot_ptr_local,
+        );
         push_segment_args(body, capability_id);
         body.instruction(&Instruction::LocalGet(input_ptr_local));
         body.instruction(&Instruction::LocalGet(input_len_local));
@@ -645,6 +653,12 @@ fn emit_pool_reinvoke(
         body.instruction(&Instruction::I32Add);
         body.instruction(&Instruction::Call(member.function_index));
         body.instruction(&Instruction::LocalSet(status_local));
+        super::cooperative_wait::parallel_deadline::close_eager_call_alarm(
+            body,
+            indices,
+            slot_ptr_local,
+            status_local,
+        );
     };
     if invoke_pool.len() == 1 {
         emit_call(body, invoke_pool[0]);
@@ -1096,6 +1110,8 @@ pub(super) fn emit_parallel_split_items(
         );
         emit_pool_reinvoke(
             body,
+            indices,
+            own_deadline,
             &invoke_pool,
             capability_id,
             static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
@@ -1116,6 +1132,8 @@ pub(super) fn emit_parallel_split_items(
         );
         emit_pool_reinvoke(
             body,
+            indices,
+            own_deadline,
             &invoke_pool,
             capability_id,
             static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
@@ -1450,6 +1468,8 @@ pub(super) fn emit_parallel_split_items(
                 body.instruction(&Instruction::If(BlockType::Empty));
                 emit_pool_reinvoke(
                     body,
+                    indices,
+                    own_deadline,
                     &invoke_pool,
                     capability_id,
                     static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
@@ -1465,6 +1485,8 @@ pub(super) fn emit_parallel_split_items(
             } else {
                 emit_pool_reinvoke(
                     body,
+                    indices,
+                    own_deadline,
                     &invoke_pool,
                     capability_id,
                     static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),

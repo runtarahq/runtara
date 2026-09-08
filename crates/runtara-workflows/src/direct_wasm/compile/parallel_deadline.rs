@@ -12,6 +12,7 @@ const READY: u64 = 180;
 const START: u64 = 184;
 const BUDGET: u64 = 192;
 const ERROR: u64 = 200;
+const ALARM: u64 = 204; // occupies the existing slot padding; stride stays 208
 const BEST: u32 = agent_deadline::DEADLINE;
 
 fn slot_load(body: &mut Function, slot: u32, offset: u64) {
@@ -66,6 +67,60 @@ pub(crate) fn begin(
     slot_store(body, slot, ACTIVE, 1);
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::LocalSet(ENABLED));
+}
+
+/// This belongs to the call, independently of whichever wait currently drives
+/// the window. Its first instruction may prevent the scheduler from returning.
+pub(crate) fn start_call_alarm(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    own: bool,
+    slot: u32,
+) {
+    if indices.monotonic_now.is_none() {
+        return;
+    }
+    // Reusing a live slot would orphan its previous alarm.
+    slot_load(body, slot, ALARM);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::Unreachable);
+    body.instruction(&Instruction::End);
+    super::super::deadline_scope::arm_call_alarm(body, indices, own, HANDLE);
+    body.instruction(&Instruction::LocalGet(slot));
+    body.instruction(&Instruction::LocalGet(HANDLE));
+    body.instruction(&Instruction::I32Store(mem(ALARM)));
+}
+
+pub(crate) fn close_call_alarm(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    slot: u32,
+) {
+    if indices.timer_abort_async.is_none() {
+        return;
+    }
+    slot_load(body, slot, ALARM);
+    body.instruction(&Instruction::LocalTee(HANDLE));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    cancel_and_drop(body, indices, HANDLE);
+    slot_store(body, slot, ALARM, 0);
+    body.instruction(&Instruction::End);
+}
+
+pub(crate) fn close_eager_call_alarm(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    slot: u32,
+    status: u32,
+) {
+    body.instruction(&Instruction::LocalGet(status));
+    body.instruction(&Instruction::I32Const(15));
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::I32Const(RETURNED));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    close_call_alarm(body, indices, slot);
+    body.instruction(&Instruction::End);
 }
 
 pub(crate) fn timer_handle(body: &mut Function) {
@@ -151,6 +206,23 @@ pub(crate) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices, set:
     body.instruction(&Instruction::End);
 }
 
+/// Untimed windows use the same alarm lifetime when an enclosing scope supplied
+/// the budget. Dispose before returning to assembly or another native import.
+pub(crate) fn close_returned_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    for_each_slot(body, |body| {
+        slot_load(
+            body,
+            CURSOR,
+            super::super::DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET as u64,
+        );
+        load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        close_call_alarm(body, indices, CURSOR);
+        body.instruction(&Instruction::End);
+    });
+}
+
 /// Detach a ready call so a second poll cannot deliver the same event. Its
 /// resolved handle remains in the slot until the normal scheduler drops it.
 pub(crate) fn remember_returned(body: &mut Function, indices: &DirectCoreFunctionIndices) {
@@ -166,6 +238,7 @@ pub(crate) fn remember_returned(body: &mut Function, indices: &DirectCoreFunctio
         load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
+        close_call_alarm(body, indices, CURSOR);
         slot_store(body, CURSOR, ACTIVE, 0);
         slot_store(body, CURSOR, READY, 1);
         body.instruction(&Instruction::LocalGet(CURSOR));
@@ -256,6 +329,7 @@ pub(crate) fn select_expired(body: &mut Function, indices: &DirectCoreFunctionIn
     body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::Unreachable);
     body.instruction(&Instruction::End);
+    close_call_alarm(body, indices, CURSOR);
     error(body, CURSOR);
     slot_store(body, CURSOR, READY, 1);
     close_timer(body, indices);

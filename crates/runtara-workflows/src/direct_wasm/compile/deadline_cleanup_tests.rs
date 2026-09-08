@@ -48,10 +48,8 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
     ))?)
 }
 
-async fn aborts(cpu_body: bool) -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut compiled = compile(dir.path(), "http://unused.test", 100, false, 0, 0, true)?;
-    let fixtures = dir.path().join("components");
+pub(super) fn fixture_components(dir: &Path, cpu_body: bool) -> anyhow::Result<PathBuf> {
+    let fixtures = dir.join("components");
     fs::create_dir(&fixtures)?;
     // Stage independent fixture paths. Shared build outputs remain untouched.
     for entry in fs::read_dir(std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)? {
@@ -61,6 +59,13 @@ async fn aborts(cpu_body: bool) -> anyhow::Result<()> {
         }
     }
     fs::write(fixtures.join("runtara_agent_http.wasm"), agent(cpu_body)?)?;
+    Ok(fixtures)
+}
+
+async fn aborts(cpu_body: bool) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut compiled = compile(dir.path(), "http://unused.test", 100, false, 0, 0, true)?;
+    let fixtures = fixture_components(dir.path(), cpu_body)?;
     compose_direct_workflow(&mut compiled, &fixtures)?;
     let executor = executor();
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;

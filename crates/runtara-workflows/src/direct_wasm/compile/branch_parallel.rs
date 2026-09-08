@@ -1052,7 +1052,7 @@ fn emit_branch_scheduler(
         );
         body.instruction(&Instruction::End);
     }
-    super::cooperative_wait::emit_forget_returned(body);
+    super::cooperative_wait::emit_forget_returned(body, indices);
     body.instruction(&Instruction::End); // if SUBTASK_RETURNED
 
     body.instruction(&Instruction::Br(0)); // continue $sched
@@ -1690,6 +1690,13 @@ fn emit_branch_launch(
         );
     }
 
+    super::cooperative_wait::parallel_deadline::start_call_alarm(
+        body,
+        indices,
+        own_deadline,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+    );
+
     // slot.state = AGENT_READY, then async-invoke into slot+RESULT_OFFSET.
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
     body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
@@ -1714,6 +1721,12 @@ fn emit_branch_launch(
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::Call(invoke.function_index));
     body.instruction(&Instruction::LocalSet(route_len_local)); // status
+    super::cooperative_wait::parallel_deadline::close_eager_call_alarm(
+        body,
+        indices,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+        route_len_local,
+    );
     match sched_pending_flag {
         None => emit_join_if_pending(
             body,

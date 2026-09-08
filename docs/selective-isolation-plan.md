@@ -868,10 +868,42 @@ host-timer contract adds the emergency import. Existing composed Agent artifacts
 are unchanged. This requires an updated host for newly emitted timer imports;
 older artifacts still import their existing subset.
 
-This is not yet complete timed-scope ownership. Parallel launch paths still need
+At this stage timed-scope ownership was incomplete. Parallel launch paths needed
 per-pending-call alarms armed before entering noncooperative code, retained while
 another call/preparation runs, and disposed when their owning call resolves.
 Enclosing inline scopes must retain coverage across dispatch/assembly boundaries,
 including preparation-timeout propagation into cleanup of the entire window.
 Keep E128, G5/G6 and the wider G1–G10 qualification open. Do not claim complete
 scope grace from the sequential/window-wait tests alone.
+
+### Parallel call alarm integration · 2026-09-08
+
+The scheduler, wavefront and parallel Split now prearm each call through the
+shared deadline/alarm emitters. A call retains its alarm while another call or
+connection lookup runs, and resolves it on eager/observed return or after timeout
+cleanup. Root/parent propagation relinquishes these alarms before call cleanup.
+The initiating cancellation grace continues to govern. No Agent-specific wrapper,
+new native interface, optional backend or host task registry is introduced.
+
+The handle uses existing slot padding (offset 204; stride remains 208 bytes).
+The seven shared helpers retain 20 i32 state values; the cache tag is now
+`cooperative-waits=shared-v16`. Native armed-alarm allocations must still be
+included in the final performance and soak comparisons.
+
+Composed tests cover CPU-bound entry and cancellation callbacks in all three
+schedulers with own and inherited deadlines, plus successful untimed peer work
+past a returned timed call's former alarm deadline, both in I/O and connection
+preparation. Removing disposal makes the preparation regression fail with
+`CleanupAborted`; restoring it produces normal success. Shared-helper tests check
+per-call retention and disposal ordering. Keep E128 and G5/G6 open: enclosing
+inline scopes still need continuous alarm ownership across assembly/checkpoint
+boundaries and error propagation. The full G1–G10 qualification remains required.
+
+For continuous enclosing-scope coverage, retain an alarm for the effective
+earliest scope while executing assembly/checkpoint work. Scope restoration must
+use the original monotonic start and the original budget including grace:
+`max(0, saturating_add(budget, grace) - elapsed)`. Clamping the remaining ordinary
+budget to zero and then adding a fresh grace would extend an overdue parent's
+cleanup deadline. Qualify blocked checkpoints with no pending Agent, nested
+handled exits, recovery past a disposed child alarm, and root/parent propagation
+before treating this remaining coverage as complete.

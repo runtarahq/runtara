@@ -474,6 +474,8 @@ const DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL: u32 = 128;
 /// canonical `result<list<u8>, error-info>` lands at the result offset (~68
 /// bytes worst case; payload pointers live in the bump heap, which is not
 /// rewound during a chunk).
+// Tail: deadline ACTIVE/READY at 176/180, START/BUDGET at 184/192,
+// timeout ERROR pointer at 200, and owned safety-alarm handle at 204.
 const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 208;
 const DIRECT_PSPLIT_SLOT_RESULT_OFFSET: i32 = 48;
 /// Bytes of the result region copied by the memoized-invoke slot→retptr copy.
@@ -1140,7 +1142,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v15,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v16,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()

@@ -134,6 +134,30 @@ pub(super) fn arm(body: &mut Function, indices: &DirectCoreFunctionIndices, own:
     }
 }
 
+/// Prearm a parallel call using the same earliest owner as a sequential wait.
+/// The caller moves this standard handle into its existing pending-call slot.
+pub(super) fn arm_call_alarm(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    own: bool,
+    handle: u32,
+) {
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(handle));
+    choose(body, indices, own);
+    if !own {
+        body.instruction(&Instruction::LocalGet(CHOSEN));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::I32Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+    }
+    body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
+    super::cooperative_wait::arm_alarm_into(body, indices, handle);
+    if !own {
+        body.instruction(&Instruction::End);
+    }
+}
+
 pub(super) fn select(body: &mut Function) {
     body.instruction(&Instruction::LocalGet(CHOSEN));
     body.instruction(&Instruction::LocalSet(SELECTED));

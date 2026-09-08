@@ -172,7 +172,7 @@ fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         body.instruction(&Instruction::I32Const(6));
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
-        close_alarm(body, indices);
+        relinquish_alarms(body, indices);
         close_all(body, indices);
         if indices.cooperative_helper_body {
             helper_return(body, 3);
@@ -283,6 +283,14 @@ fn cancel_and_drop(body: &mut Function, indices: &DirectCoreFunctionIndices, han
 /// The caller leaves the remaining scope duration in milliseconds on the
 /// stack. Arm before invoking guest code: its first instruction may never yield.
 pub(super) fn arm_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    arm_alarm_into(body, indices, ALARM);
+}
+
+pub(super) fn arm_alarm_into(
+    body: &mut Function,
+    indices: &DirectCoreFunctionIndices,
+    handle: u32,
+) {
     let remaining = super::agent_deadline::REMAINING;
     body.instruction(&Instruction::LocalSet(remaining));
     body.instruction(&Instruction::LocalGet(remaining));
@@ -304,7 +312,7 @@ pub(super) fn arm_alarm(body: &mut Function, indices: &DirectCoreFunctionIndices
     ));
     body.instruction(&Instruction::I32Const(4));
     body.instruction(&Instruction::I32ShrU);
-    body.instruction(&Instruction::LocalTee(ALARM));
+    body.instruction(&Instruction::LocalTee(handle));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
     body.instruction(&Instruction::Unreachable);
@@ -390,6 +398,16 @@ fn clear_slot_handle(body: &mut Function) {
     )));
 }
 
+fn relinquish_alarms(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    close_alarm(body, indices);
+    body.instruction(&Instruction::LocalGet(WINDOW_ACTIVE));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    for_each_slot(body, |body| {
+        parallel_deadline::close_call_alarm(body, indices, CURSOR)
+    });
+    body.instruction(&Instruction::End);
+}
+
 fn close_all(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     if indices.subtask_cancel.is_none() {
         return;
@@ -408,6 +426,7 @@ fn close_all(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         cancel_and_drop(body, indices, HANDLE);
         clear_slot_handle(body);
         body.instruction(&Instruction::End);
+        parallel_deadline::close_call_alarm(body, indices, CURSOR);
     });
     emit_window_close(body, indices);
     body.instruction(&Instruction::End);
@@ -509,7 +528,7 @@ fn act_on_cancel(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::I32And);
     body.instruction(&Instruction::If(BlockType::Empty));
-    close_alarm(body, indices);
+    relinquish_alarms(body, indices);
     close_all(body, indices);
     acknowledge(body, indices, true);
     body.instruction(&Instruction::End);
@@ -797,6 +816,7 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
     body.instruction(&Instruction::If(BlockType::Empty));
     parallel_deadline::observe_event(body, indices);
     body.instruction(&Instruction::Else);
+    parallel_deadline::close_returned_alarm(body, indices);
     close_deadline(body, indices);
     close_alarm(body, indices);
     helper_return(body, 0);
@@ -807,7 +827,7 @@ fn observe_window_event(body: &mut Function, indices: &DirectCoreFunctionIndices
 }
 
 /// Clear a resolved call's slot before its handle can be recycled by the engine.
-pub(super) fn emit_forget_returned(body: &mut Function) {
+pub(super) fn emit_forget_returned(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     for_each_slot(body, |body| {
         body.instruction(&Instruction::LocalGet(CURSOR));
         body.instruction(&Instruction::I32Load(mem(
@@ -817,6 +837,7 @@ pub(super) fn emit_forget_returned(body: &mut Function) {
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
         clear_slot_handle(body);
+        parallel_deadline::close_call_alarm(body, indices, CURSOR);
         parallel_deadline::reset_slot(body, CURSOR);
         body.instruction(&Instruction::End);
     });
@@ -1029,7 +1050,7 @@ pub(super) fn emit_iteration_boundary(body: &mut Function, indices: &DirectCoreF
     if let Some(yield_index) = indices.thread_yield {
         body.instruction(&Instruction::Call(yield_index));
         body.instruction(&Instruction::If(BlockType::Empty));
-        close_alarm(body, indices);
+        relinquish_alarms(body, indices);
         close_all(body, indices);
         emit_entry_cancel_return(body);
         body.instruction(&Instruction::End);

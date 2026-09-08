@@ -198,6 +198,35 @@ fn run_helper_with_alarm(
     expected_cancelled: &[i32],
     alarm: bool,
 ) {
+    run_helper_with_call_alarms(
+        context,
+        window,
+        ready,
+        waiting,
+        target,
+        deadline,
+        cancel_returns,
+        expected_outcome,
+        expected_cancelled,
+        alarm,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_helper_with_call_alarms(
+    context: Context,
+    window: bool,
+    ready: &[(i32, i32)],
+    waiting: &[(i32, i32)],
+    target: i32,
+    deadline: i32,
+    cancel_returns: i32,
+    expected_outcome: i32,
+    expected_cancelled: &[i32],
+    alarm: bool,
+    call_alarms: bool,
+) {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, emitted_helper(context)).unwrap();
     let mut linker = Linker::<Events>::new(&engine);
@@ -318,6 +347,11 @@ fn run_helper_with_alarm(
         .map(|s| s >> 4)
         .chain([99])
         .chain(alarm.then_some(4))
+        .chain(if call_alarms {
+            if window { vec![5, 6] } else { vec![5] }
+        } else {
+            vec![]
+        })
         .collect();
     let mut store = wasmtime::Store::new(
         &engine,
@@ -361,6 +395,25 @@ fn run_helper_with_alarm(
         if window { 100 } else { 200 },
     );
     let mem = instance.get_memory(&mut store, "test-memory").unwrap();
+    // Real window allocation zeroes every slot, including its alarm field.
+    mem.write(
+        &mut store,
+        1024,
+        &vec![0; 2 * super::super::DIRECT_PSPLIT_SLOT_STRIDE as usize],
+    )
+    .unwrap();
+    if call_alarms {
+        mem.write(&mut store, 1024 + 204, &5i32.to_le_bytes())
+            .unwrap();
+        if window {
+            mem.write(
+                &mut store,
+                1024 + super::super::DIRECT_PSPLIT_SLOT_STRIDE as usize + 204,
+                &6i32.to_le_bytes(),
+            )
+            .unwrap();
+        }
+    }
     mem.write(
         &mut store,
         1024 + super::super::DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET as usize,
@@ -394,7 +447,14 @@ fn run_helper_with_alarm(
         if expected_outcome == 0 {
             // An ordinary call is delivered intact; the entry drops it and
             // advances its slot, rather than counting a timer as a completion.
-            assert_eq!(store.data().live, BTreeSet::from([1, 99]));
+            assert_eq!(
+                store.data().live,
+                if call_alarms {
+                    BTreeSet::from([1, 99, 6])
+                } else {
+                    BTreeSet::from([1, 99])
+                }
+            );
             assert_eq!(store.data().joined, BTreeMap::from([(1, 100), (99, 100)]));
             let mut event = [0; 8];
             mem.read(&store, DIRECT_PSPLIT_EVENT_OFFSET as usize, &mut event)
@@ -423,7 +483,11 @@ fn run_helper_with_alarm(
     } else {
         assert_eq!(
             store.data().live,
-            BTreeSet::from([99]),
+            if call_alarms {
+                BTreeSet::from([99, 5])
+            } else {
+                BTreeSet::from([99])
+            },
             "unrelated sibling must survive"
         );
         assert_eq!(store.data().joined, BTreeMap::from([(99, 200)]));
@@ -662,6 +726,79 @@ fn emitted_propagated_cancellation_relinquishes_local_grace_before_cleanup() {
         CANCELLED,
         2,
         &[4, 1, 99],
+        true,
+    );
+}
+
+#[test]
+fn emitted_call_alarms_survive_other_waits_and_resolve_with_their_calls() {
+    run_helper_with_call_alarms(
+        Context::Callable,
+        false,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        4,
+        &[1, 4],
+        true,
+        true,
+    );
+    run_helper_with_call_alarms(
+        Context::Callable,
+        true,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        4,
+        &[1, 5, 99, 6, 4],
+        true,
+        true,
+    );
+    run_helper_with_call_alarms(
+        Context::Callable,
+        true,
+        &[(1, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        0,
+        &[5, 2, 4],
+        true,
+        true,
+    );
+}
+
+#[test]
+fn emitted_root_and_parent_cancel_disarm_all_call_alarms_before_any_cleanup() {
+    run_helper_with_call_alarms(
+        Context::Callable,
+        true,
+        &[],
+        &[(0, 6)],
+        17,
+        33,
+        CANCELLED,
+        3,
+        &[4, 5, 6, 2, 1, 99],
+        true,
+        true,
+    );
+    run_helper_with_call_alarms(
+        Context::RootCancel,
+        true,
+        &[(2, 2)],
+        &[],
+        17,
+        33,
+        CANCELLED,
+        2,
+        &[4, 5, 6, 1, 99],
+        true,
         true,
     );
 }

@@ -1628,10 +1628,47 @@ timed call followed by six seconds of untimed HTTP work in the same Store.
 Deterministic shared-helper tests check cleanup/disposal order for own timeout,
 window timeout, success and root/parent propagation.
 
-Parallel launches still need alarms retained for each pending call, including
+At this stage parallel launches still needed alarms retained for each pending call, including
 while another call is prepared. Enclosing inline scopes need uninterrupted
 coverage across dispatch and assembly boundaries, including preparation-timeout
 propagation into cleanup of the entire window. These remain prerequisites
 for removing E128; shared-wait coverage alone does not establish full scope
 grace. Per-Store latch allocation, armed-alarm cost and cancellation races remain
 part of the full performance/soak gates.
+
+### AUDIT-19 · Parallel calls retain their cleanup alarms
+
+**Status: per-call ownership implemented; continuous enclosing-scope ownership
+and final qualification remain open.** Each actual launch in the scheduler,
+wavefront and parallel Split arms an alarm through the shared deadline selector.
+Its duration uses the original earliest own/inherited remaining budget plus the
+existing five-second grace. The call keeps that alarm while other work is being
+prepared or awaited. It is disposed on eager/observed return or after timeout
+cleanup; root/parent propagation relinquishes window alarms before cleanup.
+
+The handle uses existing slot padding at offset 204, preserving the 208-byte
+stride. The helper count and 20 i32 state values are unchanged. The cache tag
+advances to `cooperative-waits=shared-v16`; this stage changes neither Agent
+components nor host interfaces.
+
+| Case | Required behavior | Evidence |
+| --- | --- | --- |
+| Own Agent deadline; CPU loop before launch returns | Prearmed alarm aborts before the separate run timeout in all three schedulers | `parallel_launch_alarms_precede_cpu_bound_entry_in_all_schedulers` |
+| Own Agent deadline; CPU loop in cancellation callback | Call alarm survives synchronous cancellation and bounds cleanup | `parallel_call_alarms_remain_live_during_cpu_bound_cleanup` |
+| Inherited While/Split deadline; CPU loop on entry | Same enforcement using the enclosing budget, before window-wait arming | `inherited_parallel_deadlines_prearm_before_cpu_bound_entry` |
+| Inherited deadline; CPU loop during cleanup | Whole-run abort without a false cleanup acknowledgement | `inherited_parallel_deadlines_bound_cpu_bound_cleanup` |
+| Timed call returns; untimed peer runs another six seconds | Returned call's disposed alarm cannot abort continued work in the same Store | `returned_parallel_call_disarms_alarm_while_untimed_peer_stays_live` |
+| Timed call returns during another connection lookup that stays blocked for six seconds | Dispose while preparation is pending, before returning to ordinary window scheduling; require normal success output | `returned_parallel_call_disarms_alarm_during_peer_preparation` |
+| Unrelated wait, ordinary return and timeout cleanup | Peer alarms remain live; each alarm resolves with its own call | `emitted_call_alarms_survive_other_waits_and_resolve_with_their_calls` |
+| Root or parent cancellation | Disarm window alarms before cleaning up calls, preserving initiating grace | `emitted_root_and_parent_cancel_disarm_all_call_alarms_before_any_cleanup` |
+
+A temporary negative control removing disposal from `remember_returned` fails
+the pending-preparation test with `CleanupAborted` at 5.505s. With disposal restored,
+both normal-success cases pass. A failed workflow stops its fixture rather than
+waiting for requests that it can no longer dispatch, exposing the actual exit.
+
+Continuous scope coverage through inline assembly/checkpoint work and error
+propagation remains a prerequisite for removing E128. Actual alarm allocations,
+size/latency comparisons, cancellation races and Linux soak remain part of the
+full plan gates; unchanged guest slot size does not establish unchanged runtime
+memory or performance.

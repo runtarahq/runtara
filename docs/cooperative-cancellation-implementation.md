@@ -22,6 +22,65 @@ E2E, multi-owner routing and remaining P3 timeout/race work are still open.
 Lifecycle acknowledgements and post-run fallback preserve accepted terminal
 outcomes.
 
+## Parallel call alarm ownership · 2026-09-08
+
+Scheduler, wavefront and parallel Split launches now arm a cleanup alarm before
+entering each Agent. The shared deadline selector supplies the earliest own or
+inherited remaining budget; the shared alarm emitter adds the existing five-second
+grace. A pending call retains its alarm while other calls or connection lookups
+run. Eager return, observed asynchronous return and completed timeout cleanup
+cancel/drop that call's alarm. Root and parent cancellation relinquish the window's
+alarms before cleaning up calls, preserving the initiating owner's grace.
+
+The handle occupies four bytes of existing slot padding at offset 204. Slot
+stride remains 208 bytes, and the seven shared helpers still exchange 20 i32
+state values. Reusing a slot with a live alarm traps instead of orphaning it.
+The cache identity advances to `cooperative-waits=shared-v16`. Agent binaries,
+macro expansion and native interfaces are unchanged by this stage.
+
+Six composed test groups exercise CPU-bound entry and cancellation callbacks
+under both own Agent and inherited enclosing deadlines in all three schedulers
+(12 executions), plus a timed HTTP call returning while an untimed sibling's I/O
+or connection lookup stays live for six seconds in the same Store. The success
+cases require the normal output, so timeout recovery cannot make them pass.
+Removing returned-call alarm disposal in a temporary negative control causes
+`CleanupAborted` at 5.505s during the pending lookup. Restoring disposal passes
+both success cases (13.80s). The abort cases require `CleanupAborted`
+after the five-second grace and before the independent run timeout, without a
+cleanup acknowledgement. Deterministic shared-helper tests verify that unrelated
+peer alarms remain live and that root/parent propagation disarms all call alarms
+before cleanup. The fixture now zero-initializes its slot allocation, matching
+the production allocator's precondition.
+
+The full feature-gated compiler library run passed 664 tests (296.57s). The
+subsequent two-case success run includes the added preparation test and the
+strengthened existing peer-I/O test; the current library contains 665 tests.
+The full workflow execution suite passed 395 tests (810.32s), with its three
+manual benchmarks ignored. Feature-gated workflow Clippy, formatting and diff
+checks passed. The standard component build completed all 27 Agents and both
+shared components; all 58 WASM/metadata files remained byte-identical.
+All 92 component-cancellation tests passed on those outputs (79.31s). The
+interactive audit page's inline JavaScript parsed successfully after its text
+update. No database schema or persistence implementation changed in this stage.
+
+Commands used with the pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, isolated native/component target directories and the same
+component outputs throughout the execution checks:
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib returned_parallel_call_disarms_alarm -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+scripts/build-agent-components.sh
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=1
+```
+
+Continuous enclosing inline-scope ownership remains necessary across assembly,
+checkpoint and other dispatch boundaries. These per-call tests do not establish
+complete scope grace or remove E128. Paired size/latency/native-memory measurements,
+Linux/soak and authenticated server E2E remain open.
+
 ## Generated deadline-wait alarms · 2026-09-08
 
 The shared deadline-wait emitter now arms `abort-after` before sequential Agent
@@ -68,7 +127,7 @@ scripts/build-agent-components.sh
 cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=1
 ```
 
-This is still partial timed-scope ownership: parallel launches need alarms held
+At this stage timed-scope ownership was partial: parallel launches needed alarms held
 by each pending call before entry and while other calls are prepared. Enclosing
 inline scopes need continuous coverage across dispatch/assembly boundaries,
 including propagation from a timed preparation wait into window-wide cleanup.
