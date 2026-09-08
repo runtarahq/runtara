@@ -448,10 +448,10 @@ const DIRECT_PSPLIT_CHUNK_END_LOCAL: u32 = 122;
 /// Launch-pass item cursor; reused during assemble as the CURRENT item's slot
 /// pointer (the memoized-invoke operand).
 const DIRECT_PSPLIT_LAUNCH_LOCAL: u32 = 123;
-/// Retry-round item cursor (§3.4 concurrent backoff).
+/// Shared parallel launch/preparation cursor.
 const DIRECT_PSPLIT_ROUND_CURSOR_LOCAL: u32 = 124;
-/// Set when a retry round fired at least one backoff timer — drives the
-/// round-loop exit (0 => every item settled, stop).
+/// Shared branch scratch: pending-launch flag and preserved error flag.
+/// Retains its original local index and name for the existing emitter layout.
 const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
 
 /// Scratch used only while converting a retry backoff into a lifecycle wake.
@@ -463,17 +463,14 @@ const DIRECT_RETRY_PARK_STATE_PTR_LOCAL: u32 = 126;
 const DIRECT_RETRY_PARK_STATE_LEN_LOCAL: u32 = 127;
 const DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL: u32 = 128;
 
-/// Per-item slot for the parallel window's concurrent-retry state machine
-/// (§3.4): `{ state:u32, attempts:u32, input_ptr:u32, input_len:u32, _pad:u64,
-///    wait_total:u64, _pad2:[u8;8], result:[u8;112], launch_ts:u64, settle_ts:u64 }`.
-/// States (see `split_parallel::SLOT_*`): 0 EMPTY (launch skipped — assemble
-/// runs the item fully sequentially), 1 AGENT-READY (a result is present,
-/// awaiting classification), 3 TIMER-PENDING (a backoff timer was fired),
-/// 5 SETTLED (final result memoized for assemble). `attempts` counts invokes
-/// fired; `wait_total` is the per-item rate-limit budget accumulator. The
-/// canonical `result<list<u8>, error-info>` lands at the result offset (~68
-/// bytes worst case; payload pointers live in the bump heap, which is not
-/// rewound during a chunk).
+/// Per-item slot shared by parallel Split and branch scheduling. State 0
+/// means launch was skipped (assembly uses the sequential pipeline); state 1
+/// enables memoized invocation after the window drains. The original attempt,
+/// prepared-input and checkpoint-key fields remain in place. Bytes 24..32 are
+/// reserved after retiring the unreachable concurrent retry accumulator.
+/// The canonical result and its payload pointers stay valid in the chunk heap
+/// until assembly. Scheduler/timestamp fields and deadline ownership retain
+/// their offsets; this cleanup does not change emitted artifacts or slot size.
 // Tail: deadline ACTIVE/READY at 176/180, START/BUDGET at 184/192,
 // timeout ERROR pointer at 200, and owned safety-alarm handle at 204.
 const DIRECT_PSPLIT_SLOT_STRIDE: i32 = 208;
@@ -505,11 +502,9 @@ const DIRECT_PSPLIT_SLOT_SCHED_OFFSET: i32 = 44;
 const DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET: i32 = 4;
 const DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET: i32 = 8;
 const DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET: i32 = 12;
-/// Durable replay only: set when this attempt's `::attempt::N` checkpoint was
-/// a HIT (the attempt already ran on a prior life), so classify decodes it
-/// instead of the fresh slot result, and skips the already-elapsed backoff.
+/// Durable replay only: an attempt checkpoint HIT skips launch; the sequential
+/// assembly path handles the saved attempt rather than repeating its I/O.
 const DIRECT_PSPLIT_SLOT_HIT_OFFSET: i32 = 16;
-const DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET: i32 = 24;
 /// Durable per-item step cache key (offsets 32/36) — the base for each
 /// attempt's `{cache_key}::attempt::N` checkpoint. Computed once at launch.
 const DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET: i32 = 32;

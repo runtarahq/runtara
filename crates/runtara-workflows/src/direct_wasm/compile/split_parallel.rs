@@ -39,39 +39,27 @@ use std::collections::BTreeMap;
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_get_checkpoint_has_value, load_retptr_list, load_retptr_option_list, load_retptr_tag,
-    push_retptr_arg, push_segment_args, push_variables_args, return_if_retptr_error,
+    emit_get_checkpoint_has_value, load_retptr_list, load_retptr_tag, push_retptr_arg,
+    push_segment_args, push_variables_args, return_if_retptr_error,
 };
 use super::agent::emit_agent_plan;
 use super::agent_io::emit_agent_cache_key;
-use super::agent_retry::{
-    emit_agent_advance_retry_attempt, emit_agent_attempt_decode, emit_agent_capture_retry_sleep,
-    emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
-    emit_agent_retry_error_info,
-};
 use super::split::{emit_loop_iteration_heap_reset, emit_value_store_retain};
 use super::{
-    DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
-    DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL,
-    DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
-    DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL, DIRECT_AGENT_RATE_LIMITED_LOCAL,
-    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
-    DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL, DIRECT_AGENT_RETRYABLE_LOCAL,
-    DIRECT_PSPLIT_CHUNK_END_LOCAL, DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET,
-    DIRECT_PSPLIT_LAUNCH_LOCAL, DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
+    DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
+    DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL, DIRECT_PSPLIT_CHUNK_END_LOCAL,
+    DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET, DIRECT_PSPLIT_LAUNCH_LOCAL,
+    DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
     DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET, DIRECT_PSPLIT_SLOT_HIT_OFFSET,
     DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET, DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET,
     DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET, DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET,
-    DIRECT_PSPLIT_SLOT_RESULT_LEN, DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE,
-    DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET, DIRECT_PSPLIT_SLOTS_LOCAL,
-    DIRECT_PSPLIT_TIMERS_FIRED_LOCAL, DIRECT_PSPLIT_WS_LOCAL, DIRECT_SPLIT_COUNT_LOCAL,
-    DIRECT_SPLIT_HEAP_BASE_LOCAL, DIRECT_SPLIT_INDEX_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL,
-    DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
-    DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
-    DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
-    DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectRunPlan, DirectVariables,
+    DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE, DIRECT_PSPLIT_SLOTS_LOCAL,
+    DIRECT_PSPLIT_WS_LOCAL, DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_HEAP_BASE_LOCAL,
+    DIRECT_SPLIT_INDEX_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL,
+    DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL,
+    DIRECT_SPLIT_RESULTS_LEN_LOCAL, DIRECT_SPLIT_RESULTS_PTR_LOCAL,
+    DIRECT_SPLIT_VARIABLES_LEN_LOCAL, DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectRunPlan, DirectVariables,
 };
 
 /// Subtask state code: the call fully resolved (result written through the
@@ -111,23 +99,8 @@ pub(super) struct ParallelAgentBody<'a> {
     pub(super) max_retries: u32,
     pub(super) retry_delay_ms: u64,
     pub(super) rate_limit_budget_ms: u64,
-    /// Reserved for retired timer-subtask lowering. Production eligibility
-    /// accepts only no-retry items, so this remains false.
-    pub(super) concurrent_backoff: bool,
     pub(super) next_plan: &'a DirectRunPlan,
     pub(super) error_plan: Option<&'a super::DirectErrorRoutePlan>,
-}
-
-impl ParallelAgentBody<'_> {
-    /// max_retries the assemble pass should use: 0 when the window already ran
-    /// the retries (concurrent backoff), else the real policy.
-    fn assemble_max_retries(&self) -> u32 {
-        if self.concurrent_backoff {
-            0
-        } else {
-            self.max_retries
-        }
-    }
 }
 
 /// Eligibility for THIS split node: `Some(body)` when the requested window may
@@ -191,9 +164,6 @@ pub(super) fn parallel_agent_body<'a>(
         max_retries: *agent_retries,
         retry_delay_ms: *retry_delay_ms,
         rate_limit_budget_ms: *rate_limit_budget_ms,
-        // Retry policies are rejected before a concurrent window is planned;
-        // only no-retry items reach this lowering.
-        concurrent_backoff: false,
         next_plan,
         error_plan: error_plan.as_ref(),
     })
@@ -410,14 +380,7 @@ fn slot_mem(offset: i32) -> wasm_encoder::MemArg {
 /// Slot state codes (see `DIRECT_PSPLIT_SLOT_STRIDE` doc in `compile.rs`).
 #[allow(dead_code)]
 const SLOT_EMPTY: i32 = 0;
-const SLOT_AGENT_READY: i32 = 1; // an agent result is present, not yet classified/settled
-const SLOT_TIMER_PENDING: i32 = 3; // a backoff timer was fired for this item
-const SLOT_SETTLED: i32 = 5; // the final result is memoized; assemble consumes it
-/// Durable replay only: a `::attempt::N` checkpoint HIT means the attempt
-/// already ran AND already slept its backoff on the original life, so the item
-/// skips the timer and re-invokes its next attempt immediately.
-const SLOT_REINVOKE_NOW: i32 = 6;
-
+const SLOT_AGENT_READY: i32 = 1; // invoke is memoized for assembly after the window drains
 /// `dst_local = slots + (cursor - chunk_start) * STRIDE`.
 fn emit_slot_ptr(
     body: &mut WasmFunction,
@@ -471,8 +434,8 @@ pub(super) fn emit_join_if_pending(
 }
 
 /// Drain the window's waitable-set until `pending == 0`, dropping each
-/// completed subtask (agent invoke OR backoff timer — both are subtasks whose
-/// completion decrements pending). The separate lifecycle timer wakes signal
+/// completed Agent call. The shared wait consumes deadline and lifecycle timer
+/// events without decrementing the pending-call count. The lifecycle timer wakes signal
 /// observation; root Cancel cleans all peers immediately, while pause/shutdown
 /// acknowledgement waits for the assembly boundary.
 pub(super) fn emit_drain_pending(
@@ -508,21 +471,6 @@ pub(super) fn emit_drain_pending(
     body.instruction(&Instruction::Br(0));
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End); // $drained
-}
-
-/// Copy `slot.result` (the canonical `result<list<u8>, error-info>` an invoke
-/// wrote there) to the retptr scratch at offset 0, so the sequential retry
-/// helpers — which read the result via the retptr — can classify it.
-fn emit_copy_slot_result_to_retptr(body: &mut WasmFunction, slot_ptr_local: u32) {
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalGet(slot_ptr_local));
-    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_RESULT_OFFSET));
-    body.instruction(&Instruction::I32Add);
-    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_RESULT_LEN));
-    body.instruction(&Instruction::MemoryCopy {
-        src_mem: 0,
-        dst_mem: 0,
-    });
 }
 
 /// Durable only: build `{slot.cache_key}::attempt::{slot.attempts}` into the
@@ -577,34 +525,7 @@ fn emit_durable_attempt_lookup(
     )));
 }
 
-/// Durable only: after a FRESH-MISS attempt failed, encode the per-attempt
-/// envelope (classification bits already in the shared retry locals) and
-/// checkpoint it under the attempt key — the exact sequential persistence, so
-/// a resumed run HITs it and skips the re-invoke and the elapsed sleep.
-fn emit_durable_checkpoint_attempt(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    body.instruction(&Instruction::I32Const(1)); // tag = err
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRYABLE_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RATE_LIMITED_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_envelope));
-    return_if_retptr_error(body, indices);
-    load_retptr_list(
-        body,
-        DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
-        DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
-    );
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
-    super::checkpoint::emit_checkpoint(body, indices);
-}
-
-/// Re-fire the agent invoke for a timed-out item into `slot+RESULT_OFFSET`,
+/// Invoke the Agent for an item into `slot+RESULT_OFFSET`,
 /// round-robined across the instance pool by item index. Leaves the packed
 /// status in `status_local`.
 #[allow(clippy::too_many_arguments)]
@@ -1049,11 +970,9 @@ pub(super) fn emit_parallel_split_items(
         route_ptr_local,
     );
 
-    // slot.state = AGENT_READY; stash the prepared agent input + attempt=1 so
-    // the concurrent retry rounds (§3.4) can re-fire without re-running the
-    // mapping, and durable attempt keys can be built. The input buffer lives
-    // in the bump heap (not rewound within a chunk), so the pointer stays
-    // valid across rounds.
+    // Preserve the existing slot layout and attempt-1 checkpoint identity.
+    // Prepared input lives in the chunk heap until assembly; retrying bodies
+    // use the sequential lowering instead of this window.
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
     body.instruction(&Instruction::I32Store(mem32()));
@@ -1077,7 +996,7 @@ pub(super) fn emit_parallel_split_items(
         // Durable: compute the step cache key from the item source and stash
         // it (base for every attempt::N key). Then gate attempt-1's invoke on
         // its checkpoint — a HIT (resumed run) skips the invoke so the agent
-        // never double-fires; classify decodes the stored envelope.
+        // never double-fires; sequential assembly handles the stored envelope.
         emit_agent_cache_key(
             body,
             indices,
@@ -1166,364 +1085,6 @@ pub(super) fn emit_parallel_split_items(
         subtask_drop,
         fresh_failure_target.map(|target| target.nested(2)),
     );
-
-    // ── CONCURRENT RETRY ROUNDS (§3.4) ───────────────────────────────────────
-    // Non-durable retrying items back off in the SAME waitable-set: each round
-    // classifies the agent results in place (reusing the exact sequential
-    // retry helpers), fires the eligible items' backoff sleeps as CONCURRENT
-    // timer subtasks, drains them together, then re-invokes concurrently and
-    // drains — so all items' backoffs overlap instead of serializing in
-    // assemble. Durable retries keep the sequential assemble loop (their
-    // per-attempt checkpoints must replay in order). Assemble consumes the
-    // final post-retry result with retries disabled (`assemble_max_retries`).
-    if parallel.concurrent_backoff {
-        let timer_sleep = indices
-            .timer_sleep_async
-            .expect("concurrent-backoff compiles import the host-io timer");
-
-        body.instruction(&Instruction::Block(BlockType::Empty)); // $rounds_done
-        body.instruction(&Instruction::Loop(BlockType::Empty)); // $rounds
-
-        // ---- classify + fire backoff timers ----
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::Block(BlockType::Empty)); // $classify_done
-        body.instruction(&Instruction::Loop(BlockType::Empty)); // $classify
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_END_LOCAL));
-        body.instruction(&Instruction::I32GeU);
-        body.instruction(&Instruction::BrIf(1));
-
-        // slot = slots + (cursor - chunk_start) * STRIDE  -> route_ptr_local
-        emit_slot_ptr(
-            body,
-            DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
-            DIRECT_PSPLIT_CHUNK_START_LOCAL,
-            DIRECT_PSPLIT_SLOTS_LOCAL,
-            route_ptr_local,
-        );
-
-        // if slot.state == AGENT_READY: classify
-        body.instruction(&Instruction::LocalGet(route_ptr_local));
-        body.instruction(&Instruction::I32Load(mem32()));
-        body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
-        body.instruction(&Instruction::I32Eq);
-        body.instruction(&Instruction::If(BlockType::Empty));
-        {
-            // Establish the failure classification for this attempt into the
-            // shared retry locals. Durable + a `::attempt::N` HIT decodes the
-            // stored envelope (this attempt already ran); otherwise classify
-            // the fresh slot result — and, when durable, persist that attempt.
-            if parallel.durable_checkpoint {
-                body.instruction(&Instruction::LocalGet(route_ptr_local));
-                body.instruction(&Instruction::I32Load(slot_mem(
-                    DIRECT_PSPLIT_SLOT_HIT_OFFSET,
-                )));
-                body.instruction(&Instruction::If(BlockType::Empty));
-                {
-                    // HIT: decode the stored attempt envelope (no invoke).
-                    emit_build_attempt_key(body, indices, route_ptr_local);
-                    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
-                    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
-                    super::checkpoint::emit_get_checkpoint(body, indices);
-                    load_retptr_option_list(
-                        body,
-                        DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
-                        DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
-                    );
-                    emit_agent_attempt_decode(
-                        body,
-                        DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
-                        DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
-                    );
-                }
-                body.instruction(&Instruction::Else);
-                {
-                    // MISS: classify the fresh result, then checkpoint the
-                    // attempt envelope so a resume HITs it and skips both the
-                    // re-invoke and the elapsed sleep.
-                    emit_copy_slot_result_to_retptr(body, route_ptr_local);
-                    load_retptr_tag(body);
-                    body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
-                    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
-                    body.instruction(&Instruction::If(BlockType::Empty));
-                    emit_agent_capture_retry_sleep(body);
-                    emit_agent_retry_error_info(
-                        body,
-                        indices,
-                        DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-                        DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-                    );
-                    emit_build_attempt_key(body, indices, route_ptr_local);
-                    emit_durable_checkpoint_attempt(body, indices);
-                    body.instruction(&Instruction::End);
-                }
-                body.instruction(&Instruction::End);
-            } else {
-                // Non-durable: classify the fresh result directly.
-                emit_copy_slot_result_to_retptr(body, route_ptr_local);
-                load_retptr_tag(body);
-                body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
-                body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
-                body.instruction(&Instruction::If(BlockType::Empty));
-                emit_agent_capture_retry_sleep(body);
-                emit_agent_retry_error_info(
-                    body,
-                    indices,
-                    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-                    DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-                );
-                body.instruction(&Instruction::End);
-            }
-
-            // Shared retry decision (identical to the sequential state machine,
-            // driven off the classification locals just established).
-            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
-            body.instruction(&Instruction::If(BlockType::Empty));
-            {
-                // Load this item's attempt counter + rate-limit budget into the
-                // shared locals (safe: classify is synchronous, no yield).
-                body.instruction(&Instruction::LocalGet(route_ptr_local));
-                body.instruction(&Instruction::I32Load(slot_mem(
-                    DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET,
-                )));
-                body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-                body.instruction(&Instruction::LocalGet(route_ptr_local));
-                body.instruction(&Instruction::I64Load(slot_mem(
-                    DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET,
-                )));
-                body.instruction(&Instruction::LocalSet(
-                    DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
-                ));
-                emit_agent_retry_condition(
-                    body,
-                    parallel.max_retries,
-                    parallel.retry_delay_ms,
-                    parallel.rate_limit_budget_ms,
-                );
-                body.instruction(&Instruction::If(BlockType::Empty));
-                {
-                    // RETRY: advance + persist the mutated budget.
-                    emit_agent_advance_retry_attempt(body);
-                    body.instruction(&Instruction::LocalGet(route_ptr_local));
-                    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-                    body.instruction(&Instruction::I32Store(slot_mem(
-                        DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET,
-                    )));
-                    body.instruction(&Instruction::LocalGet(route_ptr_local));
-                    body.instruction(&Instruction::LocalGet(
-                        DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
-                    ));
-                    body.instruction(&Instruction::I64Store(slot_mem(
-                        DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET,
-                    )));
-                    body.instruction(&Instruction::I32Const(1));
-                    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
-
-                    // On a durable HIT the backoff already elapsed on the prior
-                    // life — skip the timer and re-invoke the next attempt now.
-                    let hit_reinvoke = parallel.durable_checkpoint;
-                    if hit_reinvoke {
-                        body.instruction(&Instruction::LocalGet(route_ptr_local));
-                        body.instruction(&Instruction::I32Load(slot_mem(
-                            DIRECT_PSPLIT_SLOT_HIT_OFFSET,
-                        )));
-                        body.instruction(&Instruction::If(BlockType::Empty));
-                        body.instruction(&Instruction::LocalGet(route_ptr_local));
-                        body.instruction(&Instruction::I32Const(SLOT_REINVOKE_NOW));
-                        body.instruction(&Instruction::I32Store(mem32()));
-                        body.instruction(&Instruction::Else);
-                    }
-
-                    // FRESH failure: durable records the audit row; then
-                    // compute the delay and fire the backoff as a concurrent
-                    // timer subtask.
-                    if parallel.durable_checkpoint {
-                        body.instruction(&Instruction::LocalGet(route_ptr_local));
-                        body.instruction(&Instruction::I32Load(slot_mem(
-                            DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET,
-                        )));
-                        body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
-                        body.instruction(&Instruction::LocalGet(route_ptr_local));
-                        body.instruction(&Instruction::I32Load(slot_mem(
-                            DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET,
-                        )));
-                        body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
-                        emit_agent_record_retry_attempt(
-                            body,
-                            indices,
-                            DIRECT_SPLIT_ITEM_PTR_LOCAL,
-                            DIRECT_SPLIT_ITEM_LEN_LOCAL,
-                            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-                            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-                        );
-                    }
-                    emit_agent_retry_delay(
-                        body,
-                        indices,
-                        parallel.max_retries,
-                        parallel.retry_delay_ms,
-                        parallel.rate_limit_budget_ms,
-                    );
-                    body.instruction(&Instruction::LocalGet(route_ptr_local));
-                    body.instruction(&Instruction::I32Const(SLOT_TIMER_PENDING));
-                    body.instruction(&Instruction::I32Store(mem32()));
-                    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-                    body.instruction(&Instruction::Call(timer_sleep));
-                    body.instruction(&Instruction::LocalSet(route_len_local)); // status
-                    emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
-
-                    if hit_reinvoke {
-                        body.instruction(&Instruction::End); // hit / fresh
-                    }
-                }
-                body.instruction(&Instruction::Else);
-                // NO RETRY: exhausted or non-retryable — the failure is terminal.
-                body.instruction(&Instruction::LocalGet(route_ptr_local));
-                body.instruction(&Instruction::I32Const(SLOT_SETTLED));
-                body.instruction(&Instruction::I32Store(mem32()));
-                body.instruction(&Instruction::End);
-            }
-            body.instruction(&Instruction::Else);
-            // SUCCESS: the result in slot.result is terminal.
-            body.instruction(&Instruction::LocalGet(route_ptr_local));
-            body.instruction(&Instruction::I32Const(SLOT_SETTLED));
-            body.instruction(&Instruction::I32Store(mem32()));
-            body.instruction(&Instruction::End);
-        }
-        body.instruction(&Instruction::End); // if AGENT_READY
-
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::I32Add);
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::Br(0)); // -> $classify
-        body.instruction(&Instruction::End); // loop
-        body.instruction(&Instruction::End); // $classify_done
-
-        // No timer fired this round => every item is SETTLED. Done.
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
-        body.instruction(&Instruction::I32Eqz);
-        body.instruction(&Instruction::BrIf(1)); // -> $rounds_done
-
-        // ---- drain the backoff timers (they overlap here) ----
-        emit_drain_pending(
-            body,
-            indices,
-            subtask_drop,
-            fresh_failure_target.map(|target| target.nested(4)),
-        );
-
-        // ---- re-invoke the timed-out items CONCURRENTLY ----
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::Block(BlockType::Empty)); // $reinvoke_done
-        body.instruction(&Instruction::Loop(BlockType::Empty)); // $reinvoke
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_END_LOCAL));
-        body.instruction(&Instruction::I32GeU);
-        body.instruction(&Instruction::BrIf(1));
-
-        emit_slot_ptr(
-            body,
-            DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
-            DIRECT_PSPLIT_CHUNK_START_LOCAL,
-            DIRECT_PSPLIT_SLOTS_LOCAL,
-            route_ptr_local,
-        );
-        // Re-invoke items whose backoff timer elapsed (TIMER_PENDING) OR whose
-        // durable attempt was a HIT that skipped the timer (REINVOKE_NOW).
-        body.instruction(&Instruction::LocalGet(route_ptr_local));
-        body.instruction(&Instruction::I32Load(mem32()));
-        body.instruction(&Instruction::I32Const(SLOT_TIMER_PENDING));
-        body.instruction(&Instruction::I32Eq);
-        body.instruction(&Instruction::LocalGet(route_ptr_local));
-        body.instruction(&Instruction::I32Load(mem32()));
-        body.instruction(&Instruction::I32Const(SLOT_REINVOKE_NOW));
-        body.instruction(&Instruction::I32Eq);
-        body.instruction(&Instruction::I32Or);
-        body.instruction(&Instruction::If(BlockType::Empty));
-        {
-            // input = slot.input; re-fire the agent invoke into slot.result.
-            body.instruction(&Instruction::LocalGet(route_ptr_local));
-            body.instruction(&Instruction::I32Load(slot_mem(
-                DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET,
-            )));
-            body.instruction(&Instruction::LocalSet(output_ptr_local));
-            body.instruction(&Instruction::LocalGet(route_ptr_local));
-            body.instruction(&Instruction::I32Load(slot_mem(
-                DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET,
-            )));
-            body.instruction(&Instruction::LocalSet(output_len_local));
-
-            if parallel.durable_checkpoint {
-                // Gate this attempt's re-invoke on its `::attempt::N`
-                // checkpoint (HIT => already ran on a prior life, don't
-                // re-fire; classify decodes it). Sets slot.hit for classify.
-                emit_durable_attempt_lookup(body, indices, route_ptr_local);
-                body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
-                body.instruction(&Instruction::I32Eqz);
-                body.instruction(&Instruction::If(BlockType::Empty));
-                emit_pool_reinvoke(
-                    body,
-                    indices,
-                    own_deadline,
-                    &invoke_pool,
-                    capability_id,
-                    static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
-                    DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
-                    DIRECT_PSPLIT_CHUNK_START_LOCAL,
-                    output_ptr_local,
-                    output_len_local,
-                    route_ptr_local,
-                    route_len_local,
-                );
-                emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
-                body.instruction(&Instruction::End);
-            } else {
-                emit_pool_reinvoke(
-                    body,
-                    indices,
-                    own_deadline,
-                    &invoke_pool,
-                    capability_id,
-                    static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
-                    DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
-                    DIRECT_PSPLIT_CHUNK_START_LOCAL,
-                    output_ptr_local,
-                    output_len_local,
-                    route_ptr_local,
-                    route_len_local,
-                );
-                emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
-            }
-            body.instruction(&Instruction::LocalGet(route_ptr_local));
-            body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
-            body.instruction(&Instruction::I32Store(mem32()));
-        }
-        body.instruction(&Instruction::End); // if TIMER_PENDING || REINVOKE_NOW
-
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::I32Add);
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_ROUND_CURSOR_LOCAL));
-        body.instruction(&Instruction::Br(0)); // -> $reinvoke
-        body.instruction(&Instruction::End); // loop
-        body.instruction(&Instruction::End); // $reinvoke_done
-
-        // ---- drain the re-invokes, then classify again ----
-        emit_drain_pending(
-            body,
-            indices,
-            subtask_drop,
-            fresh_failure_target.map(|target| target.nested(4)),
-        );
-        body.instruction(&Instruction::Br(0)); // -> $rounds
-        body.instruction(&Instruction::End); // loop $rounds
-        body.instruction(&Instruction::End); // $rounds_done
-    }
 
     super::cooperative_wait::emit_window_close(body, indices);
 
@@ -1631,11 +1192,8 @@ pub(super) fn emit_parallel_agent_body(
         parallel.agent_component_id,
         parallel.input_mapping_id,
         parallel.durable_checkpoint,
-        false, // breakpoint (excluded by eligibility)
-        // Production eligibility only permits no-retry items. Keep the
-        // `assemble_max_retries` indirection for migration/differential
-        // lowering tests, but it resolves to zero for supported windows.
-        parallel.assemble_max_retries(),
+        false,                // breakpoint (excluded by eligibility)
+        parallel.max_retries, // eligibility guarantees no-retry items
         parallel.retry_delay_ms,
         parallel.rate_limit_budget_ms,
         parallel.next_plan,

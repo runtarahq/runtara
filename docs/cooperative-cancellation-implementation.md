@@ -3065,3 +3065,52 @@ E128 retirement, real composed race qualification, replay/suspension and CPU
 cooperation gaps, obsolete implementation cleanup, final paired measurements,
 Linux capacity/soak, authenticated multi-owner server E2E and upstream integration
 remain open. No G1–G10 gate is declared complete by this deterministic test stage.
+
+## Retire dormant concurrent Split retries · 2026-09-08
+
+Production eligibility excludes retrying Agent bodies and Split-level retry
+policies from parallel windows. The constant-false `concurrent_backoff` branch
+still contained a second classify/backoff/reinvoke implementation. It is now
+removed, along with unused retry envelope/copy helpers, obsolete slot-state
+constants and assembly indirection. Active parallel calls retain their layout,
+checkpoint identities and alarm behavior; retrying graphs retain sequential
+parking/replay. Host interfaces, migrations and existing artifact execution are
+unchanged. AUDIT-22 maps the regression evidence.
+
+A temporary compiler capture on `f107b2fd` and the edited source generated the
+same 32 input combinations (durability, Agent/Split retries, parallelism and
+scope timeout). All uncomposed output `.wasm` files are byte-identical. The
+[comparison record](research/cooperative-retry-retirement-comparison.json) preserves
+input dimensions, source fingerprints and output hashes. The temporary capture
+test was removed afterward; its source and raw outputs remain under
+`/private/tmp/retry-retirement-capture.rs`, `/private/tmp/retry-retirement-before`
+and `/private/tmp/retry-retirement-after`. No generated component or `.wasm` artifacts are committed,
+and this comparison does not measure runtime latency or memory.
+
+Validation with the pinned toolchain and isolated native/component directories:
+
+- All 602 default-feature compiler library tests passed (0.84s).
+- The feature-gated workflow execution suite's `parallel` selection passed
+  41 tests (83.75s), including HTTP overlap, cancellation, pause/replay and the
+  sequential retry fallback.
+- Its `retry` selection passed 91 tests (255.09s), including nested recovery,
+  rate-limit budgets, cancellation during backoff, parked replay and inherited
+  budget preservation. These selections overlap; their counts are not a unique
+  combined-test total.
+- Feature-gated all-target Clippy, formatting and diff checks passed. The 32-case
+  artifact comparison passed before removing the temporary capture harness.
+
+```sh
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute parallel -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute retry -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+The complete 395-test execution run, component build/cancellation suite,
+database/server E2E, Linux capacity/soak and paired runtime measurements were not
+repeated for this removal of unreachable emitter code. Prior results remain
+historical evidence. E128, the broader compatibility/obsolete-task inventory and
+remaining G1–G10 release qualification stay open.

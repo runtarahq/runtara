@@ -1,0 +1,208 @@
+{
+  "purpose": "Uncomposed compiler artifact equivalence after removal of unreachable concurrent Split retry lowering; not a runtime benchmark",
+  "date": "2026-09-08",
+  "baseline_revision": "f107b2fd863cf88a6b561b76ae73f986be2cfdaf",
+  "candidate_source_sha256": {
+    "crates/runtara-workflows/src/direct_wasm/compile.rs": "282ef56c0d465cdbf9a5a53d96b02bc8d35a617099f5607415f335244fd31417",
+    "crates/runtara-workflows/src/direct_wasm/compile/split_parallel.rs": "7d730bcd2233a0bc99b68b0788d4dec5859d769a20d1be0198c0d352afe3a0ad"
+  },
+  "input_fixture": "crates/runtara-workflows/tests/fixtures/split_parallel_workflow.json",
+  "input_fixture_sha256": "0a51ac84b06589c05e20afaa9c9902c10c56888e5bd99df67332dcf77bdf89f8",
+  "matrix": {
+    "root_and_subgraph_durable": [
+      false,
+      true
+    ],
+    "agent_max_retries": [
+      0,
+      2
+    ],
+    "split_max_retries": [
+      0,
+      2
+    ],
+    "parallelism": [
+      1,
+      4
+    ],
+    "split_timeout_ms": [
+      0,
+      4000
+    ]
+  },
+  "workflow_id": "retry-retirement",
+  "version": 1,
+  "track_events": false,
+  "api": "compile_direct_workflow",
+  "filename_fields": [
+    "durable",
+    "agent_max_retries",
+    "split_max_retries",
+    "parallelism",
+    "split_timeout_ms"
+  ],
+  "compared_artifacts": 32,
+  "all_byte_identical": true,
+  "artifacts": [
+    {
+      "fixture": "false-0-0-1-0.wasm",
+      "bytes": 102286,
+      "sha256": "eb27d5b0dc1ee6ceb13df93ef89e813490d1d62c416fac126cdeca8b5daaf6ca"
+    },
+    {
+      "fixture": "false-0-0-1-4000.wasm",
+      "bytes": 115422,
+      "sha256": "48702282beeffe5d3b29db0908f5161313cdcf72e7278f94355625d5b82b8720"
+    },
+    {
+      "fixture": "false-0-0-4-0.wasm",
+      "bytes": 107912,
+      "sha256": "50d485de8582ffa210e3d76b8951536b518b7b8e19a85a2877c70521e342c2c1"
+    },
+    {
+      "fixture": "false-0-0-4-4000.wasm",
+      "bytes": 123829,
+      "sha256": "8f53b18328e3073f8d008cf7fa18d7c9987b50e4e133d0a60e6461275e20304c"
+    },
+    {
+      "fixture": "false-0-2-1-0.wasm",
+      "bytes": 103123,
+      "sha256": "8c853fb7b1afcb179422afe1c31b4d3d08cc9ba070df0d72db4af6f2a2ec62f8"
+    },
+    {
+      "fixture": "false-0-2-1-4000.wasm",
+      "bytes": 116837,
+      "sha256": "ee9fe344c70283029f511bbe736a64246f7d209b20bdb76664ef54d004e9372d"
+    },
+    {
+      "fixture": "false-0-2-4-0.wasm",
+      "bytes": 103123,
+      "sha256": "f333a9257fabcf25a4d5e5547e425f9182f8ab156f7e303fe587a822e9deb184"
+    },
+    {
+      "fixture": "false-0-2-4-4000.wasm",
+      "bytes": 116837,
+      "sha256": "1f84a86d3bc4067379e8adb03ed6ef929491616c68cce1354fb7b1536032c986"
+    },
+    {
+      "fixture": "false-2-0-1-0.wasm",
+      "bytes": 103087,
+      "sha256": "4b147be8a451c5fd7084cf3df2632383fe8e801524a466846b9761ef2b646ec7"
+    },
+    {
+      "fixture": "false-2-0-1-4000.wasm",
+      "bytes": 116560,
+      "sha256": "090fdcafcd3a26b057481b30ec65364545b7aabbf5f8f2e626514f83d21269cb"
+    },
+    {
+      "fixture": "false-2-0-4-0.wasm",
+      "bytes": 103087,
+      "sha256": "5387e1dbcc18d7c59eec8bdc6fc128c023986902b3cd7a9d51c333253a4b443f"
+    },
+    {
+      "fixture": "false-2-0-4-4000.wasm",
+      "bytes": 116560,
+      "sha256": "b77874b314941c9426e67e33086dee8d7efd5d91c4caab33c2bbe62761626526"
+    },
+    {
+      "fixture": "false-2-2-1-0.wasm",
+      "bytes": 103924,
+      "sha256": "5ee44def4cdd6bcf8fdac7b24a39ecbae8023e1231aaf9360dfe377dfca9044e"
+    },
+    {
+      "fixture": "false-2-2-1-4000.wasm",
+      "bytes": 117975,
+      "sha256": "4af73b0e5d1dc1f805078893d14f3ae95310d56e39dd47f4b0e1a4b38ff827cb"
+    },
+    {
+      "fixture": "false-2-2-4-0.wasm",
+      "bytes": 103924,
+      "sha256": "7dceed6363a6095384729ed6dd921639a2ff2f19a66b5c37c3e4fcb3f29c53f9"
+    },
+    {
+      "fixture": "false-2-2-4-4000.wasm",
+      "bytes": 117975,
+      "sha256": "ff30538394be95af172eaa90bc2e2c1bfb31723cf15f5c569161a3587cc4304a"
+    },
+    {
+      "fixture": "true-0-0-1-0.wasm",
+      "bytes": 104720,
+      "sha256": "204e921c9629f54307e3f32569c2839779da78dc596fc96f0c6596c0e25b8852"
+    },
+    {
+      "fixture": "true-0-0-1-4000.wasm",
+      "bytes": 118554,
+      "sha256": "592dd1b9780c1e2cdf45e4f321b678b750488331f651c0254da2e4738d9aa0c6"
+    },
+    {
+      "fixture": "true-0-0-4-0.wasm",
+      "bytes": 111315,
+      "sha256": "09b6e7de31477a76d80f55021a4e3061e831c40f47614eff305146c254c3b8f4"
+    },
+    {
+      "fixture": "true-0-0-4-4000.wasm",
+      "bytes": 128284,
+      "sha256": "afd30aea937a49ba7b3bff8a0c03d3a894e48f07549b07b31ec76b49f55f83ff"
+    },
+    {
+      "fixture": "true-0-2-1-0.wasm",
+      "bytes": 108667,
+      "sha256": "09146a2d8234f53aaa7351a8d3b68b6130515fd562caf58313d6d644558ea14e"
+    },
+    {
+      "fixture": "true-0-2-1-4000.wasm",
+      "bytes": 124618,
+      "sha256": "75196dbeb5798c287c2b9657ab42429a4bc68947665ac5fdbd9f82e5ae0af64a"
+    },
+    {
+      "fixture": "true-0-2-4-0.wasm",
+      "bytes": 108667,
+      "sha256": "7da2a614e4726f1ec5b5b679a4353054856ce44b60db1b53467eabaa3aaf8cc2"
+    },
+    {
+      "fixture": "true-0-2-4-4000.wasm",
+      "bytes": 124618,
+      "sha256": "664e5f974be8488db9e5f93609f62a37c6d7c6344ebeb22fb79c153c64d95551"
+    },
+    {
+      "fixture": "true-2-0-1-0.wasm",
+      "bytes": 108347,
+      "sha256": "5358d524508bb1cb6c5ad6e3e84049d8ee33c4c06493a3cdd1eecd1577eeccdb"
+    },
+    {
+      "fixture": "true-2-0-1-4000.wasm",
+      "bytes": 123816,
+      "sha256": "94365d50bc1e05cf12a3b151f42e625115213ee9b405921a82d10c33816b15a8"
+    },
+    {
+      "fixture": "true-2-0-4-0.wasm",
+      "bytes": 108347,
+      "sha256": "81a7040e5d4da6792f511f55c8a21ac9ff6d210b9492d82d2c2ae738b2bc1d28"
+    },
+    {
+      "fixture": "true-2-0-4-4000.wasm",
+      "bytes": 123816,
+      "sha256": "85eda1f584b17db2e037d317a5c3dba6d6e1dc488bdc943dbefb9ae3837990e7"
+    },
+    {
+      "fixture": "true-2-2-1-0.wasm",
+      "bytes": 112295,
+      "sha256": "f441e1ea19392b8b13ff7913c7d97ba55a18d782d808c2b2b361ad694bbb88a8"
+    },
+    {
+      "fixture": "true-2-2-1-4000.wasm",
+      "bytes": 129880,
+      "sha256": "39388002f95c4ba7199d7a09b08d97713ca66e1bd24abbf9fb1401b7d3cea25c"
+    },
+    {
+      "fixture": "true-2-2-4-0.wasm",
+      "bytes": 112295,
+      "sha256": "4aedc20a9cd684bfa1c735405c0db6d463919b664c45c3c9e4a2d93d0bf414be"
+    },
+    {
+      "fixture": "true-2-2-4-4000.wasm",
+      "bytes": 129880,
+      "sha256": "db2252cd59fdc2a7b037546be74bfd272bce10a76cce69cea75eb724e3ec1f73"
+    }
+  ]
+}

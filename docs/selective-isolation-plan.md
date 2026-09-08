@@ -930,3 +930,14 @@ original-clock grace arithmetic and root/parent disposal order. The import test
 checks real compiled artifacts for zero-disabled loop budgets. Finish the wider
 qualification, paired measurements, Linux/soak and authenticated server E2E before
 claiming G1–G10 or removing E128.
+
+### Dormant concurrent retry emitter retirement · 2026-09-08
+
+The constant-false concurrent Split retry rounds are removed. Existing eligibility
+continues to route retrying Agent bodies and retrying Splits to sequential
+parking/replay; no supported concurrency is disabled by this cleanup. Slot layout,
+checkpoint identities, standard async calls and alarm ownership remain intact.
+A 32-case compiler corpus produces byte-identical artifacts before and after.
+See AUDIT-22 and its comparison record. The separate obsolete isolation/task
+inventory, registered/parked-artifact compatibility and G1–G10 qualification
+remain required.

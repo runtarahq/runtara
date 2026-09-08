@@ -29,6 +29,9 @@ Implemented and covered by focused tests:
 - Stop/cancel integrates with the environment lifecycle and has runner plus
   PostgreSQL coverage. Accepted terminal outcomes are preserved; emergency abort
   does not fabricate a guest cleanup acknowledgement.
+- The unreachable concurrent Split retry emitter is retired. Existing sequential
+  retry/replay behavior remains covered, with 32 byte-identical before/after
+  compiler artifacts and passing parallel/retry execution suites (AUDIT-22).
 
 **Public Agent/Embed timeout syntax still returns E128.** Internal timeout
 fixtures deliberately bypass that validation rejection to exercise the emitter;
@@ -1838,3 +1841,42 @@ The unreachable old lowering still needs cleanup in the obsolete-path inventory.
 Verification for this test-only stage is recorded in the implementation record.
 E128, composed runtime race qualification, final measurements and the other
 remaining release gates stay open.
+
+### AUDIT-22 · Retire unreachable concurrent Split retry lowering
+
+**Status: dormant emitter path removed; supported retry behavior preserved.**
+Production eligibility has always set `concurrent_backoff` to false in this
+implementation. Retrying Agent bodies and retrying Splits select the existing
+sequential lowering, which owns durable retry parking and replay. The old
+classify/backoff/reinvoke rounds could not be selected, but still carried a
+second retry implementation with its own slot states and checkpoint helpers.
+
+The emitter now removes those unreachable rounds, the constant-false selector,
+its assembly indirection, unused retry envelope/copy helpers and the unused
+rate-limit slot-offset constant. Active launch/assembly, attempt-1 checkpoint
+lookup, slot layout, scope alarms and sequential retries remain unchanged. No
+host code, WIT, migration, runtime capability or old-artifact loader is removed.
+Existing compiled artifacts retain their own emitted logic; parked runs are not
+recompiled by this cleanup.
+
+A before/after capture compared **32 uncomposed compiler artifacts** from the
+same Split fixture: durable/non-durable execution, Agent retries 0/2, Split
+retries 0/2, parallelism 1/4 and enclosing timeout 0/4000 ms. Every artifact is
+byte-identical. [Comparison metadata and hashes](research/cooperative-retry-retirement-comparison.json)
+record the baseline revision, candidate source hashes, input fixture and matrix.
+This is compiler-output equivalence for that corpus, not a performance result
+or blanket proof for every possible workflow. The cache tag and slot stride
+therefore remain unchanged.
+
+Existing regression coverage used for this cleanup includes:
+
+| Contract | Existing evidence |
+| --- | --- |
+| Requested parallel Split with retrying item parks, then resumes exactly one retry | `direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially` |
+| Retrying shapes remain accepted and compile through fallback | `direct_wasm_compiles_parallel_split_durable_rate_limited_retries`, `direct_wasm_compiles_non_durable_parallel_split_retries`, `direct_wasm_compiles_parallel_split_durable_retry_replay_shape` |
+| Eligible no-retry Split and branches retain real HTTP overlap | `direct_wasm_execute_parallel_split_http_overlap`, `direct_wasm_execute_parallel_branches_http_overlap` |
+| Pause/replay preserves completed effects | `direct_wasm_execute_parallel_split_pause_mid_window_resumes`, `direct_wasm_execute_parallel_branches_durable_resume_no_double_fire` |
+
+Final commands and results are recorded in the implementation record. The broader
+obsolete isolation/task inventory and artifact compatibility gates remain open;
+removing this unreachable retry lowering does not complete them or retire E128.
