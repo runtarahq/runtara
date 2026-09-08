@@ -291,6 +291,107 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_handle_cannot_control_a_reused_durable_launch() {
+    let h = harness().await;
+    let id = unique("reused-launch");
+    let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    seed_detached_instance(&h, &id).await;
+    let options = options(&id, &wasm);
+    let old = h.runner.try_launch_detached(&options).await.unwrap();
+    h.runner.stop(&old).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&old, Duration::from_millis(10)),
+    )
+    .await
+    .expect("old physical execution must exit");
+
+    let current = h.runner.try_launch_detached(&options).await.unwrap();
+    // Exercise each old-handle operation before asserting, so failure still
+    // tears down the controlled spinning guest below.
+    let old_looks_live = h.runner.is_running(&old).await;
+    let old_armed = h
+        .runner
+        .schedule_abort(&old, tokio::time::Instant::now())
+        .await
+        .unwrap();
+    h.runner.stop(&old).await.unwrap();
+    let old_wait = tokio::time::timeout(
+        Duration::from_millis(250),
+        h.runner.wait_for_exit(&old, Duration::from_millis(10)),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let current_live = h.runner.is_running(&current).await;
+    h.runner.stop(&current).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&current, Duration::from_millis(10)),
+    )
+    .await
+    .expect("current physical execution must exit");
+    assert_eq!(old.launch_id, current.launch_id);
+    assert_eq!(
+        (old_looks_live, old_armed, old_wait.is_ok(), current_live),
+        (false, false, true, true),
+        "old handle must be retired without observing, waiting for, or aborting its replacement"
+    );
+    assert_ne!(old.handle_id, current.handle_id);
+    assert_eq!(h.runner.occupancy().unwrap().held, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_handoffs_keep_separate_physical_handles_and_occupancy() {
+    let h = harness().await;
+    let id = unique("overlapping-handoff");
+    let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
+    seed_detached_instance(&h, &id).await;
+    let mut first_options = options(&id, &wasm);
+    let first_gate = StartGate::new(Duration::from_secs(30));
+    first_options.start_gate = Some(first_gate.clone());
+    let first = h.runner.try_launch_detached(&first_options).await.unwrap();
+    let mut next_options = first_options.clone();
+    let next_gate = StartGate::new(Duration::from_secs(30));
+    next_options.start_gate = Some(next_gate.clone());
+    let next = h.runner.try_launch_detached(&next_options).await.unwrap();
+    let both_held = h.runner.occupancy().unwrap().held;
+
+    // Model a cancelled old handoff unwinding after a replacement has already
+    // installed its closed gate. Neither fixture executes guest work.
+    h.runner.stop(&first).await.unwrap();
+    first_gate.open();
+    let first_exited = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.runner.wait_for_exit(&first, Duration::from_millis(10)),
+    )
+    .await;
+    let next_live = h.runner.is_running(&next).await;
+    let occupancy = h.runner.occupancy().unwrap();
+    next_gate.cancel();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&next, Duration::from_millis(10)),
+    )
+    .await
+    .expect("replacement closed gate must retire");
+
+    assert_eq!(first.launch_id, next.launch_id);
+    assert_ne!(first.handle_id, next.handle_id);
+    assert_eq!(both_held, 2);
+    assert!(
+        first_exited.is_ok(),
+        "old wait must not follow the replacement"
+    );
+    assert!(next_live);
+    assert_eq!(occupancy.held, 1);
+    assert_eq!(occupancy.oldest_instance_id.as_deref(), Some(id.as_str()));
+    assert!(occupancy.oldest_held_ms.is_some());
+    let finished = h.runner.occupancy().unwrap();
+    assert_eq!(finished.held, 0);
+    assert_eq!(finished.oldest_held_ms, None);
+}
+
 /// Durable preparation must read the same canonical input envelope that a
 /// production launch persists before it reaches the runner.
 async fn seed_detached_instance(harness: &Harness, instance_id: &str) {

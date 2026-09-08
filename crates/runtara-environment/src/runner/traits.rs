@@ -470,9 +470,12 @@ pub struct LaunchOptions {
 /// Handle for a launched instance (detached execution).
 #[derive(Debug, Clone)]
 pub struct RunnerHandle {
-    /// Immutable identifier for this physical launch attempt.
+    /// Durable launch queue identity. Pre-start recovery may reuse it for
+    /// another physical execution.
     pub launch_id: String,
-    /// Unique identifier for this launch.
+    /// Opaque identity of this physical execution, unique across runner
+    /// handoffs even when `launch_id` is reused. Runner control and monitoring
+    /// must use this identity so stale handles cannot target a replacement.
     pub handle_id: String,
     /// Instance ID
     pub instance_id: String,

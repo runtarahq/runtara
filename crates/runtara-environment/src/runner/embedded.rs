@@ -9,10 +9,9 @@
 //! a tokio task with its own wasmtime `Store`.
 //!
 //! Semantics (vs the retired wasmtime-CLI process runner):
-//! - `RunnerHandle.spawned_pid` is `None`. Startup recovery treats pid-less
-//!   registry entries as dead, which is exactly right here: an in-process
-//!   instance cannot survive a server restart, and resumes go through the
-//!   durable checkpoint path.
+//! - Each accepted handoff has a distinct physical handle, even if queue
+//!   recovery reuses its durable launch ID. A run dies with its owning process;
+//!   a shared registry may also contain runs in other, still-live processes.
 //! - `stop()` raises a cancel flag; the executor's epoch/watchdog rings end
 //!   the run within ~one tick (100 ms).
 //! - Memory metrics come from the store's resource limiter (exact guest
@@ -160,13 +159,14 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
 
+// Keys identify physical executions, not reusable durable launch rows.
 type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
 
 /// Remove a detached task only when this generation still owns the registry
 /// entry. A replacement can be installed while an old task is unwinding; an
 /// unconditional remove would make the live replacement invisible to stop and
 /// monitoring paths.
-fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<InstanceTask>) {
+fn remove_task_if_current(registry: &TaskRegistry, handle_id: &str, task: &Arc<InstanceTask>) {
     let mut tasks = registry
         .lock()
         // This can run while a guest task is already unwinding. Recovering
@@ -174,10 +174,10 @@ fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<I
         // abort that permanently leaks the visible runner handle.
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if tasks
-        .get(launch_id)
+        .get(handle_id)
         .is_some_and(|current| Arc::ptr_eq(current, task))
     {
-        tasks.remove(launch_id);
+        tasks.remove(handle_id);
     }
 }
 
@@ -193,7 +193,7 @@ struct TaskCompletionGuard {
     abort_timer: Option<tokio::task::AbortHandle>,
     task: Arc<InstanceTask>,
     registry: TaskRegistry,
-    launch_id: String,
+    handle_id: String,
 }
 
 impl Drop for TaskCompletionGuard {
@@ -203,7 +203,7 @@ impl Drop for TaskCompletionGuard {
         }
         drop(self.run_slot.take());
         self.task.finished.store(true, Ordering::SeqCst);
-        remove_task_if_current(&self.registry, &self.launch_id, &self.task);
+        remove_task_if_current(&self.registry, &self.handle_id, &self.task);
         self.task.done.notify_waiters();
     }
 }
@@ -262,14 +262,14 @@ pub struct EmbeddedWasmRunner {
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
-/// A run permit holder, keyed by launch generation.
+/// A run permit holder, keyed by physical execution handle.
 #[derive(Clone)]
 struct RunSlotEntry {
     instance_id: String,
     taken_at: Instant,
 }
 
-/// Acquisition times of the run permits currently held, keyed by launch.
+/// Acquisition times of the run permits currently held, keyed by physical handle.
 type RunSlotRegistry = Arc<Mutex<HashMap<String, RunSlotEntry>>>;
 
 /// A preparation permit holder, keyed by launch generation.
@@ -305,7 +305,7 @@ type PrecompileChildRegistry = Arc<Mutex<HashMap<String, PrecompileChildSlotEntr
 struct RunSlot {
     /// Dropped with the struct; that release is the whole point of the field.
     _permit: tokio::sync::OwnedSemaphorePermit,
-    launch_id: String,
+    handle_id: String,
     registry: RunSlotRegistry,
     /// Bumped as the permit returns, so the count of finished runs cannot drift
     /// from the count of released permits.
@@ -810,7 +810,7 @@ impl Drop for RunSlot {
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slots.remove(&self.launch_id);
+        slots.remove(&self.handle_id);
         self.finished.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1082,11 +1082,11 @@ impl EmbeddedWasmRunner {
         ))
     }
 
-    fn task_of(&self, launch_id: &str) -> Option<Arc<InstanceTask>> {
+    fn task_of(&self, handle_id: &str) -> Option<Arc<InstanceTask>> {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .get(launch_id)
+            .get(handle_id)
             .cloned()
     }
 }
@@ -1615,11 +1615,15 @@ impl Runner for EmbeddedWasmRunner {
                         RunnerError::Other("run semaphore closed".to_string())
                     }
                 })?;
+        // Queue recovery may reuse a durable launch ID. Every accepted runner
+        // handoff needs a distinct identity so an old Stop, grace timer or
+        // monitor can never address a later execution of that launch.
+        let handle_id = format!("wasm_{}", uuid::Uuid::new_v4());
         self.run_slots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(
-                options.launch_id.clone(),
+                handle_id.clone(),
                 RunSlotEntry {
                     instance_id: options.instance_id.clone(),
                     taken_at: Instant::now(),
@@ -1628,7 +1632,7 @@ impl Runner for EmbeddedWasmRunner {
         self.runs_started.fetch_add(1, Ordering::Relaxed);
         let run_slot = RunSlot {
             _permit: permit,
-            launch_id: options.launch_id.clone(),
+            handle_id: handle_id.clone(),
             registry: Arc::clone(&self.run_slots),
             finished: Arc::clone(&self.runs_finished),
         };
@@ -1644,7 +1648,7 @@ impl Runner for EmbeddedWasmRunner {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .insert(options.launch_id.clone(), Arc::clone(&task));
+            .insert(handle_id.clone(), Arc::clone(&task));
         // One emergency timer per existing run, on a separate task so a
         // guest stuck in cancellation cannot prevent the deadline from firing.
         // The existing completion guard owns and aborts this timer on every exit.
@@ -1658,7 +1662,7 @@ impl Runner for EmbeddedWasmRunner {
             abort_timer: Some(abort_timer.abort_handle()),
             task: Arc::clone(&task),
             registry: Arc::clone(&self.tasks),
-            launch_id: options.launch_id.clone(),
+            handle_id: handle_id.clone(),
         };
 
         let metrics = Arc::new(tokio::sync::Mutex::new(ContainerMetrics::default()));
@@ -1861,7 +1865,7 @@ impl Runner for EmbeddedWasmRunner {
 
         Ok(RunnerHandle {
             launch_id: options.launch_id.clone(),
-            handle_id: format!("wasm_{}", options.launch_id),
+            handle_id,
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: chrono::Utc::now(),
@@ -1870,7 +1874,7 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
-        match self.task_of(&handle.launch_id) {
+        match self.task_of(&handle.handle_id) {
             Some(task) => !task.finished.load(Ordering::SeqCst),
             None => false,
         }
@@ -1878,7 +1882,7 @@ impl Runner for EmbeddedWasmRunner {
 
     async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
         loop {
-            let Some(task) = self.task_of(&handle.launch_id) else {
+            let Some(task) = self.task_of(&handle.handle_id) else {
                 return;
             };
             if task.finished.load(Ordering::SeqCst) {
@@ -1894,7 +1898,7 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
-        if let Some(task) = self.task_of(&handle.launch_id) {
+        if let Some(task) = self.task_of(&handle.handle_id) {
             info!(instance_id = %handle.instance_id, launch_id = %handle.launch_id, "Cancelling embedded workflow run");
             task.cancel.store(true, Ordering::SeqCst);
         }
@@ -1906,7 +1910,7 @@ impl Runner for EmbeddedWasmRunner {
         handle: &RunnerHandle,
         deadline: tokio::time::Instant,
     ) -> Result<bool> {
-        let Some(task) = self.task_of(&handle.launch_id) else {
+        let Some(task) = self.task_of(&handle.handle_id) else {
             return Ok(false);
         };
         Ok(task.schedule_abort(deadline))
@@ -2019,7 +2023,7 @@ mod tests {
             abort_timer: Some(timer.abort_handle()),
             task: task.clone(),
             registry: registry.clone(),
-            launch_id: "same-launch".into(),
+            handle_id: "same-launch".into(),
         };
         drop(completion);
         assert!(timer.await.unwrap_err().is_cancelled());
@@ -2165,7 +2169,7 @@ mod tests {
             );
             let _slot = RunSlot {
                 _permit: permit,
-                launch_id: "launch-1".to_string(),
+                handle_id: "launch-1".to_string(),
                 registry: Arc::clone(&registry),
                 finished: Arc::clone(&finished),
             };
@@ -2212,7 +2216,7 @@ mod tests {
         );
         let slot = RunSlot {
             _permit: permit,
-            launch_id: "launch-doomed".to_string(),
+            handle_id: "launch-doomed".to_string(),
             registry: Arc::clone(&registry),
             finished: Arc::clone(&finished),
         };
@@ -2277,7 +2281,7 @@ mod tests {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let slot = RunSlot {
             _permit: permits.clone().try_acquire_owned().unwrap(),
-            launch_id: launch.into(),
+            handle_id: launch.into(),
             registry: Arc::new(Mutex::new(
                 [(
                     launch.into(),
@@ -2312,7 +2316,7 @@ mod tests {
             run_slot: Some(run_slot),
             task: task.clone(),
             registry: registry.clone(),
-            launch_id: "ordered".into(),
+            handle_id: "ordered".into(),
         };
         // Freeze handle removal immediately after its finished flag is set.
         // This exposes the precise publication window without timing a tiny
@@ -2355,7 +2359,7 @@ mod tests {
             run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
-            launch_id: "launch-doomed".to_string(),
+            handle_id: "launch-doomed".to_string(),
         };
 
         let join = tokio::spawn(async move {
@@ -2393,7 +2397,7 @@ mod tests {
             run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
-            launch_id: "launch-never-polled".to_string(),
+            handle_id: "launch-never-polled".to_string(),
         };
         let never_polled = async move {
             let _completion = completion;

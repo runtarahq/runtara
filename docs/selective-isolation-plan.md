@@ -977,3 +977,18 @@ not a reason to add host graph interpretation, per-Agent task management or a
 custom guest cancellation ABI. Standard guest cancellation and one normally
 composed workflow artifact remain the plan. Keep G1–G10, E128 and final paired
 measurements open until their separate acceptance evidence exists.
+
+### Physical runner identity prerequisite · 2026-09-08
+
+An accepted handoff now receives a unique physical handle, independent of the
+durable launch ID that pre-start recovery can reuse. The existing embedded task,
+occupancy and cleanup bookkeeping and the mock runner use that identity. Real
+WASM tests establish that retired Stop/grace/wait handles cannot affect a later
+execution of the same launch, and an old closed handoff cannot erase a
+replacement's occupancy. No per-step management or guest ABI is added.
+
+Use this physical identity when completing owner fencing and remote grace
+delivery. It is necessary to prevent a delayed abort from hitting a replacement;
+it does not itself prove that an owner is alive or has lost its right to run.
+Startup's live-peer recovery bug and the remaining whole-run lifecycle work in
+the preceding section remain open. See AUDIT-25 and the implementation record.

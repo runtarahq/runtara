@@ -106,10 +106,9 @@ impl MockRunner {
     /// Mark an instance as completed with output.
     pub async fn complete_instance(&self, instance_id: &str, output: Value) {
         let mut instances = self.instances.lock().await;
-        if let Some(instance) = instances
-            .values_mut()
-            .find(|instance| instance.handle.instance_id == instance_id)
-        {
+        if let Some(instance) = instances.values_mut().find(|instance| {
+            instance.handle.instance_id == instance_id && !instance.stopped.load(Ordering::SeqCst)
+        }) {
             instance.running.store(false, Ordering::SeqCst);
             instance.stopped.store(true, Ordering::SeqCst);
             instance.output = Some(output);
@@ -119,10 +118,9 @@ impl MockRunner {
     /// Mark an instance as failed with error.
     pub async fn fail_instance(&self, instance_id: &str, error: &str) {
         let mut instances = self.instances.lock().await;
-        if let Some(instance) = instances
-            .values_mut()
-            .find(|instance| instance.handle.instance_id == instance_id)
-        {
+        if let Some(instance) = instances.values_mut().find(|instance| {
+            instance.handle.instance_id == instance_id && !instance.stopped.load(Ordering::SeqCst)
+        }) {
             instance.running.store(false, Ordering::SeqCst);
             instance.stopped.store(true, Ordering::SeqCst);
             instance.error = Some(error.to_string());
@@ -144,7 +142,7 @@ impl Runner for MockRunner {
             .push(options.clone());
         let handle = RunnerHandle {
             launch_id: options.launch_id.clone(),
-            handle_id: format!("mock_{}", &options.launch_id[..8]),
+            handle_id: format!("mock_{}", uuid::Uuid::new_v4()),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: Utc::now(),
@@ -163,7 +161,7 @@ impl Runner for MockRunner {
         {
             let mut instances = self.instances.lock().await;
             instances.insert(
-                options.launch_id.clone(),
+                handle.handle_id.clone(),
                 MockInstance {
                     handle: handle.clone(),
                     running: running.clone(),
@@ -178,7 +176,7 @@ impl Runner for MockRunner {
         // mock needs this task so a closed/cancelled gate releases its modeled
         // runner slot instead of leaving a false positive in test telemetry.
         let instances = self.instances.clone();
-        let launch_id = options.launch_id.clone();
+        let handle_id = handle.handle_id.clone();
         let input = options.input.clone();
         let fail = self.fail_by_default;
         let delay = self.execution_delay_ms;
@@ -187,6 +185,7 @@ impl Runner for MockRunner {
             if let Some(gate) = start_gate
                 && gate.wait_and_confirm().await != StartGateOutcome::Opened
             {
+                stopped.store(true, Ordering::SeqCst);
                 return;
             }
             if stopped.load(Ordering::SeqCst) {
@@ -200,11 +199,12 @@ impl Runner for MockRunner {
                 }
 
                 let mut instances = instances.lock().await;
-                if let Some(instance) = instances.get_mut(&launch_id) {
+                if let Some(instance) = instances.get_mut(&handle_id) {
                     if instance.stopped.load(Ordering::SeqCst) {
                         return;
                     }
                     instance.running.store(false, Ordering::SeqCst);
+                    instance.stopped.store(true, Ordering::SeqCst);
                     if fail {
                         instance.error = Some("Mock failure".to_string());
                     } else {
@@ -223,14 +223,16 @@ impl Runner for MockRunner {
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
         let instances = self.instances.lock().await;
         instances
-            .get(&handle.launch_id)
+            .get(&handle.handle_id)
             .map(|i| i.running.load(Ordering::SeqCst))
             .unwrap_or(false)
     }
 
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
         let mut instances = self.instances.lock().await;
-        if let Some(instance) = instances.get_mut(&handle.launch_id) {
+        if let Some(instance) = instances.get_mut(&handle.handle_id)
+            && !instance.stopped.load(Ordering::SeqCst)
+        {
             instance.running.store(false, Ordering::SeqCst);
             instance.stopped.store(true, Ordering::SeqCst);
             instance.error = Some("Stopped".to_string());
@@ -244,17 +246,17 @@ impl Runner for MockRunner {
         deadline: tokio::time::Instant,
     ) -> Result<bool> {
         let instances = Arc::clone(&self.instances);
-        let Some(instance) = instances.lock().await.get(&handle.launch_id).cloned() else {
+        let Some(instance) = instances.lock().await.get(&handle.handle_id).cloned() else {
             return Ok(false);
         };
         if !instance.running.load(Ordering::SeqCst) {
             return Ok(false);
         }
-        let launch_id = handle.launch_id.clone();
+        let handle_id = handle.handle_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
             let mut instances = instances.lock().await;
-            if let Some(current) = instances.get_mut(&launch_id)
+            if let Some(current) = instances.get_mut(&handle_id)
                 && Arc::ptr_eq(&current.stopped, &instance.stopped)
                 && current.running.load(Ordering::SeqCst)
             {
@@ -271,7 +273,7 @@ impl Runner for MockRunner {
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics) {
         let instances = self.instances.lock().await;
-        if let Some(instance) = instances.get(&handle.launch_id) {
+        if let Some(instance) = instances.get(&handle.handle_id) {
             (
                 instance.output.clone(),
                 instance.error.clone(),
@@ -369,6 +371,46 @@ mod tests {
         assert!(
             runner.is_running(&replacement_handle).await,
             "a stale stop must not affect the replacement generation"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reused_launch_preserves_physical_results_and_control() {
+        let runner = MockRunner::never_completing();
+        let options = test_options();
+        let old = runner.try_launch_detached(&options).await.unwrap();
+        runner
+            .complete_instance(&options.instance_id, serde_json::json!("old"))
+            .await;
+        let current = runner.try_launch_detached(&options).await.unwrap();
+        assert_ne!(old.handle_id, current.handle_id);
+        assert!(!runner.is_running(&old).await);
+        assert!(
+            !runner
+                .schedule_abort(&old, tokio::time::Instant::now())
+                .await
+                .unwrap()
+        );
+        runner.stop(&old).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(runner.is_running(&current).await);
+        assert_eq!(
+            runner.collect_result(&old).await.0,
+            Some(serde_json::json!("old"))
+        );
+        assert_eq!(runner.collect_result(&old).await.1, None);
+        assert_eq!(runner.collect_result(&current).await.0, None);
+        runner
+            .complete_instance(&options.instance_id, serde_json::json!("current"))
+            .await;
+        assert!(!runner.is_running(&current).await);
+        assert_eq!(
+            runner.collect_result(&current).await.0,
+            Some(serde_json::json!("current"))
+        );
+        assert_eq!(
+            runner.collect_result(&old).await.0,
+            Some(serde_json::json!("old"))
         );
     }
 

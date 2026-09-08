@@ -37,6 +37,9 @@ Implemented and covered by focused tests:
   live execution and Stop cancels its replacement (AUDIT-23 follow-up below).
   Recovery now preserves outcomes accepted after a stale scan, but identifying
   live owners and routing remote grace remain unresolved (AUDIT-24).
+- Runner control now uses a unique physical handle for each accepted handoff,
+  even when pre-start recovery reuses a durable launch ID. Stale Stop/grace/wait
+  calls and old occupancy cleanup cannot target the replacement (AUDIT-25).
 - The unreachable concurrent Split retry emitter is retired. Existing sequential
   retry/replay behavior remains covered, with 32 byte-identical before/after
   compiler artifacts and passing parallel/retry execution suites (AUDIT-22).
@@ -2006,3 +2009,38 @@ control, Agent macro, WIT, cancellation ABI, component binary, schema or feature
 flag. A status guard cannot distinguish two different physical executions that
 both appear `running`; owner/generation fencing and the peer-startup failure
 remain open. Verification commands/results are in the implementation record.
+
+### AUDIT-25 · Runner control must identify a physical execution
+
+**Status: physical-handle aliasing fixed; server ownership remains unresolved.**
+The embedded runner used the durable `launch_id` as the key for its task and
+occupancy maps, and derived `handle_id` from that same ID. Queue recovery may
+reuse a launch before guest start. Consequently, after one physical execution
+retired and a replacement was installed, an old handle could see the replacement
+as running, arm its emergency timer, stop it or wait for its exit. The persisted
+registry's exact-handle guard could not distinguish two identical derived IDs.
+
+Each accepted runner handoff now generates an opaque unique physical handle.
+The existing task map, run-permit accounting and completion guard use that key;
+`is_running`, `wait_for_exit`, `stop` and `schedule_abort` resolve it. The durable
+launch ID still identifies queue state and is not parsed from the handle.
+There is no new task registry, per-step task, guest import, workflow artifact,
+schema change or product flag. The mock runner follows the same identity rule,
+including physical result lookup, so lifecycle tests do not retain the old alias.
+
+| Contract | Evidence |
+| --- | --- |
+| A retired handle cannot address a later execution of the same durable launch | `retired_handle_cannot_control_a_reused_durable_launch` runs real spinning WASM, retires it, reuses the launch ID and exercises old liveness/grace/Stop/wait calls; the new run must survive |
+| Old handoff cleanup cannot remove replacement occupancy | `overlapping_handoffs_keep_separate_physical_handles_and_occupancy` installs two closed gates under one launch ID, retires the first and checks that the second retains its handle, permit and age until its own gate is cancelled |
+| Mock behavior must preserve the same boundary | `reused_launch_preserves_physical_results_and_control` checks old/current results, old Stop/grace and completion of the current execution |
+
+Before the fix, the real regression observed `(old looks live, old grace accepted,
+replacement still live) = (true, true, false)`. After the fix it requires
+`(false, false, true)` and prompt retirement of the old wait. Tests also keep the
+durable ID equal while requiring distinct physical IDs; allocating a different
+durable launch would not prove the recovered-attempt case.
+
+This corrects a prerequisite for safe ownership/grace routing. It does not tell
+startup which server is alive, renew ownership, or deliver a remote grace
+deadline. AUDIT-23, the wider lifecycle/compatibility work and G1–G10 remain open.
+See the implementation record for verification and skipped gates.

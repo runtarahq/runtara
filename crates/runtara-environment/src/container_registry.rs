@@ -16,10 +16,11 @@ use crate::error::Result;
 pub struct ContainerInfo {
     /// Container/handle ID used with the runner
     pub container_id: String,
-    /// Immutable physical launch generation for this runner handle.
+    /// Durable launch queue generation for this runner handle.
     ///
     /// An instance can park and resume under the same durable ID. This value
-    /// is the fence that lets cleanup prove it still owns the observed run.
+    /// distinguishes separate launches. A pre-start retry can reuse it, so
+    /// exact physical ownership also requires `container_id`.
     pub launch_id: String,
     /// Execution instance ID (UUID)
     pub instance_id: String,

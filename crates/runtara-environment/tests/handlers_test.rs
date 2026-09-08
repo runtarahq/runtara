@@ -1921,18 +1921,9 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         .await
         .expect("Failed to update instance status");
 
-    // Create a handle for the "running" container
-    let handle = RunnerHandle {
-        launch_id: format!("launch-{instance_id}"),
-        handle_id: format!("mock_{}", &instance_id[..8]),
-        instance_id: instance_id.clone(),
-        tenant_id: tenant_id.to_string(),
-        started_at: Utc::now(),
-        metrics: None,
-    };
-
-    // Register the mock instance in the runner
-    runner
+    // Monitor the physical handle the runner actually accepted. A fabricated
+    // handle sharing only the durable launch ID must not control this run.
+    let handle = runner
         .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),

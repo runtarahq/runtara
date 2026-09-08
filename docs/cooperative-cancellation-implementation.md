@@ -3184,3 +3184,77 @@ Final component builds, full workflow execution tests, paired performance
 measurements and Linux soak are not rerun for this host persistence correction.
 The unresolved multi-owner lifecycle cases, E128, compatibility work, upstream
 integration and remaining G1–G10 qualification remain required.
+
+## Physical runner identity before owner/grace routing (2026-09-08)
+
+Tracing durable owner handoff exposed another prerequisite: `launch_id` can be
+reused after pre-start recovery, but the embedded runner keyed active tasks and
+occupancy by that ID and derived its physical handle from it. A real WASM
+regression retired one spinning run, installed another with the same durable
+launch ID and exercised the old handle. Before the fix, the old handle looked
+live, its grace request was accepted and the replacement was stopped. The
+negative-control log is `/private/tmp/cooperative-physical-handle-before2.log`.
+
+The existing maps now use an opaque UUID generated per accepted physical
+handoff. Liveness, waiting, emergency Stop/grace and completion cleanup resolve
+that handle. Durable queue IDs and preparation attempts retain their meaning;
+no guest, graph, WIT, schema or timer/task-count change is introduced. The mock
+runner uses the same physical identity for control/results and does not confuse
+retired results with a later execution. The runner/registry field documentation
+now distinguishes durable launch identity from physical handle identity.
+
+The real reuse regression passes. A second real-runner test installs overlapping
+closed gates with the same durable launch ID, stops the first before guest
+execution, and verifies that its retirement leaves the second handle and
+occupancy age intact. The mock test covers stale control and separate results.
+An older timeout-handler fixture fabricated a handle and relied on the runner
+ignoring it; it now uses the actual returned handle. That fixture initially
+failed the stricter contract, then passed after correction.
+
+Verification for this stage:
+
+- All 10 embedded-runner integration tests passed (4.94s), including both new
+  physical identity regressions and infinite invocation/initializer grace abort.
+- With the production runner fix, all 243 environment unit tests, four composed
+  cooperative Stop tests (15.73s), 45 handler tests, nine launch-queue tests and
+  seven existing packaged-runner compatibility tests (15.69s) passed.
+- After the mock alignment, all 244 environment unit tests passed (25.13s).
+  After correcting the fabricated-handle fixture, all 45 handler tests (2.59s)
+  and nine launch-queue tests (2.41s) passed again. Counts overlap across stages;
+  these are not one summed set of distinct tests.
+- Feature-gated environment/server all-target Clippy passed (25.64s), as did
+  formatting and diff whitespace checks.
+- The native server rebuild passed (53.65s). The authenticated E2E again passes
+  owning-server header/body cancellation (0.968s / 0.984s), then fails before
+  Stop because peer startup changes `running` to `suspended`. The peer/body case
+  is not reached. This is an unresolved failing E2E, not a passing suite.
+  Its command log is `/private/tmp/cooperative-physical-handle-server.log`; the
+  retained fixture directory is
+  `/var/folders/qf/62s607_11p3bw80y3v821zl80000gn/T/runtara-cooperative-api-ak7rgrzq`.
+  These individual fixture durations are not controlled latency measurements.
+
+Commands use the pinned toolchain, isolated native/component directories and
+the owned `recovery_guard` fixture databases. The final mock/handler verification
+uses the existing `RUNTARA_MAX_CONCURRENT_RUNS=4` setting; the overlapping-gate
+fixture requires at least two run slots.
+
+```sh
+cargo test -p runtara-environment --features db-integration-tests --test embedded_runner_test -- --test-threads=1
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --lib --test handlers_test --test launch_queue_test --test cooperative_stop_test --test scoped_runner_test -- --test-threads=1
+cargo test -p runtara-environment --features db-integration-tests --lib --test handlers_test --test launch_queue_test -- --test-threads=1
+cargo test -p runtara-environment --features db-integration-tests --test handlers_test --test launch_queue_test -- --test-threads=1
+cargo clippy -p runtara-environment -p runtara-server --features runtara-environment/scoped-workflow-integration-tests,runtara-server/db-integration-tests --all-targets -- -D warnings
+```
+
+The rebuilt-server check uses:
+
+```sh
+cargo build -p runtara-server --bin runtara-server
+python3 -u e2e/test_cooperative_cancellation.py --server /absolute/path/to/runtara-server --components /absolute/path/to/wasm32-wasip2/release
+```
+
+No full component rebuild, full compiler execution suite, paired size/timing
+measurement or Linux soak is claimed for this native handle change. Physical
+identity is required for ownership fencing but does not establish owner liveness,
+lease renewal or remote grace delivery. The peer-startup failure and all remaining
+G1–G10 gates remain open. AUDIT-25 maps the contracts to the tests.
