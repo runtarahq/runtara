@@ -1879,6 +1879,11 @@ fn execute_via_embedded_invoke(
         runtara_component_host::InvokeExit::Cancelled => {
             (false, "invoke cancelled".to_string(), peak)
         }
+        runtara_component_host::InvokeExit::CleanupAborted => (
+            false,
+            "cleanup grace expired; invocation aborted".to_string(),
+            peak,
+        ),
     }
 }
 

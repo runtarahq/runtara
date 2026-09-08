@@ -29,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
 
+use crate::host_io::HostIoContext;
 use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
@@ -212,6 +213,18 @@ fn wall_clock_now_ms() -> Result<u64, String> {
 fn require_host(
     store: &mut StoreContextMut<'_, WorkflowState>,
 ) -> wasmtime::Result<Arc<dyn RuntimeHost>> {
+    // An already selected emergency abort must also stop runtime calls between
+    // epoch checks, especially terminal publication and signal acknowledgement.
+    // This does not roll back a host operation that began before expiry.
+    if store
+        .data()
+        .cleanup_alarm()
+        .is_some_and(|alarm| alarm.expired())
+    {
+        return Err(wasmtime::Error::new(
+            crate::cleanup_alarm::CleanupGraceExpired,
+        ));
+    }
     store.data().runtime_host().cloned().ok_or_else(|| {
         wasmtime::format_err!(
             "workflow imports {RUNTIME_INTERFACE_NAME} but the run was not configured \

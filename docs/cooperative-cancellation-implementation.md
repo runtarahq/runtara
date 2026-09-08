@@ -22,6 +22,60 @@ E2E, multi-owner routing and remaining P3 timeout/race work are still open.
 Lifecycle acknowledgements and post-run fallback preserve accepted terminal
 outcomes.
 
+## Native cleanup alarm implementation · 2026-09-08
+
+The existing host timer interface now implements `abort-after(ms)`. This is an
+explicit platform emergency timer; the standard Component Model subtask handle
+owns its lifetime. The host receives a duration and no scope identifiers. An
+independent Tokio timer latches whole-execution abort, and standard subtask
+cancellation disarms it after guest cleanup. A disposal guard synchronizes with
+expiry to prevent stale alarms from aborting later work. There is one shared
+abort latch/notification per Store and one native timer task per armed alarm.
+
+The production executor consumes the latch both at epoch checks and while blocked
+in host I/O. A late successful return cannot override an already latched abort.
+The shared runtime host accessor also rejects new runtime calls after expiry,
+including terminal writes and acknowledgements. This does not roll back calls
+that began before expiry.
+`CleanupAborted` distinguishes this exit from normal timeout and cooperative
+cancellation. Environment records failure, or cancellation if Cancel is pending,
+with termination reason `aborted`; it does not acknowledge the command and uses
+the existing running-state guard to preserve accepted terminal outcomes. The
+old task-outcome compatibility adapter exposes this as a trap, not a fabricated
+successful cancellation.
+
+Five tests use the production executor, current synchronous cancellation ABI and
+a composed callback Agent without runtime imports: CPU cleanup, pending-I/O
+cleanup, CPU work before the parent regains control, continued execution after
+disarming, and a late-success race. Two more exercise command and dispatcher
+entry points. An additional test covers complete/fail in both supported runtime
+versions with and without expiry, using the ordinary executor. It fails without
+the shared runtime guard because native return rejection alone permits a late
+publication. Five native alarm tests cover expiry without polling, unpolled disposal, overlapping
+alarms, zero/maximum grace and 1,000 disposals. Two real database tests cover
+terminal recording and preservation. A negative Component Model control proves
+that an ordinary timer future throwing an error cannot interrupt CPU cleanup.
+
+The current emitter does not yet arm this alarm. A timed scope must arm it before
+entering potentially noncooperative code, for the remaining deadline plus grace,
+and retain it through cancellation cleanup. Integrate this into the shared
+helpers while preserving initiating-owner grace and externally configured
+root Stop deadlines; do not reset or shorten a propagated cancellation budget.
+No optional async-cancel feature, per-Agent wrapper, graph registry, extra Store,
+or product flag was added. Native blocking code without a cooperation point is
+still outside this proof. AUDIT-18 and the governing plan retain those limits.
+
+Validation: **124 native host tests** (1.86s) passed after the runtime-boundary
+guard; the focused test was also run without that guard and failed on a late
+publication. Before that final guard, **92 component-cancellation tests**
+(62.77s), **395 workflow execution tests** (534.55s; three manual benchmarks
+ignored), and both new persistence tests (0.88s) passed. The database tests used
+a separate local PostgreSQL container/database; that container was stopped after
+testing. Feature-gated host/environment Clippy passed. No Agent/guest WIT changed,
+so these runs reused the previously built component artifacts. No current-stage
+paired performance report, Linux/capacity soak or authenticated server E2E result
+is claimed.
+
 ## Async-cancel grace qualification · 2026-09-08
 
 Five composed tests in `cooperative_cancellation/async_cancel_grace.rs` qualify

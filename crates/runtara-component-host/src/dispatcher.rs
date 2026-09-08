@@ -407,6 +407,11 @@ where
     // Epoch ring: fires at guest branch points every EPOCH_TICK; interrupts
     // once the wall-clock budget is spent, otherwise re-arms for one more tick.
     store.epoch_deadline_callback(move |mut ctx| {
+        if ctx.data().cleanup_alarm.expired() {
+            return Err(wasmtime::Error::new(
+                crate::cleanup_alarm::CleanupGraceExpired,
+            ));
+        }
         if started.elapsed() >= timeout {
             ctx.data_mut().termination = Some(Termination::Timeout);
             return Ok(UpdateDeadline::Interrupt);
@@ -418,6 +423,7 @@ where
     // Watchdog ring: catches a guest blocked inside a host call, where the epoch
     // callback can't fire. Cancellation = dropping the in-flight future. Scoped
     // so the `&mut store` reborrow is released before we read the store back.
+    let cleanup_alarm = store.data().cleanup_alarm.clone();
     let outcome = {
         let call = func.call_async(&mut *store, params);
         tokio::pin!(call);
@@ -435,9 +441,15 @@ where
                 Err(trap) => GuardOutcome::Trapped(trap.into()),
             },
             _ = watchdog => GuardOutcome::TimedOut,
+            _ = cleanup_alarm.wait() => GuardOutcome::Trapped(anyhow::Error::new(crate::cleanup_alarm::CleanupGraceExpired)),
         }
     };
 
+    if cleanup_alarm.expired() {
+        return GuardOutcome::Trapped(anyhow::Error::new(
+            crate::cleanup_alarm::CleanupGraceExpired,
+        ));
+    }
     // A pure-wasm loop trips the epoch ring instead: the call returns
     // Err(trap) with our Timeout marker set. Reclassify that as TimedOut so the
     // caller doesn't mistake it for a genuine guest fault.

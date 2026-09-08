@@ -1411,6 +1411,32 @@ async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, i
     }
 }
 
+/// A cleanup alarm ends the whole Store without acknowledging any command.
+/// Preserve accepted terminal state and distinguish this from a normal timeout.
+async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+    let status = match persistence.get_pending_signal(instance_id).await {
+        Ok(Some(signal)) if signal.signal_type == runtara_core::domain::SignalType::Cancel => {
+            CoreInstanceStatus::Cancelled
+        }
+        Ok(_) => CoreInstanceStatus::Failed,
+        Err(error) => {
+            warn!(instance_id, %error, "Could not classify cleanup abort against pending cancellation");
+            return;
+        }
+    };
+    if let Err(error) = persistence
+        .complete_instance(
+            CompleteInstanceParams::new(instance_id, status)
+                .if_running()
+                .with_error("Cooperative cleanup grace expired; whole execution aborted")
+                .with_termination("aborted", None),
+        )
+        .await
+    {
+        warn!(instance_id, %error, "Could not record cleanup abort after Store disposal");
+    }
+}
+
 /// Park an invoke-shaped instance that returned `outcome::suspended` (the
 /// store-freeing durable-sleep / wait-for-signal paths). Stamps
 /// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
@@ -1767,6 +1793,9 @@ impl Runner for EmbeddedWasmRunner {
                     InvokeExit::Cancelled => {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
+                    InvokeExit::CleanupAborted => {
+                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                    }
                 }
                 if matches!(&run.exit, InvokeExit::Suspended(_)) {
                     // A cancel may arrive after the guest's last poll but before
@@ -1810,6 +1839,9 @@ impl Runner for EmbeddedWasmRunner {
                     }
                     WorkflowExit::Cancelled => {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                    }
+                    WorkflowExit::CleanupAborted => {
+                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
                     }
                 }
                 record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
@@ -2692,6 +2724,75 @@ mod tests {
     #[cfg(feature = "db-integration-tests")]
     async fn backstop_fixture() -> (Arc<dyn Persistence>, String) {
         test_support::running_instance("backstop").await
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn cleanup_abort_records_unclean_failure_or_cancel_without_acknowledgement() {
+        for requested_cancel in [false, true] {
+            let (persistence, id) = backstop_fixture().await;
+            if requested_cancel {
+                persistence
+                    .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+                    .await
+                    .unwrap();
+            }
+            record_cleanup_aborted_exit(&persistence, &id).await;
+            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(
+                after.status,
+                if requested_cancel {
+                    CoreInstanceStatus::Cancelled
+                } else {
+                    CoreInstanceStatus::Failed
+                }
+            );
+            assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
+            assert!(
+                after
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("cleanup grace expired")
+            );
+            assert!(after.finished_at.is_some());
+            let pending = persistence.get_pending_signal(&id).await.unwrap();
+            if requested_cancel {
+                assert!(pending.unwrap().acknowledged_at.is_none());
+            } else {
+                assert!(pending.is_none());
+            }
+        }
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn cleanup_abort_preserves_accepted_terminal_outcomes() {
+        for status in [
+            CoreInstanceStatus::Completed,
+            CoreInstanceStatus::Failed,
+            CoreInstanceStatus::Cancelled,
+        ] {
+            let (persistence, id) = backstop_fixture().await;
+            persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, status)
+                        .with_output(b"accepted output")
+                        .with_error("accepted error")
+                        .with_termination("crashed", Some(9)),
+                )
+                .await
+                .unwrap();
+            let before = persistence.get_instance(&id).await.unwrap().unwrap();
+            record_cleanup_aborted_exit(&persistence, &id).await;
+            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.finished_at, before.finished_at);
+            assert_eq!(after.termination_reason, before.termination_reason);
+            assert_eq!(after.exit_code, before.exit_code);
+        }
     }
 
     #[cfg(feature = "db-integration-tests")]

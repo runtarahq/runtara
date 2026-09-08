@@ -1560,3 +1560,55 @@ host abort mechanism. Its integration with scoped deadlines must cover nested
 and runtime-free workflows before enabling Agent/Embed timeout syntax. These
 fixtures do not implement production grace, prove arbitrary native-call
 interruption, or remove E128.
+
+### AUDIT-18 · An independent cleanup alarm for the existing executor
+
+**Status: native enforcement implemented; emitter integration pending.** The
+production host timer interface now includes `abort-after: async func(ms: u64)`.
+Unlike `sleep`, expiry aborts the entire execution. It is a platform I/O/safety
+capability whose ownership uses standard subtask handles, not a standardized
+WASI operation or a host workflow scheduler. The existing `sleep` behavior and
+default Component Model ABI are unchanged.
+
+WASM must arm the alarm before potentially noncooperative guest work, with the
+remaining scope deadline plus grace; it cannot wait for a blocked parent to
+observe expiry. After normal completion or cleanup, it cancels and drops the
+alarm using the ordinary ABI. Native expiry
+latches an abort that cannot be undone. Disposal and expiry are synchronized so a
+cancelled alarm cannot later set a stale abort flag. A native timer task services
+each armed alarm independently of guest scheduling; one shared latch is checked
+by the executor's epoch and blocked-I/O watchdogs. Guest CPU loops remain subject
+to epoch interruption. This does not force-stop arbitrary blocking native code.
+
+| Case | Required behavior | Evidence |
+| --- | --- | --- |
+| Unpolled alarm; expiry before Component Model can poll again | Independent native clock still sets the abort latch | `cleanup_alarm::tests::expiry_is_independent_of_polling_the_component_future` |
+| Cancel/dispose before expiry, including before first poll | No late abort; native timer releases its references | `dropping_an_unpolled_alarm_disarms_and_releases_its_native_timer` |
+| Multiple alarms and a selected expiry | Disposing one preserves the others; disposal cannot clear an abort | `cancelling_one_alarm_preserves_another_and_expiry_is_latched` |
+| Zero, maximum and repeated disposal | Zero is immediate; maximum can be cancelled; 1,000 disposed alarms release their state after scheduler reaping | Remaining `cleanup_alarm::tests` |
+| Synchronous cancel enters CPU-bound or pending-I/O cleanup | Current production executor returns `CleanupAborted` after Store teardown | `workflow::cleanup_alarm_tests::production_alarm_aborts_*` |
+| Guest body prevents the parent from regaining control | Alarm armed before the call still bounds execution | `production_alarm_bounds_cpu_work_before_parent_can_select_timeout` |
+| Command and dispatcher entry points | Apply the same alarm through their existing execution guards | `production_alarm_also_bounds_command_execution`, `production_alarm_also_bounds_dispatcher_execution` |
+| Successful cleanup | Standard cancellation disarms the alarm; same Store runs past its former deadline | `standard_cancellation_disarms_alarm_and_preserves_the_same_store` |
+| Expiry wins immediately before normal return | Discard the late successful output | `latched_cleanup_abort_rejects_a_late_successful_return` |
+| Runtime complete/fail after alarm expiry, both supported ABI versions | Reject the host call before publication; unexpired calls still publish | `expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions` |
+| Persist aborted execution, with/without a pending Cancel | Failed or cancelled with termination reason `aborted`; no command acknowledgement | `runner::embedded::tests::cleanup_abort_records_unclean_failure_or_cancel_without_acknowledgement` |
+| Accepted terminal state | Preserve output, error, finish time, termination reason and exit code | `cleanup_abort_preserves_accepted_terminal_outcomes` |
+
+The composed executor fixture imports no workflow runtime and uses synchronous
+`subtask.cancel`, proving that this enforcement does not require optional async
+cancellation or persistence-backed workflow orchestration. An added negative
+control, `ordinary_timer_trap_does_not_interrupt_cpu_cleanup`, rejects the tempting
+shortcut of throwing from a normal Component Model timer future.
+
+The shared runtime host accessor rejects new runtime calls after a latched abort,
+including terminal writes and signal acknowledgements. The new regression fails
+without that guard: native return rejection alone still allows a late durable
+publication. A call already started before expiry retains its existing outcome
+semantics; no rollback or preemption of arbitrary native code is implied.
+
+No Agent wrapper, emitted helper, WIT dependency or artifact cache key changes
+in this stage. The compiler still needs to arm/disarm this shared alarm across
+timed execution and cleanup, preserve root Stop grace, and derive remaining grace from the
+original monotonic event. E128 remains. Per-Store latch allocation, armed-alarm
+cost and cancellation races remain part of the full performance/soak gates.

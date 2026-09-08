@@ -17,6 +17,7 @@
 //!   `DispatcherService`.
 
 pub mod bindings;
+mod cleanup_alarm;
 pub mod connection_resolver_host;
 pub mod dispatcher;
 pub mod engine;

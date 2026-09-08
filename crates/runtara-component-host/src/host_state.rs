@@ -212,6 +212,7 @@ pub struct HostState {
     pub http_deadline: Option<tokio::time::Instant>,
     /// Set by the epoch deadline callback when it force-interrupts the guest.
     pub termination: Option<Termination>,
+    pub(crate) cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
 }
 
 impl HostState {
@@ -253,6 +254,7 @@ impl HostState {
             ),
             http_deadline: None,
             termination: None,
+            cleanup_alarm: Default::default(),
         }
     }
 
@@ -274,6 +276,9 @@ impl HostState {
 }
 
 impl HostIoContext for HostState {
+    fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
+        Some(&self.cleanup_alarm)
+    }
     fn http_deadline(&self) -> Option<tokio::time::Instant> {
         self.http_deadline
     }

@@ -164,6 +164,88 @@ fn run_publishing_coordinated(
 const COMPLETE: &str =
     "(call $complete (i32.const 3500) (i32.const 2) (i32.const 3000)) i32.const 42 return";
 
+#[tokio::test]
+async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions() {
+    // Use the ordinary executor, without the legacy child registry or its
+    // deferred-publication wrapper: the runtime import itself must reject this.
+    for version in ["0.3.0", "0.4.0"] {
+        for callback in ["complete", "fail"] {
+            for expired in [false, true] {
+                let engine = crate::build_engine(&crate::EngineConfig {
+                    cache_dir: None,
+                    enable_epoch_interruption: true,
+                })
+                .unwrap();
+                let _ticker = Ticker::new(engine.clone());
+                let mut executor = WorkflowExecutor::new(engine.clone()).unwrap();
+                executor
+                    .linker
+                    .root()
+                    .func_wrap("expire", move |store, (): ()| {
+                        if expired {
+                            drop(store.data().cleanup_alarm.arm(0));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                let wat = format!(
+                    r#"(component
+                  (import "expire" (func $expire))
+                  (import "runtara:workflow-runtime/runtime@{version}" (instance $runtime
+                    (export "{callback}" (func (param "{}" (list u8)) (result (result (error string)))))))
+                  (core module $mem
+                    (memory (export "memory") 1)
+                    (data (i32.const 128) "42")
+                    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096))
+                  (core instance $mem (instantiate $mem))
+                  (core func $expire (canon lower (func $expire)))
+                  (core func $publish (canon lower (func $runtime "{callback}")
+                    (memory $mem "memory") (realloc (func $mem "realloc"))))
+                  (core module $code
+                    (import "h" "expire" (func $expire))
+                    (import "h" "publish" (func $publish (param i32 i32 i32)))
+                    (func (export "run") (result i32)
+                      call $expire
+                      (call $publish (i32.const 128) (i32.const 2) (i32.const 512))
+                      i32.const 0))
+                  (core instance $code (instantiate $code (with "h" (instance
+                    (export "expire" (func $expire)) (export "publish" (func $publish))))))
+                  (func $run (result (result)) (canon lift (core func $code "run")))
+                  (instance $cli (export "run" (func $run)))
+                  (export "wasi:cli/run@0.2.3" (instance $cli)))"#,
+                    if callback == "complete" {
+                        "output"
+                    } else {
+                        "error"
+                    }
+                );
+                let prepared = executor
+                    .prepare_precompiled(Component::new(&engine, wat).unwrap())
+                    .await
+                    .unwrap();
+                let publication = Arc::new(Publication::default());
+                let mut config = spec();
+                config.runtime = Some(publication.clone());
+                let result = bounded(executor.execute(prepared.command().unwrap(), config)).await;
+                if expired {
+                    assert!(
+                        matches!(result.exit, WorkflowExit::CleanupAborted),
+                        "{result:?}"
+                    );
+                    assert!(publication.calls.lock().unwrap().is_empty());
+                    assert!(
+                        !publication.dropped.load(Ordering::Acquire),
+                        "host body never entered"
+                    );
+                } else {
+                    assert!(matches!(result.exit, WorkflowExit::Completed), "{result:?}");
+                    assert_eq!(*publication.calls.lock().unwrap(), vec![b"42".to_vec()]);
+                }
+            }
+        }
+    }
+}
+
 struct Coordinator {
     signals: Arc<Signals>,
     closes: Mutex<Vec<bool>>,

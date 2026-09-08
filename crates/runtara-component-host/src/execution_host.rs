@@ -148,6 +148,9 @@ impl From<&InvokeExit> for TaskOutcome {
             InvokeExit::Failed(error) => Self::Failed(error.clone()),
             InvokeExit::Suspended(wakes) => Self::Suspended(wakes.clone()),
             InvokeExit::Cancelled => Self::Cancelled,
+            InvokeExit::CleanupAborted => {
+                Self::Trapped(crate::cleanup_alarm::CleanupGraceExpired.to_string())
+            }
             InvokeExit::Timeout => Self::TimedOut,
             InvokeExit::Trapped { reason } => Self::Trapped(reason.clone()),
         }

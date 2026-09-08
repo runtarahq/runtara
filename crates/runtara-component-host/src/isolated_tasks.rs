@@ -179,7 +179,7 @@ fn retained_bytes(outcome: &InvokeExit) -> usize {
             },
         ),
         InvokeExit::Trapped { reason } => reason.capacity(),
-        InvokeExit::Timeout | InvokeExit::Cancelled => 0,
+        InvokeExit::Timeout | InvokeExit::Cancelled | InvokeExit::CleanupAborted => 0,
     }
 }
 

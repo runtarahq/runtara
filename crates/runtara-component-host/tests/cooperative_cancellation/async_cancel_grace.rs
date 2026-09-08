@@ -11,13 +11,14 @@ enum Cleanup {
     Return,
     PendingIo,
     CpuLoop,
+    CpuLoopWithTimerTrap,
 }
 
 fn source(cleanup: Cleanup) -> String {
     include_str!("async-cancel-grace.wat")
         .replace(
             "{{CLEANUP}}",
-            if matches!(cleanup, Cleanup::CpuLoop) {
+            if matches!(cleanup, Cleanup::CpuLoop | Cleanup::CpuLoopWithTimerTrap) {
                 "(loop $spin (br $spin))"
             } else {
                 ""
@@ -108,7 +109,20 @@ async fn run(cleanup: Cleanup) -> anyhow::Result<()> {
     config.epoch_interruption(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, source(cleanup))?;
-    let mut linker = runtara_component_host::build_linker(&engine)?;
+    let mut linker = if matches!(cleanup, Cleanup::CpuLoopWithTimerTrap) {
+        let mut linker = Linker::<HostState>::new(&engine);
+        linker
+            .instance("runtara:host-io/timers@0.1.0")?
+            .func_wrap_concurrent("sleep", |_, (ms,): (u64,)| {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    Err::<(), _>(wasmtime::Error::msg("qualification cleanup grace expired"))
+                })
+            })?;
+        linker
+    } else {
+        runtara_component_host::build_linker(&engine)?
+    };
     let trace = Trace::default();
     let active = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(Notify::new());
@@ -219,7 +233,7 @@ async fn run(cleanup: Cleanup) -> anyhow::Result<()> {
                 assert_eq!(interrupted.load(Ordering::SeqCst), 0);
                 assert_eq!(active.load(Ordering::SeqCst), 1);
             }
-            Cleanup::CpuLoop => {
+            Cleanup::CpuLoop | Cleanup::CpuLoopWithTimerTrap => {
                 let error = result.unwrap_err();
                 assert_eq!(
                     error.downcast_ref::<wasmtime::Trap>(),
@@ -258,4 +272,9 @@ async fn async_cancel_allows_guest_grace_during_pending_cleanup_io() -> anyhow::
 #[tokio::test]
 async fn async_cancel_still_needs_independent_abort_for_cpu_cleanup() -> anyhow::Result<()> {
     run(Cleanup::CpuLoop).await
+}
+
+#[tokio::test]
+async fn ordinary_timer_trap_does_not_interrupt_cpu_cleanup() -> anyhow::Result<()> {
+    run(Cleanup::CpuLoopWithTimerTrap).await
 }

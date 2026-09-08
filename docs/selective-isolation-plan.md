@@ -803,3 +803,48 @@ do not add per-Agent tasks or a host graph registry. Existing root Stop already
 arms independent grace, but that does not prove scoped deadline escalation.
 Qualification of immediate/queued/racing cancellation and the production emitter
 is still required before changing the default ABI. See AUDIT-17 for exact tests.
+
+### Shared native cleanup alarm · 2026-09-08
+
+The host now provides `runtara:host-io/timers@0.1.0.abort-after(ms)` as a platform
+emergency timer. This is a Runtara host capability, not a new standardized WASI
+operation. Its lifetime uses a normal async subtask: the guest retains its handle,
+requests ordinary `subtask.cancel` after cleanup, awaits resolution and drops it.
+The host does not receive step identifiers or choose any graph action.
+
+The native timer runs independently of Component Model scheduling and latches a
+whole-Store abort. The existing epoch and blocked-I/O execution checks consume
+that latch. Each armed alarm owns a Tokio timer task and a small disposal guard;
+the Store owns one shared latch/notification. No Agent task registry, execution
+catalog, extra Store, product flag or optional async-cancel capability is needed.
+An ordinary timer future that merely traps is insufficient: a new negative
+control confirms it cannot escape CPU-bound cleanup on the pinned scheduler.
+
+Production executor tests now cover synchronous cancellation with CPU and pending
+I/O cleanup, CPU work before the parent can regain control, normal continuation
+after disarming the alarm, and expiry immediately before a successful return.
+Command and dispatcher entry points are covered too. The composed fixture has no
+runtime/persistence imports. A separate test exercises both runtime versions
+and both terminal callbacks: a latched alarm rejects a new host publication at
+the shared runtime boundary. Calls already started before expiry retain their
+existing accepted-outcome semantics; enforcement does not undo committed writes.
+Unit tests cover independent expiry, unpolled disposal, overlapping alarms,
+zero/maximum grace and disposal of 1,000 alarms. Real database tests preserve
+accepted terminal outcomes and record an unacknowledged cleanup abort accurately.
+
+**Next integrate into the existing shared emitter cleanup.** A timed scope must
+arm its safety alarm before entering potentially noncooperative guest work,
+using its remaining deadline budget plus grace. Waiting until cancellation is
+selected cannot bound a call that prevents the parent from regaining control.
+Resolve/disarm the alarm after normal scope completion or finished cleanup. Keep
+the remaining grace calculation in guest state, measured from the original
+monotonic deadline/event, rather than resetting a budget on each nested wait.
+Preserve the externally configured root
+Stop grace: propagated cancellation must not replace it with a fresh, shorter
+child budget. Ordinary polling-timer disposal should not start a cleanup alarm.
+
+The current emitter does not yet call `abort-after`; E128 and G5/G6 remain open.
+This change closes the native enforcement prerequisite, not the production
+timeout feature. Include the per-Store latch and armed-timer allocations in the
+paired native memory/latency/soak measurements. Blocking native code that cannot
+yield remains a separate qualification limit; no host process is killed here.

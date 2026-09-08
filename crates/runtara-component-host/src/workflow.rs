@@ -117,6 +117,8 @@ pub enum WorkflowExit {
     Timeout,
     /// The cancel flag was raised.
     Cancelled,
+    /// Cleanup exceeded its grace; no cooperative acknowledgement is implied.
+    CleanupAborted,
 }
 
 /// Result of one embedded workflow run.
@@ -191,6 +193,8 @@ pub trait WorkflowStartConfirmation: Send + Sync {
 enum Termination {
     Timeout,
     Cancelled,
+    /// Cleanup exceeded its grace; no cooperative acknowledgement is implied.
+    CleanupAborted,
 }
 
 struct WorkflowLimiter {
@@ -267,6 +271,7 @@ pub struct WorkflowState {
     active_deadline: tokio::time::Instant,
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
+    cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
     /// Present when the artifact imports the runtime interface (HostImport
     /// binding); `None` for legacy composed artifacts.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
@@ -286,6 +291,9 @@ impl ExecutionView for WorkflowState {
 }
 
 impl HostIoContext for WorkflowState {
+    fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
+        Some(&self.cleanup_alarm)
+    }
     fn http_deadline(&self) -> Option<tokio::time::Instant> {
         Some(self.http_deadline)
     }
@@ -709,6 +717,7 @@ impl WorkflowExecutor {
                 denied_memory_grow: false,
             },
             termination: None,
+            cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: None,
             connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
@@ -720,6 +729,10 @@ impl WorkflowExecutor {
         let timeout = spec.timeout;
         let cancel = spec.cancel.clone();
         store.epoch_deadline_callback(move |mut ctx| {
+            if ctx.data().cleanup_alarm.expired() {
+                ctx.data_mut().termination = Some(Termination::CleanupAborted);
+                return Ok(UpdateDeadline::Interrupt);
+            }
             if let Some(flag) = &cancel
                 && flag.load(Ordering::Relaxed)
             {
@@ -736,6 +749,7 @@ impl WorkflowExecutor {
 
         // Watchdog ring: catches the guest blocked in a host call, where the
         // epoch callback can't fire. Cancellation = dropping the run future.
+        let cleanup_alarm = store.data().cleanup_alarm.clone();
         let watchdog_cancel = spec.cancel.clone();
         let run_ended = {
             // Store/WASI setup is host work before guest execution. A closed
@@ -782,6 +796,7 @@ impl WorkflowExecutor {
                 tokio::select! {
                     result = &mut run => Ok(result),
                     termination = watchdog => Err(termination),
+                    _ = cleanup_alarm.wait() => Err(Termination::CleanupAborted),
                 }
             }
         };
@@ -789,11 +804,14 @@ impl WorkflowExecutor {
         let data = store.data();
         let exit = match run_ended {
             Err(Termination::Timeout) => WorkflowExit::Timeout,
+            _ if data.cleanup_alarm.expired() => WorkflowExit::CleanupAborted,
+            Err(Termination::CleanupAborted) => WorkflowExit::CleanupAborted,
             Err(Termination::Cancelled) => WorkflowExit::Cancelled,
             Ok(Ok(Ok(()))) => WorkflowExit::Completed,
             Ok(Ok(Err(()))) => WorkflowExit::GuestError,
             Ok(Err(trap)) => match data.termination {
                 Some(Termination::Timeout) => WorkflowExit::Timeout,
+                Some(Termination::CleanupAborted) => WorkflowExit::CleanupAborted,
                 Some(Termination::Cancelled) => WorkflowExit::Cancelled,
                 None if data.limiter.denied_memory_grow => WorkflowExit::Failed {
                     reason: format!(
@@ -975,6 +993,7 @@ impl WorkflowExecutor {
                 denied_memory_grow: false,
             },
             termination: None,
+            cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
             connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
@@ -990,6 +1009,10 @@ impl WorkflowExecutor {
         let epoch_task_cancel = task_cancel.clone();
         let cancel = spec.cancel.clone();
         store.epoch_deadline_callback(move |mut ctx| {
+            if ctx.data().cleanup_alarm.expired() {
+                ctx.data_mut().termination = Some(Termination::CleanupAborted);
+                return Ok(UpdateDeadline::Interrupt);
+            }
             if cancel
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
@@ -1011,6 +1034,7 @@ impl WorkflowExecutor {
         });
         store.set_epoch_deadline(1);
 
+        let cleanup_alarm = store.data().cleanup_alarm.clone();
         let watchdog_cancel = spec.cancel.clone();
         let run_ended = {
             // Store/WASI setup is host work before guest execution. A closed
@@ -1147,6 +1171,7 @@ impl WorkflowExecutor {
                 tokio::select! {
                     result = &mut run => Ok(result),
                     termination = watchdog => Err(termination),
+                    _ = cleanup_alarm.wait() => Err(Termination::CleanupAborted),
                 }
             }
         };
@@ -1154,6 +1179,8 @@ impl WorkflowExecutor {
         let data = store.data();
         let exit = match run_ended {
             Err(Termination::Timeout) => InvokeExit::Timeout,
+            _ if data.cleanup_alarm.expired() => InvokeExit::CleanupAborted,
+            Err(Termination::CleanupAborted) => InvokeExit::CleanupAborted,
             Err(Termination::Cancelled) => InvokeExit::Cancelled,
             Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Completed(output)))) => {
                 InvokeExit::Completed(output)
@@ -1164,6 +1191,7 @@ impl WorkflowExecutor {
             Ok(Ok(Err(error))) => InvokeExit::Failed(error),
             Ok(Err(trap)) => match data.termination {
                 Some(Termination::Timeout) => InvokeExit::Timeout,
+                Some(Termination::CleanupAborted) => InvokeExit::CleanupAborted,
                 Some(Termination::Cancelled) => InvokeExit::Cancelled,
                 None if data.limiter.denied_memory_grow => InvokeExit::Trapped {
                     reason: format!(
@@ -1221,6 +1249,7 @@ impl WorkflowExecutor {
                 denied_memory_grow: false,
             },
             termination: None,
+            cleanup_alarm: Default::default(),
             runtime: None,
             execution: None,
             connection_resolver: Err(
@@ -1267,6 +1296,8 @@ pub enum InvokeExit {
     Timeout,
     /// The cancel flag was raised.
     Cancelled,
+    /// Cleanup exceeded its grace; no cooperative acknowledgement is implied.
+    CleanupAborted,
 }
 
 /// Result of one invoke-shaped workflow run.
@@ -1373,7 +1404,7 @@ mod tests {
         )
     "#;
 
-    fn run_spec(timeout: Duration) -> WorkflowRunSpec {
+    pub(super) fn run_spec(timeout: Duration) -> WorkflowRunSpec {
         WorkflowRunSpec {
             env: HashMap::new(),
             stderr: None,
@@ -1489,3 +1520,7 @@ mod test_support;
 #[cfg(test)]
 #[path = "workflow/connection_resolver_tests.rs"]
 mod connection_resolver_tests;
+
+#[cfg(test)]
+#[path = "workflow/cleanup_alarm_tests.rs"]
+mod cleanup_alarm_tests;
