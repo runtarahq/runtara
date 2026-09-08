@@ -6,6 +6,12 @@ and durable suspend/resume through the production invoke ABI.
 
 ## Current progress · 2026-09-08
 
+Progress checkpoint against implementation commit `62e051ed5001c28936381b4a544665be62f32e1e`
+on the separate branch `feat/cooperative-cancellation-progress` (remote:
+`origin/feat/cooperative-cancellation-progress`). Implementation through this
+commit is committed and pushed. This documentation checkpoint adds no runtime
+changes; the AI memory/MCP follow-up described below has not been implemented.
+
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
 workflow `.wasm`. Workflow control and scope/deadline decisions remain in the
@@ -67,6 +73,35 @@ The governing acceptance criteria remain G1–G10 in the
 per-stage tests and historical measurements. Later entries supersede earlier
 "remaining" statements when they record the corresponding implementation and
 evidence; the table above is the consolidated current work list.
+
+### Latest verified implementation checkpoint (`62e051ed`)
+
+| Stage | Recorded verification | Scope and limits |
+| --- | --- | --- |
+| Agent-as-AI-tool deadlines (`62e051ed`, AUDIT-28) | 682 feature-gated compiler library tests passed in 412.38s; 19 public AI execution tests passed in 14.00s; feature-gated all-target Clippy passed | The seven new Agent-tool regressions are included in the 682, not additional tests. Timeout regressions use private emission while E128 remains. Public AI tests cover currently accepted workflows. |
+| Physical ownership and remote emergency grace (`b932f1c6` / `d3fc2a6a`, AUDIT-26/27) | 354 distinct selected environment tests passed across the recorded runs; authenticated owner/peer HTTP header/body E2E passed | Extended E2E also observed lease renewal during a 32-second pending request and shutdown of an unrelated peer. This is lifecycle evidence from the earlier native stage, not a fresh run against `62e051ed` or a performance benchmark. |
+| Documentation checkpoint | Source and recorded results reviewed; diff whitespace checked | Rust tests, component builds, server E2E and benchmarks are not rerun for this documentation-only update. The normal pre-commit hook remains enabled; it skips Rust checks when no Rust files are staged. |
+
+The immediate implementation work is to preserve the referenced Agent's timeout
+and definition identity when constructing `memory.load`, `memory.save` and
+synthetic MCP search/invoke metadata. These entries currently set `timeout: None`.
+Memory calls also need shared guest budget/checkpoint handling; synthetic MCP
+calls should reuse the Agent-tool deadline path. Durable call identities must
+keep memory operations distinct from user-defined tools and preserve pending
+budgets and completed results across replay. This remains design work, not a
+completed fix or a new host task-management API.
+
+Required regressions for those paths include zero/maximum budgets, cancellation
+while I/O is pending, root/enclosing deadline propagation, independent subsequent
+calls, completed and pending replay, malformed persisted budgets and unchanged
+provider errors/capability arguments. After those pass, public enablement must
+exercise validation, import inference, compilation, composition and supported
+export modes together. E128 must not be removed solely on private-emitter results.
+
+The full G1–G10 matrix, final paired size/performance report and Linux soak remain
+unfinished. Recent upstream `main` has not been integrated into this branch;
+the committed migration-number conflicts and a new PR remain outstanding. The
+previous audit PR #227 was merged and is not a PR for this implementation branch.
 
 ### Verification for the scope-alarm snapshot (`f8d2d5b5`)
 
