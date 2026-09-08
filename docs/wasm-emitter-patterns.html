@@ -252,12 +252,12 @@ families.push(...[
  {
   "id": "composite-errors",
   "resolved": true,
-  "name": "Agent error propagation",
+  "name": "Child error propagation",
   "category": "Composite error contract",
   "risk": "Fixed",
-  "summary": "Agent failures retain structured fields through Embed and Split; nested Embed restores the parent context before retry or recovery.",
+  "summary": "Structured Agent errors and plain computation failures reach composite retry and recovery; nested Embed restores its parent context.",
   "boundary": "The originating error code, category, retryability and retry delay survive composite handling. Root lifecycle Cancel still bypasses ordinary recovery.",
-  "why": "The old Agent formatter returned a text prefix plus JSON. Embed could not parse it, and Split lost rate-limit classification. The shared producer now returns a JSON object. Nested Embed attempt frames also restore the parent source and mapped child input before retry/recovery.",
+  "why": "The old Agent formatter returned a text prefix plus JSON. Embed could not parse it, and Split lost rate-limit classification. The shared producer now returns a JSON object. Nested Embed attempt frames also restore the parent source and mapped child input before retry/recovery. Plain stdlib failures now remain child diagnostics instead of becoming JSON parse errors.",
   "fixTitle": "Preserve structured errors across scopes",
   "fixSteps": [
    "Agent failures retain structured fields and separate step/capability context, including checkpointed errors.",
@@ -272,8 +272,19 @@ families.push(...[
    "+split_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count",
    "+embed_permanent_agent_error_skips_retries_and_preserves_recovery_fields",
    "+published_nested_embed_retry_restores_input_after_http_error",
-   "+published_nested_embed_retry_after_rate_limit_error_cancels"
+   "+published_nested_embed_retry_after_rate_limit_error_cancels",
+   "+published_pure_embed_backoff_cancels",
+   "+published_pure_split_backoff_cancels",
+   "+pure_embed_errors_preserve_retries_and_recovery",
+   "+pure_split_errors_preserve_retries_and_recovery"
   ],
+  "testFilters": ["nested_retry::", "pure_retry::"],
+  "testFiles": {
+   "published_pure_embed_backoff_cancels": "pure_retry.rs",
+   "published_pure_split_backoff_cancels": "pure_retry.rs",
+   "pure_embed_errors_preserve_retries_and_recovery": "pure_retry.rs",
+   "pure_split_errors_preserve_retries_and_recovery": "pure_retry.rs"
+  },
   "controls": [
    [
     "structured",
@@ -292,7 +303,8 @@ families.push(...[
    [
     "split",
     "Rate-limit error inside Split"
-   ]
+   ],
+   ["pure", "Pure computation error inside Embed"]
   ],
   "testFile": "nested_retry.rs",
   "testFilter": "nested_retry::",
@@ -330,6 +342,12 @@ function cancellationDsl(f,mode,v){
   const child=nondurable('fail',{fail:{id:'fail',stepType:'Error',code:'RETRY_FIXTURE',category:'transient',severity:'error',message:'retry fixture'}});
   return composite(v==='split',child,2,control?(v==='zero'?0:50):60000);
  }
+ if(v==='pure'){
+  const child=nondurable('finish',{finish:finish('finish',{count:{...ref('data.count'),type:'integer'}})});
+  const result=composite(false,child,2,60000);
+  result.root.steps.scope.inputMapping={count:imm('invalid-number')};
+  return result;
+ }
  if(control&&v==='direct')return callGraph(agent(true,1,50));
  const child=control?nondurable('fail',{fail:{id:'fail',stepType:'Error',code:'RETRY_FIXTURE',category:'transient',severity:'error',message:'retry fixture'}}):callGraph(agent(v==='split',0,50),false);
  return composite(v==='split',child,v==='split'?1:2,50);
@@ -355,6 +373,11 @@ function cancellationScenario(f,mode,v){
   expected=cancel?'Cancel the workflow during backoff without issuing another attempt or entering error recovery.':composite?'Three child errors exhaust two retries and produce {"recovered":true}.':'Transient errors are retried and the third request succeeds.';
   observed=historical?'The old blocking sleep did not cooperate with lifecycle cancellation during backoff.':cancel?'The shared canonical timer wait observes cancellation, cleans up and acknowledges it; no further attempt runs.':composite?'Normal and zero-delay retries preserve error counts and recovery output.':'The normal retry count and success result are preserved.';
   texts=[composite?'A structured child failure reaches the enclosing retry loop. Agent errors now use the same structured propagation contract.':'The HTTP or Slack fixture returns a retryable error.',historical?'The old emitter calls the blocking sleep path.':'The emitter uses the shared canonical wait helper. The host supplies a timer; the guest controls retry.',cancel?'The test requests cancellation during the 60-second backoff; its watchdog is five seconds.':'No cancellation is requested; the timer completion permits the next attempt.',observed];
+ }else if(v==='pure'){
+  labels=[['Pure child','invalid integer input'],['Embed boundary','plain stdlib error'],['Retry wait','60-second timer'],['Cancel','parent notification']];
+  expected='Preserve the computation error and cancel cooperatively during the enclosing retry wait.';
+  observed=historical?'Embed rejects plain error text as invalid JSON, bypassing its own retry and recovery path.':'The shared Embed wrapper preserves the plain child error. Its canonical retry wait receives parent cancellation and returns before recovery.';
+  texts=['Finish attempts to coerce invalid-number to an integer. No Agent or Error step runs.',historical?'JSON parsing replaces the computation failure with a wrapper failure.':'Plain text is retained under childError; structured envelopes keep their existing fields.',historical?'The failed wrapper never reaches Embed backoff.':'Published Embed uses the existing shared timer wait without importing root runtime services.',observed];
  }else{
   const split=v==='split',direct=control&&v==='direct';
   labels=[['Child result',control&&!direct?'structured Error':'Agent error'],['Scope boundary',direct?'direct Agent':split?'Split':'EmbedWorkflow'],['Retry decision',split?'rate-limit metadata':'error decoding'],['Outcome',historical?'original defect':'structured contract']];
@@ -454,7 +477,7 @@ function diagram(){
 }
 function updateStep(){diagram();$('step-title').textContent=current.steps[step].title;$('step-copy').textContent=current.steps[step].text;$('trace-count').textContent=`${String(step+1).padStart(2,'0')} / ${String(current.steps.length).padStart(2,'0')} · illustrated trace`;$('next').disabled=step===current.steps.length-1;$('step-dots').innerHTML=current.steps.map((s,i)=>`<button class="${i<=step?'past':''}" data-step="${i}" aria-label="Step ${i+1}: ${esc(s.title.slice(5))}" ${i===step?'aria-current="step"':''}></button>`).join('');}
 function renderDetails(){
- const fileFor=t=>family.followup?'cooperative_workflow_cancellation/'+family.testFile:(['retries','identity'].includes(family.id)||(family.id==='registry'&&t.includes('_step_ids_keep_their_configuration')))?'wasm_emitter_audit.rs':'wasm_emitter_audit/execution.rs';
+ const fileFor=t=>family.followup?'cooperative_workflow_cancellation/'+(family.testFiles?.[t.replace(/^\+/, '')]||family.testFile):(['retries','identity'].includes(family.id)||(family.id==='registry'&&t.includes('_step_ids_keep_their_configuration')))?'wasm_emitter_audit.rs':'wasm_emitter_audit/execution.rs';
  $('why-title').textContent=mode==='control'?'Why this case works':mode==='fix'?(family.resolved?'What changed':'What the fix must address'):(family.resolved?'Why the old emitter failed':'Why it fails');$('why').textContent=mode==='control'?family.boundary:family.why;$('boundary').textContent=mode==='control'?family.why:family.boundary;$('explanation').querySelectorAll('h3')[1].textContent=mode==='control'?(family.resolved?'Historical cause':'Where support breaks'):'Verified boundary';$('evidence').textContent=family.evidence;$('fix-title').textContent=family.fixTitle;$('fix-steps').innerHTML=family.fixSteps.map(t=>`<li>${esc(t)}</li>`).join('');$('pseudocode').textContent=family.pseudo;
  const json=JSON.stringify(current.dsl,null,2);$('dsl-code').textContent=json.length>14000?json.slice(0,14000)+'\n\n… Preview shortened. Copy or download for the complete JSON.':json;
  $('dsl-note').textContent=(current.dsl.root?'Compile input bundle: root graph + preloaded children.':'Complete execution graph.')+(mode==='fix'?(family.resolved?' Original reproduction; updated compiler and stdlib now preserve the expected result.':' Same failing DSL; the proposal changes the compiler.'):'')+(family.id==='state'&&json.length>14000?' Includes the full 100,000-character value in export.':'');
@@ -463,7 +486,7 @@ function renderDetails(){
  if(family.id==='registry') $('command').textContent+='\n\nRUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_04';
  $('test-requirements').textContent=(family.id==='registry'?'First command: native tests. Second: composed WASM, requiring rebuilt shared components.':native?'Native tests; no prebuilt components required.':'Requires current shared workflow components. Uses the in-process host; no database or listening sockets.')+(family.resolved?` All ${family.tests.length} tests pass. Unit tests: ${family.id==='state'?'cargo test -p runtara-workflow-stdlib --lib audit_02':family.id==='signals'?'cargo test -p runtara-workflow-stdlib --lib audit_03; cargo test -p runtara-workflows --lib audit_03':family.id==='registry'?'cargo test -p runtara-workflow-stdlib --lib audit_04; cargo test -p runtara-workflows --lib audit_04':family.id==='timeouts'?'cargo test -p runtara-workflow-stdlib --lib audit_05':family.id==='identity'?'cargo test -p runtara-validation-wasm audit_07; cargo test -p runtara-server --lib step_id_mismatch_maps_to_the_authored_key_and_id_field':family.id==='retries'?'cargo test -p runtara-workflows --lib audit_06; cargo test --release -p runtara-workflows audit_06; cargo test -p runtara-workflow-stdlib --lib audit_06; cargo test --release -p runtara-workflow-stdlib --lib audit_06':'cargo test -p runtara-workflows --lib graph_order::tests'}. ${['state','signals','registry','timeouts'].includes(family.id)?'Rebuild the stdlib; agent cases also require the Utils component and its metadata. ':''}See the audit for verification details.`:' Known failures make this command exit nonzero. See the audit for setup and remaining coverage.');
  if(family.followup){
-  $('command').textContent=`RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute cooperative_workflow_cancellation::${family.testFilter}`;
+  $('command').textContent=(family.testFilters||[family.testFilter]).map(filter=>`RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute cooperative_workflow_cancellation::${filter}`).join('\n\n');
   $('test-requirements').textContent='Use current components built with scripts/build-agent-components.sh and set RUNTARA_AGENT_COMPONENTS_DIR to their output directory. Tests create local fixtures; no production credentials or database are needed. Passing compatibility tests confirm open gaps. See the implementation record for exact verification scope.';
   $('dsl-note').textContent='Illustrative '+(current.dsl.root?'compile bundle (root + preloaded children)':'execution graph')+'. Rust tests supply endpoint responses, publication, and cancellation. This page does not invoke WASM or submit signals.';
  }

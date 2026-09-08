@@ -453,3 +453,14 @@ HTTP/Slack retries through two published levels, nested inline Embed, root neste
 recovery, and pure-child normal output. This expands G2/G6 evidence; it does not
 qualify failing Agent-free callable backoff, durable callable suspension, scoped
 timeouts/grace or the remaining compatibility/performance gates.
+
+### Pure callable retry qualification · 2026-09-08
+
+Qualify failing Agent-free published Embed/Split waits with a plain stdlib
+integer-coercion error. Correct Embed's assumption that every child error is JSON
+in the existing shared wrapper; keep raw diagnostics and existing generic retry
+policy, without extracting policy from JSON fragments in text. Tests cover
+parent cancellation during backoff and root/published zero-retry, zero-delay and
+delayed recovery. This closes the failing pure-callable backoff gap identified
+above; it does not establish scoped timeout/grace, durable callable suspension,
+exact cancellation latency or the remaining compatibility/performance gates.

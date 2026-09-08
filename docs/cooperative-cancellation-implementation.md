@@ -1974,3 +1974,56 @@ E128, durable callable suspension, other remaining G1–G10 gates and fresh pair
 performance measurements remain open. Retaining extra context uses the existing
 guest operand-stack frame; binary-size and timing effects have not yet been
 measured for this revision.
+
+## Pure computation failures through published retries (2026-09-08)
+
+A failing runtime-free child now reaches Embed retry and recovery. The new
+reproduction uses only Finish input coercion: `data.count = "invalid-number"`
+with an integer type hint. Before this change Split retried this plain stdlib
+error, but Embed tried to parse it as JSON and returned a second failure,
+`failed to parse EmbedWorkflow child error`, before its own retry or onError
+handler. Published wrappers could therefore recover unexpectedly before a Cancel
+notification arrived. Both failing Embed tests reproduced this behavior against
+the preceding revision's components.
+
+Both shared Embed error exports now accept JSON or plain error text. JSON remains
+unchanged under `childError`; other bytes become a lossily decoded string there,
+matching terminal error diagnostics. Plain failures retain the existing generic
+`CHILD_WORKFLOW_FAILED` code and transient composite retry policy. Embedded JSON
+fragments inside text do not become policy fields. Structured category, code,
+retryability and delay propagation remain unchanged. This corrects the failure
+contract for newly composed artifacts; the lowering cache identity includes
+`plain-child-errors=v1`. No host task management or component ABI was added.
+
+`cooperative_workflow_cancellation/pure_retry.rs` exercises both Embed and Split:
+
+- Cancellation during a 60-second retry delay through two published workflow
+  components, with a five-second execution watchdog. The child has no Agent,
+  Error step or root runtime import. Acknowledgement occurs, recovery/terminal
+  publication does not, and no checkpoint, durable sleep or event is written.
+- Root and published recovery for zero retries, two delayed retries and two
+  zero-delay retries. The output retains the actual integer-coercion failure;
+  delayed cases verify that the configured waits were not skipped.
+
+The cancellation fixture sends the signal 1.5 seconds after execution begins;
+its finite child has no blocking work except retry timers. This is a backoff
+interruption check, not a deterministic simultaneous-readiness race test or a
+measurement of production cancellation latency. Normal delayed runs establish
+that the failure enters backoff. Exact attempt counts are not instrumented in
+these pure children; provider and Error-step fixtures cover counted attempts.
+
+The stdlib unit matrix also covers plain/empty text, invalid UTF-8, JSON strings,
+null, numbers, arrays and embedded JSON fragments through scoped/unscoped and
+nested wrappers. Existing structured-error tests run through both exports.
+The illustration adds a pure-child historical/fixed trace under AUDIT-12.
+
+Validation: all components rebuilt; stdlib 235 passed, 1 ignored (plus
+one doctest); compiler library 579 passed; all four new execution test functions
+passed (14 executions); feature-gated Clippy passed. All 100 illustration
+scenarios generate and all composite-error test links resolve. Browser inspection
+confirmed the new trace, step progression and commands for both regression suites.
+Full emitted-workflow execution: 383 passed, 3 ignored, no failures. The rebuilt
+callback/error contract passed for all 27 Agents. No database or server E2E,
+resource soak, or fresh size/timing comparison was run. Scoped
+Agent/Embed timeouts, durable callable suspension and the remaining G1–G10 gates
+are still open.

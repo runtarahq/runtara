@@ -1469,3 +1469,5 @@ async fn emitted_embed_cancel_cleans_parallel_child_branches() -> anyhow::Result
 
 #[path = "composite_retry.rs"]
 mod composite_retry;
+
+mod pure_retry;

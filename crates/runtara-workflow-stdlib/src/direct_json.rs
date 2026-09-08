@@ -1662,8 +1662,7 @@ impl DirectJsonManifest {
         step_id: &str,
         child_error: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let child_error: Value = serde_json::from_slice(child_error)
-            .map_err(|err| format!("failed to parse EmbedWorkflow child error: {err}"))?;
+        let child_error = decode_embed_child_error(child_error);
         let step = self.embed_workflow_step(step_id)?;
         let child = self.child_workflow(step_id)?;
         let result = embed_workflow_error_value(step, child, child_error);
@@ -1679,8 +1678,7 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
-        let child_error: Value = serde_json::from_slice(child_error)
-            .map_err(|err| format!("failed to parse EmbedWorkflow child error: {err}"))?;
+        let child_error = decode_embed_child_error(child_error);
         let step = self.embed_step_scoped(step_id, &source)?;
         let child = self.child_workflow(step_id)?;
         serde_json::to_vec(&embed_workflow_error_value(step, child, child_error))
@@ -5832,6 +5830,15 @@ fn embed_workflow_step_value(
         "childWorkflowId": child.workflow_id,
         "outputs": output,
     })
+}
+
+fn decode_embed_child_error(error: &[u8]) -> Value {
+    // Computation helpers return plain WIT strings; Agent/Error steps return
+    // JSON envelopes. Both are failures of the child, not of this wrapper.
+    // Preserve JSON as-is and retain plain text without interpreting embedded
+    // JSON fragments as retry policy, matching the workflow retry classifier.
+    serde_json::from_slice(error)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(error).into_owned()))
 }
 
 fn embed_workflow_error_value(
@@ -11874,7 +11881,46 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        manifest.embed_workflow_error("embed", error).unwrap()
+        let wrapped = manifest.embed_workflow_error("embed", error).unwrap();
+        assert_eq!(
+            manifest
+                .embed_workflow_error_scoped("embed", br#"{}"#, error)
+                .unwrap(),
+            wrapped
+        );
+        wrapped
+    }
+
+    #[test]
+    fn embed_plain_computation_failures_preserve_payload_and_retry_policy() {
+        for error in [
+            b"value \"abc\" cannot be coerced to integer".as_slice(),
+            b"",
+            b"not UTF-8: \xff",
+            br#"prefix {"category":"permanent","retryable":false}"#,
+            br#""JSON string""#,
+            b"null",
+            b"42",
+            br#"[{"retryable":false}]"#,
+        ] {
+            let expected = serde_json::from_slice::<Value>(error)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(error).into_owned()));
+            let wrapped = wrap_agent_error_in_embed(error);
+            let value: Value = serde_json::from_slice(&wrapped).unwrap();
+            assert_eq!(value["childError"], expected);
+            assert_eq!(value["code"], "CHILD_WORKFLOW_FAILED");
+            assert_eq!(value["category"], "transient");
+            assert!(DirectJsonManifest::workflow_error_retryable(&wrapped));
+            assert!(!DirectJsonManifest::workflow_error_rate_limited(&wrapped));
+            assert_eq!(
+                DirectJsonManifest::workflow_error_retry_after_ms(&wrapped),
+                None
+            );
+            let nested = wrap_agent_error_in_embed(&wrapped);
+            let nested_value: Value = serde_json::from_slice(&nested).unwrap();
+            assert_eq!(nested_value["childError"], value);
+            assert!(DirectJsonManifest::workflow_error_retryable(&nested));
+        }
     }
 
     #[test]

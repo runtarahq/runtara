@@ -1154,3 +1154,29 @@ Execution cases are in `cooperative_workflow_cancellation/nested_retry.rs`.
 Compiler and safety tests cover runtime ownership and import validity. Pure-child
 normal execution does not prove cancellation inside a failing Agent-free
 callable retry. E128 and the AUDIT-08 retry-policy differences remain unchanged.
+
+### AUDIT-12 follow-up: plain computation errors (2026-09-08)
+
+The published Agent-free retry qualification exposed another child-error contract
+gap: stdlib computation helpers return plain WIT error strings. Embed's shared
+error wrapper demanded JSON, so an integer-coercion failure became a parse error
+and bypassed that Embed's retry/recovery. The equivalent Split cases passed.
+This was reproduced in both root recovery and published cancellation tests before
+the fix.
+
+Both Embed wrappers now preserve plain errors under `childError` and retain the
+existing generic code/transient retry policy. Structured payloads keep their
+fields; JSON fragments inside plain text cannot override retry policy. Native
+unit tests cover scoped/unscoped and nested wrapping, empty/invalid UTF-8 text,
+JSON scalar/array values, and structured errors. The executable regressions are
+in `crates/runtara-workflows/tests/cooperative_workflow_cancellation/pure_retry.rs`:
+
+- `published_pure_embed_backoff_cancels`
+- `published_pure_split_backoff_cancels`
+- `pure_embed_errors_preserve_retries_and_recovery`
+- `pure_split_errors_preserve_retries_and_recovery`
+
+These tests use no Agent in the failing graph and cover root/published recovery,
+zero retries/delay, actual delayed retries, and cancellation through two published
+components. See the implementation record for timing assumptions and verification
+scope. E128 remains in force; this does not release scoped Agent/Embed timeouts.
