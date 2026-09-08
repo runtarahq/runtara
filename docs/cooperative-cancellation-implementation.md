@@ -22,6 +22,44 @@ E2E, multi-owner routing and remaining P3 timeout/race work are still open.
 Lifecycle acknowledgements and post-run fallback preserve accepted terminal
 outcomes.
 
+## Async-cancel grace qualification · 2026-09-08
+
+Five composed tests in `cooperative_cancellation/async_cancel_grace.rs` qualify
+the optional standard `canon subtask.cancel async` operation on Wasmtime 46.0.1.
+The production engine rejects this ABI today. Only the test engine enables
+`wasm_component_model_more_async_builtins`; no product selector is introduced.
+
+While cleanup awaits I/O, async cancel returns `BLOCKED`, and the parent can wait
+on both the original subtask and the existing timer import. Cleanup can either
+acknowledge cancellation or return normally. Both cases are exercised twice in
+the same instance. A stalled cleanup lets the parent observe grace expiry; the
+fixture deliberately traps rather than report successful cleanup. Pending I/O
+is disposed when the whole Store is destroyed.
+
+A callback entering an infinite CPU loop prevents even async cancel from
+returning. The proof observes repeated epoch yields to the host but no parent
+continuation or guest grace selection. The independent epoch watchdog interrupts
+the entire run. This matches the pinned engine's `subtask_cancel` implementation:
+it yields to a cancellable callee before checking whether to return `BLOCKED`.
+
+The extension therefore supplies an I/O cleanup wait, not a complete bounded
+grace implementation. Production adoption still needs independent whole-run
+watchdog coverage for scoped deadlines, including nested and runtime-free
+published workflows. Existing root Stop already arms that watchdog externally;
+this does not establish scoped timeout coverage. No emitter, guest binding,
+production engine, WIT, cache identity or E128 behavior changes in this proof.
+
+Validation: all five focused cases passed; the full component-cancellation suite
+passed **91 tests** in 64.17s. The tests assert exact trace order, cancellation
+resolution, trap type, resource disposal and repeated instance use. After changing
+the success cases to cancel a generous timer instead of racing a short deadline,
+all five focused tests passed again in 0.64s. This also verifies asynchronous
+cancellation and resolution of the pending host timer. Feature-gated component
+host Clippy, formatting, diff whitespace and HTML JavaScript syntax checks passed.
+No agent
+rebuild, workflow execution suite, server E2E, Linux/soak or performance comparison
+was run for this test-only qualification. AUDIT-17 records the cases and limits.
+
 ## P0: initial ABI inventory
 
 The following records the starting state before the HTTP binding update below

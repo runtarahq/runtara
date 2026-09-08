@@ -773,3 +773,33 @@ Keep G5/G6 and E128 open for simultaneous readiness/expiry races, deeper mixed
 handled exits, concurrent retries and independent cleanup grace. The full G1–G10,
 publication, compatibility-retirement, Linux/soak/performance and PR requirements
 remain unchanged.
+
+### Non-blocking cancellation qualification · 2026-09-08
+
+The pinned Wasmtime 46.0.1 accepts `canon subtask.cancel async` only with
+`wasm_component_model_more_async_builtins(true)`. The production engine rejects
+it today. A test-only engine qualifies this standard ABI without changing the
+product engine, emitted artifacts, default path or E128.
+
+The composed proof in `cooperative_cancellation/async_cancel_grace.rs` establishes:
+
+- Pending I/O cleanup can return `BLOCKED` to the parent. The parent retains the
+  original handle in its waitable set and can observe a grace timer independently
+  of that I/O. A completed cleanup can acknowledge cancellation or return normally;
+  both resolutions release handles and allow repeated use of the same instance.
+- Expired grace with unresolved cleanup must end the whole execution. The proof
+  deliberately traps and verifies that Store disposal releases the pending I/O;
+  it does not report a recoverable step error or successful cancellation.
+- A cancellation callback entering an infinite CPU loop prevents the async cancel
+  from returning to the parent at all. Epoch yields let the host run, but do not
+  resume the parent to observe its grace timer. An independent epoch watchdog
+  terminates this case. Async cancel alone therefore cannot close G5/G8.
+
+Do not adopt the extension as a complete grace solution. Before production use,
+establish how the existing whole-run watchdog receives the scoped deadline/grace
+budget before potentially noncooperative cleanup begins, including nested and
+runtime-free published workflows. Keep guest ownership of scopes and selection;
+do not add per-Agent tasks or a host graph registry. Existing root Stop already
+arms independent grace, but that does not prove scoped deadline escalation.
+Qualification of immediate/queued/racing cancellation and the production emitter
+is still required before changing the default ABI. See AUDIT-17 for exact tests.

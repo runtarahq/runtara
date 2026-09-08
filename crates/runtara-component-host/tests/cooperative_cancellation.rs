@@ -355,3 +355,6 @@ mod real_sharepoint_shopify;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/deadline.rs"]
 mod deadline;
+
+#[path = "cooperative_cancellation/async_cancel_grace.rs"]
+mod async_cancel_grace;

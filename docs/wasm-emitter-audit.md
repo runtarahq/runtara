@@ -1526,3 +1526,37 @@ when a timed window is active; helper code size and preparation latency still
 need the planned paired measurements. Simultaneous completion/timeout/parent
 races, deeper mixed handled exits, independent cleanup grace and public release
 qualification remain open. E128 remains in place.
+
+### AUDIT-17 · Async cancellation does not eliminate independent abort
+
+**Status: runtime qualification; production behavior unchanged.** The current
+engine rejects `canon subtask.cancel async`. Wasmtime 46.0.1 can enable it using
+`wasm_component_model_more_async_builtins(true)`; that capability is enabled only
+in these tests. No product flag, host task registry, or per-Agent implementation
+is added.
+
+The fixture composes a parent and a callback Agent in one Store. Its original
+request remains pending until cancelled. Cleanup either waits for I/O, returns,
+acknowledges cancellation, or enters an infinite CPU loop. The parent uses the
+existing host-I/O timer import and standard waitable sets/subtask handles.
+
+| Case | Observed behavior | Test in `cooperative_cancellation/async_cancel_grace.rs` |
+| --- | --- | --- |
+| Current production engine | Rejects the additional async-cancel ABI with the expected validation error | `async_cancel_requires_an_additional_engine_capability` |
+| Cleanup awaits I/O, then acknowledges | Cancel returns `BLOCKED`; parent resumes before cleanup can complete; original handle resolves cancelled; same instance works twice | `async_cancel_allows_cleanup_ack_and_repeated_instance_use` |
+| Cleanup returns normally | Original handle resolves returned; same instance remains usable | `async_cancel_allows_return_during_cleanup` |
+| Cleanup I/O never completes | Parent observes grace expiry and traps; no false completion; Store teardown disposes the remaining I/O | `async_cancel_allows_guest_grace_during_pending_cleanup_io` |
+| Cleanup callback loops forever | Parent never returns from async cancel; epoch yields do not deliver its timer; independent whole-run epoch interruption terminates execution | `async_cancel_still_needs_independent_abort_for_cpu_cleanup` |
+
+`BLOCKED` is `0xffffffff`, not a terminal status or permission to drop a handle.
+The caller must await resolution on the original subtask before dropping it.
+The tests assert exact event order and actual trap types, and count pending host
+futures before and after Store destruction. The CPU proof has a separately
+running, joined epoch ticker and a bounded host watchdog.
+
+**Consequence:** the extension is useful for cleanup that cooperates through I/O,
+but cannot independently enforce grace against CPU cleanup. Keep the independent
+host abort mechanism. Its integration with scoped deadlines must cover nested
+and runtime-free workflows before enabling Agent/Embed timeout syntax. These
+fixtures do not implement production grace, prove arbitrary native-call
+interruption, or remove E128.
