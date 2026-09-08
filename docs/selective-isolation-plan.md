@@ -1162,3 +1162,19 @@ execution/replay/export contracts before removing their decoder and runner. This
 stage does not qualify native lifecycle recovery, Linux soak or final paired
 measurements. See AUDIT-35 for tests and results. Keep commits local until the
 user explicitly requests a push.
+
+
+### Composed late-completion qualification · 2026-09-08
+
+AUDIT-36 executes publicly compiled Agent/Embed/While and parallel workflows with
+an Agent that returns success during cancellation cleanup. A selected timeout
+or root Cancel keeps its outcome; no automatic retry or late-success checkpoint
+is allowed. Recovery proves the same component retained cleanup state, and root
+acknowledgement requires observed cleanup. Positive ready-completion controls
+prove ordinary continuation still works. Six groups cover 20 composed runs.
+
+No production code or cache identity changes in this stage. This covers late
+completion after selection, not the distinct simultaneous-ready scheduling tie.
+Keep G4/G5 and the broader G1–G10 release gates open for the remaining matrix,
+including lifecycle recovery, artifact inventory, performance and upstream
+integration. Commits remain local until the user explicitly requests a push.

@@ -11,7 +11,9 @@ The memory, tool-name and public-timeout stages are committed locally as
 `ce58265e`, `2752aa83` and `f9ff11c6`. Failed-attempt checkpoint cancellation is
 committed as `217e11ae` (AUDIT-33). Breakpoint checkpoint handling is committed as
 `ef95a0dd` (AUDIT-34). AUDIT-35 removes production selection of the superseded
-isolation compiler while retaining compatibility support for older artifacts.
+isolation compiler while retaining compatibility support for older artifacts
+(committed as `561eb259`). AUDIT-36 adds real composed late-completion coverage
+through the production DSL emitter.
 No push is authorized; the latest pushed stage is `6de29584`.
 
 **Implementation is in progress; this snapshot is not release qualification.**
@@ -46,6 +48,10 @@ Implemented and covered by focused tests:
 - Runner control now uses a unique physical handle for each accepted handoff,
   even when pre-start recovery reuses a durable launch ID. Stale Stop/grace/wait
   calls and old occupancy cleanup cannot target the replacement (AUDIT-25).
+- A late value returned by an Agent cancellation callback cannot replace selected
+  Agent/Embed/While/parallel timeout or root Cancel. Recovery reuses the same
+  component only after cleanup; root acknowledgement follows cleanup and cannot
+  enter ordinary recovery (AUDIT-36).
 - New server, library and CLI compilation uses standard component composition.
   The old isolation policy cannot select child-task packaging or change the
   compiler cache identity. Runtime approvals remain available for older artifacts;
@@ -84,6 +90,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Late completion (AUDIT-36) | Six new groups passed: 20 composed runs covering timeout, root Cancel and normal completion | Public DSL emitter plus normally composed fixture Agent; cleanup events, same-component reuse and real checkpoint records. Simultaneous-ready scheduling and native lifecycle E2E remain separate gates. |
 | Production isolation selection retirement (AUDIT-35) | Default production build and Clippy; 24 server config, 609 compiler, 28 compatibility execution and six CLI tests passed; legacy runner integration target compiled | New output has no isolation catalog/custom task import. Native runner target was compile-only; registered/parked inventory, full lifecycle E2E and final benchmarks remain open. |
 | Breakpoint cancellation (AUDIT-34) | 35 breakpoint tests; 609 compiler tests outside the deadline execution module; six checkpoint regressions; three public breakpoint execution tests; feature-gated Clippy passed | Counts overlap. Seven new composed regression groups cover receipt handling, marker replay and rejected Pause. Wider deadline/lifecycle/benchmark gates remain open. |
 | Checkpoint cancellation (AUDIT-33) | Six new composed test groups passed in 2.98s; full library: 706 passed, one stale cache-tag assertion failed; corrected assertion rerun passed; 91 public retry tests and feature-gated Clippy passed | Public compilation, real HTTP, one checkpoint delivery, saved outcomes, pending-peer cleanup before acknowledgement and Pause replay. No new native lifecycle E2E or performance claims. |
@@ -2653,3 +2660,68 @@ export compatibility qualification, then retirement of any unneeded native
 isolation machinery. Broader G1–G10 race/recovery, Linux soak, final paired
 measurements and upstream integration remain open. Commits remain local; a push
 requires an explicit user request.
+
+
+### AUDIT-36 — Late completion after cancellation selection
+
+**Status:** existing production behavior verified with new composed regressions;
+no emitter, native production code, WIT contract or cache-tag change.
+The earlier late-return proof used a hand-written parent. These tests compile
+authored Agent/Embed/While timeouts and parallel branches through the public DSL
+compiler, then use normal component composition and `WorkflowExecutor`.
+
+`late_completion_tests.rs` supplies an Agent fixture that waits on a five-minute
+standard timer. Its cancellation callback drops the pending subtask and waitable
+set, reports cleanup through a test event, and calls normal `task.return` with a
+success value. That value arrives after the parent selected cancellation. The
+next invocation in recovery traps unless the same component retained the first
+invocation's cleanup state. Extra invocations also trap. The runtime test host
+only observes events and supplies a root Cancel on entry when that case requests
+it; guest code owns timeout selection, cleanup and recovery.
+
+| Case | Required result |
+| --- | --- |
+| Agent timeout with three configured retries | `AGENT_TIMEOUT`, nonretryable; late success discarded, no retry, same component reused in recovery |
+| Enclosing While timeout | `WHILE_TIMEOUT`; child cleanup value cannot replace the enclosing outcome; existing absent retryable field remains null |
+| Embed timeout with three configured retries | `EMBED_TIMEOUT`, nonretryable; child cleaned before parent recovery |
+| Own Agent timeout in an actual parallel pool | `AGENT_TIMEOUT`, nonretryable; late callback value rejected by the production window/scheduler path |
+| Root Cancel at Agent entry in all four shapes | Cleanup observed before acknowledgement; suspended cancellation outcome, no ordinary recovery or late-success checkpoint |
+| Ordinary ready completion in all four shapes | Normal continuation, no cancellation callback or acknowledgement |
+
+Timeout and root-Cancel cases run in durable and non-durable modes. Positive
+completion controls use durable mode. Six test groups cover **20 composed runs**.
+Every cancelling case asserts one real Agent entry and one cleanup callback. The
+durable retry-enabled Agent checks actual saved failed-attempt envelopes for
+`AGENT_TIMEOUT`. Nonretrying parallel failures and enclosing-scope cancellation
+save no late child result, matching the existing persistence policy.
+
+The final six-group selection passed in **7.93s**. During fixture development,
+the parallel seed was missing its required input, so recovery ran before the
+timed call; correcting the fixture resolved that failure. Assertions were also
+aligned with existing While error fields and failed-attempt checkpoint policy.
+These were fixture corrections, not production defects.
+
+The related `checkpoint` selection passed **43 tests in 133.30s**, including
+checkpoint cancellation/replay, parallel HTTP/preparation and emergency cleanup
+alarm cases that share this test host. These selections are not a fresh full
+compiler or public execution suite. No Agent source, production component or WIT
+changed; existing built components were reused, and the new fixture is compiled
+from WAT by the tests. Native server/database lifecycle E2E, browser rebuilds,
+paired benchmarks and Linux soak were not rerun. Feature-gated all-target Clippy
+passed in **5.25s**; formatting and diff whitespace checks passed.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib late_completion -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib checkpoint -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+This advances G4/G5/G6/G7 coverage for a return arriving during cleanup. It does
+not prove simultaneous-ready event ordering in a fully emitted workflow: the
+existing deterministic helper and hand-written component proofs remain the
+evidence for that distinct tie case. Broader owner recovery, persistence E2E,
+registered/parked artifact inventory, Linux soak, final paired measurements and
+upstream integration remain open. This timer fixture does not replace real HTTP
+header/body cleanup tests or validate cancellation inside arbitrary CPU loops.

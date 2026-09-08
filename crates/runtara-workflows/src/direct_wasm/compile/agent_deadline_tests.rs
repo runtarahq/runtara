@@ -16,6 +16,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[path = "deadline_cleanup_tests.rs"]
 mod cleanup;
 
+#[path = "late_completion_tests.rs"]
+mod late_completion;
+
 #[path = "scope_alarm_tests.rs"]
 mod scope_alarm;
 
@@ -56,6 +59,9 @@ struct Host {
     breakpoint_pause_error: Mutex<Option<String>>,
     breakpoint_hits: AtomicUsize,
     reject_checkpoint_signal: AtomicBool,
+    late_return_cancel_on_start: AtomicBool,
+    late_return_starts: AtomicUsize,
+    late_return_cleanups: AtomicUsize,
 }
 impl Host {
     fn new() -> Self {
@@ -83,6 +89,9 @@ impl Host {
             breakpoint_pause_error: Mutex::new(Some("unexpected breakpoint".into())),
             breakpoint_hits: AtomicUsize::new(0),
             reject_checkpoint_signal: AtomicBool::new(false),
+            late_return_cancel_on_start: AtomicBool::new(false),
+            late_return_starts: AtomicUsize::new(0),
+            late_return_cleanups: AtomicUsize::new(0),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -135,6 +144,15 @@ impl RuntimeHost for Host {
         Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        if kind == "late-return-start" {
+            self.late_return_starts.fetch_add(1, Ordering::SeqCst);
+            if self.late_return_cancel_on_start.load(Ordering::SeqCst) {
+                self.cancel.store(true, Ordering::SeqCst);
+            }
+        }
+        if kind == "late-return-cleanup" {
+            self.late_return_cleanups.fetch_add(1, Ordering::SeqCst);
+        }
         if kind == "breakpoint_hit" {
             self.breakpoint_hits.fetch_add(1, Ordering::SeqCst);
         }
@@ -275,6 +293,13 @@ impl RuntimeHost for Host {
             tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
                 .await
                 .map_err(|_| "cancellation acknowledgement preceded pending call cleanup")?;
+        }
+        if self.late_return_cancel_on_start.load(Ordering::SeqCst) {
+            assert_eq!(
+                self.late_return_cleanups.load(Ordering::SeqCst),
+                1,
+                "root acknowledgement must follow the returning cleanup callback"
+            );
         }
         assert!(!self.acknowledged.swap(true, Ordering::SeqCst));
         Ok(true)
