@@ -992,3 +992,28 @@ delivery. It is necessary to prevent a delayed abort from hitting a replacement;
 it does not itself prove that an owner is alive or has lost its right to run.
 Startup's live-peer recovery bug and the remaining whole-run lifecycle work in
 the preceding section remain open. See AUDIT-25 and the implementation record.
+
+
+### Owner fencing and remote grace progress · 2026-09-08
+
+Running launches retain their existing dispatcher ownership lease. The existing
+physical-run monitor renews it and aborts that run if renewal loses ownership or
+exceeds its conservative local bound. Startup/heartbeat recovery checks expiry
+under the launch/physical-registration locks; drain only handles local runs.
+AUDIT-26 records the implementation and its remaining failure/capacity risks.
+
+Remote whole-run emergency grace now travels through the existing physical
+registration, with owner acknowledgement after `schedule_abort` accepts the
+native timer. The launch dispatcher's existing pass delivers bounded batches.
+A peer must observe that acknowledgement or an accepted terminal outcome before
+reporting success; an unconfirmed request remains an error. Guest Cancel signals
+and graph/scope behavior remain unchanged. There are no product flags, extra
+workers, per-step task registries or custom guest imports.
+
+The four authenticated owner/peer header/body cancellation cases pass. Native
+regressions cover remote spin/initializer abort, missing confirmation, delayed
+and duplicate deadlines and replacement handles. AUDIT-27 and the implementation
+record carry the current evidence. Extend qualification to owner loss/recovery,
+partitions, database clock changes, small pools, concurrent transitions and load.
+Include the new indexed deadline scan and lease writes in G10 measurements.
+Do not retire E128 or close G1–G10 on this lifecycle evidence.

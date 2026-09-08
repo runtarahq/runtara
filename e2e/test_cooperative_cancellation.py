@@ -273,7 +273,8 @@ class TestServer:
         graph = {"name": "Authenticated cancellation", "durable": True, "entryPoint": "fetch",
                  "steps": {"fetch": {"id": "fetch", "stepType": "Agent", "agentId": "http",
                                       "capabilityId": "http-request", "maxRetries": 3,
-                                      "inputMapping": {"url": {"valueType": "immediate", "value": url}}},
+                                      "inputMapping": {"url": {"valueType": "immediate", "value": url},
+                                                       "timeout_ms": {"valueType": "immediate", "value": 90000}}},
                            "finish": {"id": "finish", "stepType": "Finish"},
                            "recovery": {"id": "recovery", "stepType": "Finish"}},
                  "executionPlan": [{"fromStep": "fetch", "toStep": "finish"},
@@ -308,6 +309,28 @@ class TestServer:
                     assert after_start[key] == running[key], (
                         "peer startup changed the live execution before Stop", key,
                         running[key], after_start[key])
+            if cross_owner and mode == "headers":
+                # Hold beyond a complete 30-second running lease, then shut
+                # down an unrelated peer. Neither may retire the owner's run.
+                def owner_lease():
+                    return self.sql("runtime", f"""SELECT json_build_object(
+                        'owner', lease_owner, 'expiry', EXTRACT(EPOCH FROM lease_expires_at))
+                        FROM instance_launches WHERE launch_id='{running["run"]["launch_id"]}';""")
+                initial_lease = owner_lease()
+                assert initial_lease["owner"] and initial_lease["expiry"], initial_lease
+                time.sleep(32)
+                renewed_lease = owner_lease()
+                assert renewed_lease["owner"] == initial_lease["owner"], "live execution changed owners"
+                assert renewed_lease["expiry"] > initial_lease["expiry"], "running lease was not renewed"
+                _, drain_peer = self.launch_server("drain-probe")
+                self.stop_process(drain_peer)
+                after_drain = self.state(ident)
+                for key in ["status", "run", "launches", "recovery_attempts", "pending"]:
+                    assert after_drain[key] == running[key], (
+                        "renewal or peer drain changed the live execution", key,
+                        running[key], after_drain[key])
+                assert not call["closed"].is_set(), "renewal or peer drain closed the owner's HTTP"
+                print("PASS sustained owner renewal and unrelated peer shutdown", flush=True)
             path = f"/api/runtime/workflows/instances/{ident}/stop"
             for label, token, expected in [
                 ("missing", False, 401),

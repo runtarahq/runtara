@@ -864,7 +864,39 @@ pub async fn handle_stop_instance(
     match state.runner.schedule_abort(&handle, abort_at).await {
         Ok(true) => {}
         Ok(false) => {
-            return stop_after_handle_retired(state, &request).await;
+            // Cooperative signals are already durable. A peer additionally
+            // needs proof that the physical owner armed whole-run emergency
+            // grace; persisting a request alone is not that proof.
+            let delivery = async {
+                let Some(deadline) = container_registry.request_abort(&handle, abort_at).await?
+                else {
+                    return stop_after_handle_retired(state, &request).await;
+                };
+                loop {
+                    if container_registry.abort_is_armed(&handle, deadline).await?
+                        || state
+                            .persistence
+                            .get_instance_meta(&request.instance_id)
+                            .await?
+                            .is_some_and(|instance| instance.status.is_terminal())
+                    {
+                        return Ok(StopInstanceResponse {
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            };
+            // This bounds acknowledgement waiting only. The persisted deadline
+            // retains the original request budget, including zero grace.
+            return match tokio::time::timeout(std::time::Duration::from_secs(5), delivery).await {
+                Ok(result) => result,
+                Err(_) => Ok(StopInstanceResponse {
+                    success: false,
+                    error: Some("Cancellation was signalled, but its owner did not confirm the emergency deadline".into()),
+                }),
+            };
         }
         Err(error) => {
             return Ok(StopInstanceResponse {

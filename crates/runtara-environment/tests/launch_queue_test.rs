@@ -1321,3 +1321,224 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
         context.cleanup_tenant(&fixture.tenant_id).await;
     }
 }
+
+async fn owned_mock_execution(
+    context: &TestContext,
+) -> (LaunchFixture, Arc<MockRunner>, RunnerHandle) {
+    let (fixture, _, mut container) = owned_running_registration(context).await;
+    let runner = Arc::new(MockRunner::never_completing());
+    let handle = runner
+        .try_launch_detached(&runtara_environment::runner::LaunchOptions {
+            launch_id: container.launch_id.clone(),
+            instance_id: fixture.instance_id.clone(),
+            tenant_id: fixture.tenant_id.clone(),
+            wasm_path: std::env::current_exe().unwrap(),
+            requires_lifecycle_invoke: false,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: serde_json::json!({}),
+            timeout: Duration::from_secs(60),
+            checkpoint_id: None,
+            env: Default::default(),
+            prepersisted_input: None,
+            start_gate: None,
+        })
+        .await
+        .unwrap();
+    container.container_id = handle.handle_id.clone();
+    runtara_environment::container_registry::ContainerRegistry::new(context.pool.clone())
+        .register(&container)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !runner.is_running(&handle).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    (fixture, runner, handle)
+}
+
+#[tokio::test]
+async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
+    use runtara_environment::{
+        container_registry::ContainerRegistry,
+        handlers::{EnvironmentHandlerState, StopInstanceRequest, handle_stop_instance},
+    };
+    let context = TestContext::new().await.unwrap();
+    let (fixture, runner, handle) = owned_mock_execution(&context).await;
+    let persistence = Arc::new(PostgresPersistence::new(context.pool.clone()));
+    let peer_runner = Arc::new(MockRunner::never_completing());
+    let peer = EnvironmentHandlerState::new(
+        context.pool.clone(),
+        persistence.clone(),
+        peer_runner.clone(),
+        std::env::temp_dir(),
+    );
+    let instance_id = fixture.instance_id.clone();
+    let stop = tokio::spawn(async move {
+        handle_stop_instance(
+            &peer,
+            StopInstanceRequest {
+                instance_id,
+                reason: "peer Stop".into(),
+                grace_period_seconds: 1,
+            },
+        )
+        .await
+        .unwrap()
+    });
+    let registry = ContainerRegistry::new(context.pool.clone());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let requested: bool = sqlx::query_scalar("SELECT abort_deadline_at IS NOT NULL FROM container_registry WHERE instance_id = $1")
+                .bind(&fixture.instance_id).fetch_one(&context.pool).await.unwrap();
+            if requested { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert!(
+        !stop.is_finished(),
+        "persisting a request cannot establish delivery"
+    );
+    assert_eq!(
+        registry
+            .deliver_abort_requests("wrong-owner", runner.as_ref(), 32)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        registry
+            .deliver_abort_requests("live-owner", peer_runner.as_ref(), 32)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !stop.is_finished(),
+        "a peer without the physical handle cannot acknowledge"
+    );
+    assert_eq!(
+        registry
+            .deliver_abort_requests("live-owner", runner.as_ref(), 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(stop.await.unwrap().success);
+    assert_eq!(
+        registry
+            .deliver_abort_requests("live-owner", runner.as_ref(), 32)
+            .await
+            .unwrap(),
+        0
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    // The mock ignores cooperative signals. Native timer delivery must not
+    // fabricate the guest's acknowledgement or publish a cooperative outcome.
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await.0,
+        "running"
+    );
+    assert!(
+        persistence
+            .get_pending_signal(&fixture.instance_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+#[tokio::test]
+async fn remote_grace_never_extends_and_cannot_follow_a_replacement_handle() {
+    use runtara_environment::container_registry::ContainerRegistry;
+    let context = TestContext::new().await.unwrap();
+    let (fixture, runner, handle) = owned_mock_execution(&context).await;
+    let registry = ContainerRegistry::new(context.pool.clone());
+    let now = tokio::time::Instant::now();
+    let first = registry
+        .request_abort(&handle, now + Duration::from_secs(30))
+        .await
+        .unwrap()
+        .unwrap();
+    let earlier = registry
+        .request_abort(&handle, now + Duration::from_millis(50))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(earlier < first);
+    assert_eq!(
+        registry
+            .request_abort(&handle, now + Duration::from_secs(60))
+            .await
+            .unwrap(),
+        Some(earlier)
+    );
+    // Updating the same registration cannot erase an accepted control request.
+    let mut container = registry.get(&fixture.instance_id).await.unwrap().unwrap();
+    registry.register(&container).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        registry
+            .deliver_abort_requests("live-owner", runner.as_ref(), 32)
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        runner.wait_for_exit(&handle, Duration::from_millis(5)),
+    )
+    .await
+    .unwrap();
+    assert!(registry.abort_is_armed(&handle, earlier).await.unwrap());
+    // Reuse the durable launch but replace the physical registration. Old
+    // requests and acknowledgements must no longer address this execution.
+    container.container_id = Uuid::new_v4().to_string();
+    registry.register(&container).await.unwrap();
+    assert!(!registry.abort_is_armed(&handle, earlier).await.unwrap());
+    assert_eq!(registry.request_abort(&handle, now).await.unwrap(), None);
+    let empty: bool = sqlx::query_scalar("SELECT abort_deadline_at IS NULL AND abort_armed_deadline_at IS NULL FROM container_registry WHERE instance_id = $1")
+        .bind(&fixture.instance_id).fetch_one(&context.pool).await.unwrap();
+    assert!(empty);
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+#[tokio::test]
+async fn peer_stop_does_not_claim_delivery_when_owner_never_confirms() {
+    use runtara_environment::handlers::{
+        EnvironmentHandlerState, StopInstanceRequest, handle_stop_instance,
+    };
+    let context = TestContext::new().await.unwrap();
+    let (fixture, runner, handle) = owned_mock_execution(&context).await;
+    let peer = EnvironmentHandlerState::new(
+        context.pool.clone(),
+        Arc::new(PostgresPersistence::new(context.pool.clone())),
+        Arc::new(MockRunner::never_completing()),
+        std::env::temp_dir(),
+    );
+    let response = handle_stop_instance(
+        &peer,
+        StopInstanceRequest {
+            instance_id: fixture.instance_id.clone(),
+            reason: "owner unavailable".into(),
+            grace_period_seconds: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!response.success);
+    assert!(response.error.unwrap().contains("did not confirm"));
+    assert!(runner.is_running(&handle).await);
+    runner.stop(&handle).await.unwrap();
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}

@@ -3258,3 +3258,89 @@ measurement or Linux soak is claimed for this native handle change. Physical
 identity is required for ownership fencing but does not establish owner liveness,
 lease renewal or remote grace delivery. The peer-startup failure and all remaining
 G1–G10 gates remain open. AUDIT-25 maps the contracts to the tests.
+
+
+### Remote whole-execution grace delivery · 2026-09-08
+
+The preceding `b932f1c6` snapshot retained existing launch ownership leases and
+recorded AUDIT-26. Rebuilding that source passed (42.24s), and authenticated E2E
+proved peer startup now preserves the live run. Owner/header and owner/body
+passed (0.998s / 1.026s); peer/header then returned HTTP 500 from the local-only
+grace path. The failing run is `/private/tmp/cooperative-owner-server-e2e.log`,
+with retained isolated fixture `runtara-cooperative-api-n5hrcxkb` beneath the
+system temporary directory. This isolated remote grace from startup recovery.
+
+The new forward migration adds requested/armed deadline timestamps to the
+existing physical registry. A peer persists an absolute deadline derived from
+the request's remaining monotonic budget and the database clock. The existing
+launch dispatcher delivers a bounded batch for its own live claims before queue
+work, including during drain. It arms the native physical handle before recording
+acknowledgement. A peer waits up to five seconds for that acknowledgement or an
+accepted terminal outcome; lack of confirmation remains an error. This wait
+never extends the stored grace. Replacement registrations clear control state;
+same-handle upserts and duplicate Stop preserve the earliest deadline.
+
+The change adds no guest ABI, per-step task manager, worker, graph orchestration,
+component binary or product flag. Whole-execution emergency abort remains native;
+cooperative Cancel consumption, cleanup and graph decisions remain in WASM.
+Database-clock jumps, late delivery, partitions, owner disappearance/recovery,
+small-pool pressure and load still need qualification. The renewal writes and
+indexed pending-deadline scan belong in the outstanding G10 comparison.
+
+Verification on this change:
+
+| Suite | Result |
+| --- | --- |
+| Handler and launch queue | 45 + 15 pass (2.92s / 9.24s) |
+| Environment library, physical registry and composed Stop | 244 + 12 + 4 pass (24.06s / 0.79s / 15.54s) |
+| Embedded WASM and heartbeat after fixture correction | 13 + 21 pass (7.21s / 4.22s) |
+| Feature-gated environment/server all-target Clippy | Pass, 24.15s |
+| Native server rebuild | Pass, 35.60s |
+| Authenticated owner/peer HTTP E2E | All four cases pass; extended repeat also passes sustained lease renewal and unrelated peer shutdown |
+
+These are 354 distinct tests across the selected Rust suites, not one complete
+workspace run. The initial embedded run had 12 passes and a failure caused by the
+new fixture reusing a tenant/image name; the fixture now uses its unique image ID
+as the name, and the entire 13-test suite passed again. The subsequent heartbeat
+suite also passed. Python syntax and diff whitespace checks passed. The commit
+uses the normal formatting/workspace Clippy pre-commit hook without bypass.
+
+The E2E's original four-case pass observed owner headers/body at 1.017s / 0.849s
+and peer headers/body at 0.545s / 0.587s. The extended repeat holds pending HTTP
+for 32 seconds, proves the owner's lease expiry advances, starts and shuts down
+an unrelated peer, and checks the original physical run and pending-signal state
+are preserved before Stop. All extended cases pass at 0.980s / 1.007s and
+1.119s / 0.640s respectively. These timings include fixture verification and
+are not controlled cancellation benchmarks. The 90-second HTTP timeout in the
+fixture avoids its default 30-second timeout masking the ownership test.
+
+Logs:
+
+- `/private/tmp/cooperative-remote-grace-tests.log`
+- `/private/tmp/cooperative-remote-grace-broad-tests.log` (includes the fixture failure)
+- `/private/tmp/cooperative-remote-grace-native-tests.log`
+- `/private/tmp/cooperative-remote-grace-clippy.log`
+- `/private/tmp/cooperative-remote-grace-server-e2e.log`
+- `/private/tmp/cooperative-remote-grace-renewal-e2e.log`
+
+The extended E2E retains its own database/log fixture at
+`/var/folders/qf/62s607_11p3bw80y3v821zl80000gn/T/runtara-cooperative-api-lmx6jkrf`;
+its own servers and containers were stopped by the harness. Tests use fresh
+isolated credentials generated in memory, never existing connection settings.
+Rust tests use the owned isolated `recovery_guard` database, pinned toolchain,
+existing matching Agent components and native target, with
+`RUNTARA_MAX_CONCURRENT_RUNS=4` for overlapping physical handoffs.
+
+```sh
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test launch_queue_test --test handlers_test -- --test-threads=1
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --lib --test embedded_runner_test --test cooperative_stop_test --test heartbeat_monitor_test --test container_registry_test -- --test-threads=1
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test embedded_runner_test --test heartbeat_monitor_test -- --test-threads=1
+cargo clippy -p runtara-environment -p runtara-server --features runtara-environment/scoped-workflow-integration-tests,runtara-server/db-integration-tests --all-targets -- -D warnings
+cargo build -p runtara-server --bin runtara-server
+python3 -u e2e/test_cooperative_cancellation.py --server /absolute/path/to/runtara-server --components /absolute/path/to/wasm32-wasip2/release
+```
+
+The full component/compiler matrices, baseline/candidate size and latency
+measurements and Linux soak were not rerun for this native lifecycle change.
+No G1–G10 completion is claimed. E128 remains, and the audit's consolidated
+remaining-work table still governs final qualification and upstream/PR work.

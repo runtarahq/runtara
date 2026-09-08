@@ -116,7 +116,7 @@ const INITIALIZER_SPIN_WAT: &str = r#"
     )
 "#;
 
-async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64) {
+async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: bool) {
     use runtara_core::domain::InstanceStatus;
     use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
     use runtara_environment::handlers::{
@@ -145,10 +145,46 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64) {
         })
         .await
         .unwrap();
+    let peer_delivery = if peer {
+        // Seed the existing running launch claim. The fixture's peer shares
+        // persistence but has no access to the owner's native task registry.
+        let image_id = unique("remote-abort-image");
+        sqlx::query(
+            "INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $2, $1, $3)",
+        )
+        .bind(&image_id)
+        .bind(&handle.tenant_id)
+        .bind(wasm.to_string_lossy().as_ref())
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, state, deadline_at, lease_owner, lease_expires_at, attempt_count) VALUES ($1, $2, $3, $4, 'start', 'running', NOW() + INTERVAL '60 seconds', 'spinning-owner', NOW() + INTERVAL '60 seconds', 1)")
+            .bind(&handle.launch_id).bind(&inst_id).bind(&handle.tenant_id).bind(image_id)
+            .execute(&h.pool).await.unwrap();
+        let pool = h.pool.clone();
+        let runner = h.runner.clone();
+        let physical = handle.clone();
+        Some(tokio::spawn(async move {
+            while runner.is_running(&physical).await {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                ContainerRegistry::new(pool.clone())
+                    .deliver_abort_requests("spinning-owner", runner.as_ref(), 32)
+                    .await
+                    .unwrap();
+            }
+        }))
+    } else {
+        None
+    };
+    let control_runner: Arc<dyn Runner> = if peer {
+        Arc::new(runtara_environment::runner::MockRunner::never_completing())
+    } else {
+        h.runner.clone()
+    };
     let state = EnvironmentHandlerState::new(
         h.pool.clone(),
         h.persistence.clone(),
-        h.runner.clone(),
+        control_runner,
         h.dir.path().into(),
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -209,7 +245,18 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64) {
     )
     .await
     .expect("grace must abort before the 30-second execution timeout");
-    assert!(before.elapsed() >= Duration::from_secs(grace));
+    let clock_margin = if peer {
+        Duration::from_millis(50)
+    } else {
+        Duration::ZERO
+    };
+    assert!(before.elapsed() + clock_margin >= Duration::from_secs(grace));
+    if let Some(delivery) = peer_delivery {
+        tokio::time::timeout(Duration::from_secs(2), delivery)
+            .await
+            .unwrap()
+            .unwrap();
+    }
     assert!(!h.runner.is_running(&handle).await);
     let instance = h.persistence.get_instance(&inst_id).await.unwrap().unwrap();
     assert_eq!(instance.status, InstanceStatus::Cancelled);
@@ -252,17 +299,27 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_stop_grace_aborts_spinning_invocation() {
-    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 1).await;
+    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 1, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_stop_grace_aborts_infinite_initializer() {
-    public_stop_aborts_non_cooperative_guest(INITIALIZER_SPIN_WAT, 1).await;
+    public_stop_aborts_non_cooperative_guest(INITIALIZER_SPIN_WAT, 1, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_stop_zero_grace_aborts_spinning_invocation() {
-    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 0).await;
+    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 0, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_stop_grace_aborts_spinning_invocation() {
+    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 1, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_stop_zero_grace_aborts_infinite_initializer() {
+    public_stop_aborts_non_cooperative_guest(INITIALIZER_SPIN_WAT, 0, true).await;
 }
 
 fn write_component(dir: &Path, name: &str, wat: &str) -> PathBuf {

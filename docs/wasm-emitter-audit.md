@@ -29,16 +29,12 @@ Implemented and covered by focused tests:
 - Stop/cancel integrates with the environment lifecycle and has runner plus
   PostgreSQL coverage. Accepted terminal outcomes are preserved; emergency abort
   does not fabricate a guest cleanup acknowledgement.
-- Authenticated single-server Stop closes HTTP while waiting for response
-  headers or a response body, persists cancellation, and rejects unauthorized
-  callers. The new two-server regression currently fails: Stop through a newly
-  started peer returns success without closing the owner's HTTP request within
-  four seconds. Inspection confirms that peer startup incorrectly recovers A's
-  live execution and Stop cancels its replacement (AUDIT-23 follow-up below).
-  Recovery preserves outcomes accepted after a stale scan (AUDIT-24). The current
-  snapshot retains and renews existing launch ownership leases to protect live
-  owners (AUDIT-26); the authenticated peer E2E has not been rerun with this
-  change, and remote grace delivery remains unimplemented.
+- Authenticated Stop closes HTTP while waiting for headers or a response body,
+  both on the owning server and through a peer. The original peer-startup bug
+  and subsequent HTTP 500 regression now pass the four-case server E2E
+  (AUDIT-23/26/27). Ownership uses retained launch leases; remote emergency grace
+  is delivered through the existing physical registry and dispatcher pass.
+  Success requires an armed timer or an accepted terminal outcome.
 - Runner control now uses a unique physical handle for each accepted handoff,
   even when pre-start recovery reuses a durable launch ID. Stale Stop/grace/wait
   calls and old occupancy cleanup cannot target the replacement (AUDIT-25).
@@ -57,7 +53,7 @@ feature flag or optional cancellation backend has been added.
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
-| Server and persistence E2E | Single-server authenticated header/body cancellation passes on the preceding server build. Ownership leases and guarded peer recovery are implemented in this snapshot (AUDIT-26), pending authenticated multi-server verification. Implement remote grace delivery and qualify status/acknowledgement, peer drain, owner loss and emergency escalation. |
+| Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
 | Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
@@ -2122,3 +2118,69 @@ Verification on this source snapshot:
 - This is a progress checkpoint. The server was not rebuilt and authenticated
   server E2E was not rerun with the lease change. The full compiler/component
   matrices, final paired benchmarks and Linux soak were also not rerun.
+
+
+### AUDIT-27 · Deliver emergency grace to the physical owner
+
+**Status: the four-case authenticated owner/peer HTTP regression now passes.**
+Rebuilding `b932f1c6` first established that peer startup preserves the live run;
+Stop then returned HTTP 500 because only the owner could arm native emergency
+grace. The present change delivers that whole-execution deadline across peers.
+Cooperative cancellation still uses the existing persisted Cancel signal and
+standard guest cancellation. There is no new guest task manager or graph logic.
+
+The existing physical `container_registry` row now holds the requested emergency
+deadline and the deadline acknowledged by its owner. The forward migration adds
+two nullable timestamps and an index for pending delivery. The existing launch
+dispatcher processes a bounded batch before queue work, including while draining;
+no new worker or per-step registry is introduced. It selects its own live claims,
+arms the exact native physical handle, then records acknowledgement. Registry
+replacement clears these fields; an upsert of the same handle preserves them.
+
+A peer Stop waits at most five seconds for timer acknowledgement or an accepted
+terminal outcome. Persisting a request alone does not return success. Missing
+owner confirmation returns an error while leaving the already delivered Cancel
+signal and deadline request intact. The five-second wait bounds the HTTP-side
+confirmation; it does not grant more cleanup time. Zero grace remains due
+immediately upon delivery, without allowing a new zero-to-five-second grace.
+Duplicate requests keep the earliest deadline, and acknowledgement of a later
+deadline cannot satisfy an intervening shorter request.
+
+Deadline conversion samples the database clock, subtracts time already spent
+from the caller's monotonic budget, and persists a fixed timestamp. The owner
+converts the remaining database interval from before its read began; network,
+query and row-wait latency therefore do not restart a full grace interval.
+Transport/poll delays can still make an already-due abort arrive late. Cross-host
+wall clocks are not compared, but database clock jumps and process pauses still
+require operational qualification; this is not a real-time delivery guarantee.
+
+| Contract | Evidence |
+| --- | --- |
+| A peer must wait for the exact owner to arm grace | `peer_stop_waits_for_physical_owner_to_arm_emergency_grace`; wrong owner and a runner without the handle cannot acknowledge |
+| Unconfirmed delivery must not be reported as success | `peer_stop_does_not_claim_delivery_when_owner_never_confirms`; zero-grace request remains unsuccessful after the bounded wait |
+| Delayed and repeated requests cannot restart grace or target a replacement | `remote_grace_never_extends_and_cannot_follow_a_replacement_handle`; checks shorter/later requests, same-handle upsert, overdue delivery and physical replacement |
+| Remote emergency grace stops real non-cooperative WASM | `peer_stop_grace_aborts_spinning_invocation` and `peer_stop_zero_grace_aborts_infinite_initializer`; require actual exit, zero occupancy, `aborted` outcome, no guest cleanup acknowledgement and a healthy subsequent invocation |
+| Authenticated peer Stop cooperatively closes pending HTTP | `e2e/test_cooperative_cancellation.py`; owner and peer, headers and partial body, unauthorized callers, duplicate Stop, no retries/continuations, signal acknowledgement and registry cleanup |
+
+The first complete four-case run reported 1.017s / 0.849s on the owner and
+0.545s / 0.587s through a peer (headers / body). These are individual fixture
+durations, not controlled latency measurements. An extended run additionally
+holds the peer/header request for 32 seconds, checks renewal beyond the original
+running lease, and shuts down an unrelated peer before sending Stop. The HTTP
+fixture explicitly uses a 90-second I/O timeout so its own default 30-second
+request timeout cannot mask ownership behavior. That extended run passed renewal,
+unrelated peer shutdown and all four cancellation cases: 0.980s / 1.007s on the
+owner and 1.119s / 0.640s through a peer. These remain fixture observations.
+
+Focused validation covers 354 distinct environment tests across the listed
+suites: 244 library, 45 handler, 15 launch queue, 12 registry, four composed Stop,
+13 embedded runner and 21 heartbeat tests. The initial broad run exposed a
+non-unique image name in the new native fixture; after making it unique, all 13
+embedded and 21 heartbeat tests passed. See the implementation record for
+commands, final extended-E2E result, lint and limitations.
+
+This closes the reproduced peer-startup/Stop failures, not G1–G10. Public
+Agent/Embed timeouts still return E128. Full owner-loss/recovery and partition
+coverage, mixed-version safety, the remaining composed race/CPU/durable nesting
+matrix, obsolete-path compatibility work, controlled size/time/DB-cost reports,
+Linux soak, upstream migration integration and the PR remain outstanding.
