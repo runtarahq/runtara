@@ -210,6 +210,7 @@ pub fn from_xml(input: FromXmlInput) -> Result<Value, AgentError> {
 
     // Convert the root element to JSON
     let root = doc.root_element();
+    check_nesting_depth(&root)?;
     let tag_name = root.tag_name().name().to_string();
     let content = element_to_json(&root, &input);
 
@@ -225,6 +226,33 @@ pub fn from_xml(input: FromXmlInput) -> Result<Value, AgentError> {
 // -----------------------------------------------------------------------------
 
 /// Converts an XML element to a JSON value (content only, no wrapper)
+/// Deepest element nesting `element_to_json` will convert.
+///
+/// `roxmltree` parses into an arena and does not recurse, but the conversion
+/// below does, so nesting depth is guest stack depth. A few kilobytes of
+/// `<a><a><a>...` overflowed a 512 KiB stack around 700 levels in a release
+/// build, and a stack overflow traps the whole component: no error the workflow
+/// can catch, no cancellation, no cleanup. Real documents sit far below this.
+const MAX_NESTING_DEPTH: usize = 256;
+
+/// Reject a document whose element nesting would recurse past
+/// [`MAX_NESTING_DEPTH`]. Walking `descendants` is an arena iteration, so this
+/// check itself never recurses.
+fn check_nesting_depth(root: &roxmltree::Node) -> Result<(), AgentError> {
+    for node in root.descendants() {
+        if !node.is_element() {
+            continue;
+        }
+        if node.ancestors().count() > MAX_NESTING_DEPTH {
+            return Err(AgentError::permanent(
+                "XML_NESTING_TOO_DEEP",
+                format!("XML nesting exceeds the supported depth of {MAX_NESTING_DEPTH}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn element_to_json(node: &roxmltree::Node, input: &FromXmlInput) -> Value {
     let mut obj = Map::new();
 
@@ -639,5 +667,33 @@ mod tests {
         let result = from_xml(input).unwrap();
         assert_eq!(result["root"]["@text"], "Text before Text after");
         assert_eq!(result["root"]["child"], "Child text");
+    }
+
+    fn nested(depth: usize) -> FromXmlInput {
+        let xml = format!("<r>{}x{}</r>", "<a>".repeat(depth), "</a>".repeat(depth));
+        FromXmlInput {
+            data: XmlDataInput::Bytes(xml.into_bytes()),
+            encoding: Encoding::default(),
+            preserve_text: true,
+            include_attributes: true,
+            trim_text: true,
+        }
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_before_the_conversion_recurses() {
+        // Left unchecked this recursion overflowed a 512 KiB stack at roughly
+        // 700 levels, and a stack overflow traps the component outright.
+        let error = from_xml(nested(MAX_NESTING_DEPTH + 1)).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("XML_NESTING_TOO_DEEP"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn nesting_within_the_limit_still_converts() {
+        let result = from_xml(nested(MAX_NESTING_DEPTH - 2)).unwrap();
+        assert!(result.get("r").is_some());
     }
 }
