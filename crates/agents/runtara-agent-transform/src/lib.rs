@@ -679,6 +679,11 @@ pub fn get_value_by_path(input: GetValueByPathInput) -> Result<Value, String> {
 pub fn set_value_by_path(input: SetValueByPathInput) -> Result<Value, String> {
     let result = match (input.target, input.property_path, input.value) {
         (Some(target), Some(path), value) if !path.is_empty() => {
+            if path.split('.').count() > MAX_PATH_SEGMENTS {
+                return Err(format!(
+                    "Property path exceeds the supported depth of {MAX_PATH_SEGMENTS} segments"
+                ));
+            }
             set_property_value(target, &path, value.unwrap_or(Value::Null))
         }
         (Some(target), _, _) => target,
@@ -1227,26 +1232,38 @@ fn set_property_value(obj: Value, property_path: &str, value: Value) -> Value {
     obj
 }
 
+/// Deepest dotted path `set-value-by-path` will build.
+///
+/// A path segment becomes one level of nesting, and `serde_json` recurses to
+/// drop and to serialize a `Value`, so an unbounded path lets a data-supplied
+/// string exhaust the guest stack — a trap rather than a step failure. This is
+/// serde_json's own default deserialization depth, so anything this agent
+/// builds can still be read back by an ordinary consumer.
+const MAX_PATH_SEGMENTS: usize = 128;
+
+/// Insert `value` at a dotted path, creating intermediate objects.
+///
+/// Descends iteratively: one recursive frame per path segment would let a
+/// long data-supplied path exhaust the guest stack, and a stack overflow traps
+/// the component rather than failing the step. As before, a segment that
+/// already holds a non-object stops the descent and writes nothing.
 fn set_nested_value(map: &mut serde_json::Map<String, Value>, parts: &[&str], value: Value) {
-    if parts.is_empty() {
+    let Some((last, prefix)) = parts.split_last() else {
         return;
+    };
+
+    let mut current = map;
+    for key in prefix {
+        let next = current
+            .entry((*key).to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        match next {
+            Value::Object(nested_map) => current = nested_map,
+            _ => return,
+        }
     }
 
-    if parts.len() == 1 {
-        map.insert(parts[0].to_string(), value);
-        return;
-    }
-
-    let key = parts[0];
-    let rest = &parts[1..];
-
-    let next = map
-        .entry(key.to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-
-    if let Value::Object(nested_map) = next {
-        set_nested_value(nested_map, rest, value);
-    }
+    current.insert(last.to_string(), value);
 }
 
 fn matches_filter_values(property_value: &Value, filter_values: &[Value]) -> bool {
@@ -1484,6 +1501,48 @@ mod tests {
 
         let result = set_value_by_path(input).unwrap();
         assert_eq!(result, json!({"user": {"name": "Alice", "age": 30}}));
+    }
+
+    #[test]
+    fn test_set_value_by_path_stops_at_a_non_object_segment() {
+        let input = SetValueByPathInput {
+            target: Some(json!({"user": "Alice"})),
+            property_path: Some("user.name.first".to_string()),
+            value: Some(json!("A")),
+        };
+        assert_eq!(set_value_by_path(input).unwrap(), json!({"user": "Alice"}));
+    }
+
+    fn path_of(segments: usize) -> SetValueByPathInput {
+        SetValueByPathInput {
+            target: Some(json!({})),
+            property_path: Some(
+                (0..segments)
+                    .map(|i| format!("k{i}"))
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+            value: Some(json!("deep")),
+        }
+    }
+
+    #[test]
+    fn test_set_value_by_path_builds_the_deepest_supported_path() {
+        let result = set_value_by_path(path_of(MAX_PATH_SEGMENTS)).unwrap();
+        let mut current = &result;
+        for i in 0..MAX_PATH_SEGMENTS {
+            current = &current[format!("k{i}")];
+        }
+        assert_eq!(current, &json!("deep"));
+    }
+
+    #[test]
+    fn test_set_value_by_path_rejects_a_path_past_the_limit() {
+        // Descending per segment, dropping the result and serializing it all
+        // recurse, so an unbounded path exhausts the guest stack and traps the
+        // component instead of failing the step.
+        let error = set_value_by_path(path_of(MAX_PATH_SEGMENTS + 1)).unwrap_err();
+        assert!(error.contains("supported depth"), "{error}");
     }
 
     #[test]
