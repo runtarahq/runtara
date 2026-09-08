@@ -941,3 +941,39 @@ A 32-case compiler corpus produces byte-identical artifacts before and after.
 See AUDIT-22 and its comparison record. The separate obsolete isolation/task
 inventory, registered/parked-artifact compatibility and G1–G10 qualification
 remain required.
+
+### Authenticated server and recovery findings · 2026-09-08
+
+The real authenticated server E2E passes owning-server Stop during pending HTTP
+headers and body. Its second-server scenario exposes a prerequisite lifecycle
+bug: startup assumes the entire shared registry belonged to its dead predecessor,
+recovers a live peer execution and creates a replacement. Stop then cancels that
+replacement without signalling the original. The test now checks preservation of
+the physical generation before issuing Stop, so remote delivery cannot appear
+qualified through this false-success path. See AUDIT-23.
+
+AUDIT-24 separately fixes recovery writes resurrecting a cancelled/completed
+instance or replacing a newer suspension after a stale scan. Applied, unchanged
+and failed writes are distinguished; registry cleanup is guarded by the observed
+physical handle. This advances G4/G7 but does not identify live owners.
+
+The remaining whole-execution lifecycle work must establish:
+
+- Startup recovers only an execution whose owner is no longer entitled to run
+  it; another server starting is not evidence that the owner died. Retain crash
+  recovery without launching a second live generation.
+- Drain and stale-execution handling respect physical ownership and generation,
+  including a replacement created after a scan.
+- Stop arriving at another server uses the existing lifecycle signal mechanism
+  and reaches the execution owner for emergency grace. Acceptance must not imply
+  that a process-local timer was armed remotely. Duplicate requests cannot extend
+  grace, and ownership changes cannot redirect an old abort to a new generation.
+- Tests distinguish peer startup, Stop through an already running peer, owner
+  disappearance/recovery, cleanup acknowledgement, emergency abort, and peer
+  shutdown. Exercise both header/body stalls and non-cooperative execution.
+
+These are responsibilities of the existing environment's whole-run lifecycle,
+not a reason to add host graph interpretation, per-Agent task management or a
+custom guest cancellation ABI. Standard guest cancellation and one normally
+composed workflow artifact remain the plan. Keep G1–G10, E128 and final paired
+measurements open until their separate acceptance evidence exists.

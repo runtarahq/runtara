@@ -6,8 +6,8 @@ runtara-server binary and built Agent components. All credentials are generated
 in memory. Only newly created processes/containers are stopped; databases and
 logs are retained. This does not read repository dotenv files or existing keys.
 
-Progress snapshot: single-server cases pass; the peer/header Stop case currently
-fails its HTTP cleanup assertion. See AUDIT-23 in docs/wasm-emitter-audit.md.
+Progress snapshot: single-server cases pass; starting the peer currently replaces
+the live owner's generation before Stop. See AUDIT-23 in docs/wasm-emitter-audit.md.
 """
 import argparse
 import base64
@@ -262,6 +262,9 @@ class TestServer:
             'status', status, 'reason', termination_reason,
             'pending', (SELECT count(*) FROM pending_signals WHERE instance_id='{ident}' AND acknowledged_at IS NULL),
             'launches', (SELECT count(*) FROM instance_launches WHERE instance_id='{ident}'),
+            'recovery_attempts', recovery_attempts,
+            'run', (SELECT json_build_object('launch_id', launch_id, 'handle_id', container_id)
+                    FROM container_registry WHERE instance_id='{ident}'),
             'registry', (SELECT count(*) FROM container_registry WHERE instance_id='{ident}'))
             FROM instances WHERE instance_id='{ident}';""")
 
@@ -294,9 +297,17 @@ class TestServer:
             url, call = self.fixture.new_call(mode)
             ident = self.execute(url)
             assert call["started"].wait(30), "workflow never reached controlled HTTP"
+            running = self.state(ident)
+            assert running["status"] == "running" and running["run"], running
             # Start the peer only after the owner has dispatched this request,
             # so the execution cannot accidentally be claimed by the peer.
             stop_base, peer = self.launch_server("peer-" + mode) if cross_owner else (self.base, None)
+            if cross_owner:
+                after_start = self.state(ident)
+                for key in ["status", "run", "launches", "recovery_attempts", "pending"]:
+                    assert after_start[key] == running[key], (
+                        "peer startup changed the live execution before Stop", key,
+                        running[key], after_start[key])
             path = f"/api/runtime/workflows/instances/{ident}/stop"
             for label, token, expected in [
                 ("missing", False, 401),

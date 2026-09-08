@@ -3114,3 +3114,73 @@ database/server E2E, Linux capacity/soak and paired runtime measurements were no
 repeated for this removal of unreachable emitter code. Prior results remain
 historical evidence. E128, the broader compatibility/obsolete-task inventory and
 remaining G1–G10 release qualification stay open.
+
+## Authenticated server E2E and recovery-write races (2026-09-08)
+
+The isolated Python E2E added in `06aed70a` drives the native server's real
+authenticated workflow creation/composition/execution and Stop API. Owning-server
+header/body cancellation passes, including authentication/role/tenant rejection,
+acknowledgement, terminal state, registry retirement, no retries or continuations,
+and duplicate Stop. Starting a second server exposes incorrect startup recovery
+of a still-live peer execution. The retained database shows the original launch
+suspended, a replacement cancelled before start, one recovery attempt and no
+Cancel signal for that instance. Thus the original HTTP socket surviving a
+successful Stop response is explained by cancellation of the replacement, not by
+evidence that guest cooperative cancellation failed. AUDIT-23 records the runs.
+
+The E2E now checks the physical registry generation, lifecycle status, launch
+count, recovery attempts and pending commands before and after peer startup,
+before issuing Stop. Owner detection is still missing. Existing process-local
+grace arming also does not establish remote-owner grace delivery; this remains a
+separate follow-up once startup no longer replaces live work.
+
+While tracing recovery, a real PostgreSQL negative control established a second
+bug: a stale recovery UPDATE resurrected a `cancelled` row as `suspended` and
+replaced its termination reason, wake and counters. Recovery now conditions that
+UPDATE on `running`. It reports applied/unchanged outcomes and propagates write
+errors, instead of treating an unapplied/failed write as a terminal failure.
+Startup retains tracking after unchanged/error outcomes and uses the existing
+exact launch-plus-handle cleanup guard after successful decisions. The heartbeat
+caller reports recovery errors without claiming they were applied. These changes
+do not establish that an owner is dead and cannot distinguish a replacement that
+is also `running`; do not read them as resolving the peer-startup failure.
+
+Three database tests cover all non-running statuses, preservation of accepted
+lifecycle/result/wake fields, normal running recovery with either policy,
+duplicate recovery and database write failure. The registry regression separately
+checks replacements that change only the physical handle, only the durable
+launch, or both; stale cleanup cannot remove any of them. No emitted WASM, WIT,
+Agent component or migration changes in this stage.
+
+Validation uses the pinned toolchain, isolated native/component targets and fresh
+`recovery_guard` / `recovery_guard_unit` fixture databases in the retained owned
+PostgreSQL container. The initial negative control failed as expected. All eight
+focused recovery tests then passed. The broader run passed 243 environment unit
+tests (25.00s), 45 handler tests (3.37s) and 21 heartbeat tests (4.06s). A further
+22 runtime tests passed after consolidating registry cleanup through the exact
+handle guard. These overlapping selections must not be summed as unique tests.
+All 12 registry tests passed (1.07s), including the new replacement matrix.
+Feature-gated environment/server all-target Clippy passed (113.75s), as did the
+native server rebuild (41.08s), formatting, Python syntax and diff checks.
+
+The rebuilt-server E2E repeats the owning-server passes at 0.962s and 0.971s,
+then fails before Stop because peer startup changes `running` to `suspended`.
+The peer/body case is not reached. These fixture timings are not paired
+performance measurements, and the failing E2E remains a release gap. Its retained
+logs are under `/var/folders/qf/62s607_11p3bw80y3v821zl80000gn/T/runtara-cooperative-api-82m95b05`;
+the command log is `/private/tmp/cooperative-peer-startup-guard.log`.
+
+```sh
+cargo test -p runtara-environment --features db-integration-tests --lib recovery:: -- --test-threads=1
+cargo test -p runtara-environment --features db-integration-tests --lib --test heartbeat_monitor_test --test handlers_test -- --test-threads=1
+cargo test -p runtara-environment --features db-integration-tests --lib runtime::tests -- --test-threads=1
+cargo test -p runtara-environment --features db-integration-tests --test container_registry_test -- --test-threads=1
+cargo clippy -p runtara-environment -p runtara-server --features runtara-environment/scoped-workflow-integration-tests,runtara-server/db-integration-tests --all-targets -- -D warnings
+cargo build -p runtara-server --bin runtara-server
+python3 -u e2e/test_cooperative_cancellation.py --server /absolute/path/to/runtara-server --components /absolute/path/to/wasm32-wasip2/release
+```
+
+Final component builds, full workflow execution tests, paired performance
+measurements and Linux soak are not rerun for this host persistence correction.
+The unresolved multi-owner lifecycle cases, E128, compatibility work, upstream
+integration and remaining G1–G10 qualification remain required.

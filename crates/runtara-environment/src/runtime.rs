@@ -979,7 +979,6 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                         status = ?status,
                         "Cleaning up terminated container from registry"
                     );
-                    let _ = registry.cleanup(instance_id).await;
                 } else {
                     // Process is gone but Core still shows the instance
                     // running: it was killed by this Environment restart. Route
@@ -1001,14 +1000,15 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                         crate::recovery::auto_recover_enabled(),
                     )
                     .await;
-                    match outcome {
-                        crate::recovery::RecoveryOutcome::Recovered => recovered += 1,
-                        crate::recovery::RecoveryOutcome::Failed => failed += 1,
+                    match &outcome {
+                        Ok(crate::recovery::RecoveryOutcome::Recovered) => recovered += 1,
+                        Ok(crate::recovery::RecoveryOutcome::Failed) => failed += 1,
+                        Ok(crate::recovery::RecoveryOutcome::Unchanged) => continue,
+                        Err(error) => {
+                            warn!(instance_id, %error, "Recovery write failed; retaining registry entry");
+                            continue;
+                        }
                     }
-
-                    // Drop the stale registry entry either way; the wake
-                    // scheduler registers a fresh one on relaunch.
-                    let _ = registry.cleanup(instance_id).await;
 
                     info!(
                         instance_id = %instance_id,
@@ -1023,7 +1023,6 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                     instance_id = %instance_id,
                     "Container in registry but not in Core - cleaning up"
                 );
-                let _ = registry.cleanup(instance_id).await;
             }
             Err(e) => {
                 error!(
@@ -1031,8 +1030,14 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                     error = %e,
                     "Failed to check instance status during recovery"
                 );
+                continue;
             }
         }
+        // A wake can replace the row after this scan. Retire only the exact
+        // physical handle observed; failed/unapplied decisions retained it above.
+        let _ = registry
+            .cleanup_handle(instance_id, &container.launch_id, &container.container_id)
+            .await;
     }
 
     if recovered > 0 || failed > 0 {

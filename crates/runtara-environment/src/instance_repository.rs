@@ -404,6 +404,9 @@ impl InstanceRepository {
     /// crash-loop counters in the same atomic UPDATE. The instance is then
     /// replayed from the start against the checkpoint cache, so completed
     /// durable steps are served from cache rather than re-run.
+    /// Returns false if it is no longer running when the write executes. A
+    /// stale recovery scan must not resurrect a cancelled/completed instance
+    /// or replace a suspension's existing wake deadline.
     ///
     /// Restart policy is Environment's: the counters exist so
     /// [`crate::recovery`] can tell an instance that is making progress from
@@ -415,15 +418,15 @@ impl InstanceRepository {
         instance_id: &str,
         attempt: i32,
         marker: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<bool> {
+        let result = sqlx::query(
             "UPDATE instances \
              SET status = 'suspended'::instance_status, \
                  termination_reason = 'environment_restart'::termination_reason, \
                  sleep_until = NOW(), \
                  recovery_attempts = $2, \
                  recovery_marker = $3 \
-             WHERE instance_id = $1",
+             WHERE instance_id = $1 AND status = 'running'::instance_status",
         )
         .bind(instance_id)
         .bind(attempt)
@@ -432,7 +435,7 @@ impl InstanceRepository {
         .await
         .map_err(|e| Error::Other(format!("mark_for_recovery: {e}")))?;
 
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 }
 

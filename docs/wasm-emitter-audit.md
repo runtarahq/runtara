@@ -33,7 +33,10 @@ Implemented and covered by focused tests:
   headers or a response body, persists cancellation, and rejects unauthorized
   callers. The new two-server regression currently fails: Stop through a newly
   started peer returns success without closing the owner's HTTP request within
-  four seconds. Ownership/startup recovery remains under investigation (AUDIT-23).
+  four seconds. Inspection confirms that peer startup incorrectly recovers A's
+  live execution and Stop cancels its replacement (AUDIT-23 follow-up below).
+  Recovery now preserves outcomes accepted after a stale scan, but identifying
+  live owners and routing remote grace remain unresolved (AUDIT-24).
 - The unreachable concurrent Split retry emitter is retired. Existing sequential
   retry/replay behavior remains covered, with 32 byte-identical before/after
   compiler artifacts and passing parallel/retry execution suites (AUDIT-22).
@@ -49,7 +52,7 @@ feature flag or optional cancellation backend has been added.
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | Prove Agent/Embed timeout contracts, then deliberately remove E128 and verify public validation, compilation and execution together, including zero/overflow/inherited budgets and cleanup escalation. |
-| Server and persistence E2E | Single-server authenticated header/body cancellation now passes. Diagnose and fix the failing two-server peer-Stop regression (AUDIT-23), then complete execution-owner routing, status/acknowledgement publication and emergency escalation qualification. |
+| Server and persistence E2E | Single-server authenticated header/body cancellation passes. Fix startup's incorrect recovery of another server's live execution, then qualify remote grace delivery and the remaining status/acknowledgement and emergency escalation cases. AUDIT-24 prevents stale recovery from overwriting accepted lifecycle outcomes; it does not establish live-owner detection. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
 | Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
@@ -1950,3 +1953,56 @@ Prerequisites are Docker with `pgvector/pgvector:pg18` and
 Agent builds. The script prints its retained fixture directory. This snapshot is
 on `feat/cooperative-cancellation-progress`, separate from `main`; upstream
 integration, the PR and the other completion criteria above remain outstanding.
+
+#### Follow-up: the failed Stop targeted a replacement launch
+
+Read-only inspection of the retained isolated database confirms that the failing
+instance had **two physical launches**: the original was suspended, a replacement
+was cancelled, and `recovery_attempts` increased to one. Unlike the two passing
+instances, it had no persisted Cancel signal row. Startup's
+`recover_orphaned_containers` scans the shared registry and assumes every entry
+belongs to a dead predecessor. Starting B therefore recovered A's still-live
+run. Stop then succeeded through pre-start cancellation of the replacement.
+
+The E2E now records the running generation before starting B and checks that
+startup preserves status, registry handle/launch, launch count, recovery counter
+and pending signals **before** sending Stop. This distinguishes startup damage
+from remote signal/grace delivery. The production Stop handler also still arms
+grace only on a locally owned runner handle; fixing startup alone does not
+qualify cross-server grace. Drain and heartbeat scans also need ownership review.
+
+With the AUDIT-24 host fix and a rebuilt server, owning-server cases again pass
+(headers 0.962s, body 0.971s). The strengthened regression fails **before Stop**:
+peer startup changes the live instance from `running` to `suspended`. The peer/body
+case remains unreached. This is still a failing E2E, not expected-success coverage.
+
+### AUDIT-24 · Stale recovery must preserve accepted lifecycle outcomes
+
+**Status: the recovery-write race is fixed; multi-owner lifecycle handling is
+still incomplete.** Recovery previously updated an instance by ID without
+checking its current state. A scan could observe `running`, then overwrite an
+accepted cancellation/completion or a newer suspension with `suspended`,
+`environment_restart` and an immediate wake. The new PostgreSQL regression
+failed against that implementation: a `cancelled` row became `suspended`, its
+termination reason changed and its wake/counters were replaced.
+
+`mark_for_recovery` now updates only a row still in `running`, atomically with
+the recovery fields, and returns whether it applied. `recover_or_fail` reports
+`Unchanged` when either its recovery or terminal-failure write loses to another
+transition. Database write failures propagate as errors instead of being reported
+as terminal failures. Startup retains tracking after an error or unapplied
+decision. Its successful cleanup uses the existing exact physical-handle guard
+so it cannot delete a replacement registry row selected after the scan.
+
+| Contract | Test evidence |
+| --- | --- |
+| Cancelled/completed/failed/suspended/pending state wins after the scan | `recovery_write_preserves_states_that_changed_after_scan` preserves status, termination, wake, result/error, finish timestamp and recovery counters; both recovery policies report `Unchanged` |
+| Running instance is still recoverable or fails when recovery is disabled | `recovery_reports_applied_outcome_once` checks applied state and repeated decision without a second mutation |
+| Database failure is not evidence of terminal failure | `recovery_write_failure_is_not_reported_as_terminal_failure` checks both policies return errors |
+| Cleanup must retain a replacement registry entry | `cleanup_handle_preserves_every_replacement_identity` checks replacement of handle, launch, or both, followed by successful exact cleanup and idempotent repetition |
+
+This is a host lifecycle persistence correction. It changes no guest graph
+control, Agent macro, WIT, cancellation ABI, component binary, schema or feature
+flag. A status guard cannot distinguish two different physical executions that
+both appear `running`; owner/generation fencing and the peer-startup failure
+remain open. Verification commands/results are in the implementation record.

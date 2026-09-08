@@ -23,7 +23,9 @@
 //! any number of restarts.
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
+
+use crate::error::Result;
 
 /// Default maximum number of CONSECUTIVE no-progress auto-restarts before an
 /// instance is failed terminally. Override with `RUNTARA_MAX_AUTO_RESTARTS`.
@@ -60,6 +62,9 @@ pub enum RecoveryOutcome {
     /// Crash-loop cap exceeded, or auto-recovery disabled: instance failed
     /// terminally with `termination_reason = environment_restart`.
     Failed,
+    /// Another lifecycle transition won before the recovery write. No recovery
+    /// state was applied and the caller must not claim a restart or failure.
+    Unchanged,
 }
 
 /// Pure crash-loop decision, separated from any I/O so it can be unit-tested.
@@ -117,12 +122,14 @@ fn decide(
 ///
 /// `auto_recover` is the per-workflow policy (default `true`; Phase 3 wires the
 /// real value through from the workflow definition).
+/// A concurrent lifecycle transition returns `Unchanged`; a failed write
+/// returns an error, so callers do not retire tracking as though it succeeded.
 pub async fn recover_or_fail(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     instance_id: &str,
     auto_recover: bool,
-) -> RecoveryOutcome {
+) -> Result<RecoveryOutcome> {
     // Progress fingerprint: total checkpoints written for this instance.
     // Monotonic, so a higher count than the last recovery means the instance
     // made forward progress across the restart.
@@ -149,7 +156,7 @@ pub async fn recover_or_fail(
         auto_recover,
     ) {
         Decision::Fail { error: err } => {
-            if let Err(e) = persistence
+            let applied = persistence
                 .complete_instance(
                     CompleteInstanceParams::new(
                         instance_id,
@@ -159,13 +166,9 @@ pub async fn recover_or_fail(
                     .with_termination("environment_restart", None)
                     .with_error(&err),
                 )
-                .await
-            {
-                error!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "Failed to mark instance failed after Environment restart"
-                );
+                .await?;
+            if !applied {
+                return Ok(RecoveryOutcome::Unchanged);
             }
             warn!(
                 instance_id = %instance_id,
@@ -173,19 +176,14 @@ pub async fn recover_or_fail(
                 auto_recover,
                 "Instance NOT auto-recovered after Environment restart"
             );
-            RecoveryOutcome::Failed
+            Ok(RecoveryOutcome::Failed)
         }
         Decision::Recover { attempt } => {
-            if let Err(e) = crate::instance_repository::InstanceRepository::new(pool.clone())
+            let applied = crate::instance_repository::InstanceRepository::new(pool.clone())
                 .mark_for_recovery(instance_id, attempt, Some(&marker))
-                .await
-            {
-                error!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "Failed to mark instance for recovery"
-                );
-                return RecoveryOutcome::Failed;
+                .await?;
+            if !applied {
+                return Ok(RecoveryOutcome::Unchanged);
             }
             info!(
                 instance_id = %instance_id,
@@ -194,7 +192,7 @@ pub async fn recover_or_fail(
                 progress,
                 "Marked instance for automatic recovery after Environment restart (wake scheduler will relaunch)"
             );
-            RecoveryOutcome::Recovered
+            Ok(RecoveryOutcome::Recovered)
         }
     }
 }
@@ -250,6 +248,137 @@ mod tests {
         match decide(0, None, 10, 5, false) {
             Decision::Fail { error } => assert!(error.contains("disabled")),
             other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "db-integration-tests"))]
+mod persistence_tests {
+    use super::{RecoveryOutcome, recover_or_fail};
+    use crate::instance_repository::InstanceRepository;
+    use runtara_store_postgres::PostgresPersistence;
+
+    async fn snapshot(pool: &sqlx::PgPool, id: &str) -> serde_json::Value {
+        sqlx::query_scalar(
+            "SELECT jsonb_build_object(\
+             'status', status, 'termination_reason', termination_reason, \
+             'sleep_until', sleep_until, 'wake_reason', wake_reason, \
+             'finished_at', finished_at, 'output', output, 'error', error, \
+             'recovery_attempts', recovery_attempts, 'recovery_marker', recovery_marker) \
+             FROM instances WHERE instance_id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read lifecycle snapshot")
+    }
+
+    #[tokio::test]
+    async fn recovery_write_preserves_states_that_changed_after_scan() {
+        let pool = crate::test_support::pool().await;
+        let repository = InstanceRepository::new(pool.clone());
+        for status in ["cancelled", "completed", "failed", "suspended", "pending"] {
+            let id = crate::test_support::unique_id("recovery-stale-scan");
+            sqlx::query(
+                "INSERT INTO instances (instance_id, tenant_id, status) \
+                 VALUES ($1, 'recovery-test', 'running')",
+            )
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("create running instance");
+            // A recovery scan observed Running, but another lifecycle writer
+            // settles/parks/requeues it before the recovery UPDATE executes.
+            assert_eq!(snapshot(&pool, &id).await["status"], "running");
+            sqlx::query(
+                "UPDATE instances SET status = $2::instance_status, \
+                 termination_reason = 'cancelled', finished_at = NOW(), \
+                 sleep_until = NOW() + INTERVAL '1 hour', \
+                 recovery_attempts = 3, recovery_marker = '7', \
+                 output = $3, error = 'accepted outcome' WHERE instance_id = $1",
+            )
+            .bind(&id)
+            .bind(status)
+            .bind(b"accepted result".as_slice())
+            .execute(&pool)
+            .await
+            .expect("settle after scan");
+            let before = snapshot(&pool, &id).await;
+            assert!(
+                !repository
+                    .mark_for_recovery(&id, 4, Some("8"))
+                    .await
+                    .expect("attempt stale recovery")
+            );
+            assert_eq!(snapshot(&pool, &id).await, before, "state {status}");
+            let persistence = PostgresPersistence::new(pool.clone());
+            for auto_recover in [true, false] {
+                assert_eq!(
+                    recover_or_fail(&pool, &persistence, &id, auto_recover)
+                        .await
+                        .expect("resolve stale recovery"),
+                    RecoveryOutcome::Unchanged
+                );
+                assert_eq!(snapshot(&pool, &id).await, before, "state {status}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_reports_applied_outcome_once() {
+        let pool = crate::test_support::pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+        for auto_recover in [true, false] {
+            let id = crate::test_support::unique_id("recovery-applied");
+            sqlx::query(
+                "INSERT INTO instances (instance_id, tenant_id, status) \
+                 VALUES ($1, 'recovery-test', 'running')",
+            )
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("create running instance");
+            assert_eq!(
+                recover_or_fail(&pool, &persistence, &id, auto_recover)
+                    .await
+                    .expect("apply recovery decision"),
+                if auto_recover {
+                    RecoveryOutcome::Recovered
+                } else {
+                    RecoveryOutcome::Failed
+                }
+            );
+            let after = snapshot(&pool, &id).await;
+            assert_eq!(
+                after["status"],
+                if auto_recover { "suspended" } else { "failed" }
+            );
+            assert_eq!(after["termination_reason"], "environment_restart");
+            if auto_recover {
+                assert!(!after["sleep_until"].is_null());
+                assert_eq!(after["recovery_attempts"], 1);
+            }
+            assert_eq!(
+                recover_or_fail(&pool, &persistence, &id, auto_recover)
+                    .await
+                    .expect("repeat recovery decision"),
+                RecoveryOutcome::Unchanged
+            );
+            assert_eq!(snapshot(&pool, &id).await, after);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_write_failure_is_not_reported_as_terminal_failure() {
+        let pool = crate::test_support::pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+        pool.close().await;
+        for auto_recover in [true, false] {
+            assert!(
+                recover_or_fail(&pool, &persistence, "unavailable", auto_recover)
+                    .await
+                    .is_err()
+            );
         }
     }
 }

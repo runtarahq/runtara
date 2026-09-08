@@ -469,6 +469,11 @@ impl HeartbeatMonitor {
         )
         .await;
 
+        if let Err(error) = &outcome {
+            warn!(instance_id = %instance.instance_id, %error, "Orphan recovery write failed");
+            return;
+        }
+
         info!(
             instance_id = %instance.instance_id,
             outcome = ?outcome,
