@@ -13,8 +13,11 @@ committed as `217e11ae` (AUDIT-33). Breakpoint checkpoint handling is committed 
 `ef95a0dd` (AUDIT-34). AUDIT-35 removes production selection of the superseded
 isolation compiler while retaining compatibility support for older artifacts
 (committed as `561eb259`). AUDIT-36 adds real composed late-completion coverage
-through the production DSL emitter.
-No push is authorized; the latest pushed stage is `6de29584`.
+through the production DSL emitter. AUDIT-37 merges recent upstream `main`,
+renumbers this branch's two Postgres migrations to 027/028, and repairs the two
+load-sensitive tests behind the red `components-build` check.
+No push is authorized; the latest pushed stage is `6de29584`, so draft PR #237
+still shows the pre-merge tree.
 
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
@@ -77,7 +80,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | AUDIT-35 retires production isolation selection. Inventory registered/parked artifacts; retire remaining superseded isolation/task runtime machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
-| Upstream integration and PR | Integrate recent upstream `main`, resolve the conflicting committed migration numbers 025/026 without silently rewriting migration history, rerun affected checks and create the PR. This snapshot branch does not claim that integration is complete. |
+| Upstream integration and PR | AUDIT-37 merges upstream `main`, moves the run-label locals to 186/187 so no published `DIRECT_*` index shifts, and renames the branch's two migrations to 027/028 rather than editing them. Push draft PR #237 to the merged tree, triage the nine new CodeQL alerts and rerun the feature-gated database suites. |
 
 The governing acceptance criteria remain G1–G10 in the
 [updated plan](selective-isolation-plan.md). The
@@ -90,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment and migration-version suites; the five-case cancellation E2E; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. The feature-gated database suites, frontend, Linux soak and paired benchmarks were not run. |
 | Late completion (AUDIT-36) | Six new groups passed: 20 composed runs covering timeout, root Cancel and normal completion | Public DSL emitter plus normally composed fixture Agent; cleanup events, same-component reuse and real checkpoint records. Simultaneous-ready scheduling and native lifecycle E2E remain separate gates. |
 | Production isolation selection retirement (AUDIT-35) | Default production build and Clippy; 24 server config, 609 compiler, 28 compatibility execution and six CLI tests passed; legacy runner integration target compiled | New output has no isolation catalog/custom task import. Native runner target was compile-only; registered/parked inventory, full lifecycle E2E and final benchmarks remain open. |
 | Breakpoint cancellation (AUDIT-34) | 35 breakpoint tests; 609 compiler tests outside the deadline execution module; six checkpoint regressions; three public breakpoint execution tests; feature-gated Clippy passed | Counts overlap. Seven new composed regression groups cover receipt handling, marker replay and rejected Pause. Wider deadline/lifecycle/benchmark gates remain open. |
@@ -2725,3 +2729,100 @@ evidence for that distinct tie case. Broader owner recovery, persistence E2E,
 registered/parked artifact inventory, Linux soak, final paired measurements and
 upstream integration remain open. This timer fixture does not replace real HTTP
 header/body cleanup tests or validate cancellation inside arbitrary CPU loops.
+
+
+### AUDIT-37 — Upstream integration and two load-sensitive test defects
+
+**Status:** upstream `main` is merged into this branch, the branch's two Postgres
+migrations are renumbered, and the three red CI checks are accounted for. No
+emitter behavior, WIT contract or cache tag changed.
+
+Recent `main` carried the run-label Finish work (#233), the environment settings
+rule (#236), the suspended-instance index (#235) and the migration renumbering
+(`c540d6be`). Four files conflicted:
+
+| File | Resolution |
+| --- | --- |
+| `instance_handlers/mod.rs` | Union of the branch's `SLEEP_POLL_INTERVAL` re-export and main's `handle_instance_event_with_run_label` |
+| `runner/mod.rs` | Keep `build_runner_configured`; read `RUNTARA_RUNNER` through `ProcessEnv` as main now requires |
+| `compile/core_imports.rs` | Union of `has_run_label` and the branch's `connection_resolver_describe_async` rename |
+| `compile/core_module.rs` | Both sides appended locals at index 142 |
+
+The local-index collision is the only substantive one. The branch owns 142-185
+for cooperative wait handles, window bounds, owned deadlines, monotonic budgets,
+enclosing-scope state and cleanup alarms, and dozens of `DIRECT_*` constants
+depend on those absolute indices. Main's run-label pointer/length pair therefore
+moves to **186/187**, keeping every published index intact. The canonical table
+now covers 0..187, its final group is the two run-label `I32` slots, and no other
+local constant reaches 184 or above.
+
+The branch's `025_invocation_fences.sql` and `026_aborted_termination.sql` become
+`027` and `028`, because main already took 025 and 026 and now enforces that with
+`no_migration_set_numbers_two_migrations_the_same`. The files are renamed, never
+edited, so no applied checksum changes; a test database created under the old
+numbering must be recreated.
+
+Two CI failures were separate load-sensitive test defects, not product defects.
+
+`scoped_runner_does_not_start_children_or_charge_active_budget_before_gate_open`
+built its ten-second `StartGate` **before** `try_launch_detached`, so artifact
+reading and precompilation ran inside the handoff budget. On a runner that had
+just built 27 Agent components, preparation could consume nearly all of it and
+the gate expired during the test's own 1100 ms sleep, so the detached task took
+the `TimedOut` arm and `is_running` was false. Production never does this:
+`dispatch_prepared` receives an already-prepared launch and only then builds the
+gate. The test now prepares first and calls `try_launch_prepared_detached`.
+
+`emitted_root_stop_bypasses_local_recovery_and_reaps_both_http_children` ticked
+wasmtime epochs from a `tokio::time::interval` task on the same four-worker
+runtime it was interrupting. Production's `spawn_epoch_ticker` uses a dedicated
+OS thread precisely so saturation cannot delay the tick that makes a stored
+cancel flag visible. Under full-suite parallelism the tick arrived late and the
+five-second wait for the cancelled run elapsed. Both `isolated_agent_execution`
+sites now use an `EpochTicker` guard that ticks from its own thread and stops on
+drop. The suite also got faster: **566s to 442s**.
+
+The third and fourth red checks need no code change here. `validation wasm` and
+`frontend (embedded UI)` both failed the `wasm32-unknown-unknown` build on
+`-D dead-code` for `needs_agent_runtime`; the already-committed `f9ff11c6` gates
+that function, and the build now passes with CI's flags. CodeQL reports nine new
+alerts on the branch and has not been triaged.
+
+Verified after the merge:
+
+| Check | Result |
+| --- | --- |
+| `runtara-workflows` library, default features | 607 passed |
+| `runtara-workflows` library, feature-gated, single-threaded | 720 passed in 524.20s |
+| `agent_deadline_tests` selection | 111 passed in 252.92s (inside the 720) |
+| `direct_wasm_execute` | 400 passed, 3 ignored, in 441.74s and again in 536.22s |
+| `runtara-component-host` integration and isolated-step targets | 139 + 92 + 13 passed, one ignored |
+| `scoped_runner_test` and `cooperative_stop_test` | 7 and 4 passed against a recreated database |
+| `migration_versions_test` | 2 passed |
+| `cargo test --workspace --lib` | no failures with `RUNTARA_AGENT_COMPONENTS_DIR` set |
+| `runtara-validation-wasm` for `wasm32-unknown-unknown`, `RUSTFLAGS=-D warnings` | built |
+| `test_cooperative_cancellation.py` | 5 cases passed; owner and peer, headers and body, 0.62-1.10s, plus sustained renewal |
+| Workspace all-target Clippy, formatting, diff whitespace | passed |
+
+```sh
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test
+cargo test -p runtara-server --test migration_versions_test
+cargo test --workspace --lib
+RUSTFLAGS="-D warnings" cargo build -p runtara-validation-wasm --lib --release --target wasm32-unknown-unknown
+python3 e2e/test_cooperative_cancellation.py --server target/release/runtara-server --components "$RUNTARA_AGENT_COMPONENTS_DIR"
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+Not run in this stage: the feature-gated database suites for core, store-postgres,
+server, object-store and connections; frontend build and tests; Linux latency,
+throughput and soak; and any paired benchmark. The `component-host` real-Agent
+test resolves components from the workspace `target/wasm32-wasip2/release` rather
+than `RUNTARA_AGENT_COMPONENTS_DIR`, so a separately staged component directory
+must be linked there before it will run locally. G1-G10 remain open, CodeQL
+triage remains open, and the pull request is still a draft on an older commit.
+Commits remain local until the user explicitly requests a push.

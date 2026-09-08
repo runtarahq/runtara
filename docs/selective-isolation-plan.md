@@ -1178,3 +1178,27 @@ completion after selection, not the distinct simultaneous-ready scheduling tie.
 Keep G4/G5 and the broader G1–G10 release gates open for the remaining matrix,
 including lifecycle recovery, artifact inventory, performance and upstream
 integration. Commits remain local until the user explicitly requests a push.
+
+
+### Upstream integration · 2026-09-09
+
+AUDIT-37 merges recent upstream `main` into this branch. The one substantive
+conflict is the canonical local table: main's run-label lowering and this
+branch's cooperative-cancellation lowering both appended at index 142, so the
+run-label pointer/length pair moves to 186/187 and every published `DIRECT_*`
+index keeps its value. The branch's two Postgres migrations are renamed to 027
+and 028 because main took 025 and 026 and now enforces unique versions; the SQL
+is untouched, so no applied checksum changes.
+
+Two red CI tests were load-sensitive harness defects rather than product defects.
+A gated-launch test built its `StartGate` before preparation, letting artifact
+reading and precompilation spend the handoff budget that `dispatch_prepared`
+reserves for the handoff alone. An isolated-execution test drove wasmtime epochs
+from a `tokio` interval task on the runtime it was interrupting, where production
+uses a dedicated ticker thread. Both now follow the production shape.
+
+This closes the plan's upstream-integration item for the merge itself. It does
+not advance G1-G10: the feature-gated database suites, frontend, CodeQL triage,
+Linux soak and the final paired measurements are unchanged and still open, and
+the draft pull request still points at the pre-merge commit. Commits remain local
+until the user explicitly requests a push.

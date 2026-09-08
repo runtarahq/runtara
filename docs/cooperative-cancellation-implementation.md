@@ -3886,3 +3886,28 @@ full public execution, native lifecycle/database E2E, component/browser builds a
 benchmarks were not rerun. Remaining G1–G10 gates, Linux soak, controlled paired
 measurements, upstream/migration integration and a new PR remain open. No push
 is authorized.
+
+
+## Upstream integration and harness repairs · 2026-09-09
+
+Recent upstream `main` is merged. Run-label locals move from 142/143 to 186/187
+so the cooperative-cancellation locals at 142-185 keep their published indices,
+`RUNTARA_RUNNER` is read through `ProcessEnv`, and the branch's two migrations
+are renamed to `027_invocation_fences.sql` and `028_aborted_termination.sql`.
+
+Two tests were repaired at their source rather than by widening a timeout. The
+gated-launch runner test prepares before it builds its `StartGate`, matching
+`dispatch_prepared`, so preparation can no longer expire the handoff budget. The
+`isolated_agent_execution` tests tick epochs from a dedicated `EpochTicker`
+thread, matching `spawn_epoch_ticker`, so an oversubscribed machine cannot delay
+the tick that makes a stored cancel flag visible; the execution suite also runs
+about two minutes faster.
+
+Verified: 607 default and 720 feature-gated compiler library tests; 400
+`direct_wasm_execute` tests twice; the component-host integration and
+isolated-step targets; `scoped_runner_test`, `cooperative_stop_test` and
+`migration_versions_test`; `cargo test --workspace --lib`; the
+`wasm32-unknown-unknown` validation build under `-D warnings`; and the five-case
+authenticated cancellation E2E, where owner and peer header and body cases
+cancelled in 0.62-1.10s. The feature-gated database suites, frontend, Linux soak,
+CodeQL triage and paired measurements were not run.
