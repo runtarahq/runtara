@@ -74,21 +74,6 @@ fn compile_nested_with(
         version_resolved: 1,
         execution_graph: serde_json::from_value(child)?,
     }];
-    let mut compiled = compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "nested-ai".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(root.clone())?,
-            child_workflows: children.clone(),
-            output_dir: dir.into(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )?;
     if let Some(timeout) = timeout {
         let scope = if parent.is_some() {
             &mut root["steps"]["outer"]["subgraph"]
@@ -96,20 +81,14 @@ fn compile_nested_with(
             &mut root
         };
         scope["steps"]["tool"]["timeout"] = timeout.into();
-        super::super::embed::reemit(
-            compiled,
-            serde_json::from_value(root)?,
-            children,
-            false,
-            "nested-ai",
-        )
-    } else {
-        compose_direct_workflow(
-            &mut compiled,
-            std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?,
-        )?;
-        Ok(compiled)
     }
+    super::super::embed::compile_composed(
+        dir,
+        serde_json::from_value(root)?,
+        children,
+        false,
+        "nested-ai",
+    )
 }
 
 fn call(name: &str, id: &str, arguments: Value) -> Value {

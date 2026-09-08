@@ -138,10 +138,16 @@ impl WorkflowFeatureSummary {
 
     /// Runtime ownership for one graph of a callable workflow. Agent/Embed/Split retries use
     /// cancellable host-I/O timers and connections use the separate resolver.
-    /// This is only an import analysis: callers must also apply the complete
-    /// workflow-agent safety gate and inspect every supplied Embed child graph.
-    pub(crate) fn needs_agent_runtime(&self, track_events: bool) -> bool {
-        if track_events || self.root_durable {
+    /// Agent/Embed deadlines use guest clocks; `runtime_timeouts` identifies
+    /// other timeout owners whose lowering still calls the lifecycle runtime.
+    /// Callers must also apply the complete workflow-agent safety gate and
+    /// inspect every supplied Embed child graph.
+    #[cfg(all(
+        feature = "compiler",
+        not(all(target_family = "wasm", not(target_os = "wasi")))
+    ))]
+    pub(crate) fn needs_agent_runtime(&self, track_events: bool, runtime_timeouts: bool) -> bool {
+        if track_events || self.root_durable || runtime_timeouts {
             return true;
         }
         self.features.iter().any(|feature| {
@@ -154,7 +160,6 @@ impl WorkflowFeatureSummary {
                     | WorkflowFeature::WaitForSignal
                     | WorkflowFeature::SuspendResume
                     | WorkflowFeature::Durability
-                    | WorkflowFeature::Timeout
                     | WorkflowFeature::Breakpoint
             )
         })

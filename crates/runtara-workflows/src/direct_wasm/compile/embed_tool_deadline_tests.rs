@@ -76,21 +76,6 @@ fn compiled_with_delay(
         version_resolved: 1,
         execution_graph: serde_json::from_value(child)?,
     }];
-    let mut result = compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "embed-tool-deadline".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(graph.clone())?,
-            child_workflows: children.clone(),
-            output_dir: dir.into(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )?;
     if let Some(timeout) = timeout {
         let scoped = if parent_timeout.is_some() {
             &mut graph["steps"]["outer"]["subgraph"]
@@ -98,17 +83,14 @@ fn compiled_with_delay(
             &mut graph
         };
         scoped["steps"]["tool"]["timeout"] = timeout.into();
-        result = super::embed::reemit(
-            result,
-            serde_json::from_value(graph)?,
-            children,
-            false,
-            "embed-tool-deadline",
-        )?;
-    } else {
-        compose_direct_workflow(&mut result, std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)?;
     }
-    Ok(result)
+    super::embed::compile_composed(
+        dir,
+        serde_json::from_value(graph)?,
+        children,
+        false,
+        "embed-tool-deadline",
+    )
 }
 
 struct Server {

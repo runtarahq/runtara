@@ -57,7 +57,7 @@
 //! | E058 | UndefinedReferenceField | Nested `data.*`/`variables.*` field not known under a validated prefix |
 //! | E059 | ReferenceNonObjectTraversal | Reference tries to traverse through a scalar or invalid container |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
-//! | E128 | UnsupportedStepTimeout | A per-step timeout has no enforcement path |
+//! | E128 | Retired | Agent and EmbedWorkflow timeouts now use cooperative guest deadlines |
 //! | E129 | RetryCountOverflow | Retries plus the initial attempt exceed u32 |
 //! | E130 | StepIdMismatch | A step map key differs from its declared ID |
 //! | E126 | UnknownReferenceRoot | Reference root is not one of the runtime's supported roots |
@@ -378,13 +378,6 @@ pub enum ValidationError {
     },
 
     // === Unsupported Step Configuration Errors ===
-    /// An Agent or EmbedWorkflow step declares `timeout`, but the runtime has
-    /// no host-owned deadline that can interrupt a running invocation.
-    ///
-    /// The field is retained in the DSL solely so older definitions parse and
-    /// receive this precise, structured error instead of a generic serde error.
-    UnsupportedStepTimeout { step_id: String, step_type: String },
-
     /// Retries plus the initial attempt cannot fit in the runtime u32 counter.
     RetryCountOverflow { step_id: String, max_retries: u32 },
 
@@ -511,7 +504,6 @@ impl ValidationError {
             Self::InvalidEnumValue { .. } => "E024",
             Self::InvalidConditionShape { .. } => "E025",
             Self::QueryOnlyConditionOperator { .. } => "E027",
-            Self::UnsupportedStepTimeout { .. } => "E128",
             Self::RetryCountOverflow { .. } => "E129",
             Self::StepIdMismatch { .. } => "E130",
             Self::DuplicateStepName { .. } => "E060",
@@ -1026,15 +1018,6 @@ impl std::fmt::Display for ValidationError {
                     crate::retry_budget::retry_count_message(u64::from(*max_retries))
                 )
             }
-            ValidationError::UnsupportedStepTimeout { step_id, step_type } => {
-                write!(
-                    f,
-                    "[E128] Step '{}': 'timeout' is unsupported for {} steps because a running invocation cannot be interrupted. Remove this field; only Split, While, and WaitForSignal have enforced per-step timeouts.",
-                    step_id, step_type
-                )
-            }
-
-            // Naming Errors
             ValidationError::DuplicateStepName { name, step_ids } => {
                 write!(
                     f,
@@ -1554,9 +1537,6 @@ pub fn validate_workflow(
 
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
-
-    // Phase 9.5: Reject per-step timeout fields with no enforcement path.
-    validate_unsupported_step_timeouts(graph, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
@@ -4003,48 +3983,6 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             }
             Step::While(while_step) => {
                 collect_step_names(&while_step.subgraph, name_to_step_ids);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Reject an Agent or EmbedWorkflow `timeout` before it reaches a compiler.
-///
-/// A running capability or child workflow cannot be preempted in the
-/// synchronous component model. Keeping a parsed field lets stored legacy
-/// definitions receive a stable, step-scoped error instead of silently
-/// dropping a purported deadline. Split, While, and WaitForSignal use distinct
-/// runtime deadline lowerings and therefore remain valid.
-fn validate_unsupported_step_timeouts(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    for (step_id, step) in &graph.steps {
-        match step {
-            Step::Agent(agent_step) if agent_step.timeout.is_some() => {
-                result.errors.push(ValidationError::UnsupportedStepTimeout {
-                    step_id: step_id.clone(),
-                    step_type: "Agent".to_string(),
-                });
-            }
-            Step::EmbedWorkflow(embed_step) if embed_step.timeout.is_some() => {
-                result.errors.push(ValidationError::UnsupportedStepTimeout {
-                    step_id: step_id.clone(),
-                    step_type: "EmbedWorkflow".to_string(),
-                });
-            }
-            _ => {}
-        }
-
-        match step {
-            Step::Split(split_step) => {
-                validate_unsupported_step_timeouts(&split_step.subgraph, result);
-            }
-            Step::While(while_step) => {
-                validate_unsupported_step_timeouts(&while_step.subgraph, result);
-            }
-            Step::WaitForSignal(wait_step) => {
-                if let Some(on_wait) = &wait_step.on_wait {
-                    validate_unsupported_step_timeouts(on_wait, result);
-                }
             }
             _ => {}
         }
@@ -11559,11 +11497,11 @@ mod tests {
         );
     }
 
-    // === Unsupported Per-Step Timeout Tests (E128) ===
+    // === Cooperative Per-Step Timeout Validation ===
 
     #[test]
-    fn test_agent_and_embed_timeout_are_errors_e128() {
-        let graph: ExecutionGraph = serde_json::from_str(
+    fn test_agent_and_embed_timeouts_validate() {
+        let mut graph: ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "a",
               "executionPlan": [
@@ -11581,40 +11519,31 @@ mod tests {
         )
         .unwrap();
 
-        let result = validate_workflow(&graph, &test_catalog());
-
-        let mut flagged: Vec<(String, String)> = result
-            .errors
-            .iter()
-            .filter_map(|error| match error {
-                ValidationError::UnsupportedStepTimeout { step_id, step_type } => {
-                    Some((step_id.clone(), step_type.clone()))
+        let child: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint":"finish", "steps":{"finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[]
+        }))
+        .unwrap();
+        let children = [ClosureChildGraph {
+            workflow_id: "child".into(),
+            version: 1,
+            execution_graph: child,
+        }];
+        for budget in [None, Some(0), Some(1), Some(u64::MAX)] {
+            for step in graph.steps.values_mut() {
+                match step {
+                    Step::Agent(step) => step.timeout = budget,
+                    Step::EmbedWorkflow(step) => step.timeout = budget,
+                    _ => {}
                 }
-                _ => None,
-            })
-            .collect();
-        flagged.sort();
-        assert_eq!(
-            flagged,
-            vec![
-                ("a".to_string(), "Agent".to_string()),
-                ("embed".to_string(), "EmbedWorkflow".to_string())
-            ],
-            "{:?}",
-            result.errors
-        );
-        let display = result
-            .errors
-            .iter()
-            .find(|error| matches!(error, ValidationError::UnsupportedStepTimeout { .. }))
-            .map(|error| format!("{error}"))
-            .unwrap();
-        assert!(display.contains("[E128]"), "{display}");
-        assert!(display.contains("unsupported"), "{display}");
+            }
+            let result = validate_workflow_closure("root", &graph, &test_catalog(), &children);
+            assert!(result.is_ok(), "budget={budget:?}: {result:?}");
+        }
     }
 
     #[test]
-    fn test_enforced_timeouts_are_not_rejected_e128() {
+    fn test_existing_loop_and_signal_timeouts_validate() {
         // Split / While / WaitForSignal timeouts ARE enforced and remain valid.
         // The Agent inside the Split subgraph has no timeout either.
         let graph: ExecutionGraph = serde_json::from_str(
@@ -11656,18 +11585,11 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
 
-        assert!(
-            !result
-                .errors
-                .iter()
-                .any(|error| matches!(error, ValidationError::UnsupportedStepTimeout { .. })),
-            "enforced Split/While/Wait timeouts must not be rejected: {:?}",
-            result.errors
-        );
+        assert!(!result.has_errors(), "{:?}", result.errors);
     }
 
     #[test]
-    fn test_agent_timeout_is_error_e128_inside_while_subgraph() {
+    fn test_agent_timeout_validates_inside_while_subgraph() {
         let graph: ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "loop",
@@ -11699,15 +11621,7 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
 
-        assert!(
-            result.errors.iter().any(|error| matches!(
-                error,
-                ValidationError::UnsupportedStepTimeout { step_id, step_type }
-                    if step_id == "inner" && step_type == "Agent"
-            )),
-            "Agent timeout in a While subgraph must reject the graph: {:?}",
-            result.errors
-        );
+        assert!(!result.has_errors(), "{:?}", result.errors);
     }
 
     // === AiAgent WaitForSignal Tool onWait Tests (W072) ===

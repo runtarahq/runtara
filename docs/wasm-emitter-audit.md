@@ -7,10 +7,9 @@ and durable suspend/resume through the production invoke ABI.
 ## Current progress · 2026-09-08
 
 Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`.
-The memory deadline stage is committed locally as `ce58265e`; the latest pushed
-stage remains `6de29584`. AUDIT-31 closes an MCP tool-name collision that could
-select the wrong provider/budget, and tests now use production timer-import
-inference. Subsequent work stays local unless a push is explicitly requested.
+The memory and tool-name stages are committed locally as `ce58265e` and `2752aa83`.
+AUDIT-32 removes the E128 rejection and migrates the deadline execution corpus to
+public compilation. No push is authorized; the latest pushed stage is `6de29584`.
 
 **Implementation is in progress; this snapshot is not release qualification.**
 The current approach is cooperative cancellation in one normally composed
@@ -48,22 +47,19 @@ Implemented and covered by focused tests:
   retry/replay behavior remains covered, with 32 byte-identical before/after
   compiler artifacts and passing parallel/retry execution suites (AUDIT-22).
 
-**Public Agent/Embed timeout syntax still returns E128.** Internal timeout
-fixtures deliberately bypass that validation rejection to exercise the emitter;
-their success does not mean users can already author those timeouts. AUDIT-28
-fixes the Agent-as-AI-tool path, which previously only injected a capability
-argument. AUDIT-29 extends the same deadline path to synthetic MCP tools.
-AUDIT-30 also carries and enforces the memory storage provider budget. Public
-validation, import inference and export-mode qualification still need to move
-through the normal compiler entry points before E128 is retired. No product
-feature flag or optional cancellation backend has been added.
+**Public Agent/Embed timeout syntax is accepted in AUDIT-32.** Agent tools,
+synthetic MCP tools and memory calls use the shared guest deadline path. Fixtures
+now compile the authored timeout through public entry points and normal component
+composition; the private re-emission helpers are removed. Existing export safety
+restrictions remain. This accepts the language contract without declaring all
+release gates complete. No product flag or optional cancellation backend is added.
 
 ### Remaining work to reach the goal
 
 | Work | Completion criterion |
 | --- | --- |
 | Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
-| Public timeout support | Agent tools, synthetic MCP tools and AI memory calls use shared guest budget enforcement (AUDIT-28/29/30). Qualify public compilation/import inference and supported export modes, then remove E128 deliberately and move deadline coverage through public validation/compilation/composition, including zero/overflow/inherited budgets, replay and cleanup escalation. |
+| Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
 | Compatibility and obsolete-path cleanup | Inventory registered/parked artifacts; retire superseded isolation/task machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
@@ -80,6 +76,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Public timeout compilation (AUDIT-32) | 701 compiler library tests passed in 462.37s; 395 public execution tests passed in 712.74s; three manual benchmarks ignored; 24 server DTO and 24 browser-validator tests passed; generated WASM passed 12 boundary cases | Includes public Agent/Embed, AI tool/MCP/memory, published export, retry, cancellation and original audit regressions. The selected 21 runtime/export tests overlap the library run. Remaining release and paired-measurement gates stay open. |
 | Name validation and inferred imports (AUDIT-31) | 701 feature-gated compiler library tests passed in 485.04s; 19 public AI tests passed in 8.69s | Includes the three new name-collision regressions and the deadline corpus with production timer/clock inference. E128 remains; timeout execution still uses private emission. |
 | AI memory deadlines (AUDIT-30) | 697-test compiler library run; final 15-test memory selection; 242 stdlib tests (one manual benchmark ignored); 92 component cancellation tests; six dispatcher tests; 19 public AI tests passed | The final memory selection includes one regression added after the full library run; overlapping counts are not summed. Public timeout syntax and final release qualification remain open. |
 | Synthetic MCP deadlines (AUDIT-29) | 689 feature-gated compiler library tests passed in 416.76s; final 14-test MCP selection passed in 13.07s; public AI selection passed 19 tests in 8.62s | The final MCP rerun includes stronger exact provider-error assertions. Its tests are included in the library count. E128 remains, and native server E2E/benchmarks were not rerun. |
@@ -87,18 +84,16 @@ evidence; the table above is the consolidated current work list.
 | Physical ownership and remote emergency grace (`b932f1c6` / `d3fc2a6a`, AUDIT-26/27) | 354 distinct selected environment tests passed across the recorded runs; authenticated owner/peer HTTP header/body E2E passed | Extended E2E also observed lease renewal during a 32-second pending request and shutdown of an unrelated peer. This is lifecycle evidence from the earlier native stage, not a fresh run against `62e051ed` or a performance benchmark. |
 | Documentation checkpoint (`4ecb4f9b`) | Source and recorded results reviewed; diff whitespace checked | No runtime changes or Rust test reruns in that documentation-only commit. |
 
-The immediate follow-up is public timeout enablement and qualification. Agent
-tools, synthetic MCP and memory load/save now preserve the referenced budget and
-use the shared guest invocation path. Memory has an explicit auxiliary namespace
-separate from model-selected tools; completed results and pending budgets have
-composed replay coverage. The storage budget does not become an LLM summarization
-budget.
+Public timeout enablement is implemented. Agent tools, synthetic MCP and memory
+load/save preserve the referenced budget and use the shared guest invocation path.
+Memory has an auxiliary namespace separate from model-selected tools; completed
+results and pending budgets have composed replay coverage. The storage budget
+does not become an LLM summarization budget.
 
-Move the deadline corpus through public validation, import inference, compilation,
-composition and supported export modes together, including inherited/zero/maximum
-budgets, retries, durable nesting and cleanup escalation. E128 must not be removed
-solely because private-emitter tests pass. The existing race/CPU and recovery
-qualification work in the remaining-work table still applies.
+The deadline corpus now passes through public validation, import inference,
+compilation, composition and supported export modes, including inherited/zero/
+maximum budgets, retries, durable nesting and cleanup escalation. The remaining
+race/CPU and recovery qualification in the work table still applies.
 
 The full G1–G10 matrix, final paired size/performance report and Linux soak remain
 unfinished. Recent upstream `main` has not been integrated into this branch;
@@ -2440,3 +2435,67 @@ E128 removal and migration of the private fixtures onto public compilation remai
 next. G1–G10, registered-artifact compatibility, upstream/migration integration,
 paired measurements and Linux soak remain open. This stage changes validation and
 tests only; no Agent/shared guest component rebuild or new compiler ABI is needed.
+
+
+### AUDIT-32 — Public cooperative Agent and Embed timeouts
+
+**Status:** E128 is retired. The full compiler library and public execution suites
+pass on the public path; browser/server boundary checks are recorded separately.
+Remaining release gates are not declared complete.
+
+The blanket validation/compiler rejection is removed. Agent and Embed `timeout`
+fields now select the existing guest deadline machinery through public compilation.
+The retired code is not reused. Its obsolete server DTO branch is removed, while
+the DTO shape remains unchanged. DSL documentation now explains the cooperative
+contract. The compiler tag is `shared-v21`; registered and parked artifacts retain
+the code with which they were compiled.
+
+Agent and Embed zero budgets prevent invocation. Their budgets include preparation,
+retries and durable suspension; absent budgets retain enclosing deadlines. The
+existing Split/While zero-budget meaning remains unchanged. Own timeout recovery
+uses the existing graph path; root Cancel and enclosing expiry propagate to their
+owner. Cleanup may outlast the deadline; emergency abort ends the entire execution.
+No remote side-effect rollback is promised.
+
+All private deadline re-emission helpers are removed. Fixtures set the authored
+budget before calling the public compiler, then compose its returned artifacts.
+Published-workflow tests retain the public explicit export API and assert that no
+lifecycle-runtime import appears. Public compilation exposed a generic-timeout
+inference bug that the old untimed-seed fixture hid; the compiler now inspects
+actual timeout owners before omitting imports. Agent/Embed budgets are guest-only,
+while loop/signal budgets and durability/logging/suspension retain required runtime
+imports. The expanded callable-Embed matrix verifies mixtures of these cases.
+Host I/O, clock and whole-run alarm imports remain ordinary platform capabilities.
+Existing export and workflow-as-agent safety restrictions remain; no host graph interpreter or task manager is added.
+
+| Acceptance contract | Evidence |
+| --- | --- |
+| Absent, zero, one-millisecond and maximum-u64 Agent/Embed budgets validate through a root/child closure | `test_agent_and_embed_timeouts_validate` |
+| Nested Agent and existing loop/signal timeout syntax remains valid | `test_agent_timeout_validates_inside_while_subgraph`, `test_existing_loop_and_signal_timeouts_validate` |
+| Agent tools carry authored budgets through public compilation | `direct_compile_accepts_ai_agent_tool_guest_timeout` and the seven Agent-tool execution regressions |
+| Pending I/O, preparation, zero/maximum budgets, replay, inherited/root propagation, sibling survival and cleanup escalation use public compilation | Existing Agent/Embed, parallel, MCP, memory, nested AI and alarm regression modules; their private re-emission helpers are removed |
+| Published workflows preserve runtime-free exports | `agent_deadline_published_workflows_use_standard_clock_without_runtime` |
+| Browser validator JSON API accepts absent/zero/one/maximum budgets and rejects negative/fractional/oversized/string values | `browser_validator_accepts_cooperative_agent_and_embed_timeouts`, `browser_validator_rejects_malformed_cooperative_timeouts` |
+
+The first selected run passed 27 tests and failed one request-count assertion:
+the 200 ms enclosing budget expired before the first HTTP request, with the
+correct timeout/recovery output. That fixture now uses a 1,000 ms live budget to
+test cancellation of pending I/O; exact request count, cleanup and owner assertions
+remain. The final selected run passed 28 tests in 28.09s. The root/child budget
+matrix was added afterward and is included in full-library verification recorded
+in the implementation record. Published in-flight-I/O cases also use 1,000 ms
+startup headroom. After the import-ownership fix, all 21 selected runtime/export
+tests passed in 17.31s. This is not a latency benchmark.
+
+The pattern lab reflects the public contract. Remaining G1–G10 work includes
+completion/cancellation races, wider lifecycle/recovery/partition qualification,
+old-artifact and obsolete-path inventory, paired size/time/DB/RSS measurements,
+Linux soak, upstream migration integration and the PR. Public syntax acceptance
+does not establish these other requirements.
+
+Final boundary verification: all 24 server DTO tests and all 24 browser-validator
+library tests passed. The frontend validator was rebuilt with pinned Node 22.12.0;
+the generated WASM then passed 12 JSON boundary cases, preserving the exact
+maximum-u64 literal. Owning-package feature-gated Clippy passed. Generated assets
+remain ignored. These checks do not replace the outstanding database/server E2E,
+paired benchmarks or Linux soak.

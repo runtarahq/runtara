@@ -18,8 +18,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runtara_dsl::{
-    AgentStep, AiAgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step,
-    WaitForSignalStep, WhileStep,
+    AiAgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step, WaitForSignalStep,
+    WhileStep,
 };
 
 use crate::compile::ChildWorkflowInput;
@@ -137,7 +137,40 @@ pub(crate) fn workflow_agent_requires_runtime(
 ) -> bool {
     std::iter::once(graph)
         .chain(children.iter().map(|child| &child.execution_graph))
-        .any(|graph| analyze_workflow_features(graph).needs_agent_runtime(track_events))
+        .any(|graph| {
+            analyze_workflow_features(graph)
+                .needs_agent_runtime(track_events, has_runtime_timeout(graph))
+        })
+}
+
+/// The coarse Timeout feature includes guest-only Agent/Embed budgets. Keep
+/// loop/signal deadline ownership explicit so publication cannot drop required
+/// runtime imports when both kinds of timeout appear in one graph or closure.
+fn has_runtime_timeout(graph: &ExecutionGraph) -> bool {
+    graph.steps.values().any(|step| match step {
+        Step::Split(step) => {
+            step.config
+                .as_ref()
+                .and_then(|config| config.timeout)
+                .is_some()
+                || has_runtime_timeout(&step.subgraph)
+        }
+        Step::While(step) => {
+            step.config
+                .as_ref()
+                .and_then(|config| config.timeout)
+                .is_some()
+                || has_runtime_timeout(&step.subgraph)
+        }
+        Step::WaitForSignal(step) => {
+            step.timeout_ms.is_some()
+                || step
+                    .on_wait
+                    .as_ref()
+                    .is_some_and(|graph| has_runtime_timeout(graph))
+        }
+        _ => false,
+    })
 }
 
 fn collect_workflow_agent_safety(
@@ -220,7 +253,7 @@ fn collect_workflow_agent_step_safety(
             path,
             step,
             "retry-or-rate-limit-backoff",
-            "Agent backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, timeout and breakpoint paths before publishing",
+            "Agent backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, loop/signal timeout and breakpoint paths before publishing",
         ),
         // AiAgent uses the same outbound retry/rate-limit machinery as Agent
         // for its model call and may dispatch any declared tool path.
@@ -245,7 +278,7 @@ fn collect_workflow_agent_step_safety(
                     path,
                     step,
                     "retry-backoff",
-                    "Split backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, timeout and breakpoint paths before publishing",
+                    "Split backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, loop/signal timeout and breakpoint paths before publishing",
                 );
             }
             collect_workflow_agent_safety(
@@ -272,7 +305,7 @@ fn collect_workflow_agent_step_safety(
                     path,
                     step,
                     "retry-backoff",
-                    "EmbedWorkflow backoff is callable only when the complete child closure is non-durable and has no root runtime operations; remove durable, logging, suspension, timeout and breakpoint paths before publishing",
+                    "EmbedWorkflow backoff is callable only when the complete child closure is non-durable and has no root runtime operations; remove durable, logging, suspension, loop/signal timeout and breakpoint paths before publishing",
                 );
             }
 
@@ -1062,28 +1095,26 @@ fn supports_direct_control_step_inner(
                 include_on_error,
             )
         }
-        Step::Agent(step) => {
-            supports_agent_step_baseline(graph, step)
-                && supports_normal_flow_step(
-                    graph,
-                    child_workflows,
-                    step_id,
-                    reachable,
-                    used_edges,
-                    stack,
-                    child_stack,
-                    include_on_error,
-                )
-                && on_error_supported_or_inert(
-                    graph,
-                    child_workflows,
-                    step_id,
-                    reachable,
-                    used_edges,
-                    stack,
-                    child_stack,
-                    include_on_error,
-                )
+        Step::Agent(_) => {
+            supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) && on_error_supported_or_inert(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            )
         }
         Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step, child_workflows) => {
             // The AiAgent loop consumes its tool edges directly (it dispatches
@@ -1176,14 +1207,6 @@ fn mark_inert_on_error_edges(
             mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
         }
     }
-}
-
-fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    // A running capabilities.invoke cannot be interrupted by the synchronous
-    // component host. Never lower a claimed Agent deadline as a best-effort
-    // hint: validation and this compiler gate reject it until host-owned
-    // cancellation exists.
-    step.timeout.is_none()
 }
 
 /// AiAgent baseline: single-shot completions (optionally with structured
@@ -1306,13 +1329,6 @@ fn supports_embed_workflow_step_baseline(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
-    // A child runs inline and has no host-owned cancellation boundary. Do not
-    // silently treat `timeout` as a hint; reject it with the same rule as an
-    // Agent call.
-    if step.timeout.is_some() {
-        return false;
-    }
-
     if child_stack.iter().any(|visited| visited == &step.id) {
         return false;
     }
@@ -1506,7 +1522,7 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
         // Split / While / EmbedWorkflow stay excluded: their successor
         // handling owns next/error-plan interplay and needs its own analysis.
         Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
-        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Agent(_) => {}
         Step::Delay(_) | Step::WaitForSignal(_) => {}
         Step::Switch(step)
             if !step
@@ -1547,7 +1563,7 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         return false;
     };
     match step {
-        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Agent(_) => {}
         Step::EmbedWorkflow(_) => {}
         Step::Split(step) if supports_split_step_baseline(step) => {}
         Step::While(step) if supports_while_step_baseline(step) => {}
@@ -1746,8 +1762,7 @@ fn collect_step_support(
     }
     match step {
         Step::Finish(_) => {}
-        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
-        Step::Agent(step) => collect_agent_step_unsupported(graph, step, unsupported),
+        Step::Agent(_) => {}
         Step::Conditional(_) if direct_control => {}
         Step::Conditional(_) => unsupported_step(
             step,
@@ -1912,13 +1927,6 @@ fn collect_embed_workflow_step_unsupported(
         });
     };
 
-    if step.timeout.is_some() {
-        push(
-            "embed-workflow-timeout",
-            "EmbedWorkflow timeout is unsupported because an inline child invocation cannot be interrupted; remove the timeout field",
-        );
-    }
-
     let Some(child) = child_workflows.get(&step.id) else {
         push(
             "embed-workflow-missing-child",
@@ -1944,21 +1952,6 @@ fn collect_embed_workflow_step_unsupported(
              compile the child workflow directly to see its specific failure — this is not a problem \
              with the parent's EmbedWorkflow step",
         );
-    }
-}
-
-fn collect_agent_step_unsupported(
-    _graph: &ExecutionGraph,
-    step: &AgentStep,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
-) {
-    if step.timeout.is_some() {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(step.id.clone()),
-            step_type: Some("Agent".to_string()),
-            feature: "agent-timeout".to_string(),
-            reason: "Agent timeout is unsupported because a running capability invocation cannot be interrupted; remove the timeout field".to_string(),
-        });
     }
 }
 
@@ -2164,9 +2157,9 @@ mod tests {
                 features.needs_runtime(false),
                 "top-level owns its lifecycle"
             );
-            assert!(!features.needs_agent_runtime(false));
+            assert!(!workflow_agent_requires_runtime(&graph, &[], false));
             assert!(
-                features.needs_agent_runtime(true),
+                workflow_agent_requires_runtime(&graph, &[], true),
                 "debug events require runtime"
             );
 
@@ -2206,7 +2199,7 @@ mod tests {
             value["steps"]["scope"]["config"]["sequential"] = sequential.into();
             let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
             assert!(!analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
-            assert!(!analyze_workflow_features(&graph).needs_agent_runtime(false));
+            assert!(!workflow_agent_requires_runtime(&graph, &[], false));
         }
         // The full declared closure matters, including otherwise unreachable
         // recovery steps. A wait must not acquire the parent's lifecycle runtime.
@@ -2258,7 +2251,10 @@ mod tests {
             }
             let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
             let features = analyze_workflow_features(&graph);
-            assert!(features.needs_agent_runtime(false), "{case}: {features:?}");
+            assert!(
+                workflow_agent_requires_runtime(&graph, &[], false),
+                "{case}: {features:?}"
+            );
             let report = analyze_workflow_agent_safety(&graph, &[]);
             assert!(
                 report
@@ -2657,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_workflow_timeout_is_rejected_by_child_aware_check() {
+    fn embed_workflow_timeout_is_supported_by_child_aware_check() {
         let mut graph = fixture("embed_workflow");
         let Some(Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
             panic!("expected EmbedWorkflow fixture step");
@@ -2675,12 +2671,7 @@ mod tests {
             }],
         );
 
-        assert!(!report.supported, "{:?}", report.unsupported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("call_child")
-                && feature.step_type.as_deref() == Some("EmbedWorkflow")
-                && feature.feature == "embed-workflow-timeout"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]
@@ -3994,7 +3985,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_timeout_is_rejected_instead_of_injected_as_a_hint() {
+    fn agent_timeout_is_supported_as_a_guest_deadline() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
@@ -4002,14 +3993,7 @@ mod tests {
         agent.timeout = Some(1_000);
 
         let report = analyze_direct_wasm_support(&graph);
-        assert!(!report.supported, "{:?}", report.unsupported);
-        assert!(
-            report
-                .unsupported
-                .iter()
-                .any(|feature| feature.feature == "agent-timeout"),
-            "timeout must have a precise unsupported feature"
-        );
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]

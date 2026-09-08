@@ -23,15 +23,7 @@ async fn aborts(shape: Shape, cpu_body: bool, inherited: bool) -> anyhow::Result
             _ => graph["steps"]["scope"]["config"]["timeout"] = 200.into(),
         }
     }
-    let compiled = compile_graph(dir.path(), graph.clone())?;
-    assert!(
-        !compiled.parallel_pools.is_empty(),
-        "fixture must retain parallel execution"
-    );
-    let mut compiled = if inherited {
-        // Public enclosing timeout syntax; neither Agent has an own timeout.
-        compiled
-    } else {
+    if !inherited {
         match shape {
             Shape::Split => {
                 graph["steps"]["items"]["subgraph"]["steps"]["fetch"]["timeout"] = 100.into()
@@ -42,8 +34,12 @@ async fn aborts(shape: Shape, cpu_body: bool, inherited: bool) -> anyhow::Result
                 }
             }
         }
-        reemit_parallel(compiled, graph)?
-    };
+    }
+    let mut compiled = compile_graph(dir.path(), graph)?;
+    assert!(
+        !compiled.parallel_pools.is_empty(),
+        "fixture must retain parallel execution"
+    );
     // With own deadlines there is no enclosing alarm. With an inherited
     // deadline its wait cannot be armed until after these launches return.
     let components = fixture_components(dir.path(), cpu_body)?;
@@ -122,9 +118,8 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
         graph["steps"]["scope"]["subgraph"]["steps"]["b"]["connectionRef"] =
             json!({"valueType":"immediate","value":"pending"});
     }
-    let compiled = compile_graph(dir.path(), graph.clone())?;
     graph["steps"]["scope"]["subgraph"]["steps"]["a"]["timeout"] = 500.into();
-    let compiled = reemit_parallel(compiled, graph)?;
+    let compiled = compile_graph(dir.path(), graph)?;
     let executor = executor();
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
     let server = async move {

@@ -1,6 +1,5 @@
 //! Embed-owned budgets execute in the same composed workflow and guest scope.
 use super::*;
-use crate::direct_wasm::{RuntimeBinding, WorkflowAbi};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Operation {
@@ -88,120 +87,35 @@ fn compiled(
             "finish":{"id":"finish","stepType":"Finish","inputMapping":{"result":{"valueType":"reference","value":"steps.outer.outputs.outputs"}}},
             "handled":handled},"executionPlan":[{"fromStep":"outer","toStep":"finish"},{"fromStep":"outer","toStep":"handled","label":"onError"}]});
     }
-    let result = compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "embed-deadline".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(graph.clone())?,
-            child_workflows: children.clone(),
-            output_dir: dir.into(),
-            track_events,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )?;
     if matches!(scope, Scope::Parent(_)) {
         graph["steps"]["outer"]["subgraph"]["steps"]["embed"]["timeout"] = budget.into();
     } else {
         graph["steps"]["embed"]["timeout"] = budget.into();
     }
     let graph = serde_json::from_value(graph)?;
-    reemit(result, graph, children, track_events, "embed-deadline")
+    compile_composed(dir, graph, children, track_events, "embed-deadline")
 }
 
-pub(super) fn reemit(
-    mut result: DirectCompilationResult,
+/// Exercise the public compiler with the authored timeout already present.
+pub(super) fn compile_composed(
+    dir: &Path,
     graph: runtara_dsl::ExecutionGraph,
     children: Vec<crate::ChildWorkflowInput>,
     track_events: bool,
     workflow_id: &str,
 ) -> anyhow::Result<DirectCompilationResult> {
-    result.support_report =
-        super::super::super::support::analyze_direct_wasm_support_with_child_workflows(
-            &graph, &children,
-        );
-    assert!(
-        !result.support_report.supported,
-        "E128 remains until the complete contract is qualified"
-    );
-    assert!(
-        result
-            .support_report
-            .unsupported
-            .iter()
-            .any(|feature| matches!(
-                feature.feature.as_str(),
-                "embed-workflow-timeout" | "agent-timeout"
-            ))
-    );
-    assert!(
-        crate::validation::validate_workflow(
-            &graph,
-            &runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![])
-        )
-        .errors
-        .iter()
-        .any(|error| error.code() == "E128")
-    );
-    let inputs = children
-        .iter()
-        .map(
-            |child| super::super::super::manifest::DirectManifestChildWorkflowInput {
-                step_id: &child.step_id,
-                workflow_id: &child.workflow_id,
-                version_requested: &child.version_requested,
-                version_resolved: child.version_resolved,
-                execution_graph: &child.execution_graph,
-            },
-        )
-        .collect::<Vec<_>>();
-    let manifest = super::super::super::manifest::build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(&graph,&inputs,None)?;
-    let manifest_json = manifest.to_canonical_json()?;
-    let support = serde_json::to_vec(&result.support_report)?;
-    let (bytes, pools) = emit_direct_artifact(
-        &manifest,
-        &manifest_json,
-        &support,
+    let mut result = crate::direct_wasm::compile_direct_workflow(DirectCompilationInput {
+        workflow_id: workflow_id.into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: children,
+        output_dir: dir.into(),
         track_events,
-        workflow_id,
-        WorkflowAbi::InvokeHostImports,
-        result.omit_runtime,
-        None,
-        &Default::default(),
-    )?;
-    result.component_artifacts =
-        super::super::super::component::emit_direct_component_artifacts_scoped(
-            &manifest.feature_summary.agent_ids,
-            RuntimeBinding::HostImport,
-            WorkflowAbi::InvokeHostImports,
-            result.omit_runtime,
-            None,
-            &pools,
-            manifest.graph.agents.iter().any(|agent| {
-                agent
-                    .connection_id
-                    .as_deref()
-                    .is_some_and(|id| !id.is_empty())
-                    || agent.connection_ref.is_some()
-            }),
-            &Default::default(),
-            crate::direct_wasm::plan::needs_cooperative_timers(&manifest),
-            crate::direct_wasm::manifest::needs_monotonic_clock(
-                &manifest.graph,
-                &manifest.child_workflows,
-            ),
-        );
-    fs::write(&result.workflow_logic_wasm_path, bytes)?;
-    fs::write(&result.manifest_path, manifest_json)?;
-    fs::write(&result.support_report_path, support)?;
-    fs::write(
-        &result.world_wit_path,
-        &result.component_artifacts.world_wit,
-    )?;
-    fs::write(&result.wac_path, &result.component_artifacts.wac_source)?;
+        agent_catalog: None,
+        agent_slug: None,
+    })?;
+    assert!(result.support_report.supported);
     compose_direct_workflow(&mut result, std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)?;
     Ok(result)
 }

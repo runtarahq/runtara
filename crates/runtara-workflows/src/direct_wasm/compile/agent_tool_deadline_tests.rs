@@ -24,29 +24,14 @@ fn compiled_agent(
             "handled":{"id":"handled","stepType":"Finish","inputMapping":{"code":{"valueType":"reference","value":"steps.__error.code"}}}},
             "executionPlan":[{"fromStep":"outer","toStep":"finish"},{"fromStep":"outer","toStep":"handled","label":"onError"}]});
     }
-    let result = compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "agent-tool-deadline".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(graph.clone())?,
-            child_workflows: vec![],
-            output_dir: dir.into(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )?;
     let scope = if parent.is_some() {
         &mut graph["steps"]["outer"]["subgraph"]
     } else {
         &mut graph
     };
     scope["steps"]["tool"]["timeout"] = budget.into();
-    super::super::embed::reemit(
-        result,
+    super::super::embed::compile_composed(
+        dir,
         serde_json::from_value(graph)?,
         vec![],
         false,

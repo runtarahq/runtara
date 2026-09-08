@@ -1097,3 +1097,21 @@ Keep unsupported export/safety shapes rejected by their specific existing gates.
 No product selector or alternate backend is introduced. This qualification does
 not close the remaining lifecycle, compatibility, performance, soak or upstream
 integration gates. Commit locally; push only on a new explicit request.
+
+
+### Public timeout acceptance · 2026-09-08
+
+AUDIT-32 removes E128 and the blanket Agent/Embed support rejection. Deadline
+fixtures author the budget before public compilation and normal composition;
+private re-emission is removed. Published workflow tests continue to use the public
+explicit export API and preserve runtime-free behavior. The compiler tag is
+`shared-v21`, with no alternate cancellation backend or opt-in flag.
+
+The former public-acceptance blocker is replaced by remaining qualification:
+simultaneous completion/expiry selection, broader lifecycle races and owner
+failure/recovery, artifact compatibility and superseded-path retirement, paired
+baseline/candidate measurements, Linux soak and recent upstream integration
+(including conflicting committed migration identifiers). Verify these against
+G1–G10; do not infer completion from the public deadline corpus. Existing compiled
+and parked artifacts retain their original semantics. Keep changes local until
+the user explicitly requests a push.

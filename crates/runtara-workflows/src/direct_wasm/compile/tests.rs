@@ -3144,39 +3144,27 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
 }
 
 #[test]
-fn direct_compile_rejects_ai_agent_tool_step_timeout() {
-    // An Agent tool is still an Agent step. Its `timeout` cannot interrupt a
-    // running capability call, so compilation must reject the graph rather
-    // than inject a best-effort timeout_ms hint into the tool payload.
+fn direct_compile_accepts_ai_agent_tool_guest_timeout() {
     let mut graph = fixture("ai_agent_multi_tool");
     let Some(runtara_dsl::Step::Agent(tool)) = graph.steps.get_mut("echo") else {
         panic!("expected Agent tool step 'echo'");
     };
     tool.timeout = Some(2_000);
-
     let temp = tempfile::tempdir().expect("tempdir");
-    let error = compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "ai-agent-multi-tool-timeout".to_string(),
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-multi-tool-timeout".into(),
         version: 1,
         source_checksum: None,
         execution_graph: graph,
         child_workflows: vec![],
-        output_dir: temp.path().to_path_buf(),
+        output_dir: temp.path().into(),
         track_events: false,
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect_err("Agent tool timeout must be rejected before compilation");
-
-    let DirectCompileError::Unsupported { report } = error else {
-        panic!("expected unsupported report, got {error}");
-    };
-    assert!(
-        report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("echo") && feature.feature == "agent-timeout"
-        }),
-        "{report:?}"
-    );
+    .expect("Agent tool timeout compiles publicly");
+    assert!(result.support_report.supported);
+    assert!(result.component_artifacts.needs_monotonic_clock);
 }
 
 #[test]
@@ -11129,7 +11117,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
-        tag.contains("cooperative-waits=shared-v20"),
+        tag.contains("cooperative-waits=shared-v21"),
         "recompilation must replace artifacts with duplicated wait code: {tag}"
     );
     assert!(tag.contains("parent-cancel=v1"));
@@ -11278,25 +11266,36 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
 fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
     use super::super::component::WorkflowAbi;
     for retries in [0, 2] {
-        for case in [
+        for (case, own_timeout) in [
             "pure",
+            "agent-timeout",
             "durable",
             "log",
             "error",
             "wait",
             "timeout",
             "breakpoint",
-        ] {
-            let root = serde_json::json!({"durable":false,"entryPoint":"embed","steps":{
+        ]
+        .into_iter()
+        .flat_map(|case| {
+            [None, Some(0), Some(u64::MAX)]
+                .into_iter()
+                .map(move |budget| (case, budget))
+        }) {
+            let mut root = serde_json::json!({"durable":false,"entryPoint":"embed","steps":{
                 "embed":{"id":"embed","stepType":"EmbedWorkflow","childWorkflowId":"child",
                     "childVersion":1,"maxRetries":retries,"retryDelay":50},
                 "finish":{"id":"finish","stepType":"Finish"}},
                 "executionPlan":[{"fromStep":"embed","toStep":"finish"}]});
+            root["steps"]["embed"]["timeout"] = serde_json::json!(own_timeout);
             let leaf = serde_json::json!({"durable":false,"entryPoint":"finish","steps":{
                 "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]});
             let mut child = leaf.clone();
             let extra = match case {
                 "pure" => None,
+                "agent-timeout" => Some(serde_json::json!({"id":"extra","stepType":"Agent",
+                    "agentId":"utils","capabilityId":"return-input","maxRetries":0,
+                    "timeout":u64::MAX,"inputMapping":{"value":{"valueType":"immediate","value":7}}})),
                 "durable" => {
                     child["durable"] = true.into();
                     None
@@ -11353,17 +11352,27 @@ fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
                 false,
             )
             .unwrap_or_else(|error| panic!("{case}/{retries}: {error}"));
-            assert_eq!(compiled.omit_runtime, case == "pure", "{case}/{retries}");
+            let runtime_free = matches!(case, "pure" | "agent-timeout");
+            assert_eq!(
+                compiled.omit_runtime, runtime_free,
+                "{case}/{retries}/{own_timeout:?}"
+            );
             assert_eq!(
                 compiled
                     .component_artifacts
                     .world_wit
                     .contains("workflow-runtime/runtime"),
-                case != "pure",
+                !runtime_free,
                 "{case}/{retries}"
             );
             if case == "pure" {
-                assert_eq!(compiled.component_artifacts.has_timers, retries > 0);
+                assert_eq!(
+                    compiled.component_artifacts.has_timers,
+                    retries > 0 || own_timeout.is_some()
+                );
+            }
+            if own_timeout.is_some() || case == "agent-timeout" {
+                assert!(compiled.component_artifacts.needs_monotonic_clock);
             }
             Validator::new_with_features(wasmparser::WasmFeatures::all())
                 .validate_all(&fs::read(compiled.wasm_path).unwrap())

@@ -3652,3 +3652,107 @@ acceptance and removal of private fixture re-emission, keeping the existing
 export/no-runtime safety gates. Native server/database E2E, old-artifact inventory,
 paired measurements, Linux soak, upstream/migration integration and the remaining
 G1–G10 work are not established by this validation stage. No push is authorized.
+
+
+### Public cooperative timeout compilation · 2026-09-08
+
+AUDIT-32 retires E128 and the Agent/Embed support rejection. The existing guest
+budget/cancellation path is now reachable through public compilation. DSL comments
+and the pattern lab describe preparation/retry/suspension budgets, zero semantics,
+cleanup grace and whole-run abort. The obsolete DTO error mapping is removed;
+no DTO field or runtime endpoint shape changes. The compiler cache tag advances
+to `shared-v21`; old registered/parked artifacts are not rewritten.
+
+Private deadline re-emission is removed from Agent, Embed, AI tool, MCP, memory,
+nested-AI and parallel fixtures. Budgets are authored before calling the public
+compiler. Published Agent exports use the public explicit-ABI entry, with
+runtime-free import assertions. Fixture-specific non-cooperating components remain
+necessary to test emergency abort; they do not replace normal compilation.
+
+Initial verification and corrections:
+
+- The first selected timeout run passed 27 tests and failed one in-flight-I/O
+  precondition: its 200 ms enclosing budget expired before the first request.
+  The typed timeout and recovery output were correct. The test now allows
+  1,000 ms to reach the pending request and retains exact request count,
+  cleanup, output and owner assertions. The rerun passed 28 tests in 28.09s.
+- Public compilation exposed a real published-export inference gap. The coarse
+  `Timeout` feature treated Agent/Embed guest deadlines as lifecycle-runtime
+  operations. The old private fixture compiled an untimed graph first, hiding
+  this inference decision. Import analysis now separately inspects timeout
+  ownership through nested graphs and the complete supplied child closure.
+  Agent/Embed deadlines can remain runtime-free; loop/signal deadlines and
+  existing durability/logging/suspension/debug requirements keep their imports.
+- The callable Embed import matrix now combines absent/zero/maximum Embed budgets
+  with pure children, timed Agent children, durable children, logging, errors,
+  waits, loop timeouts and breakpoints. It checks actual public compiler import
+  decisions and validates the emitted WASM, preserving the old runtime-requiring
+  restrictions even when guest deadlines coexist with them.
+- Public closure validation covers absent/zero/one-millisecond/maximum-u64 budgets
+  for Agent and Embed; the existing nested Agent and loop/signal cases require
+  full validation success.
+
+The first full-library run passed 700 tests and failed the published-export
+`compiled.omit_runtime` assertion (459.75s), confirming the import-ownership gap.
+After fixing inference, the runtime selection initially passed 20 tests and failed
+one published HTTP request-count precondition: its 200 ms deadline fired before
+cold callable startup reached I/O. Those positive budgets are now 1,000 ms,
+retaining the zero/maximum cases and exact request/cleanup/output assertions.
+The final runtime/export selection passed **21 tests** in **17.31s**, including the
+expanded child-import matrix and real published deadline execution. The final
+full-library run passed **701 tests** in **462.37s**. The full public
+execution target passed **395 tests** in **712.74s**, with **three manual benchmarks
+ignored**. The comparison smoke test ran, but the ignored release/paired benchmark
+functions are not measurement evidence. All **24 server DTO tests** passed in
+**0.02s**. Owning-package feature-gated Clippy passed in **36.47s**. Checks use the
+pinned toolchain, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true`,
+`CARGO_BUILD_JOBS=4`, the existing isolated native target and matching components
+from the memory stage. Guest component implementation/WIT are unchanged; no
+component rebuild is required for this validation/compiler/description change.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib timeout -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib runtime -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=1
+cargo test -p runtara-server --lib api::dto::workflows::tests -- --test-threads=1
+cargo clippy -p runtara-dsl -p runtara-workflows -p runtara-server --features runtara-workflows/direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Logs begin with `/private/tmp/cooperative-public-timeout-`: `focused.log`,
+`focused-final.log`, `lib.log`, `runtime.log`, `runtime-final.log`, `lib-final.log`,
+`execute.log`, `server-dto.log` and `clippy.log`. The pattern lab's extracted inline
+JavaScript passed `node --check`; this edit changes its explanatory text only.
+No push is authorized. This
+stage does not establish broader owner-failure/recovery, partition/race, artifact
+compatibility, paired performance, Linux soak, upstream migration or PR gates.
+
+
+Browser boundary qualification for this stage adds two retained tests in
+`runtara-validation-wasm`: its serialized validation API accepts absent/zero/one/
+maximum-u64 Agent and Embed budgets and rejects negative, fractional, oversized
+and string values. These use the existing catalog-mutation lock. The frontend's
+existing `prebuild` already invokes `build:wasm-validation`; the generated asset
+was rebuilt with pinned Node 22.12.0 and the existing wasm-pack tool. The
+Node distribution was fetched from the official archive and verified against
+its published SHA-256 digest, in a temporary directory rather than changing the
+user's global Node installation. Generated validator outputs remain ignored.
+
+The browser-validator library passed **24 tests** in **0.01s**. The initial run
+incorrectly expected `success: false` for malformed input; the existing API instead
+returns `success: true, valid: false` and a parse error. That assertion failure
+also poisoned the shared test mutex. Correcting the expectation fixed both test
+failures; production validation already rejected those values.
+
+The first generated-WASM build passed in 26.58s and reported the compiler-only
+runtime-inference helper as unused on the browser target. Applying the compiler
+module's existing build condition to that helper removed the Rust warning; the
+final build passed in **7.93s**. A direct generated-WASM smoke test on Node 22.12.0
+passed **12 JSON cases**: absent/zero/one/maximum-u64 budgets plus each Agent/Embed
+field with negative/fractional/oversized/string values. The maximum value is sent
+as an exact JSON literal to avoid JavaScript number rounding. This smoke test
+exercises the generated module; it does not claim browser UI interaction coverage.
+The build and smoke logs use the same prefix with `browser-native-final.log`,
+`browser-build-final.log` and `browser-smoke.log` suffixes.

@@ -9,21 +9,17 @@ fn compile_graph_with_events(
     graph: Value,
     track_events: bool,
 ) -> anyhow::Result<DirectCompilationResult> {
-    let mut result = compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "checkpoint-failure".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(graph)?,
-            child_workflows: vec![],
-            output_dir: dir.into(),
-            track_events,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )?;
+    let mut result = crate::direct_wasm::compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "checkpoint-failure".into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: serde_json::from_value(graph)?,
+        child_workflows: vec![],
+        output_dir: dir.into(),
+        track_events,
+        agent_catalog: None,
+        agent_slug: None,
+    })?;
     compose_direct_workflow(&mut result, std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)?;
     Ok(result)
 }

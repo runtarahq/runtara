@@ -1,5 +1,4 @@
-//! Actual composed Agent deadline execution, before the public E128 gate is
-//! retired. Tests call the private emitter; no production opt-in is introduced.
+//! Actual composed Agent deadlines through public compilation and composition.
 use super::*;
 use runtara_component_host::runtime_host::{
     RuntimeCheckpointResult, RuntimeHost, RuntimeSignalInfo,
@@ -404,21 +403,6 @@ fn compile_shaped(
         super::super::component::WorkflowAbi::InvokeHostImports
     };
     let slug = published.then_some("timed-child");
-    let mut compiled = compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "deadline".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(graph.clone())?,
-            child_workflows: vec![],
-            output_dir: dir.into(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: slug.map(str::to_owned),
-        },
-        abi,
-        false,
-    )?;
     let mut scope = &mut graph;
     if let Shape::InlineWhile(depth) = shape {
         for _ in 0..depth {
@@ -447,48 +431,24 @@ fn compile_shaped(
         scope["steps"]["fetch"]["timeout"] = timeout.into();
     }
 
-    let graph = serde_json::from_value(graph)?;
-    // Explicitly prove there is no public gate bypass or hidden product flag.
-    compiled.support_report = super::super::support::analyze_direct_wasm_support(&graph);
-    assert_eq!(compiled.support_report.supported, own_timeout.is_none());
-    let manifest = super::super::manifest::build_direct_workflow_manifest(&graph)?;
-    let manifest_json = manifest.to_canonical_json()?;
-    let support = serde_json::to_vec(&compiled.support_report)?;
-    let (bytes, pools) = emit_direct_artifact(
-        &manifest,
-        &manifest_json,
-        &support,
-        false,
-        "deadline",
-        abi,
-        compiled.omit_runtime,
-        slug,
-        &Default::default(),
-    )?;
-    assert!(pools.is_empty());
-    compiled.component_artifacts = super::super::component::emit_direct_component_artifacts_scoped(
-        &manifest.feature_summary.agent_ids,
-        super::super::component::RuntimeBinding::HostImport,
-        abi,
-        compiled.omit_runtime,
-        slug,
-        &pools,
-        matches!(shape, Shape::Preparation(_)),
-        &Default::default(),
-        crate::direct_wasm::plan::needs_cooperative_timers(&manifest),
-        crate::direct_wasm::manifest::needs_monotonic_clock(
-            &manifest.graph,
-            &manifest.child_workflows,
-        ),
-    );
-    fs::write(&compiled.workflow_logic_wasm_path, bytes)?;
-    fs::write(&compiled.manifest_path, manifest_json)?;
-    fs::write(&compiled.support_report_path, support)?;
-    fs::write(
-        &compiled.world_wit_path,
-        &compiled.component_artifacts.world_wit,
-    )?;
-    fs::write(&compiled.wac_path, &compiled.component_artifacts.wac_source)?;
+    let input = DirectCompilationInput {
+        workflow_id: "deadline".into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: serde_json::from_value(graph)?,
+        child_workflows: vec![],
+        output_dir: dir.into(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: slug.map(str::to_owned),
+    };
+    let mut compiled = if published {
+        compile_direct_workflow_with_abi(input, abi, false)?
+    } else {
+        crate::direct_wasm::compile_direct_workflow(input)?
+    };
+    assert!(compiled.support_report.supported);
+    assert!(compiled.parallel_pools.is_empty());
     let components = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
         .expect("build components and set RUNTARA_AGENT_COMPONENTS_DIR");
     compose_direct_workflow(&mut compiled, &components)?;
@@ -526,7 +486,7 @@ fn assert_runtime_free(compiled: &DirectCompilationResult) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Publish the privately emitted child into one or more normal composed Agent
+/// Publish the publicly compiled child into one or more normal composed Agent
 /// callers. Only the final root imports the runtime and receives user signals.
 fn wrap_published(
     mut child: DirectCompilationResult,
@@ -1012,11 +972,12 @@ async fn agent_deadline_root_cancel_bypasses_step_recovery() -> anyhow::Result<(
 #[tokio::test]
 async fn agent_deadline_published_workflows_use_standard_clock_without_runtime()
 -> anyhow::Result<()> {
+    // Include cold callable-component startup while still reaching pending I/O.
     for depth in [1, 2] {
         for (response, timeout, retries, delay) in [
-            (Response::Hang, 200, 5, 60_000),
+            (Response::Hang, 1_000, 5, 60_000),
             (Response::Hang, 0, 5, 60_000),
-            (Response::Error, 200, 5, 60_000),
+            (Response::Error, 1_000, 5, 60_000),
             (Response::Ok, u64::MAX, 0, 0),
             (Response::RootCancel, 60_000, 5, 60_000),
         ] {
@@ -1137,7 +1098,9 @@ async fn agent_deadline_inherited_timeout_bypasses_split_aggregation_and_retry()
             for split_retries in [0, 3] {
                 run_shaped(
                     Response::Hang,
-                    200,
+                    // Leave startup headroom so this proves cancellation of
+                    // pending I/O, not expiry before the first request.
+                    1_000,
                     durable,
                     3,
                     60_000,

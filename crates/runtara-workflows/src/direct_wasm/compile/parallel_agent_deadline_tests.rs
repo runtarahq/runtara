@@ -77,63 +77,14 @@ fn compile_timed_graph(
     mut graph: Value,
     timeout: Option<u64>,
 ) -> anyhow::Result<DirectCompilationResult> {
-    let result = compile_graph(dir, graph.clone())?;
-    let Some(timeout) = timeout else {
-        return Ok(result);
-    };
-    graph["steps"]["scope"]["subgraph"]["steps"]["b"]["timeout"] = timeout.into();
-    reemit_parallel(result, graph)
-}
-fn reemit_parallel(
-    mut result: DirectCompilationResult,
-    graph: Value,
-) -> anyhow::Result<DirectCompilationResult> {
-    let graph = serde_json::from_value(graph)?;
-    result.support_report = crate::direct_wasm::support::analyze_direct_wasm_support(&graph);
+    if let Some(timeout) = timeout {
+        graph["steps"]["scope"]["subgraph"]["steps"]["b"]["timeout"] = timeout.into();
+    }
+    let result = compile_graph(dir, graph)?;
     assert!(
-        !result.support_report.supported,
-        "E128 remains until the full timeout contract is qualified"
+        !result.parallel_pools.is_empty(),
+        "fixture must retain parallel execution"
     );
-    let manifest = crate::direct_wasm::manifest::build_direct_workflow_manifest(&graph)?;
-    let manifest_json = manifest.to_canonical_json()?;
-    let support = serde_json::to_vec(&result.support_report)?;
-    let (bytes, pools) = emit_direct_artifact(
-        &manifest,
-        &manifest_json,
-        &support,
-        false,
-        "checkpoint-failure",
-        WorkflowAbi::InvokeHostImports,
-        result.omit_runtime,
-        None,
-        &Default::default(),
-    )?;
-    assert!(!pools.is_empty(), "fixture must emit a parallel window");
-    result.component_artifacts =
-        crate::direct_wasm::component::emit_direct_component_artifacts_scoped(
-            &manifest.feature_summary.agent_ids,
-            crate::direct_wasm::RuntimeBinding::HostImport,
-            WorkflowAbi::InvokeHostImports,
-            result.omit_runtime,
-            None,
-            &pools,
-            result.component_artifacts.has_connections,
-            &Default::default(),
-            crate::direct_wasm::plan::needs_cooperative_timers(&manifest),
-            crate::direct_wasm::manifest::needs_monotonic_clock(
-                &manifest.graph,
-                &manifest.child_workflows,
-            ),
-        );
-    fs::write(&result.workflow_logic_wasm_path, bytes)?;
-    fs::write(&result.manifest_path, manifest_json)?;
-    fs::write(&result.support_report_path, support)?;
-    fs::write(
-        &result.world_wit_path,
-        &result.component_artifacts.world_wit,
-    )?;
-    fs::write(&result.wac_path, &result.component_artifacts.wac_source)?;
-    compose_direct_workflow(&mut result, std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)?;
     Ok(result)
 }
 
@@ -290,9 +241,8 @@ async fn parallel_split_aggregates_each_agent_deadline() -> anyhow::Result<()> {
         graph["steps"]["items"]["config"]["dontStopOnFailed"] = true.into();
         graph["steps"]["finish"]["inputMapping"] =
             json!({"result":{"valueType":"reference","value":"steps.items"}});
-        let result = compile_graph(dir.path(), graph.clone())?;
         graph["steps"]["items"]["subgraph"]["steps"]["fetch"]["timeout"] = timeout.into();
-        let compiled = reemit_parallel(result, graph)?;
+        let compiled = compile_graph(dir.path(), graph)?;
         let host = Arc::new(Host::new());
         let mut server = Server::start(
             host.clone(),
@@ -374,9 +324,8 @@ async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<
     if parent_timeout {
         graph["steps"]["items"]["config"]["timeout"] = 800.into();
     }
-    let result = compile_graph(dir.path(), graph.clone())?;
     graph["steps"]["items"]["subgraph"]["steps"]["fetch"]["timeout"] = 1_000.into();
-    let compiled = reemit_parallel(result, graph)?;
+    let compiled = compile_graph(dir.path(), graph)?;
     for body in [false, true] {
         let host = Arc::new(Host::new());
         // The first invocation spends 400ms resolving its descriptor. The
