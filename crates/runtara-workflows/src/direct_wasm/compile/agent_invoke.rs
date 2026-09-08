@@ -12,7 +12,7 @@
 //! MCP-tool). The base call's four flat input parameters fit async lowering;
 //! retained scoped invocations use the existing indirect-argument shim.
 
-use wasm_encoder::{Function as WasmFunction, Instruction};
+use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
     emit_agent_suspend_sentinel_check, emit_fail_if_retptr_error_inplace, push_retptr_arg,
@@ -42,6 +42,16 @@ pub(super) fn emit_agent_invoke(
     site: AgentInvocationSite,
 ) {
     super::cooperative_wait::emit_poll_before_call(body, indices);
+    let deadline = matches!(site, AgentInvocationSite::Step(_))
+        && static_data.agent_timeout(agent_id).is_some();
+    if deadline {
+        super::agent_deadline::remaining(body, indices);
+        body.instruction(&Instruction::LocalGet(super::agent_deadline::REMAINING));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        super::agent_deadline::error(body, static_data);
+        body.instruction(&Instruction::Else);
+    }
     let async_invoke = indices
         .agent_invokes
         .iter()
@@ -61,6 +71,10 @@ pub(super) fn emit_agent_invoke(
         source_ptr_local,
         source_len_local,
     );
+
+    if deadline {
+        super::agent_deadline::arm(body, indices);
+    }
 
     // invoke(capability-id, input): push cap `(ptr, len)` then input `(ptr,
     // len)`. Any trailing lowered params (none for this signature) zero-fill;
@@ -90,6 +104,13 @@ pub(super) fn emit_agent_invoke(
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(async_invoke.function_index));
     super::cooperative_wait::emit_await_call(body, indices);
+    if deadline {
+        body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // Ignore a late result written while subtask.cancel resolved the call.
+        super::agent_deadline::error(body, static_data);
+        body.instruction(&Instruction::End);
+    }
 
     // A workflow-agent child shares this instance's runtime host, so a
     // lifecycle suspend (pause/shutdown ack) can fire INSIDE the child; the
@@ -100,6 +121,9 @@ pub(super) fn emit_agent_invoke(
     // gated off their invokes entirely).
     if static_data.agent_is_workflow_agent(agent_id) {
         emit_agent_suspend_sentinel_check(body, indices);
+    }
+    if deadline {
+        body.instruction(&Instruction::End);
     }
 }
 

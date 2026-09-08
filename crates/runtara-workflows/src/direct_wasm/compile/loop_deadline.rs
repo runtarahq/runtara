@@ -69,64 +69,16 @@ pub(super) fn enter(
     body.instruction(&Instruction::LocalGet(DIRECT_LOOP_COMPLETED_LOCAL));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
-    key(body, indices, step, source, false);
-    lookup(body, indices);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    load_retptr_option_list(
-        body,
-        DIRECT_LOOP_STATE_PTR_LOCAL,
-        DIRECT_LOOP_STATE_LEN_LOCAL,
-    );
-    body.instruction(&Instruction::LocalGet(DIRECT_LOOP_STATE_LEN_LOCAL));
-    body.instruction(&Instruction::I32Const(8));
-    body.instruction(&Instruction::I32Ne);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I32Const(
-        static_data.loop_deadline_state_error.offset,
-    ));
-    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_PTR_LOCAL));
-    body.instruction(&Instruction::I32Const(
-        static_data.loop_deadline_state_error.len_i32(),
-    ));
-    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_LEN_LOCAL));
-    emit_runtime_fail_return(
+    load_budget(
         body,
         indices,
-        DIRECT_LOOP_STATE_PTR_LOCAL,
-        DIRECT_LOOP_STATE_LEN_LOCAL,
+        &static_data.loop_deadline_state_error,
+        step,
+        source,
+        timeout,
+        deadline_local,
+        true,
     );
-    body.instruction(&Instruction::End);
-    push_i64_load_from_ptr(body, DIRECT_LOOP_STATE_PTR_LOCAL);
-    body.instruction(&Instruction::LocalSet(deadline_local));
-    body.instruction(&Instruction::Else);
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
-    return_if_retptr_error(body, indices);
-    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
-    body.instruction(&Instruction::LocalTee(DIRECT_LOOP_NOW_MS_LOCAL));
-    body.instruction(&Instruction::I64Const(timeout as i64));
-    body.instruction(&Instruction::I64Add);
-    body.instruction(&Instruction::LocalTee(deadline_local));
-    body.instruction(&Instruction::LocalGet(DIRECT_LOOP_NOW_MS_LOCAL));
-    body.instruction(&Instruction::I64LtU);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::I64Const(-1));
-    body.instruction(&Instruction::LocalSet(deadline_local));
-    body.instruction(&Instruction::End);
-    store_local_i64_at(body, DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, deadline_local);
-    body.instruction(&Instruction::I32Const(DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET));
-    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_PTR_LOCAL));
-    body.instruction(&Instruction::I32Const(8));
-    body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_LEN_LOCAL));
-    emit_checkpoint_save(
-        body,
-        indices,
-        DIRECT_LOOP_KEY_PTR_LOCAL,
-        DIRECT_LOOP_KEY_LEN_LOCAL,
-        DIRECT_LOOP_STATE_PTR_LOCAL,
-        DIRECT_LOOP_STATE_LEN_LOCAL,
-    );
-    body.instruction(&Instruction::End);
     // Add this deadline to the enclosing minimum. Frame restoration removes it.
     body.instruction(&Instruction::LocalGet(DIRECT_ACTIVE_DEADLINE_FLAG_LOCAL));
     body.instruction(&Instruction::I32Eqz);
@@ -246,4 +198,77 @@ pub(super) fn check(
         emit_runtime_fail_return(body, indices, output.0, output.1);
     }
     body.instruction(&Instruction::End);
+}
+
+/// Initialize one absolute budget. Durable callers reuse the same checkpoint
+/// across attempts/replay; non-durable callers perform no checkpoint I/O.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn load_budget(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    state_error: &DirectDataSegment,
+    step: &DirectDataSegment,
+    source: (u32, u32),
+    timeout: u64,
+    deadline_local: u32,
+    durable: bool,
+) {
+    if durable {
+        key(body, indices, step, source, false);
+        lookup(body, indices);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        load_retptr_option_list(
+            body,
+            DIRECT_LOOP_STATE_PTR_LOCAL,
+            DIRECT_LOOP_STATE_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::LocalGet(DIRECT_LOOP_STATE_LEN_LOCAL));
+        body.instruction(&Instruction::I32Const(8));
+        body.instruction(&Instruction::I32Ne);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::I32Const(state_error.offset));
+        body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::I32Const(state_error.len_i32()));
+        body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_LEN_LOCAL));
+        emit_runtime_fail_return(
+            body,
+            indices,
+            DIRECT_LOOP_STATE_PTR_LOCAL,
+            DIRECT_LOOP_STATE_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::End);
+        push_i64_load_from_ptr(body, DIRECT_LOOP_STATE_PTR_LOCAL);
+        body.instruction(&Instruction::LocalSet(deadline_local));
+        body.instruction(&Instruction::Else);
+    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    return_if_retptr_error(body, indices);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalTee(DIRECT_LOOP_NOW_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(timeout as i64));
+    body.instruction(&Instruction::I64Add);
+    body.instruction(&Instruction::LocalTee(deadline_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_LOOP_NOW_MS_LOCAL));
+    body.instruction(&Instruction::I64LtU);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::I64Const(-1));
+    body.instruction(&Instruction::LocalSet(deadline_local));
+    body.instruction(&Instruction::End);
+    if durable {
+        store_local_i64_at(body, DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, deadline_local);
+        body.instruction(&Instruction::I32Const(DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET));
+        body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::I32Const(8));
+        body.instruction(&Instruction::LocalSet(DIRECT_LOOP_STATE_LEN_LOCAL));
+        emit_checkpoint_save(
+            body,
+            indices,
+            DIRECT_LOOP_KEY_PTR_LOCAL,
+            DIRECT_LOOP_KEY_LEN_LOCAL,
+            DIRECT_LOOP_STATE_PTR_LOCAL,
+            DIRECT_LOOP_STATE_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::End);
+    }
 }

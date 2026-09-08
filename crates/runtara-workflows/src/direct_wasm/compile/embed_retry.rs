@@ -110,6 +110,7 @@ pub(super) fn emit_embed_retry_park(
         DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
         DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
         DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL,
+        None,
     );
 }
 

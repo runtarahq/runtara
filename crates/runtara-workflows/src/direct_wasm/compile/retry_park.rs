@@ -49,6 +49,7 @@ pub(super) fn emit_retry_park_until_deadline(
     retry_key_ptr_local: u32,
     retry_key_len_local: u32,
     delay_ms_local: u32,
+    deadline: Option<u32>,
 ) {
     emit_checkpoint_lookup(
         body,
@@ -68,6 +69,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::If(BlockType::Empty));
     push_i64_load_from_ptr(body, DIRECT_RETRY_PARK_STATE_PTR_LOCAL);
     body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+    clamp_deadline(body, deadline);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
     return_if_retptr_error(body, indices);
@@ -102,6 +104,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::LocalGet(delay_ms_local));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+    clamp_deadline(body, deadline);
     store_local_i64_at(
         body,
         DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
@@ -121,4 +124,16 @@ pub(super) fn emit_retry_park_until_deadline(
     );
     emit_entry_suspend_at(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
+}
+
+fn clamp_deadline(body: &mut WasmFunction, deadline: Option<u32>) {
+    if let Some(deadline) = deadline {
+        body.instruction(&Instruction::LocalGet(deadline));
+        body.instruction(&Instruction::LocalGet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+        body.instruction(&Instruction::I64LtU);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(deadline));
+        body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+        body.instruction(&Instruction::End);
+    }
 }

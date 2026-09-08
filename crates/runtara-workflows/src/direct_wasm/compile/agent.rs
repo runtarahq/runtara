@@ -210,6 +210,19 @@ pub(super) fn emit_agent_plan(
         body.instruction(&Instruction::Else);
     }
 
+    let timeout_ms = static_data.agent_timeout(agent_id);
+    if let Some(timeout) = timeout_ms {
+        super::agent_deadline::enter(
+            body,
+            indices,
+            static_data,
+            step_id,
+            (source_ptr_local, source_len_local),
+            timeout,
+            durable_checkpoint,
+        );
+    }
+
     let invoke = indices
         .agent_invokes
         .get(agent_component_id)
@@ -463,6 +476,9 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
+            if timeout_ms.is_some() {
+                super::agent_deadline::clamp_retry(body, indices);
+            }
             // Retry audit is keyed by attempt number and upserts in core, so it
             // remains idempotent across a crash/replay. Recording before the
             // park also makes the impending retry visible while it is queued.
@@ -474,7 +490,13 @@ pub(super) fn emit_agent_plan(
                 DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
                 DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
             );
-            emit_agent_retry_park(body, indices, route_ptr_local, route_len_local);
+            emit_agent_retry_park(
+                body,
+                indices,
+                route_ptr_local,
+                route_len_local,
+                timeout_ms.map(|_| super::agent_deadline::DEADLINE),
+            );
         } else if durable_checkpoint {
             // A replayed (HIT) attempt already slept its backoff and recorded its
             // audit row on the original run; skip both. Core `handle_sleep`
@@ -490,6 +512,9 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
+            if timeout_ms.is_some() {
+                super::agent_deadline::clamp_retry(body, indices);
+            }
             emit_agent_retry_sleep(
                 body,
                 indices,
@@ -517,6 +542,9 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
+            if timeout_ms.is_some() {
+                super::agent_deadline::clamp_retry(body, indices);
+            }
             emit_agent_retry_sleep(
                 body,
                 indices,

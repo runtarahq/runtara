@@ -175,6 +175,7 @@ pub(super) fn emit_agent_retry_park(
     indices: &DirectCoreFunctionIndices,
     cache_key_ptr_local: u32,
     cache_key_len_local: u32,
+    deadline: Option<u32>,
 ) {
     body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
@@ -196,6 +197,7 @@ pub(super) fn emit_agent_retry_park(
         DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
         DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
         DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
+        deadline,
     );
 }
 

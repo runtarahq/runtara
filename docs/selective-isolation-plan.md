@@ -477,3 +477,21 @@ remaining budget and recovery target before enabling it: discard a late result,
 skip cancelled work's retries, preserve durable deadlines, restore outer context
 and keep unrelated parallel work live. Cleanup grace and the remaining G1–G10
 qualification still apply.
+
+
+### Agent invocation/retry deadline wiring · 2026-09-08
+
+The common sequential Agent lowering now supplies an owning timer and consumes
+Await's timeout outcome before retries or recovery. It preserves one durable
+budget across failed attempts and replay, caps backoff wakes, bypasses old budgets
+on a result-cache hit, and reports a nonretryable typed timeout after cleanup.
+Composed HTTP tests cover request cleanup, root cancellation bypassing recovery,
+zero/overflow budgets, later attempts, early/expired replay, and malformed state.
+See the implementation record's “Agent deadline integration” section for exact
+coverage and limits.
+
+E128 remains: runtime-free/monotonic clocks, inherited scope and recovery routing,
+parallel scoped ownership, preparation interruption, and cleanup grace are still
+required. No feature flag is added. The temporary internal parallel eligibility
+restriction must be removed once scoped window deadlines are qualified. This is
+progress on G5/G7, not completion of either gate or the full G1–G10 plan.

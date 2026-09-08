@@ -1197,3 +1197,23 @@ budgets still require integration to interrupt pending I/O.** Remaining work mus
 preserve scope ownership, inherited/durable budgets, recovery context, sibling
 execution and cleanup grace. See the implementation record for exact evidence
 and limits; the emitter primitive alone does not close the timeout audit gap.
+
+
+### Agent deadline lowering qualification · 2026-09-08
+
+The emitter now retains an authored Agent timeout and integrates the sequential
+invocation/retry budget with standard subtask cancellation. Public E128 rejection
+is unchanged. Private-emitter composed tests exercise HTTP cleanup followed by
+structured recovery, no automatic retry after timeout, zero and u64::MAX,
+backoff clipping, early/expired durable replay, result-cache replay, root Cancel
+bypassing recovery, later-attempt budget preservation, and corrupt budget state.
+Tests: `crates/runtara-workflows/src/direct_wasm/compile/agent_deadline_tests.rs`
+(existing `direct-wasm-integration-tests` test feature; built components required)
+and stdlib `agent_deadline_identity_is_distinct_and_stable_across_attempts`.
+
+This does not close timeout support: the owning budget starts after input
+mapping/validation/cache lookup, uses the runtime wall clock, and does not yet
+interrupt connection preparation, carry inherited expiry through nested recovery,
+or provide parallel scope ownership and cleanup grace. Published runtime-free
+clock lowering, monotonic clock behavior, Embed/AI scope coverage, and the wider
+qualification gates remain open. No new public supported-pattern claim is made.

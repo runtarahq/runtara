@@ -33,6 +33,12 @@ const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
 /// `Finish`); matches the generated compiler's `Ok(Value::Null)`.
 const DIRECT_OUTPUT_NULL: &[u8] = b"null";
 pub(super) const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
+pub(super) const AGENT_TIMEOUT_FIELDS: [&str; 4] = [
+    "AGENT_TIMEOUT",
+    "Agent step exceeded its configured timeout",
+    "timeout",
+    "error",
+];
 /// Structured failure payload emitted when a `While` step exceeds its configured
 /// timeout. Generated Rust parses `WhileConfig.timeout` but does not enforce it;
 /// direct mode is the first to honor the documented "if exceeded, step fails"
@@ -160,6 +166,9 @@ pub(super) struct DirectCoreStaticData {
     pub(super) output_null: DirectDataSegment,
     pub(super) agent_rate_limit_wait: DirectDataSegment,
     pub(super) loop_deadline_state_error: DirectDataSegment,
+    pub(super) agent_timeout_error: DirectDataSegment,
+    pub(super) agent_deadline_state_error: DirectDataSegment,
+    agent_timeouts: BTreeMap<u32, u64>,
     pub(super) while_timeout_error: DirectDataSegment,
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
@@ -280,6 +289,35 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let agent_timeouts: BTreeMap<u32, u64> = std::iter::once(graph)
+            .chain(child_workflows.iter().map(|child| &child.graph))
+            .flat_map(|graph| graph.agents.iter())
+            .filter_map(|agent| agent.timeout.map(|timeout| (agent.id, timeout)))
+            .collect();
+        let timeout_bytes = if agent_timeouts.is_empty() {
+            String::new()
+        } else {
+            AGENT_TIMEOUT_FIELDS.concat()
+        };
+        let agent_timeout_error = DirectDataSegment::new(offset, timeout_bytes.as_bytes());
+        offset = align_i32(
+            checked_offset_add(offset, agent_timeout_error.data.len())?,
+            16,
+        );
+
+        let agent_deadline_state_error = DirectDataSegment::new(
+            offset,
+            if agent_timeouts.is_empty() {
+                b""
+            } else {
+                br#"{"code":"AGENT_DEADLINE_STATE","message":"Agent deadline checkpoint must contain exactly eight bytes","category":"permanent","severity":"error","retryable":false}"#
+            },
+        );
+        offset = align_i32(
+            checked_offset_add(offset, agent_deadline_state_error.data.len())?,
+            16,
+        );
+
         let loop_deadline_state_error =
             DirectDataSegment::new(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR);
         offset = align_i32(
@@ -350,6 +388,9 @@ impl DirectCoreStaticData {
             output_null,
             agent_rate_limit_wait,
             loop_deadline_state_error,
+            agent_timeout_error,
+            agent_deadline_state_error,
+            agent_timeouts,
             while_timeout_error,
             split_timeout_error,
             step_ids,
@@ -370,6 +411,10 @@ impl DirectCoreStaticData {
 
     pub(super) fn invocation_site(&self, target: u32, caller: u32, domain: u32) -> u32 {
         self.invocation_sites[&(target, caller, domain)]
+    }
+
+    pub(super) fn agent_timeout(&self, agent_id: u32) -> Option<u64> {
+        self.agent_timeouts.get(&agent_id).copied()
     }
 
     pub(super) fn agent_capability_id(
@@ -420,6 +465,8 @@ impl DirectCoreStaticData {
             &self.output_null,
             &self.agent_rate_limit_wait,
             &self.loop_deadline_state_error,
+            &self.agent_timeout_error,
+            &self.agent_deadline_state_error,
             &self.while_timeout_error,
             &self.split_timeout_error,
         ];

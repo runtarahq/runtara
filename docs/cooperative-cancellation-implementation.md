@@ -2092,3 +2092,88 @@ contract tests passed. Full emitted-workflow execution: 383 passed, 3 ignored,
 no failures. Formatting and diff checks passed. No new binary-size/timing comparison, server/database E2E or resource soak
 was performed. Extra helper state and cleanup branches still need the planned
 paired performance measurement.
+
+
+## Agent deadline integration behind the existing support gate (2026-09-08)
+
+Sequential Agent lowering now connects the owning invocation/retry budget to the
+shared Await helper. This is production emitter code exercised through a private
+emission seam in tests; public compilation still rejects Agent/Embed `timeout`
+with E128. There is no product feature flag or opt-in annotation.
+
+The manifest retains the authored timeout instead of discarding it. Static Agent
+metadata supplies the budget to the common invocation path. After mapping,
+validation, and the result-cache probe, a cache miss initializes one absolute
+budget. Non-durable steps keep it in guest locals without checkpoint writes;
+durable steps persist eight bytes under an `agent-deadline` identity that includes
+workflow, invocation ancestry, graph scope, and step. Failed-attempt replay and
+retry wake records share this budget. A successful result-cache hit bypasses its
+old deadline. Existing loop identities and completed-loop behavior are unchanged;
+the existing deadline-key export is shared rather than adding an Agent task API.
+
+Before an attempt, an expired budget produces typed `AGENT_TIMEOUT` without
+sending a request. A live attempt starts an owned timer in the existing standard
+waitable set. After timeout selects cancellation and resolves the subtask, the
+Agent caller overwrites any late return with `AGENT_TIMEOUT`, category `timeout`,
+`retryable: false`. Existing `onError` receives this structured error; an unhandled
+one becomes a typed workflow failure. Root cancellation retains its suspend/ack
+path and cannot enter the ordinary recovery route. Retry sleep durations and
+persisted wakes are capped by the remaining budget; an expired replay cannot
+send another request. Saturating addition and subtraction handle zero and u64
+bounds. Malformed durable budget widths fail with `AGENT_DEADLINE_STATE`.
+
+Tests in `compile/agent_deadline_tests.rs` run the actual emitted, statically
+composed HTTP Agent and stdlib components. They cover pending-header cleanup,
+zero timeout with retries, positive timeout with/without retries, backoff expiry,
+early and expired durable replay, successful cached replay, u64::MAX, a later
+hanging attempt using a reduced original budget, root cancellation with an active
+deadline, unhandled typed failure, and malformed checkpoint widths. The later
+attempt test advances the fixture clock before its retry and bounds elapsed time
+from the first HTTP request; restarting a full relative budget fails that check.
+CI explicitly runs the feature-gated library deadline suite after building the
+component bundle; the ordinary workflow integration target would not run these
+private-emitter tests. The loop/Agent key test separately checks attempt independence and separation
+across graph scope, loop invocation, and published-child namespaces.
+
+Qualification limits remain material:
+
+- This stage uses the existing runtime wall clock. Runtime-free published
+  workflows and a monotonic in-run budget, including clock rollback handling,
+  still need clock lowering and tests. The private emitter rejects a missing
+  clock lowering rather than emitting a poisoned import.
+- The budget currently starts after mapping/validation/cache lookup. Connection
+  preparation consumes elapsed budget, but this stage does not interrupt a
+  blocked connection resolver or arbitrary synchronous preparation.
+- Inherited loop/Embed deadlines are not yet raced against this I/O. Their owner
+  and unwind/recovery target must be preserved so an inner Agent handler cannot
+  swallow an outer expiry. Nested restoration needs composed qualification.
+- Timed Agents are excluded from speculative parallel launch while scoped timer
+  ownership is implemented. E128 keeps this internal fallback from becoming a
+  released parallelism change. Parallel sibling survival still needs DSL proof.
+- Cleanup uses the existing synchronous canonical subtask cancellation contract;
+  a noncooperating operation can stall it. Scoped cleanup grace and independent
+  emergency escalation are not supplied by this patch.
+- Capability transport timeouts and AiAgent turnTimeout retain their own behavior;
+  AI auxiliary calls and Embed timeout lowering are not added here.
+
+Cache identity advances to `cooperative-waits=shared-v3`. The emitted core adds two
+i64 locals; timeout error data is emitted only when a manifest contains a timeout.
+No new host bookkeeping, graph interpretation, child Store, task registry, or
+custom cancellation import is introduced. This is not a performance comparison;
+paired size/timing/resource measurements remain outstanding.
+
+Verification:
+
+- Compiler library with the integration-test feature: 597 passed, including the
+  eight composed deadline test functions.
+- Stdlib: 236 passed, one existing ignored case, and one doctest passed.
+- Full direct workflow execution target: 383 passed, three existing ignored
+  benchmarks, zero failures (503.08 seconds).
+- Normal component build: all 27 Agents and both shared components, with metadata.
+- The eight deadline test functions passed again against the final rebuilt
+  bundle; the all-27-Agent callback/error contract passed too.
+- Feature-gated all-target Clippy for workflows/stdlib, formatting, and diff
+  whitespace checks passed. The mandatory workspace pre-commit hook also runs.
+
+Server/database E2E, resource soak, and fresh paired measurements were not run
+for this stage. No release or PR completion is claimed.

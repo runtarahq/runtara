@@ -432,10 +432,8 @@ pub struct DirectAgentManifest {
     /// Base retry delay configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
-    /// Legacy Agent-step timeout retained only for manifest decode compatibility.
-    ///
-    /// Supported artifacts always leave this unset: Agent `timeout` is rejected
-    /// before compilation because the host cannot interrupt an active invoke.
+    /// Total Agent-step budget, retained for deadline lowering. The public
+    /// support gate still rejects it until the complete timeout contract passes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 }
@@ -1009,10 +1007,8 @@ fn step_manifest(
                 ),
                 max_retries: step.max_retries,
                 retry_delay: step.retry_delay,
-                // Agent `timeout` is deliberately not lowered as a best-effort
-                // capability hint. The direct support gate rejects it before
-                // an artifact can be emitted.
-                timeout: None,
+                // A workflow-owned budget, never a capability input hint.
+                timeout: step.timeout,
             });
         }
         Step::AiAgent(step) => {

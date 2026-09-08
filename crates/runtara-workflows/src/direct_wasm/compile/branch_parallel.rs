@@ -490,7 +490,11 @@ pub(super) fn concurrent_branch_pools(
             agent_id,
             max_retries,
             ..
-        } => !static_data.agent_is_workflow_agent(*agent_id) && *max_retries == 0,
+        } => {
+            !static_data.agent_is_workflow_agent(*agent_id)
+                && static_data.agent_timeout(*agent_id).is_none()
+                && *max_retries == 0
+        }
         _ => true, // sync steps have no invoke
     });
     if !ok {
@@ -678,6 +682,7 @@ fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunP
                 && match node {
                     DirectRunPlan::Agent { agent_id, .. } => {
                         !static_data.agent_is_workflow_agent(*agent_id)
+                            && static_data.agent_timeout(*agent_id).is_none()
                     }
                     DirectRunPlan::Log { .. }
                     | DirectRunPlan::Filter { .. }

@@ -646,6 +646,13 @@ jobs:
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests
 
+      - name: Qualify emitted Agent deadlines before relaxing E128
+        env:
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        # These composed tests need private emitter access while the public
+        # support gate remains closed, so they are a feature-gated lib target.
+        run: cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests
+
       # Direct WASM smoke: use the staged stdlib/runtime/agent component
       # bundle, then compile direct workflow fixtures, compose them in-process
       # (wac-graph), execute the final artifacts, and assert the fake SDK

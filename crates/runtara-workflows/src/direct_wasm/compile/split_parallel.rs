@@ -178,7 +178,11 @@ pub(super) fn parallel_agent_body<'a>(
     // shape stops the workflow from starting at all, and an Agent's maxRetries
     // defaults to 3, so the overwhelming majority of authored Splits carry a
     // retry policy they never opted into.
-    if *breakpoint || *agent_retries > 0 || static_data.agent_is_workflow_agent(*agent_id) {
+    if *breakpoint
+        || *agent_retries > 0
+        || static_data.agent_is_workflow_agent(*agent_id)
+        || static_data.agent_timeout(*agent_id).is_some()
+    {
         return None;
     }
     // Any continuation after the Agent is fine: the launch pass only fronts

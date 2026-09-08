@@ -179,6 +179,7 @@ pub(super) fn emit_split_retry_park(
         DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
         DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
         DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL,
+        None,
     );
 }
 

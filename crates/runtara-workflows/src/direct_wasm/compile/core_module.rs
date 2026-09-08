@@ -821,6 +821,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (12, ValType::I32),
     // 158: owned deadline packed status; 159: last await selected timeout.
     (2, ValType::I32),
+    // 160-161: current Agent budget and clock/remaining-duration scratch.
+    (2, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
