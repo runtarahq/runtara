@@ -3823,3 +3823,66 @@ git diff --check
 Final logs use `-tag.log`, `-public-retry.log` and `-clippy.log` with the same prefix. Remaining G1–G10 work, final paired measurements, Linux soak,
 upstream/migration integration and PR remain open.
 Changes stay local until the user explicitly requests a push.
+
+
+### Breakpoint checkpoint cancellation · 2026-09-08
+
+AUDIT-34 fixes the other direct bare checkpoint consumer: the shared breakpoint
+emitter. A resumed breakpoint checkpoint could deliver a Cancel receipt, but its
+`found` branch skipped directly to Agent execution. The composed regression
+reproduced a completed HTTP workflow instead of acknowledged cancellation.
+The initial three-test run also contained two invalid fixture expectations:
+non-durable graphs intentionally strip breakpoints (`step_breakpoint_enabled`
+requires graph durability). The negative durability contract is now explicitly
+tested rather than changing that policy.
+
+The emitter calls the existing checkpoint signal helper after loading the
+checkpoint's `found` bit onto the operand stack. Cancel or accepted Pause exits
+before debug-pause publication or resumed-step dispatch. The saved stack value
+survives a rejected Pause acknowledgement, whose boolean return occupies the same
+canonical return area. A new test reproduced an extra `Suspended(OnResume)` when
+that value was not preserved; moving the load before signal handling fixed it.
+This was caught during development of this change, not a separate shipped bug.
+The cache marker advances from `shared-v22` to `shared-v23`, including its exact
+version assertion. No host implementation, WIT, generated Agent or new helper ABI
+is changed.
+
+Seven new composed test groups cover first-entry and replayed breakpoint Cancel,
+Embed parent/child propagation, terminal Finish/Error boundaries, accepted and
+rejected Pause, ordinary pause/resume and the non-durable policy. They assert
+exact HTTP calls, marker persistence, acknowledgement and debug-pause/event
+counts. The Error fixture initially used mapped values for its static string
+`code`/`message` fields; correcting the fixture resolved that parse failure.
+All fixtures use the public compiler and normally built/composed components.
+
+Final verification (overlapping selections, not summed):
+
+- 35 breakpoint-selected library tests passed in 3.49s, including all seven new
+  groups and the existing breakpoint storage-failure check.
+- 609 compiler/library tests outside the long-running `agent_deadline_tests`
+  execution module passed in 2.68s, including the updated cache-version assertion.
+- All six prior checkpoint-cancellation regressions passed in 1.78s with the
+  extended test RuntimeHost, preserving failed-attempt Pause/Cancel behavior.
+- Three public execution tests passed in 3.08s: AI-loop breakpoint pause before
+  model I/O, resumed AI-loop execution, and parallel-branch breakpoint resume.
+- Feature-gated all-target Clippy passed in 3.91s; formatting and diff checks pass.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib breakpoint -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1 --skip agent_deadline_tests
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib checkpoint_cancellation -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute breakpoint -- --test-threads=1
+cargo clippy -p runtara-workflows --features direct-wasm-integration-tests --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Logs are under `/private/tmp/cooperative-breakpoint-`: `cancel-before.log`,
+`cancel-fixed.log`, `cancel-matrix.log`, `cancel-final.log`,
+`rejected-before.log`, `cancel-verified.log`, `compiler.log`,
+`checkpoint-regression.log`, `public.log` and `clippy.log`.
+The final selections exclude unrelated long-running deadline/abort executions;
+full public execution, native lifecycle/database E2E, component/browser builds and
+benchmarks were not rerun. Remaining G1–G10 gates, Linux soak, controlled paired
+measurements, upstream/migration integration and a new PR remain open. No push
+is authorized.

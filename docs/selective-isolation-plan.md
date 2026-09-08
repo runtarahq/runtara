@@ -1131,3 +1131,15 @@ This does not close all completion/expiry races, lifecycle persistence E2E,
 owner-failure/recovery, compatibility, Linux soak or paired-measurement gates.
 The current audit and implementation record distinguish narrow boundary evidence
 from the remaining G1–G10 qualification. Keep commits local; no push is authorized.
+
+
+### Breakpoint cancellation boundary · 2026-09-08
+
+AUDIT-34 handles lifecycle receipts from first-visit and replayed breakpoint
+checkpoints through the existing guest signal helper. A saved `found` bit survives
+rejected Pause acknowledgements, preventing an accidental second debug pause.
+Seven new composed regression groups and the existing public AI/parallel
+breakpoint tests establish this boundary. Non-durable breakpoint policy is
+unchanged; the compiler marker is `shared-v23`. Wider G4/G7 and G1–G10 coverage,
+paired measurements, Linux soak, compatibility and upstream integration remain
+open. Commits remain local until the user explicitly requests a push.

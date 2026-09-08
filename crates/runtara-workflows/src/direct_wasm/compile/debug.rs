@@ -442,7 +442,11 @@ pub(super) fn emit_step_breakpoint(
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
+    // A lifecycle receipt owns this boundary even on a checkpoint hit. Keep
+    // found on the operand stack: rejecting a stale Pause writes a new result
+    // into retptr, but must not make an existing marker look newly inserted.
     push_retptr_u8_load(body, DIRECT_CHECKPOINT_FOUND_OFFSET);
+    super::cooperative_wait::emit_checkpoint_signal(body, indices);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
 

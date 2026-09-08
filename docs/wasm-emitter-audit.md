@@ -8,8 +8,9 @@ and durable suspend/resume through the production invoke ABI.
 
 Progress checkpoint on the separate branch `feat/cooperative-cancellation-progress`.
 The memory, tool-name and public-timeout stages are committed locally as
-`ce58265e`, `2752aa83` and `f9ff11c6`. AUDIT-33 preserves lifecycle signals delivered
-with failed-attempt checkpoints, using the existing guest signal helper.
+`ce58265e`, `2752aa83` and `f9ff11c6`. Failed-attempt checkpoint cancellation is
+committed as `217e11ae` (AUDIT-33). AUDIT-34 applies the same shared guest signal
+handling to breakpoint checkpoints, including resumed markers and rejected Pause.
 No push is authorized; the latest pushed stage is `6de29584`.
 
 **Implementation is in progress; this snapshot is not release qualification.**
@@ -77,6 +78,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Breakpoint cancellation (AUDIT-34) | 35 breakpoint tests; 609 compiler tests outside the deadline execution module; six checkpoint regressions; three public breakpoint execution tests; feature-gated Clippy passed | Counts overlap. Seven new composed regression groups cover receipt handling, marker replay and rejected Pause. Wider deadline/lifecycle/benchmark gates remain open. |
 | Checkpoint cancellation (AUDIT-33) | Six new composed test groups passed in 2.98s; full library: 706 passed, one stale cache-tag assertion failed; corrected assertion rerun passed; 91 public retry tests and feature-gated Clippy passed | Public compilation, real HTTP, one checkpoint delivery, saved outcomes, pending-peer cleanup before acknowledgement and Pause replay. No new native lifecycle E2E or performance claims. |
 | Public timeout compilation (AUDIT-32) | 701 compiler library tests passed in 462.37s; 395 public execution tests passed in 712.74s; three manual benchmarks ignored; 24 server DTO and 24 browser-validator tests passed; generated WASM passed 12 boundary cases | Includes public Agent/Embed, AI tool/MCP/memory, published export, retry, cancellation and original audit regressions. The selected 21 runtime/export tests overlap the library run. Remaining release and paired-measurement gates stay open. |
 | Name validation and inferred imports (AUDIT-31) | 701 feature-gated compiler library tests passed in 485.04s; 19 public AI tests passed in 8.69s | Includes the three new name-collision regressions and the deadline corpus with production timer/clock inference. E128 remains; timeout execution still uses private emission. |
@@ -2547,3 +2549,41 @@ The public retry execution selection passed all 91 tests in 216.32s, and
 feature-gated all-target Clippy passed in 7.36s. Other public execution cases and
 native lifecycle/database E2E were not rerun for this guest-only change. G4/G5/G7 still require the
 remaining broader race/recovery matrix; final G1–G10 qualification remains open.
+
+
+### AUDIT-34 — Lifecycle receipts at breakpoint checkpoints
+
+**Status:** fixed in the shared guest breakpoint emitter; cache tag `shared-v23`.
+A checkpoint hit on a resumed breakpoint could deliver Cancel, but the emitter
+ignored the receipt and executed the Agent. The new regression reproduced normal
+completion and an HTTP request where cancellation acknowledgement was required.
+The first-visit path also needs to handle the receipt before publishing a debug
+pause. Non-durable graphs intentionally disable breakpoints; that policy remains.
+
+The breakpoint emitter now passes the receipt to the existing guest checkpoint
+signal helper before testing whether the marker was already present. It preserves
+the checkpoint's `found` bit on the WASM operand stack: the host's boolean response
+to a rejected/stale Pause reuses the canonical return area and must not turn a
+checkpoint hit into a second debug pause. A dedicated test caught this issue while
+the fix was being developed. No new task management, native code, WIT interface or
+product flag is introduced. Old artifacts retain their code until recompiled.
+
+| Boundary | Evidence in `breakpoint_cancellation_tests.rs` |
+| --- | --- |
+| Cancel on first breakpoint, with/without Agent timeout | Receipt acknowledged, no HTTP request, debug event or breakpoint-pause call; marker saved |
+| Cancel after a breakpoint resume finds its marker | No resumed Agent invocation, repeated debug pause or changed checkpoint |
+| Cancel at an Embed parent or inside its child | No child HTTP call or parent onError outcome; root receipt acknowledged |
+| Cancel before Finish or Error | No normal completion or ordinary failure outcome |
+| Pause receipt at a breakpoint | One acknowledgement; resume runs once without another breakpoint pause |
+| Host rejects a stale Pause on a marker hit | Original `found` bit survives; one normal execution and no repeated debug event/pause |
+| No command | Durable debug run pauses once and resumes; non-durable graph executes with breakpoints disabled |
+
+Verification passed: **35 breakpoint-selected library tests** (3.49s), **609
+compiler/library tests excluding `agent_deadline_tests`** (2.68s), the **six AUDIT-33
+checkpoint regressions** (1.78s), **three public breakpoint execution tests**
+(3.08s), and feature-gated all-target Clippy (3.91s). These overlapping selections
+are not a fresh full-suite result. The public tests cover AI-loop first pause,
+resume and a parallel-branch breakpoint. Unrelated long-running deadline/abort
+cases, full public execution, native lifecycle/database E2E, browser/component
+builds and paired benchmarks were not repeated for this breakpoint-only lowering
+change. G4/G7 and the broader G1–G10 release qualification remain open.

@@ -51,6 +51,11 @@ struct Host {
     blocked_checkpoint: Mutex<Option<(String, usize)>>,
     checkpoint_blocked: AtomicBool,
     custom_signals: Mutex<HashMap<String, Vec<u8>>>,
+    debug_enabled: AtomicBool,
+    breakpoint_pause_calls: AtomicUsize,
+    breakpoint_pause_error: Mutex<Option<String>>,
+    breakpoint_hits: AtomicUsize,
+    reject_checkpoint_signal: AtomicBool,
 }
 impl Host {
     fn new() -> Self {
@@ -73,6 +78,11 @@ impl Host {
             blocked_checkpoint: Mutex::new(None),
             checkpoint_blocked: AtomicBool::new(false),
             custom_signals: Mutex::new(HashMap::new()),
+            debug_enabled: AtomicBool::new(false),
+            breakpoint_pause_calls: AtomicUsize::new(0),
+            breakpoint_pause_error: Mutex::new(Some("unexpected breakpoint".into())),
+            breakpoint_hits: AtomicUsize::new(0),
+            reject_checkpoint_signal: AtomicBool::new(false),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -125,6 +135,9 @@ impl RuntimeHost for Host {
         Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        if kind == "breakpoint_hit" {
+            self.breakpoint_hits.fetch_add(1, Ordering::SeqCst);
+        }
         if kind == "step_debug_start"
             && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == "handled"
         {
@@ -139,10 +152,15 @@ impl RuntimeHost for Host {
         Ok(())
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {
-        Ok(self.recovery_cleanup.lock().unwrap().is_some())
+        Ok(self.debug_enabled.load(Ordering::SeqCst)
+            || self.recovery_cleanup.lock().unwrap().is_some())
     }
     async fn breakpoint_pause(&self) -> Result<(), String> {
-        Err("unexpected breakpoint".into())
+        self.breakpoint_pause_calls.fetch_add(1, Ordering::SeqCst);
+        match self.breakpoint_pause_error.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
     async fn heartbeat(&self) -> Result<(), String> {
         Ok(())
@@ -249,6 +267,9 @@ impl RuntimeHost for Host {
             (kind.as_str(), command.as_str()),
             ("cancel", "root-cancel") | ("pause", "response-pause")
         ));
+        if self.reject_checkpoint_signal.swap(false, Ordering::SeqCst) {
+            return Ok(false);
+        }
         let cleanup = self.cancel_cleanup.lock().unwrap().clone();
         if let Some(cleanup) = cleanup {
             tokio::time::timeout(Duration::from_secs(2), cleanup.notified())

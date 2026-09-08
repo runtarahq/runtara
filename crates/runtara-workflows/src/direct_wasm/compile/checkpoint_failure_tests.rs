@@ -413,3 +413,6 @@ mod parallel_agent_deadline;
 
 #[path = "checkpoint_cancellation_tests.rs"]
 mod checkpoint_cancellation;
+
+#[path = "breakpoint_cancellation_tests.rs"]
+mod breakpoint_cancellation;
