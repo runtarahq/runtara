@@ -94,7 +94,7 @@ evidence; the table above is the consolidated current work list.
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
 | CPU-Agent cooperation audit (AUDIT-38) | 13 new Agent unit tests and two composed fixtures; utils/text/xml/transform components rebuilt; component-host, `direct_wasm_execute`, environment and workspace-lib suites rerun clean | Static review of every loop, self-recursive function and string byte-slice in the nine Agents, plus targeted execution. Not a per-Agent latency measurement, and third-party crates they call were not reviewed. |
-| Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment, server, store, object-store, connections and migration-version suites; the five-case cancellation E2E; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. Frontend, Linux soak and paired benchmarks were not run. |
+| Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment, server, store, object-store, connections and migration-version suites; the five-case cancellation E2E; the full frontend check set including 81 mocked Playwright tests; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. Linux soak and paired benchmarks were not run. |
 | Late completion (AUDIT-36) | Six new groups passed: 20 composed runs covering timeout, root Cancel and normal completion | Public DSL emitter plus normally composed fixture Agent; cleanup events, same-component reuse and real checkpoint records. Simultaneous-ready scheduling and native lifecycle E2E remain separate gates. |
 | Production isolation selection retirement (AUDIT-35) | Default production build and Clippy; 24 server config, 609 compiler, 28 compatibility execution and six CLI tests passed; legacy runner integration target compiled | New output has no isolation catalog/custom task import. Native runner target was compile-only; registered/parked inventory, full lifecycle E2E and final benchmarks remain open. |
 | Breakpoint cancellation (AUDIT-34) | 35 breakpoint tests; 609 compiler tests outside the deadline execution module; six checkpoint regressions; three public breakpoint execution tests; feature-gated Clippy passed | Counts overlap. Seven new composed regression groups cover receipt handling, marker replay and rejected Pause. Wider deadline/lifecycle/benchmark gates remain open. |
@@ -2819,6 +2819,7 @@ Verified after the merge:
 | `runtara-validation-wasm` for `wasm32-unknown-unknown`, `RUSTFLAGS=-D warnings` | built |
 | `test_cooperative_cancellation.py` | 5 cases passed; owner and peer, headers and body, 0.62-1.10s, plus sustained renewal |
 | Workspace all-target Clippy, formatting, diff whitespace | passed |
+| Frontend on the pinned Node 22.12.0 | lint clean (34 pre-existing warnings, no errors), `format:check`, `tsc -b`, 1,513 unit tests across 134 files, `knip`, production build, and 81 mocked Playwright tests |
 
 ```sh
 cargo test -p runtara-workflows --lib
@@ -2834,8 +2835,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Not run in this stage: frontend build and tests; Linux latency, throughput and
-soak; and any paired benchmark. The `component-host` real-Agent
+Not run in this stage: Linux latency, throughput and soak; and any paired
+benchmark. The `component-host` real-Agent
 test resolves components from the workspace `target/wasm32-wasip2/release` rather
 than `RUNTARA_AGENT_COMPONENTS_DIR`, so a separately staged component directory
 must be linked there before it will run locally. G1-G10 remain open, CodeQL

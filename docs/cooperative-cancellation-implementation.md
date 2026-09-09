@@ -3914,5 +3914,6 @@ authenticated cancellation E2E, where owner and peer header and body cases
 cancelled in 0.62-1.10s. The feature-gated database suites for core,
 store-postgres, environment, server, object-store and connections also pass on
 the merged tree; the object-store vector test needs `CREATE EXTENSION vector` in
-its database. Frontend, Linux soak, CodeQL triage and paired measurements were
-not run.
+its database. The frontend passes lint, formatting, `tsc -b`, 1,513 unit tests,
+`knip`, the production build and 81 mocked Playwright tests on its pinned Node
+22.12.0. Linux soak, CodeQL triage and paired measurements were not run.
