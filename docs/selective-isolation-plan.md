@@ -1202,3 +1202,32 @@ not advance G1-G10: the feature-gated database suites, frontend, CodeQL triage,
 Linux soak and the final paired measurements are unchanged and still open, and
 the draft pull request still points at the pre-merge commit. Commits remain local
 until the user explicitly requests a push.
+
+
+### CPU-Agent cooperation audit · 2026-09-09
+
+AUDIT-38 reviews every loop, self-recursive function and string byte-slice in the
+nine CPU-oriented built-in Agents, which the plan has carried as unqualified
+since the loop-cooperation stage. These Agents take no cancellable I/O, so one
+capability call is one uninterruptible unit of guest work and everything it does
+must be bounded by the caller's input and must never trap.
+
+Four capabilities failed that. `utils`'s two calendar helpers walked one
+iteration per year from 1970 with no bound on the year a caller could supply.
+`text:wrap-text` sliced a long word by byte index and panicked inside multi-byte
+characters. `xml:from-xml` recursed once per nesting level and overflowed the
+guest stack on a few kilobytes of nested tags. `transform:set-value-by-path`
+recursed once per dotted segment and built a value `serde_json` then recursed
+again to drop. The first is a cooperation gap; the other three trap the
+component, which is strictly worse than an uncancellable burn because the
+workflow gets no catchable error and no cleanup.
+
+All four are fixed with closed-form arithmetic, character-oriented wrapping and
+explicit depth limits. No remaining reviewed capability in the nine runs
+unbounded independently of its input, so their cooperation bound is one call over
+a bounded input with the epoch deadline and whole-run abort as the backstop.
+
+This is a bound on shape, not a latency guarantee: a large enough input can still
+exceed any deadline, and a per-Agent execution measurement for large inputs is
+not part of this stage. G1-G10 remain open. Commits remain local until the user
+explicitly requests a push.

@@ -4,8 +4,10 @@ Status: cooperative root cancellation and guest deadline implementation in progr
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
 All 27 built-in Agent exports now use a shared callback-binding macro. Eighteen
-I/O-capable Agents await cancellable operations; the nine CPU-oriented Agents
-still require cooperation-point qualification. Non-durable workflow-agents now
+I/O-capable Agents await cancellable operations. The nine CPU-oriented Agents
+were audited in AUDIT-38: four unbounded or trapping paths in utils, text, xml
+and transform are fixed, and no remaining reviewed capability runs unbounded
+independently of its input. Non-durable workflow-agents now
 propagate parent cancellation through sequential/parallel calls and local retry
 waits. Emitted While and sequential Split loops cooperate between iterations;
 inline Embed/While/parallel cancellation has additional execution coverage.

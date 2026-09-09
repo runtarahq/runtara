@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify CPU-agent cooperation and durable nested suspension/replay against the supported construct matrix. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| CPU-Agent cooperation audit (AUDIT-38) | 13 new Agent unit tests and two composed fixtures; utils/text/xml/transform components rebuilt; component-host, `direct_wasm_execute`, environment and workspace-lib suites rerun clean | Static review of every loop, self-recursive function and string byte-slice in the nine Agents, plus targeted execution. Not a per-Agent latency measurement, and third-party crates they call were not reviewed. |
 | Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment, server, store, object-store, connections and migration-version suites; the five-case cancellation E2E; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. Frontend, Linux soak and paired benchmarks were not run. |
 | Late completion (AUDIT-36) | Six new groups passed: 20 composed runs covering timeout, root Cancel and normal completion | Public DSL emitter plus normally composed fixture Agent; cleanup events, same-component reuse and real checkpoint records. Simultaneous-ready scheduling and native lifecycle E2E remain separate gates. |
 | Production isolation selection retirement (AUDIT-35) | Default production build and Clippy; 24 server config, 609 compiler, 28 compatibility execution and six CLI tests passed; legacy runner integration target compiled | New output has no isolation catalog/custom task import. Native runner target was compile-only; registered/parked inventory, full lifecycle E2E and final benchmarks remain open. |
@@ -2840,3 +2841,79 @@ than `RUNTARA_AGENT_COMPONENTS_DIR`, so a separately staged component directory
 must be linked there before it will run locally. G1-G10 remain open, CodeQL
 triage remains open, and the pull request is still a draft on an older commit.
 Commits remain local until the user explicitly requests a push.
+
+
+### AUDIT-38 — Cooperation-point audit of the nine CPU-oriented Agents
+
+**Status:** four defects found and fixed in the built-in Agents; the audit itself
+is static review plus targeted execution, not an exhaustive proof. No emitter,
+host, WIT or cache-tag change.
+
+The plan has listed "arbitrary loops inside the nine CPU-oriented built-in
+Agents" as unqualified since the loop-cooperation stage. These nine — compression,
+crypto, csv, datetime, text, transform, utils, xlsx and xml — take no cancellable
+I/O, so a single capability call is one uninterruptible unit of guest work.
+The only backstops are the epoch deadline and whole-run abort, and an abort skips
+cleanup. Whatever they do therefore has to be bounded by the size of the input
+the caller supplied, and it must never trap.
+
+Every `loop`, `while` and self-recursive function in the nine was reviewed, plus
+every `&str` byte-slice. Four capabilities failed on one of those two counts.
+
+| Finding | Capability | Why it mattered |
+| --- | --- | --- |
+| Two year-at-a-time calendar loops | `utils:iso-to-unix-timestamp`, `utils:format-date-from-iso` | `parse_iso_to_unix` accepts any `i32` year, so `2147483647-01-01T00:00:00Z` ran about two billion iterations with no host call and no yield. `unix_to_datetime` took a `u64` built from an `i64`, so a negative timestamp ran roughly 584 billion. |
+| Byte-indexed wrapping | `text:wrap-text` | A word longer than the width was sliced by byte index, so any cut inside a multi-byte character panicked. `"ééééé"` at width 1, or ordinary CJK at any width. |
+| Unbounded conversion recursion | `xml:from-xml` | `roxmltree` parses into an arena without recursing, but `element_to_json` recurses per level. A release build overflowed a 512 KiB stack near 700 levels, which a five-kilobyte document reaches. |
+| Unbounded path descent | `transform:set-value-by-path` | One frame per dotted segment, and `serde_json` recurses again to drop and to serialize the value it builds, so a long data-supplied path exhausted the stack. |
+
+The first is a cooperation defect: a multi-minute burn that can only be aborted,
+never cancelled. The other three are worse than that — a panic or stack overflow
+traps the component, so the workflow gets no catchable error, no cancellation
+acknowledgement and no cleanup.
+
+The calendar loops are replaced by closed-form civil-calendar arithmetic, which
+also fixes pre-1970 dates that the ascending loop skipped entirely. Wrapping now
+counts characters, matching what a column width means and leaving ASCII output
+unchanged. XML rejects nesting past 256 levels with `XML_NESTING_TOO_DEEP`, found
+by an iterative arena walk. `set-value-by-path` descends iteratively and caps the
+path at 128 segments, `serde_json`'s own default deserialization depth, so
+anything it builds can still be read back.
+
+After these, no reviewed capability in the nine has a runtime that is unbounded
+independently of its input. `text:slugify`'s dash collapse is `O(n log n)`, and
+every other surviving loop is bounded by the length of a supplied string, array
+or archive. The cooperation bound for these Agents is therefore one call over a
+bounded input, with the epoch deadline and whole-run abort still the backstop for
+a genuinely large one. This is a bound on shape, not a latency guarantee, and a
+sufficiently large input can still exceed any deadline.
+
+Verified: 5 new utils tests, 3 new text tests, 2 new xml tests and 3 new
+transform tests, with the full agent suites at 5, 117, 16 and 61 passing; two new
+composed fixtures for `utils:format-date-from-iso` and
+`utils:iso-to-unix-timestamp` driven through `test_capability` (deliberately
+broken once to prove the harness runs them); the utils, text, xml and transform
+components rebuilt and the component-host integration, `direct_wasm_execute`
+(400 passed for the third consecutive run), `scoped_runner_test`,
+`cooperative_stop_test` and `cargo test --workspace --lib` suites rerun clean
+against them.
+
+```sh
+cargo test -p runtara-agent-utils --lib
+cargo test -p runtara-agent-text --lib
+cargo test -p runtara-agent-xml --lib
+cargo test -p runtara-agent-transform --lib
+scripts/build-agent-components.sh utils text xml transform
+cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test
+cargo test --workspace --lib
+```
+
+Not covered here: an execution-level measurement of how long a large input takes
+inside each of the nine, the eighteen I/O-capable Agents' own CPU paths, and any
+third-party crate these Agents call. `resolve_sheet_name` in the xlsx Agent
+indexes `sheet_names[0]` without checking for an empty workbook; whether calamine
+can produce one was not established, so it is recorded rather than changed. The
+`text:truncate-text` capability compares byte length against a limit it then
+applies in characters, which is inconsistent but cannot trap. G1-G10 remain open.
