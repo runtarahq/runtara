@@ -358,3 +358,7 @@ mod deadline;
 
 #[path = "cooperative_cancellation/async_cancel_grace.rs"]
 mod async_cancel_grace;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/soak.rs"]
+mod soak;
