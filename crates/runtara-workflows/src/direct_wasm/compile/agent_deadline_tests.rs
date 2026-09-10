@@ -73,6 +73,10 @@ struct Host {
     suspend_after_custom_poll: AtomicUsize,
     /// Report a root cancel once this many custom-signal polls have happened.
     cancel_after_custom_poll: AtomicUsize,
+    /// Every custom-signal route polled, in order. A nested wait's route
+    /// encodes its whole call path, so this also shows that replay rebuilds
+    /// the same route after a park.
+    custom_signal_keys: Mutex<Vec<String>>,
 }
 impl Host {
     fn new() -> Self {
@@ -106,6 +110,7 @@ impl Host {
             custom_signal_polls: AtomicUsize::new(0),
             suspend_after_custom_poll: AtomicUsize::new(usize::MAX),
             cancel_after_custom_poll: AtomicUsize::new(usize::MAX),
+            custom_signal_keys: Mutex::new(Vec::new()),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -217,6 +222,7 @@ impl RuntimeHost for Host {
     }
     async fn poll_custom_signal(&self, key: String) -> Result<Option<Vec<u8>>, String> {
         self.custom_signal_polls.fetch_add(1, Ordering::SeqCst);
+        self.custom_signal_keys.lock().unwrap().push(key.clone());
         Ok(self.custom_signals.lock().unwrap().get(&key).cloned())
     }
     async fn get_checkpoint(&self, key: String) -> Result<Option<Vec<u8>>, String> {

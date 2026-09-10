@@ -24,10 +24,12 @@ use super::step_error::emit_step_error_and_continue;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
-    DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
-    DIRECT_RESULT_OPTION_LIST_LEN_OFFSET, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET,
-    DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectFailureTarget, DirectVariables,
+    DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RESULT_OK_LEN_OFFSET,
+    DIRECT_AGENT_RESULT_OK_PTR_OFFSET, DIRECT_RESULT_OPTION_LIST_LEN_OFFSET,
+    DIRECT_RESULT_OPTION_LIST_PTR_OFFSET, DIRECT_RESULT_OPTION_TAG_OFFSET,
+    DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectFailureTarget,
+    DirectVariables,
 };
 use crate::direct_wasm::static_data::DirectDataSegment;
 
@@ -324,7 +326,7 @@ pub(super) fn emit_entry_suspend_return(
             function.instruction(&Instruction::Return);
         }
         crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
-            emit_agent_control_return(function, AGENT_SUSPEND_SENTINEL_CODE, b"", b"");
+            emit_agent_control_return(function, AGENT_SUSPEND_SENTINEL_CODE, b"", b"", None);
         }
         crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             // Zero result area + wake element (0..120).
@@ -378,7 +380,7 @@ pub(super) fn emit_entry_cancel_return(
     indices: &DirectCoreFunctionIndices,
 ) {
     super::deadline_scope::close_alarm(function, indices);
-    emit_agent_control_return(function, b"CANCELLED", b"cancellation", b"error");
+    emit_agent_control_return(function, b"CANCELLED", b"cancellation", b"error", None);
 }
 
 /// Shared canonical error layout for non-local control returns. Low scratch is
@@ -388,6 +390,11 @@ fn emit_agent_control_return(
     code: &[u8],
     category: &[u8],
     severity: &[u8],
+    // When set, the runtime u64 in this local replaces `category` with the
+    // absolute deadline the caller should park until. The capability result
+    // type has no suspended arm and so no wake channel; the error's category
+    // field is the only slot wide enough to carry one back out.
+    deadline_local: Option<u32>,
 ) {
     assert!(code.len() <= 24 && category.len() <= 24 && severity.len() <= 16);
     function.instruction(&Instruction::I32Const(0));
@@ -428,6 +435,30 @@ fn emit_agent_control_return(
             memory_index: 0,
         }));
     }
+    if let Some(deadline_local) = deadline_local {
+        // `retry-after` is the error's only numeric field, and the sentinel is
+        // consumed before any retry classification can read it. The string
+        // fields cannot carry this: they are lifted as UTF-8, and raw deadline
+        // bytes in one trap the caller on `invalid utf8 encoding`.
+        function.instruction(&Instruction::I32Const(
+            DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET as i32,
+        ));
+        function.instruction(&Instruction::I32Const(1));
+        function.instruction(&Instruction::I32Store8(MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(
+            DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET as i32,
+        ));
+        function.instruction(&Instruction::LocalGet(deadline_local));
+        function.instruction(&Instruction::I64Store(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::I32Store8(MemArg {
@@ -437,6 +468,40 @@ fn emit_agent_control_return(
     }));
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::Return);
+}
+
+/// Park a nested workflow-agent child until `deadline_local`.
+///
+/// The invoke export emits the suspended arm directly; a composed agent
+/// re-raises the sentinel carrying the same deadline so the chain keeps
+/// unwinding to the real instance owner; `wasi:cli/run` has no wake channel and
+/// keeps its clean exit.
+pub(super) fn emit_suspend_at_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    deadline_local: u32,
+) {
+    match indices.abi {
+        // This arm closes the alarm itself.
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            emit_entry_suspend_at(function, indices, deadline_local);
+        }
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            super::deadline_scope::close_alarm(function, indices);
+            emit_agent_control_return(
+                function,
+                AGENT_SUSPEND_SENTINEL_CODE,
+                b"",
+                b"",
+                Some(deadline_local),
+            );
+        }
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            super::deadline_scope::close_alarm(function, indices);
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+    }
 }
 
 /// Re-raise a composed workflow-agent child's suspend. Emitted immediately
@@ -480,7 +545,25 @@ pub(super) fn emit_agent_suspend_sentinel_check(
     body.instruction(&Instruction::I64Eq);
     body.instruction(&Instruction::I32And);
     body.instruction(&Instruction::If(BlockType::Empty));
+    // A child that parked on a TIMED wait carries the absolute deadline in the
+    // error's numeric `retry-after` field, the only wake channel the capability
+    // result type has.
+    // Re-raise with that deadline so the owner parks until it; without one the
+    // owner would park on `on-resume` and the child's timeout would never fire.
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
+    body.instruction(&Instruction::LocalSet(
+        super::core_module::NESTED_SUSPEND_DEADLINE_LOCAL,
+    ));
+    emit_suspend_at_return(
+        body,
+        indices,
+        super::core_module::NESTED_SUSPEND_DEADLINE_LOCAL,
+    );
+    body.instruction(&Instruction::Else);
     emit_entry_suspend_return(body, indices);
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);

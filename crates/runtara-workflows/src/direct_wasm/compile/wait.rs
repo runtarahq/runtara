@@ -503,6 +503,28 @@ pub(super) fn emit_wait_for_signal_plan(
             )),
         );
     } else {
+        // A workflow-agent child cannot emit the suspended arm — its result type
+        // has none — but it can still stop holding the parent's runner. Raise
+        // the suspend sentinel instead: the parent re-raises it through its own
+        // ABI and the chain unwinds to the real instance owner, which parks. The
+        // custom-signal waker relaunches that instance when the signal lands,
+        // and replay rebuilds this same nested route and re-polls. A timed wait
+        // carries its absolute deadline out through the sentinel so the owner
+        // parks until it; an untimed one is open-ended by construction and parks
+        // with no deadline at all.
+        if matches!(
+            indices.abi,
+            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+        ) {
+            body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+            body.instruction(&Instruction::If(BlockType::Empty));
+            // Timed: carry the deadline out so the owner parks until it and the
+            // timeout still fires on relaunch.
+            super::abi::emit_suspend_at_return(body, indices, DIRECT_WAIT_DEADLINE_MS_LOCAL);
+            body.instruction(&Instruction::Else);
+            super::abi::emit_entry_suspend_return(body, indices);
+            body.instruction(&Instruction::End);
+        }
         body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));

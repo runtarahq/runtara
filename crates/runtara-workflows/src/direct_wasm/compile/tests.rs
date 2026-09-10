@@ -11117,7 +11117,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
-        tag.contains("cooperative-waits=shared-v23"),
+        tag.contains("cooperative-waits=shared-v24"),
         "recompilation must preserve breakpoint checkpoint signals: {tag}"
     );
     assert!(tag.contains("agent-composition=standard-v1"));

@@ -873,6 +873,9 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     // 186-187: resolved terminal run label JSON, separate from workflow output.
     (2, ValType::I32),
+    // 188: absolute deadline a nested workflow-agent child asked to park until,
+    // carried out of its capability call by the suspend sentinel.
+    (1, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
@@ -1029,6 +1032,10 @@ fn direct_run_function(
 }
 
 /// Locals live in the invocation frame; child/loop scratch cannot overwrite them.
+/// Where a re-raised child suspend stashes the deadline it wants to park until.
+/// The parent needs its own slot: the child's is inside the callee.
+pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
+
 pub(super) const RUN_LABEL_PTR_LOCAL: u32 = 186;
 pub(super) const RUN_LABEL_LEN_LOCAL: u32 = 187;
 

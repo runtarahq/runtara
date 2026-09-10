@@ -16,6 +16,19 @@
 //! These tests build exactly the artifact the gates exist to keep out — a child
 //! that waits, carrying a non-suspending certificate it does not deserve — and
 //! pin what the parent does with it, including when a root Cancel is in flight.
+//!
+//! A nested `Delay` deliberately does NOT park, even though the same wake
+//! channel would carry it. A wait is open-ended and holds a runner slot for an
+//! unbounded time; a Delay is bounded, and parking one unwinds and relaunches
+//! the whole parent chain, so a five-millisecond nested sleep would cost a full
+//! instance teardown. It also changes what four specified contracts in
+//! `direct_wasm_execute` mean — `parent_workflow_invokes_published_durable_workflow_agent`
+//! asserts the parent completes in a single invoke with exactly one terminal
+//! complete, and `composed_durable_child_checkpoints_are_namespaced_per_invocation_site`
+//! fans a Split over three durable children and asserts each sleep gets its own
+//! checkpoint namespace and that a second run HITs everything. Switching
+//! `delay.rs` to `emit_suspend_at_return` makes those four fail first, which is
+//! the guard: the wake channel is ready if that trade is ever worth making.
 use super::*;
 use crate::direct_wasm::WorkflowAbi;
 
@@ -25,9 +38,21 @@ use crate::direct_wasm::WorkflowAbi;
 /// graph, which is the point. The certificate is stamped without being earned,
 /// modelling the mis-certified artifact the sentinel exists to survive.
 fn suspending_child(dir: &Path, components: &str) -> anyhow::Result<PathBuf> {
+    suspending_child_with_timeout(dir, components, None)
+}
+
+fn suspending_child_with_timeout(
+    dir: &Path,
+    components: &str,
+    timeout_ms: Option<u64>,
+) -> anyhow::Result<PathBuf> {
+    let mut hold = json!({"id":"hold","stepType":"WaitForSignal","name":"never-arrives",
+        "pollIntervalMs":10});
+    if let Some(timeout_ms) = timeout_ms {
+        hold["timeoutMs"] = json!({"valueType":"immediate","value":timeout_ms});
+    }
     let graph = serde_json::from_value(json!({"durable":true,"entryPoint":"hold","steps":{
-        "hold":{"id":"hold","stepType":"WaitForSignal","name":"never-arrives",
-            "pollIntervalMs":10},
+        "hold":hold,
         "finish":{"id":"finish","stepType":"Finish","inputMapping":{
             "payload":{"valueType":"reference","value":"steps.hold.outputs"}}}},
         "executionPlan":[{"fromStep":"hold","toStep":"finish"}]}))?;
@@ -200,6 +225,188 @@ async fn a_root_cancel_racing_a_child_suspend_parks_for_the_environment() -> any
         child_invocations(&host),
         1,
         "neither cancel nor suspend may drive a retry"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_parked_waiting_child_resumes_and_completes_on_replay() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let components = components();
+    let staging = suspending_child(dir.path(), &components)?;
+    let parent = parent_of(dir.path(), &components, &staging)?;
+
+    // Same host across both invocations, so the checkpoints a durable run wrote
+    // before parking are the ones replay reads back.
+    let host = Arc::new(Host::new());
+    host.suspend_after_custom_poll.store(1, Ordering::SeqCst);
+
+    let first = invoke(&parent, host.clone()).await?;
+    assert!(
+        matches!(first, InvokeExit::Suspended(_)),
+        "the child must park rather than block: {first:?}"
+    );
+
+    // The signal the child was waiting for arrives while the run is parked, and
+    // the lifecycle suspend is over.
+    host.suspend_after_custom_poll
+        .store(usize::MAX, Ordering::SeqCst);
+    let route = host
+        .custom_signal_keys
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the child polled for its signal before parking");
+    host.custom_signals
+        .lock()
+        .unwrap()
+        .insert(route.clone(), b"{\"arrived\":true}".to_vec());
+
+    let second = invoke(&parent, host.clone()).await?;
+    assert!(
+        matches!(second, InvokeExit::Completed(_)),
+        "replay must re-enter the child's wait and finish: {second:?}"
+    );
+    // A nested wait's route carries its whole call path, so rebuilding the same
+    // one after a park is what lets a waker reach this child rather than some
+    // other instance's wait.
+    let keys = host.custom_signal_keys.lock().unwrap();
+    assert!(
+        keys.iter().all(|key| *key == route),
+        "replay must rebuild the same nested route: {keys:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let components = components();
+    let staging = suspending_child(dir.path(), &components)?;
+    let parent = parent_of(dir.path(), &components, &staging)?;
+
+    // No lifecycle suspend, no cancel, nothing external: the child's own wait
+    // has to decide to park. Previously it would blocking-sleep on the parent's
+    // runner until this run hit its five-second timeout.
+    let host = Arc::new(Host::new());
+
+    let started = Instant::now();
+    let first = invoke(&parent, host.clone()).await?;
+    let parked_in = started.elapsed();
+
+    assert!(
+        matches!(first, InvokeExit::Suspended(_)),
+        "an untimed nested wait must park the chain on its own: {first:?}"
+    );
+    assert!(
+        parked_in < Duration::from_secs(2),
+        "parking must not wait out the run timeout, took {parked_in:?}"
+    );
+    assert_eq!(
+        host.custom_signal_polls.load(Ordering::SeqCst),
+        1,
+        "the child should park after its first miss, not spin"
+    );
+
+    // And the park is resumable: the signal lands, replay re-enters the wait.
+    let route = host
+        .custom_signal_keys
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the child polled before parking");
+    host.custom_signals
+        .lock()
+        .unwrap()
+        .insert(route, b"{\"arrived\":true}".to_vec());
+    let second = invoke(&parent, host.clone()).await?;
+    assert!(
+        matches!(second, InvokeExit::Completed(_)),
+        "a parked nested wait must resume and finish: {second:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let components = components();
+    let staging = suspending_child_with_timeout(dir.path(), &components, Some(150))?;
+    let parent = parent_of(dir.path(), &components, &staging)?;
+
+    let host = Arc::new(Host::new());
+    // Pin the clock so the parked deadline is exactly checkable.
+    host.clock_override.store(1_000, Ordering::SeqCst);
+
+    let first = invoke(&parent, host.clone()).await?;
+
+    // The capability result type has no wake channel, so the child carries its
+    // absolute deadline out through the sentinel's category field and the owner
+    // parks until it. Parking on a wakeless `on-resume` here would silently turn
+    // a timed wait into an open-ended one.
+    let InvokeExit::Suspended(ref wakes) = first else {
+        panic!("a timed nested wait must park: {first:?}");
+    };
+    assert_eq!(
+        wakes.as_slice(),
+        [runtara_component_host::lifecycle::WorkflowWake::At(1_150)],
+        "the park must carry the child's own deadline, not a bare resume"
+    );
+
+    // Relaunch past the deadline: the wait must now take its timeout path
+    // rather than parking again forever.
+    host.clock_override.store(2_000, Ordering::SeqCst);
+    let second = invoke(&parent, host.clone()).await?;
+    assert!(
+        !matches!(second, InvokeExit::Suspended(_)),
+        "an expired nested wait must stop parking and resolve: {second:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cancel_reaching_an_already_parked_child_stops_it_resuming() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let components = components();
+    let staging = suspending_child(dir.path(), &components)?;
+    let parent = parent_of(dir.path(), &components, &staging)?;
+
+    let host = Arc::new(Host::new());
+    let first = invoke(&parent, host.clone()).await?;
+    assert!(
+        matches!(first, InvokeExit::Suspended(_)),
+        "the nested wait must park first: {first:?}"
+    );
+
+    // The cancel lands while the chain is parked. In production
+    // `cancel_suspended_instances` terminalizes a parked instance without ever
+    // relaunching it; this covers the other order — a relaunch that happens
+    // anyway, from a wake already in flight or a recovery pass — where the
+    // guest itself has to refuse to carry on. The signal it was waiting for is
+    // now available, so only the cancel can stop it finishing.
+    let route = host
+        .custom_signal_keys
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the child polled before parking");
+    host.custom_signals
+        .lock()
+        .unwrap()
+        .insert(route, b"{\"arrived\":true}".to_vec());
+    host.cancel.store(true, Ordering::SeqCst);
+
+    let second = invoke(&parent, host.clone()).await?;
+    assert!(
+        !matches!(second, InvokeExit::Completed(_)),
+        "a cancelled parked child must not resume and finish: {second:?}"
+    );
+    assert!(
+        !matches!(second, InvokeExit::Trapped { .. }),
+        "cancelling a parked child must stay controlled: {second:?}"
     );
     Ok(())
 }
