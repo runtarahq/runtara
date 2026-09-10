@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Suspend sentinel coverage (AUDIT-40) | 722 feature-gated compiler tests, no failures, in 620.46s; negative control turns the suspend into a nonretryable failure and fails both new tests | Covers the defence behind the publish prohibition, not the prohibition itself. Durable workflow-agent suspension stays refused; authorizing it is a separate WIT/ABI decision. |
 | Isolated-step experiment retirement (AUDIT-39) | Component-host integration targets pass without the retired feature across nine binaries, no failures; workspace Clippy, formatting, whitespace | Removes the superseded experiment and fixes six suites that ignored `RUNTARA_AGENT_COMPONENTS_DIR`. The decoder, catalog, scoped host and legacy runner are untouched and still gated on the G9 inventory. |
 | CPU-Agent cooperation audit (AUDIT-38) | 13 new Agent unit tests and two composed fixtures; utils/text/xml/transform components rebuilt; component-host, `direct_wasm_execute`, environment and workspace-lib suites rerun clean | Static review of every loop, self-recursive function and string byte-slice in the nine Agents, plus targeted execution. Not a per-Agent latency measurement, and third-party crates they call were not reviewed. |
 | Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment, server, store, object-store, connections and migration-version suites; the five-case cancellation E2E; the full frontend check set including 81 mocked Playwright tests; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. Linux soak and paired benchmarks were not run. |
@@ -2971,3 +2972,69 @@ Not covered: the G9 artifact inventory itself, and therefore any decision about
 the decoder, catalog or legacy runner. The simultaneous-ready scheduling tie also
 remains proven only through the deterministic helper fixture of AUDIT-21 — see
 the note in the remaining-work table.
+
+
+### AUDIT-40 — The suspend sentinel a mis-certified workflow-agent would raise
+
+**Status:** the defensive path is now covered by execution tests. No production
+code, WIT contract, artifact format or cache tag changes.
+
+Durable nested suspension is often read as unbuilt. It is the opposite:
+publishing a workflow that can suspend as an agent is **refused four times over**.
+`analyze_workflow_agent_safety` records a violation for `Delay` and
+`WaitForSignal`; `check_workflow_agent_checkpoint_scope` refuses a sidecar
+without the non-suspending certificate at composition; the server's
+`require_non_suspending_workflow_agent` rejects the graph before publishing; and
+`workflow_agents.rs` checks the certificate again when loading. The reason is
+recorded at the composition gate: the capability ABI is synchronous, so a child
+that waits would hold the parent's runner with no way to park.
+
+Behind those gates sits a runtime defence for an artifact that reaches execution
+anyway — a migration, a hand-built package, or a certification bug. The child
+raises `AGENT_SUSPEND_SENTINEL_CODE` through the capability error channel and the
+parent re-raises it through its own ABI in `emit_agent_suspend_sentinel_check`,
+deliberately **before** retry classification, per-attempt checkpointing or
+onError routing can see it. Under a parent that is itself a composed agent the
+sentinel is re-raised again, so the chain unwinds to the real instance owner.
+
+That defence had no execution coverage. The only test touching the sentinel was a
+stdlib unit test proving a user error cannot spoof the code. These two tests
+build exactly the artifact the gates exist to exclude — a child that waits on a
+signal that never arrives, carrying a non-suspending certificate it has not
+earned — and pin what the parent does with it.
+
+| Case | Required behavior |
+| --- | --- |
+| Child suspends under a parent with `maxRetries: 3` | Root exit is `Suspended`; the child is invoked exactly once; no `::attempt::` checkpoint is written |
+| Root Cancel racing the child's suspend | Root parks as `Suspended([OnResume])`; still one invocation; never a failure, a retry or a lost cancel |
+
+The second case deliberately does **not** require in-guest cancellation. The
+runner follows every suspended exit with `cancel_suspended_instances`, which
+atomically cancels a parked instance holding a pending cancel command, clears its
+wake deadline and acknowledges that exact command. Deciding cancellation inside
+the guest would race that write. The guest's obligation is to park rather than
+fail, because a run that exited any other way would never reach the
+parked-cancellation path at all.
+
+A negative control establishes sensitivity: replacing
+`emit_agent_suspend_sentinel_check` with a no-op makes the child's suspend arrive
+as `Failed(code: "__rt_suspended__:user", retryable: false)` — a failure the
+parent would route through onError — and both tests fail. Restoring the emitter
+makes both pass.
+
+Verified: the feature-gated compiler library is **722 tests, no failures, in
+620.46s**, up from 720 by exactly these two. Workspace all-target Clippy,
+formatting and diff whitespace passed.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+This does not authorize durable workflow-agent suspension, and does not move that
+gate. Doing so means giving the capability ABI a suspended arm and teaching a
+parent to park and resume a nested chain — a WIT and ABI change reaching the
+emitter, component host, environment parking and persistence — which is a
+separate design decision, not a follow-up to this coverage. What these tests
+establish is that the prohibition fails safe if it is ever bypassed.
