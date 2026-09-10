@@ -28,6 +28,9 @@ mod embed;
 #[path = "embed_tool_deadline_tests.rs"]
 mod embed_tool;
 
+#[path = "nested_suspend_tests.rs"]
+mod nested_suspend;
+
 struct CheckpointFault {
     pattern: String,
     write: bool,
@@ -62,6 +65,14 @@ struct Host {
     late_return_cancel_on_start: AtomicBool,
     late_return_starts: AtomicUsize,
     late_return_cleanups: AtomicUsize,
+    /// How many times a custom-signal poll has run, which for a waiting child
+    /// counts how often the parent actually invoked it.
+    custom_signal_polls: AtomicUsize,
+    /// Report a lifecycle suspend once this many custom-signal polls have
+    /// happened. `usize::MAX` never suspends.
+    suspend_after_custom_poll: AtomicUsize,
+    /// Report a root cancel once this many custom-signal polls have happened.
+    cancel_after_custom_poll: AtomicUsize,
 }
 impl Host {
     fn new() -> Self {
@@ -92,6 +103,9 @@ impl Host {
             late_return_cancel_on_start: AtomicBool::new(false),
             late_return_starts: AtomicUsize::new(0),
             late_return_cleanups: AtomicUsize::new(0),
+            custom_signal_polls: AtomicUsize::new(0),
+            suspend_after_custom_poll: AtomicUsize::new(usize::MAX),
+            cancel_after_custom_poll: AtomicUsize::new(usize::MAX),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -184,23 +198,25 @@ impl RuntimeHost for Host {
         Ok(())
     }
     async fn poll_signal(&self) -> Result<Option<RuntimeSignalInfo>, String> {
-        Ok(self
-            .cancel
-            .load(Ordering::SeqCst)
-            .then(|| RuntimeSignalInfo {
-                signal_type: "cancel".into(),
-                command_id: "root-cancel".into(),
-                payload: vec![],
-                checkpoint_id: None,
-            }))
+        Ok((self.cancel.load(Ordering::SeqCst)
+            || self.custom_signal_polls.load(Ordering::SeqCst)
+                >= self.cancel_after_custom_poll.load(Ordering::SeqCst))
+        .then(|| RuntimeSignalInfo {
+            signal_type: "cancel".into(),
+            command_id: "root-cancel".into(),
+            payload: vec![],
+            checkpoint_id: None,
+        }))
     }
     async fn is_cancelled(&self) -> Result<bool, String> {
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
-        Ok(false)
+        Ok(self.custom_signal_polls.load(Ordering::SeqCst)
+            >= self.suspend_after_custom_poll.load(Ordering::SeqCst))
     }
     async fn poll_custom_signal(&self, key: String) -> Result<Option<Vec<u8>>, String> {
+        self.custom_signal_polls.fetch_add(1, Ordering::SeqCst);
         Ok(self.custom_signals.lock().unwrap().get(&key).cloned())
     }
     async fn get_checkpoint(&self, key: String) -> Result<Option<Vec<u8>>, String> {
