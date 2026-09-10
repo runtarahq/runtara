@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Parking staging marker (AUDIT-42) | 221 DSL, 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Closes the older-parent hazard by making `parks-on-wait:1` exclusive with `non-suspending:1`. The publish gate is untouched and nothing stamps the marker outside tests. |
 | Nested wait parking (AUDIT-41) | 726 feature-gated compiler tests and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Wait-on-signal parks with its deadline; a nested Delay stays blocking because parking it rewrites four specified contracts. The publish gates stay closed pending a parent/child vintage marker. |
 | Suspend sentinel coverage (AUDIT-40) | 722 feature-gated compiler tests, no failures, in 620.46s; negative control turns the suspend into a nonretryable failure and fails both new tests | Covers the defence behind the publish prohibition, not the prohibition itself. Durable workflow-agent suspension stays refused; authorizing it is a separate WIT/ABI decision. |
 | Isolated-step experiment retirement (AUDIT-39) | Component-host integration targets pass without the retired feature across nine binaries, no failures; workspace Clippy, formatting, whitespace | Removes the superseded experiment and fixes six suites that ignored `RUNTARA_AGENT_COMPONENTS_DIR`. The decoder, catalog, scoped host and legacy runner are untouched and still gated on the G9 inventory. |
@@ -3109,3 +3110,62 @@ its timeout silently dropped. `shared-v24` separates new compilations but does
 not by itself prevent a mixed staging, so opening the gates needs a parent/child
 vintage marker and a decision about what the "non-suspending" certificate should
 now mean.
+
+
+### AUDIT-42 — A staging marker for a workflow-agent that parks
+
+**Status:** the compatibility hazard behind AUDIT-41 is closed structurally. The
+DSL publish gate is unchanged and still refuses these workflows.
+
+AUDIT-41 left one hazard: a child compiled with the deadline-carrying sentinel,
+composed by a parent built before that existed, has its suspend re-raised without
+the deadline and its timeout silently dropped. `shared-v24` separates new
+compilations but does not prevent a mixed staging, because a staged child artifact
+and the compiler that composes it are versioned independently.
+
+Capability tags are already the vintage mechanism here — `checkpoint-scope:1` and
+`non-suspending:1` — and every composer demands `non-suspending:1` on **every**
+staged workflow-agent. That makes the fix nearly free, provided the new marker is
+an alternative rather than an addition:
+
+- `parks-on-wait:1` says the child may park on a wait and carries its absolute
+  deadline out through the suspend sentinel.
+- `certify_workflow_agent_parks_on_wait` **strips** `non-suspending:1` when it
+  stamps, so no artifact can ever carry both.
+- Composition accepts either certificate, and still refuses a child carrying
+  neither.
+
+The exclusivity is the guarantee. An older parent looks for `non-suspending:1`,
+does not find it on a parking child, and refuses to compose — instead of
+composing one whose deadline it cannot decode. No new check had to be added to
+any existing composer, which is what makes this safe for artifacts already in the
+field: their behavior is unchanged and their refusal is the correct outcome.
+
+The marker also makes the nested-suspend fixtures honest. They previously staged
+a waiting child under `non-suspending:1` — a deliberate lie, and the only way
+through the gate at the time — and now stage under the marker that describes them.
+
+| Case | Required result |
+| --- | --- |
+| Child tagged `parks-on-wait:1` | Composes on its own marker, without the non-suspending certificate |
+| Stamping parking over non-suspending | The contradictory certificate is stripped; `is_parking_workflow_agent` true, `is_certified_non_suspending_workflow_agent` false |
+| Child with neither tag | Still refused, with an error naming both acceptable markers |
+| Older composer meeting a parking child | Refuses: it requires `non-suspending:1`, which a parking child never carries |
+
+Verified: **221 `runtara-dsl` tests**, **728 feature-gated compiler tests** and
+**400 `direct_wasm_execute` tests**, no failures. Workspace all-target Clippy,
+formatting and diff whitespace passed.
+
+```sh
+cargo test -p runtara-dsl --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+What remains is now only the policy step: `analyze_workflow_agent_safety` still
+records a violation for `WaitForSignal`, so a parking workflow cannot be published
+through the server, and nothing stamps `parks-on-wait:1` outside tests. Opening
+that gate means deciding that a parked nested wait is a supported product shape,
+and wiring the publish path to stamp the marker for exactly the graphs that earn
+it. `Delay` stays refused either way, for the reasons in AUDIT-41.
