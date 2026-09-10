@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Nested wait wake fix (AUDIT-43) | 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Fixes a parked nested wait that never woke and an untimed park that published an epoch-zero deadline. The environment half of the round trip is still not executed end to end. |
 | Parking staging marker (AUDIT-42) | 221 DSL, 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Closes the older-parent hazard by making `parks-on-wait:1` exclusive with `non-suspending:1`. The publish gate is untouched and nothing stamps the marker outside tests. |
 | Nested wait parking (AUDIT-41) | 726 feature-gated compiler tests and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Wait-on-signal parks with its deadline; a nested Delay stays blocking because parking it rewrites four specified contracts. The publish gates stay closed pending a parent/child vintage marker. |
 | Suspend sentinel coverage (AUDIT-40) | 722 feature-gated compiler tests, no failures, in 620.46s; negative control turns the suspend into a nonretryable failure and fails both new tests | Covers the defence behind the publish prohibition, not the prohibition itself. Durable workflow-agent suspension stays refused; authorizing it is a separate WIT/ABI decision. |
@@ -3093,6 +3094,10 @@ namespace and that a second run HITs everything. Reverting `delay.rs` alone make
 all four pass again, which isolates the effect exactly. Switching `delay.rs` to
 `emit_suspend_at_return` takes the trade, and those four fail first.
 
+**Correction, AUDIT-43.** As first written this parked on a bare `on-resume` and
+the instance never woke. See AUDIT-43 for the fault and the fix; the table above
+describes the corrected behavior.
+
 Verified: **726 feature-gated compiler tests** and **400 `direct_wasm_execute`
 tests**, no failures, both after the change. Workspace all-target Clippy,
 formatting and diff whitespace passed.
@@ -3169,3 +3174,75 @@ through the server, and nothing stamps `parks-on-wait:1` outside tests. Opening
 that gate means deciding that a parked nested wait is a supported product shape,
 and wiring the publish path to stamp the marker for exactly the graphs that earn
 it. `Delay` stays refused either way, for the reasons in AUDIT-41.
+
+
+### AUDIT-43 — A parked nested wait never woke
+
+**Status:** two faults in AUDIT-41 found and fixed. Both were invisible to that
+stage's tests.
+
+AUDIT-41 made a nested wait park. It did not make it wake.
+
+The child raised the plain suspend sentinel, so the owner parked as
+`Suspended([OnResume])`. `park_invoke_suspend` opens with
+
+```rust
+if deadline_ms.is_none() && !has_on_signal_wake(wakes) { return; }
+```
+
+so a pure `on-resume` returns before `park_instance` is ever called, and
+`termination_reason` never becomes `waiting_signal`. `wake_suspended_on_signal`
+is a deliberate no-op without that reason — stamping `sleep_until` on a
+pause-shaped suspend would silently auto-resume a *paused* instance on any
+custom signal. So `put_custom_signal` inserted its row and nothing relaunched the
+instance. A timed wait did not hang, but parked as `At(deadline)` under
+`ParkReason::Timer` and woke only at its timeout, ignoring an early signal.
+
+The root's own store-freeing wait never had this problem: it emits
+`OnSignal(SignalWait)`, which is what earns `ParkReason::Signal`. The nested path
+carried a deadline but never said *which signal*.
+
+`AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE` now distinguishes a wait park from a
+lifecycle suspend, and carries the child's signal route in the error's message
+field — a genuine UTF-8 string, unlike the raw `u64` that trapped the caller in
+AUDIT-41. The caller re-raises it through `emit_suspend_on_signal_return`, which
+dispatches on ABI exactly as the deadline path does. A park now reads:
+
+```
+OnSignal(SignalWait { checkpoint_id: "runtara:v2:[\"wait\",\"waiting-child\",
+  [[\"child\",\"waiting-parent\",[],[\"call\"]]],[],[…,\"hold\"]]",
+  deadline_ms: Some(1150) })
+```
+
+Route and deadline both survive, so the waker can reach the child when the signal
+lands early and the timeout still fires if it does not.
+
+Fixing that exposed a second fault. The `retry-after` tag was written
+unconditionally whenever a deadline local was supplied, so an **untimed** wait
+published `deadline_ms: Some(0)` — epoch zero, therefore permanently due, which
+would have relaunched the parked instance in a hot loop. The tag now follows the
+wait's own timeout-present flag, and a test asserts an untimed park carries
+`deadline_ms: None`.
+
+**Why AUDIT-41's tests missed both.** They re-invoked the parent by hand. That
+proves replay re-enters the child's wait and completes; it proves nothing about
+whether the environment would ever relaunch it. The tests now assert the wake
+*shape* — `OnSignal`, its route, and the presence or absence of a deadline —
+which is the part the environment actually reads.
+
+Verified: **728 feature-gated compiler tests** and **400 `direct_wasm_execute`
+tests**, no failures. Workspace all-target Clippy, formatting and diff whitespace
+passed.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Still not covered by any test here: the environment half of the round trip. These
+assert the wake the guest publishes; that `wake_suspended_on_signal` then stamps
+`sleep_until` and the scheduler relaunches a parked nested wait is inferred from
+`park_invoke_suspend`'s and the waker's own conditions, not executed end to end.
+That belongs in a database-backed environment test, and it is the check that
+would have caught this fault directly.
