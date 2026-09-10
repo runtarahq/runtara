@@ -618,3 +618,167 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
     );
     assert_eq!(runner.occupancy().unwrap().held, 0);
 }
+
+/// Stage a workflow-agent child that waits on a signal, and a parent that calls
+/// it. Returns the parent artifact. The child carries `parks-on-wait:1`, the
+/// marker that says it may park and carries its wake out through the suspend
+/// sentinel.
+fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilationResult {
+    let components = components();
+    let components = components.to_str().unwrap();
+    let mut hold = json!({"id":"hold","stepType":"WaitForSignal","name":"never-arrives",
+        "pollIntervalMs":10});
+    if let Some(timeout_ms) = timeout_ms {
+        hold["timeoutMs"] = json!({"valueType":"immediate","value":timeout_ms});
+    }
+    let child_graph = serde_json::from_value(json!({"durable":true,"entryPoint":"hold","steps":{
+        "hold":hold,
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "payload":{"valueType":"reference","value":"steps.hold.outputs"}}}},
+        "executionPlan":[{"fromStep":"hold","toStep":"finish"}]}))
+    .unwrap();
+    let mut child = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "parking-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph,
+            child_workflows: vec![],
+            output_dir: dir.join("child"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("parking-child".into()),
+        },
+        WorkflowAbi::AgentCapabilities,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut child, components).unwrap();
+
+    let staging = dir.join("staged");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        "parking-child",
+        "parking-child",
+        "fixture",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    runtara_dsl::agent_meta::certify_workflow_agent_parks_on_wait(&mut info);
+    std::fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_parking_child.wasm"),
+    )
+    .unwrap();
+    std::fs::write(
+        staging.join("runtara_agent_parking_child.meta.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+
+    let parent_graph = serde_json::from_value(json!({"durable":true,"entryPoint":"call","steps":{
+        "call":{"id":"call","stepType":"Agent","agentId":"parking-child","capabilityId":"run",
+            "maxRetries":0},
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "result":{"valueType":"reference","value":"steps.call.outputs"}}}},
+        "executionPlan":[{"fromStep":"call","toStep":"finish"}]}))
+    .unwrap();
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "parking-parent".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: dir.join("parent"),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]),
+            )),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        components,
+        std::slice::from_ref(&staging),
+    )
+    .unwrap();
+    parent
+}
+
+/// The environment half of a nested park: the runner must record it as a
+/// signal park, and a custom signal must then schedule a wake.
+///
+/// This is the check that a guest-only test cannot make. A nested wait that
+/// parked on a bare `on-resume` still looked correct from inside the guest —
+/// it suspended, and a hand-driven replay resumed and completed — but
+/// `park_invoke_suspend` drops a pure `on-resume` before `park_instance`, so
+/// `termination_reason` never became `waiting_signal`, and
+/// `wake_suspended_on_signal` refuses to relaunch anything else. The signal
+/// row landed and the instance stayed parked forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it() {
+    let h = Harness::new().await;
+    let parent = parking_child_parent(h.dir.path(), None);
+    let runner = h.runner(None);
+    let options = h.options(&parent.wasm_path).await;
+
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runner.wait_for_exit(&handle, Duration::from_millis(20)),
+    )
+    .await
+    .expect("the parked chain must stop holding its runner");
+
+    let parked = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        parked.status,
+        InstanceStatus::Suspended,
+        "a nested wait must park the whole chain"
+    );
+    assert_eq!(
+        parked.termination_reason.as_deref(),
+        Some("waiting_signal"),
+        "the park must be recorded as a SIGNAL park; anything else and the waker ignores it"
+    );
+    assert!(
+        parked.sleep_until.is_none(),
+        "an untimed wait must park with no deadline, got {:?}",
+        parked.sleep_until
+    );
+
+    // The signal arrives. `handle_send_custom_signal` writes it and wakes the
+    // instance; the address is the child's own nested route, but the waker is
+    // keyed on the instance, so scheduling a wake is what has to happen here.
+    runtara_environment::handlers::wake_suspended_on_signal(
+        h.persistence.as_ref(),
+        &options.instance_id,
+    )
+    .await;
+
+    let woken = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        woken.sleep_until.is_some(),
+        "a custom signal must schedule a wake for a parked nested wait"
+    );
+    assert!(
+        woken.sleep_until.unwrap() <= chrono::Utc::now() + chrono::Duration::seconds(5),
+        "the wake must be due now, not at some future deadline: {:?}",
+        woken.sleep_until
+    );
+}

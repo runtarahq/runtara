@@ -65,6 +65,8 @@ async-trait = "0.1"
 # Compatibility fixtures must still construct old isolated packages; this is
 # test-only and does not expose their compiler in production builds.
 runtara-workflows = { path = "../runtara-workflows", features = ["direct-wasm-integration-tests"] }
+# Staging a workflow-agent fixture needs its sidecar builders and capability tags.
+runtara-dsl = { path = "../runtara-dsl" }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 futures = "0.3"
