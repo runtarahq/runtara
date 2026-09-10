@@ -644,7 +644,7 @@ jobs:
           test "$meta_count" -eq "$expected"
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
-        run: cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests
+        run: cargo test -p runtara-component-host --features component-integration-tests --tests
 
       - name: Qualify emitted Agent deadlines before relaxing E128
         env:
