@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Environment round trip (AUDIT-44) | 8 scoped-runner and 4 cooperative-stop cases, environment db-integration, 728 compiler, 400 execution, and the five-case E2E, all clean | Executes park and wake against real PostgreSQL. The wake scheduler's own relaunch of a due nested-wait instance is still not exercised. |
 | Nested wait wake fix (AUDIT-43) | 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Fixes a parked nested wait that never woke and an untimed park that published an epoch-zero deadline. The environment half of the round trip is still not executed end to end. |
 | Parking staging marker (AUDIT-42) | 221 DSL, 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Closes the older-parent hazard by making `parks-on-wait:1` exclusive with `non-suspending:1`. The publish gate is untouched and nothing stamps the marker outside tests. |
 | Nested wait parking (AUDIT-41) | 726 feature-gated compiler tests and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Wait-on-signal parks with its deadline; a nested Delay stays blocking because parking it rewrites four specified contracts. The publish gates stay closed pending a parent/child vintage marker. |
@@ -3240,9 +3241,56 @@ cargo test -p runtara-workflows --features direct-wasm-integration-tests --test 
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Still not covered by any test here: the environment half of the round trip. These
-assert the wake the guest publishes; that `wake_suspended_on_signal` then stamps
-`sleep_until` and the scheduler relaunches a parked nested wait is inferred from
-`park_invoke_suspend`'s and the waker's own conditions, not executed end to end.
-That belongs in a database-backed environment test, and it is the check that
-would have caught this fault directly.
+The environment half is covered in AUDIT-44, which also shows the pre-fix
+behavior was worse than "parked and never woken".
+
+
+### AUDIT-44 — The environment half, and what the guest tests could not see
+
+**Status:** the parked-nested-wait round trip is now exercised against the real
+runner and PostgreSQL. No production code changed in this stage.
+
+AUDIT-43 fixed a parked nested wait that never woke, but every test for it ran
+inside the guest and re-invoked the parent by hand. That proves replay re-enters
+the child's wait; it says nothing about whether the platform would ever relaunch
+it, which is the half that was broken.
+
+`a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it` stages
+a `parks-on-wait:1` child that waits, compiles a parent that calls it, launches
+through `EmbeddedWasmRunner` against PostgreSQL, and asserts the state only the
+environment holds:
+
+| Assertion | Why it is the one that matters |
+| --- | --- |
+| Instance reaches `Suspended` | The chain actually parked rather than holding its runner |
+| `termination_reason == "waiting_signal"` | The sole condition `wake_suspended_on_signal` acts on; any other park is invisible to it by design |
+| `sleep_until` is `NULL` | An untimed wait must carry no deadline; `Some(0)` would be permanently due |
+| After the signal, a wake is scheduled and due now | The custom signal actually reaches a parked nested wait |
+
+**The negative control is the point of this entry.** Reverting `wait.rs` to the
+pre-fix bare-resume park fails at the *first* assertion, with the instance still
+`Running` — not `Suspended`. `park_invoke_suspend` returns before `park_instance`
+on a pure `on-resume`, so the row was never moved off `Running` at all. The guest
+had exited and the database still called the run live: a zombie `Running` row
+that the waker ignores, recovery does not reclaim, and every active-count query
+charges for. "Parked and never woken" was the optimistic reading.
+
+Verified with a rebuilt release binary and freshly staged components: 8
+`scoped_runner_test` and 4 `cooperative_stop_test` cases; `runtara-environment`
+`db-integration-tests` with no failures; **728** feature-gated compiler tests;
+**400** `direct_wasm_execute` tests; and the five-case authenticated cancellation
+E2E against a real server and PostgreSQL, cancelling in 0.79-1.05s. Workspace
+all-target Clippy, formatting and diff whitespace passed.
+
+```sh
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test
+cargo test -p runtara-environment --features db-integration-tests -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+python3 e2e/test_cooperative_cancellation.py --server target/release/runtara-server --components "$RUNTARA_AGENT_COMPONENTS_DIR"
+```
+
+What this still does not execute is the last link: the wake scheduler claiming a
+due instance and relaunching it. The test asserts the wake is scheduled and due,
+which is what the scheduler selects on, but the relaunch itself is covered only
+by the existing wake-scheduler suites and not by a nested-wait case.
