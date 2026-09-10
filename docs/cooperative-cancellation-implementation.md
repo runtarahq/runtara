@@ -11,13 +11,15 @@ independently of its input. Non-durable workflow-agents now
 propagate parent cancellation through sequential/parallel calls and local retry
 waits. Emitted While and sequential Split loops cooperate between iterations;
 inline Embed/While/parallel cancellation has additional execution coverage.
-Durable nested suspension is not incomplete but prohibited: a workflow that can
-suspend is refused publication as an agent by the DSL safety report, the staging
-certificate, the composition gate and the server loader, because the capability
-ABI is synchronous and a waiting child would hold the parent's runner with no way
-to park. AUDIT-40 covers the sentinel that makes that prohibition fail safe if an
-artifact ever bypasses it. Lifting the prohibition is a separate WIT and ABI
-decision. Timeouts and the remaining plan gates are still incomplete.
+A nested durable wait now parks rather than holding the parent's runner
+(AUDIT-41): the suspend sentinel carries an absolute deadline in the error's
+numeric `retry-after` field, so a workflow-agent child can park through the chain
+even though the capability result type has no suspended arm. A nested `Delay`
+still blocks, deliberately — it is bounded where a wait is not, and parking one
+relaunches the whole parent chain. Publication of suspending workflow-agents
+remains refused at four layers; opening it needs a parent/child vintage marker,
+because an older parent drops a newer child's deadline. Timeouts and the
+remaining plan gates are still incomplete.
 
 The server's Stop/cancel methods now use the environment Stop handler to deliver
 lifecycle Cancel and arm an independent whole-run abort grace. Normally composed

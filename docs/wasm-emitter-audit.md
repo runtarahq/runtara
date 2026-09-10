@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture; forcing that tie inside a fully composed execution needs a deterministic hook, since a wall-clock race would only add a flaky test. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | AUDIT-41 lands nested wait parking; a nested Delay and the publish gates remain open decisions. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture; forcing that tie inside a fully composed execution needs a deterministic hook, since a wall-clock race would only add a flaky test. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Nested wait parking (AUDIT-41) | 726 feature-gated compiler tests and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Wait-on-signal parks with its deadline; a nested Delay stays blocking because parking it rewrites four specified contracts. The publish gates stay closed pending a parent/child vintage marker. |
 | Suspend sentinel coverage (AUDIT-40) | 722 feature-gated compiler tests, no failures, in 620.46s; negative control turns the suspend into a nonretryable failure and fails both new tests | Covers the defence behind the publish prohibition, not the prohibition itself. Durable workflow-agent suspension stays refused; authorizing it is a separate WIT/ABI decision. |
 | Isolated-step experiment retirement (AUDIT-39) | Component-host integration targets pass without the retired feature across nine binaries, no failures; workspace Clippy, formatting, whitespace | Removes the superseded experiment and fixes six suites that ignored `RUNTARA_AGENT_COMPONENTS_DIR`. The decoder, catalog, scoped host and legacy runner are untouched and still gated on the G9 inventory. |
 | CPU-Agent cooperation audit (AUDIT-38) | 13 new Agent unit tests and two composed fixtures; utils/text/xml/transform components rebuilt; component-host, `direct_wasm_execute`, environment and workspace-lib suites rerun clean | Static review of every loop, self-recursive function and string byte-slice in the nine Agents, plus targeted execution. Not a per-Agent latency measurement, and third-party crates they call were not reviewed. |
@@ -3038,3 +3039,73 @@ parent to park and resume a nested chain — a WIT and ABI change reaching the
 emitter, component host, environment parking and persistence — which is a
 separate design decision, not a follow-up to this coverage. What these tests
 establish is that the prohibition fails safe if it is ever bypassed.
+
+
+### AUDIT-41 — A nested durable wait parks instead of holding the parent's runner
+
+**Status:** implemented for wait-on-signal; a nested `Delay` deliberately still
+blocks. Guest lowering marker `shared-v23` becomes `shared-v24`.
+
+The composition gate's reason for refusing suspending workflow-agents is that
+the capability ABI is synchronous and a waiting child would hold the parent's
+runner "without a way to park". Half of that was accurate. The park machinery
+already worked end to end — AUDIT-40's coverage proved a child suspend unwinds
+the sentinel chain, the owner parks, and replay re-enters the child's wait on a
+byte-identical nested route. What was missing is that the child only parked
+**reactively**, when an external pause or shutdown happened to arrive. On its own
+wait it called `runtime_blocking_sleep` in a `br 0` loop, holding the runner for
+as long as the wait lasted.
+
+A nested wait now raises the suspend sentinel itself. The capability result type
+really has no suspended arm, so the sentinel carries the wake: the child writes
+its absolute deadline into the error's `retry-after` field — an `option<u64>`,
+the only numeric slot — and `emit_agent_suspend_sentinel_check` decodes it and
+re-raises through the new ABI-dispatching `emit_suspend_at_return`. The invoke
+export emits the real suspended arm, a nested parent re-raises the sentinel with
+the same deadline so the chain keeps unwinding to the real instance owner, and
+`wasi:cli/run` keeps its blocking lowering because it has no wake channel at all.
+Canonical local 188 holds the propagated deadline.
+
+The string fields cannot carry a deadline. The first implementation used
+`category` and the execution suite caught it at once: WIT strings are lifted as
+UTF-8 and raw deadline bytes trap the caller with `invalid utf8 encoding`.
+
+| Case | Behavior |
+| --- | --- |
+| Untimed nested wait | Parks the chain on its first miss, in well under the run timeout instead of polling it out; resumes on the signal and completes |
+| Timed nested wait | Parks with `At(clock + timeout)`; a relaunch past the deadline resolves instead of parking again |
+| Child suspend under `maxRetries: 3` | Reaches the root as a suspend, one invocation, no `::attempt::` checkpoint |
+| Root Cancel racing the suspend | Parks for `cancel_suspended_instances` to terminalize; never a failure, retry or lost cancel |
+| Cancel reaching an already-parked child | A relaunch from an in-flight wake or recovery pass refuses to resume and finish, even with the signal now present |
+
+**A nested `Delay` is deliberately excluded.** The same wake channel carries it,
+and the change is one line, but it was implemented, measured against the suite
+and reverted. A wait is open-ended and holds a slot indefinitely; a Delay is
+bounded, and parking one unwinds and relaunches the whole parent chain, so a
+five-millisecond nested sleep would cost a full instance teardown. It also
+rewrites four specified contracts:
+`parent_workflow_invokes_published_durable_workflow_agent` asserts the parent
+completes in a single invoke with exactly one terminal complete, and
+`composed_durable_child_checkpoints_are_namespaced_per_invocation_site` fans a
+Split over three durable children asserting each sleep gets its own checkpoint
+namespace and that a second run HITs everything. Reverting `delay.rs` alone makes
+all four pass again, which isolates the effect exactly. Switching `delay.rs` to
+`emit_suspend_at_return` takes the trade, and those four fail first.
+
+Verified: **726 feature-gated compiler tests** and **400 `direct_wasm_execute`
+tests**, no failures, both after the change. Workspace all-target Clippy,
+formatting and diff whitespace passed.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+This does not open the publish gates, and that is the next decision rather than
+an oversight. A child compiled with the deadline-carrying sentinel, invoked by a
+parent compiled before it, has its deadline re-raised as a bare `on-resume` and
+its timeout silently dropped. `shared-v24` separates new compilations but does
+not by itself prevent a mixed staging, so opening the gates needs a parent/child
+vintage marker and a decision about what the "non-suspending" certificate should
+now mean.
