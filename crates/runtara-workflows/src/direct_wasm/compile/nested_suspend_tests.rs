@@ -13,9 +13,12 @@
 //! execution coverage at all, only a stdlib test proving a user error cannot
 //! spoof the code.
 //!
-//! These tests build exactly the artifact the gates exist to keep out — a child
-//! that waits, carrying a non-suspending certificate it does not deserve — and
-//! pin what the parent does with it, including when a root Cancel is in flight.
+//! These tests stage a child that waits under `parks-on-wait:1`, the marker that
+//! says exactly that, and pin what the parent does with it — including when a
+//! root Cancel is in flight. The marker is deliberately an alternative to
+//! `non-suspending:1` rather than an addition, so an older composer, which
+//! demands the latter, refuses a parking child instead of dropping the deadline
+//! it cannot decode.
 //!
 //! A nested `Delay` deliberately does NOT park, even though the same wake
 //! channel would carry it. A wait is open-ended and holds a runner slot for an
@@ -88,9 +91,10 @@ fn suspending_child_with_timeout(
         &HashMap::new(),
         &HashMap::new(),
     );
-    // Unearned on purpose: without it the composition gate rejects the child
-    // and the interesting path is unreachable.
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+    // A child that waits is exactly what `parks-on-wait:1` describes. Staging it
+    // as `non-suspending:1` would be a lie, and an older composer would take
+    // that lie and drop the deadline it cannot decode.
+    runtara_dsl::agent_meta::certify_workflow_agent_parks_on_wait(&mut info);
     fs::copy(
         &child.wasm_path,
         staging.join("runtara_agent_waiting_child.wasm"),
@@ -117,7 +121,7 @@ fn parent_of(
         &HashMap::new(),
     );
     let mut certified = info.clone();
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut certified);
+    runtara_dsl::agent_meta::certify_workflow_agent_parks_on_wait(&mut certified);
     let graph = serde_json::from_value(json!({"durable":true,"entryPoint":"call","steps":{
         "call":{"id":"call","stepType":"Agent","agentId":"waiting-child","capabilityId":"run",
             "maxRetries":3,"retryDelay":10},

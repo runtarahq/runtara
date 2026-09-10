@@ -387,13 +387,23 @@ fn check_workflow_agent_checkpoint_scope(
                 component.agent_id
             )));
         }
-        if workflow_agent_capabilities
-            .iter()
-            .any(|tags| !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING))
-        {
+        // Either certificate composes: `non-suspending:1` proves the child never
+        // suspends, `parks-on-wait:1` says it may but carries its deadline out
+        // through the suspend sentinel and this composer knows how to re-raise
+        // it. A child carrying neither is a stale or unproven artifact.
+        //
+        // The two are mutually exclusive by construction, which is what makes
+        // the second one safe to add: every composer built before parking
+        // existed demands `non-suspending:1`, so it refuses a parking child
+        // outright instead of dropping the deadline it cannot decode.
+        if workflow_agent_capabilities.iter().any(|tags| {
+            !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
+                && !tags.contains(&capability_tags::WORKFLOW_AGENT_PARKS_ON_WAIT)
+        }) {
             return Err(DirectCompileError::Component(format!(
-                "published workflow-agent `{}` lacks the required non-suspending:1 certification; \
-                 republish it after removing every wait, delay, retry/backoff, and breakpoint path",
+                "published workflow-agent `{}` carries neither the non-suspending:1 certification \
+                 nor the parks-on-wait:1 marker; republish it after removing every wait, delay, \
+                 retry/backoff, and breakpoint path, or republish it as a parking agent",
                 component.agent_id
             )));
         }
@@ -653,6 +663,46 @@ mod tests {
             .expect_err("an old workflow-agent sidecar must not compose");
 
         assert!(error.to_string().contains("non-suspending:1"), "{error}");
+    }
+
+    #[test]
+    fn a_parking_workflow_agent_composes_without_the_non_suspending_certificate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let component = component_requirement();
+        write_sidecar(
+            dir.path(),
+            &[
+                capability_tags::WORKFLOW_AGENT,
+                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
+                capability_tags::WORKFLOW_AGENT_PARKS_ON_WAIT,
+            ],
+        );
+
+        check_workflow_agent_checkpoint_scope(dir.path(), &component)
+            .expect("a parking workflow-agent composes on its own marker");
+    }
+
+    #[test]
+    fn a_parking_marker_never_accompanies_the_non_suspending_certificate() {
+        // The exclusivity is the compatibility guarantee: every composer built
+        // before parking existed demands `non-suspending:1`, so a child that
+        // carries only `parks-on-wait:1` is refused by an older parent instead
+        // of composed by one that would drop the deadline it cannot decode.
+        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+            "parking-child",
+            "parking-child",
+            "fixture",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+        runtara_dsl::agent_meta::certify_workflow_agent_parks_on_wait(&mut info);
+
+        assert!(runtara_dsl::agent_meta::is_parking_workflow_agent(&info));
+        assert!(
+            !runtara_dsl::agent_meta::is_certified_non_suspending_workflow_agent(&info),
+            "parking must strip the non-suspending certificate it contradicts"
+        );
     }
 
     #[test]
