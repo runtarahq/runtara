@@ -4817,6 +4817,7 @@ dependencies = [
  "opentelemetry",
  "runtara-component-host",
  "runtara-core",
+ "runtara-dsl",
  "runtara-store-postgres",
  "runtara-workflow-wit",
  "runtara-workflows",
