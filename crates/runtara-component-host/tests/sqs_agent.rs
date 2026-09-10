@@ -28,7 +28,12 @@ fn agent_wasm_path() -> PathBuf {
         .to_path_buf();
     // cargo-component drops the finalized component under wasm32-wasip2/
     // (the wasm32-wasip1/ artifact is a malformed intermediate — don't use it).
-    workspace.join("target/wasm32-wasip2/release/runtara_agent_sqs.wasm")
+    // A separately built revision stages its components outside the
+    // workspace target tree; honour the directory the suites are given.
+    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target/wasm32-wasip2/release"))
+        .join("runtara_agent_sqs.wasm")
 }
 
 type InvokeFunc = wasmtime::component::TypedFunc<

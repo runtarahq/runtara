@@ -29,7 +29,12 @@ fn workspace_root() -> PathBuf {
 }
 
 fn wasm_path(stem: &str) -> PathBuf {
-    let p = workspace_root().join(format!("target/wasm32-wasip2/release/{stem}.wasm"));
+    // A separately built revision stages its components outside the
+    // workspace target tree; honour the directory the suites are given.
+    let p = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"))
+        .join(format!("{stem}.wasm"));
     assert!(
         p.exists(),
         "requires {}; run scripts/build-agent-components.sh",

@@ -50,8 +50,13 @@ fn spec() -> WorkflowRunSpec {
 }
 
 fn component_path(agent: &str) -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-wasip2/release")
+    // A separately built revision stages its components outside the workspace
+    // target tree; honour the directory the suites are given.
+    let path = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release")
+        })
         .join(format!("runtara_agent_{agent}.wasm"));
     assert!(
         path.exists(),

@@ -68,11 +68,19 @@ async fn guest_owned_control_cancels_real_http_agent_after_random_sibling_comple
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
     let mut bindings = BTreeMap::new();
+    // Honour the staged component directory the rest of the suites use; a
+    // separately built revision does not land in the workspace target tree.
+    let components = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release")
+        });
     for name in ["http", "utils"] {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/wasm32-wasip2/release")
-            .join(format!("runtara_agent_{name}.wasm"));
-        assert!(path.exists(), "run scripts/build-agent-components.sh");
+        let path = components.join(format!("runtara_agent_{name}.wasm"));
+        assert!(
+            path.exists(),
+            "run scripts/build-agent-components.sh, or point RUNTARA_AGENT_COMPONENTS_DIR at a staged build"
+        );
         let pre = executor.load_instance_pre(&path).await.unwrap();
         bindings.insert(
             name.into(),

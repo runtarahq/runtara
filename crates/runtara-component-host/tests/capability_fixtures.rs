@@ -57,7 +57,11 @@ fn workspace_root() -> PathBuf {
 }
 
 fn bundle_dir() -> PathBuf {
-    workspace_root().join("target/wasm32-wasip2/release")
+    // Same rule as the dispatcher suite: a separately built revision stages its
+    // components outside the workspace target tree.
+    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"))
 }
 
 fn agents_crates_dir() -> PathBuf {
