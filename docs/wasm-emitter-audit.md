@@ -75,11 +75,11 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture; forcing that tie inside a fully composed execution needs a deterministic hook, since a wall-clock race would only add a flaky test. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
-| Compatibility and obsolete-path cleanup | AUDIT-35 retires production isolation selection. Inventory registered/parked artifacts; retire remaining superseded isolation/task runtime machinery while preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
+| Compatibility and obsolete-path cleanup | AUDIT-35 retires production isolation selection and AUDIT-39 retires the isolated-step experiment. Still open: inventory registered/parked artifacts, then decide the fate of the isolation package decoder, prepared child catalog, scoped runtime host and legacy runner, preserving required old-artifact execution and replay contracts, runtime capability checks and export/no-host modes. |
 | Upstream integration and PR | AUDIT-37 merges upstream `main`, moves the run-label locals to 186/187 so no published `DIRECT_*` index shifts, and renames the branch's two migrations to 027/028 rather than editing them. Push draft PR #237 to the merged tree, triage the nine new CodeQL alerts and rerun the feature-gated database suites. |
 
 The governing acceptance criteria remain G1–G10 in the
@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| Isolated-step experiment retirement (AUDIT-39) | Component-host integration targets pass without the retired feature across nine binaries, no failures; workspace Clippy, formatting, whitespace | Removes the superseded experiment and fixes six suites that ignored `RUNTARA_AGENT_COMPONENTS_DIR`. The decoder, catalog, scoped host and legacy runner are untouched and still gated on the G9 inventory. |
 | CPU-Agent cooperation audit (AUDIT-38) | 13 new Agent unit tests and two composed fixtures; utils/text/xml/transform components rebuilt; component-host, `direct_wasm_execute`, environment and workspace-lib suites rerun clean | Static review of every loop, self-recursive function and string byte-slice in the nine Agents, plus targeted execution. Not a per-Agent latency measurement, and third-party crates they call were not reviewed. |
 | Upstream integration (AUDIT-37) | 607 default and 720 feature-gated compiler tests; 400 execution tests twice; component-host, environment, server, store, object-store, connections and migration-version suites; the five-case cancellation E2E; the full frontend check set including 81 mocked Playwright tests; workspace Clippy | Merge resolution, migration renumbering and two test-harness repairs. Linux soak and paired benchmarks were not run. |
 | Late completion (AUDIT-36) | Six new groups passed: 20 composed runs covering timeout, root Cancel and normal completion | Public DSL emitter plus normally composed fixture Agent; cleanup events, same-component reuse and real checkpoint records. Simultaneous-ready scheduling and native lifecycle E2E remain separate gates. |
@@ -2918,3 +2919,55 @@ indexes `sheet_names[0]` without checking for an empty workbook; whether calamin
 can produce one was not established, so it is recorded rather than changed. The
 `text:truncate-text` capability compares byte length against a limit it then
 applies in characters, which is inconsistent but cannot trap. G1-G10 remain open.
+
+
+### AUDIT-39 — Retire the isolated-step proof of concept
+
+**Status:** the superseded design's architectural experiment is removed. No
+production code, WIT contract, artifact format or cache tag changes.
+
+`isolated_step_poc` was the proof that a per-step isolated Store could cancel a
+running guest. Its own header says it is a test-only architectural proof and
+that no production linker exposes its imports, and the plan is explicit that
+evidence from the superseded design does not establish this design's gates. It
+was compiled only under `#[cfg(all(test, feature = "isolated-step-poc"))]`, so
+nothing outside its own feature could reach it and no artifact could depend on
+it.
+
+Removed: `isolated_step_poc.rs` and its `production_research.rs` (about 930
+lines), five WAT fixtures, the `isolated-step-poc` Cargo feature, its `mod`
+declaration, and the feature from the CI invocation. The historical write-ups in
+`docs/isolated-step-cancellation-poc.md` and
+`docs/isolated-step-production-research.md` are kept, and git history keeps the
+code.
+
+This retires the **experiment** only. The isolation package decoder, metadata
+contracts, prepared child catalog, scoped runtime host and legacy runner all
+remain, because registered and parked artifacts may still need them — that
+retirement is still gated on the G9 inventory, exactly as AUDIT-35 left it.
+
+While rerunning the component-host suites without the feature, six of them
+turned out to resolve agents from the workspace target tree alone, so a
+separately built revision failed with "run scripts/build-agent-components.sh"
+even with components staged. `execution_host::real_agents`, `capability_fixtures`,
+`crypto_agent`, `sqs_agent`, `native_free_agents` and `isolated_capability` now
+read `RUNTARA_AGENT_COMPONENTS_DIR` first and fall back to the workspace path,
+which is what `dispatcher` and the cancellation suites already did. This closes
+the local-run wrinkle AUDIT-37 recorded rather than leaving it as a footnote.
+
+Verified: the component-host integration targets pass without the retired
+feature — 125, 92, 6, 2, 2, 1, 1, 1 and 1 tests across the nine binaries, one
+ignored, no failures. Formatting, diff whitespace and workspace all-target Clippy
+passed. The count drops from 139 to 125 in the first binary because the retired
+experiment's own tests are gone.
+
+```sh
+cargo test -p runtara-component-host --features component-integration-tests --tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+Not covered: the G9 artifact inventory itself, and therefore any decision about
+the decoder, catalog or legacy runner. The simultaneous-ready scheduling tie also
+remains proven only through the deterministic helper fixture of AUDIT-21 — see
+the note in the remaining-work table.
