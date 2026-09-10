@@ -516,14 +516,20 @@ pub(super) fn emit_wait_for_signal_plan(
             indices.abi,
             crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
         ) {
-            body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
-            body.instruction(&Instruction::If(BlockType::Empty));
-            // Timed: carry the deadline out so the owner parks until it and the
-            // timeout still fires on relaunch.
-            super::abi::emit_suspend_at_return(body, indices, DIRECT_WAIT_DEADLINE_MS_LOCAL);
-            body.instruction(&Instruction::Else);
-            super::abi::emit_entry_suspend_return(body, indices);
-            body.instruction(&Instruction::End);
+            // Park ON THE SIGNAL, carrying the route and any timeout deadline.
+            // A bare resume would be dropped by `park_invoke_suspend` before it
+            // stamped `waiting_signal`, and the custom-signal waker would then
+            // never relaunch this instance at all.
+            super::abi::emit_suspend_on_signal_return(
+                body,
+                indices,
+                DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+                DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+                Some((
+                    DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+                    DIRECT_WAIT_DEADLINE_MS_LOCAL,
+                )),
+            );
         }
         body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
         push_retptr_arg(body);

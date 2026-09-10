@@ -24,6 +24,7 @@ use super::step_error::emit_step_error_and_continue;
 use super::wait::emit_wait_on_wait_error_and_fail;
 use super::{
     DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
+    DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET,
     DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET,
     DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RESULT_OK_LEN_OFFSET,
     DIRECT_AGENT_RESULT_OK_PTR_OFFSET, DIRECT_RESULT_OPTION_LIST_LEN_OFFSET,
@@ -284,8 +285,30 @@ pub(super) fn emit_invoke_err_return_from_locals(
 /// its OWN ABI — chaining however deep the composition nests. Exactly 16
 /// bytes so the parent's check is two immediate i64 compares, no memcmp loop.
 pub(super) const AGENT_SUSPEND_SENTINEL_CODE: &[u8; 16] = b"__rt_suspended__";
+/// A nested child parked on a WAIT rather than a lifecycle suspend. Distinct
+/// from [`AGENT_SUSPEND_SENTINEL_CODE`] because the caller must re-raise it as
+/// an `on-signal` wake: `park_invoke_suspend` drops a pure `on-resume` before it
+/// reaches `park_instance`, so `termination_reason` never becomes
+/// `waiting_signal` and `wake_suspended_on_signal` would never relaunch it.
+/// Sixteen bytes so it compares with the same two i64 loads.
+pub(super) const AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE: &[u8; 16] = b"__rt_on_signal__";
 
 /// The sentinel as two little-endian i64 immediates (low half, high half).
+fn on_signal_sentinel_halves() -> (i64, i64) {
+    (
+        i64::from_le_bytes(
+            AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE[..8]
+                .try_into()
+                .expect("8 bytes"),
+        ),
+        i64::from_le_bytes(
+            AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE[8..]
+                .try_into()
+                .expect("8 bytes"),
+        ),
+    )
+}
+
 fn suspend_sentinel_halves() -> (i64, i64) {
     let lo = i64::from_le_bytes(
         AGENT_SUSPEND_SENTINEL_CODE[..8]
@@ -326,7 +349,15 @@ pub(super) fn emit_entry_suspend_return(
             function.instruction(&Instruction::Return);
         }
         crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
-            emit_agent_control_return(function, AGENT_SUSPEND_SENTINEL_CODE, b"", b"", None);
+            emit_agent_control_return(
+                function,
+                AGENT_SUSPEND_SENTINEL_CODE,
+                b"",
+                b"",
+                None,
+                None,
+                None,
+            );
         }
         crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             // Zero result area + wake element (0..120).
@@ -380,7 +411,15 @@ pub(super) fn emit_entry_cancel_return(
     indices: &DirectCoreFunctionIndices,
 ) {
     super::deadline_scope::close_alarm(function, indices);
-    emit_agent_control_return(function, b"CANCELLED", b"cancellation", b"error", None);
+    emit_agent_control_return(
+        function,
+        b"CANCELLED",
+        b"cancellation",
+        b"error",
+        None,
+        None,
+        None,
+    );
 }
 
 /// Shared canonical error layout for non-local control returns. Low scratch is
@@ -395,6 +434,15 @@ fn emit_agent_control_return(
     // type has no suspended arm and so no wake channel; the error's category
     // field is the only slot wide enough to carry one back out.
     deadline_local: Option<u32>,
+    // When set, the i32 in this local decides whether the deadline is present.
+    // Without it a carried deadline is always present. An unconditional tag on
+    // an untimed wait would publish `deadline_ms: Some(0)` — epoch zero, so
+    // permanently due, relaunching the parked instance in a hot loop.
+    deadline_present_local: Option<u32>,
+    // When set, these locals hold a real UTF-8 string that replaces the default
+    // message (which otherwise aliases the code). Used to carry a nested wait's
+    // signal route out to its caller.
+    message_local: Option<(u32, u32)>,
 ) {
     assert!(code.len() <= 24 && category.len() <= 24 && severity.len() <= 16);
     function.instruction(&Instruction::I32Const(0));
@@ -435,6 +483,26 @@ fn emit_agent_control_return(
             memory_index: 0,
         }));
     }
+    if let Some((ptr_local, len_local)) = message_local {
+        function.instruction(&Instruction::I32Const(
+            DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET as i32,
+        ));
+        function.instruction(&Instruction::LocalGet(ptr_local));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(
+            DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET as i32,
+        ));
+        function.instruction(&Instruction::LocalGet(len_local));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
     if let Some(deadline_local) = deadline_local {
         // `retry-after` is the error's only numeric field, and the sentinel is
         // consumed before any retry classification can read it. The string
@@ -443,7 +511,10 @@ fn emit_agent_control_return(
         function.instruction(&Instruction::I32Const(
             DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET as i32,
         ));
-        function.instruction(&Instruction::I32Const(1));
+        match deadline_present_local {
+            Some(present) => function.instruction(&Instruction::LocalGet(present)),
+            None => function.instruction(&Instruction::I32Const(1)),
+        };
         function.instruction(&Instruction::I32Store8(MemArg {
             offset: 0,
             align: 0,
@@ -494,6 +565,8 @@ pub(super) fn emit_suspend_at_return(
                 b"",
                 b"",
                 Some(deadline_local),
+                None,
+                None,
             );
         }
         crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
@@ -502,6 +575,114 @@ pub(super) fn emit_suspend_at_return(
             function.instruction(&Instruction::Return);
         }
     }
+}
+
+/// Park a nested child on a SIGNAL, carrying the route its caller must wait on.
+///
+/// The route is a genuine UTF-8 string, so unlike a deadline it rides in the
+/// error's message field. `deadline` is the wait's optional timeout, threaded
+/// through so a timed wait still expires.
+pub(super) fn emit_suspend_on_signal_return(
+    function: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    signal_ptr_local: u32,
+    signal_len_local: u32,
+    deadline: Option<(u32, u32)>,
+) {
+    match indices.abi {
+        // This arm closes the alarm itself.
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            emit_entry_suspend_on_signal(
+                function,
+                indices,
+                signal_ptr_local,
+                signal_len_local,
+                deadline,
+            );
+        }
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            super::deadline_scope::close_alarm(function, indices);
+            emit_agent_control_return(
+                function,
+                AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE,
+                b"",
+                b"",
+                deadline.map(|(_, deadline)| deadline),
+                deadline.map(|(present, _)| present),
+                Some((signal_ptr_local, signal_len_local)),
+            );
+        }
+        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
+            super::deadline_scope::close_alarm(function, indices);
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::Return);
+        }
+    }
+}
+
+/// Re-raise a nested child's WAIT park, preserving the route it is waiting on.
+///
+/// Without this the caller would park on a bare `on-resume`, which
+/// `park_invoke_suspend` drops before `park_instance` — the instance would never
+/// be stamped `waiting_signal`, and `wake_suspended_on_signal` would never
+/// relaunch it when the signal arrived.
+fn emit_on_signal_sentinel_check(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+    let (lo, hi) = on_signal_sentinel_halves();
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
+    body.instruction(&Instruction::I32Const(
+        AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE.len() as i32,
+    ));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I64Const(lo));
+    body.instruction(&Instruction::I64Eq);
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
+    body.instruction(&Instruction::I64Load(MemArg {
+        offset: 8,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::I64Const(hi));
+    body.instruction(&Instruction::I64Eq);
+    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // The route rides in the message field; a present `retry-after` is the
+    // wait's timeout deadline.
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET);
+    body.instruction(&Instruction::LocalSet(
+        super::core_module::NESTED_SUSPEND_SIGNAL_PTR_LOCAL,
+    ));
+    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET);
+    body.instruction(&Instruction::LocalSet(
+        super::core_module::NESTED_SUSPEND_SIGNAL_LEN_LOCAL,
+    ));
+    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
+    body.instruction(&Instruction::LocalSet(
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+    ));
+    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
+    body.instruction(&Instruction::LocalSet(super::DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    emit_suspend_on_signal_return(
+        body,
+        indices,
+        super::core_module::NESTED_SUSPEND_SIGNAL_PTR_LOCAL,
+        super::core_module::NESTED_SUSPEND_SIGNAL_LEN_LOCAL,
+        Some((
+            super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+            super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
+        )),
+    );
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 /// Re-raise a composed workflow-agent child's suspend. Emitted immediately
@@ -518,6 +699,7 @@ pub(super) fn emit_agent_suspend_sentinel_check(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
+    emit_on_signal_sentinel_check(body, indices);
     let (lo, hi) = suspend_sentinel_halves();
     load_retptr_tag(body);
     body.instruction(&Instruction::If(BlockType::Empty));

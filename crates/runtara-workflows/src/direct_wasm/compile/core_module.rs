@@ -876,6 +876,9 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // 188: absolute deadline a nested workflow-agent child asked to park until,
     // carried out of its capability call by the suspend sentinel.
     (1, ValType::I64),
+    // 189-190: the signal route that child is parked on, so the caller re-raises
+    // an on-signal wake rather than a bare resume the waker would ignore.
+    (2, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
@@ -1035,6 +1038,9 @@ fn direct_run_function(
 /// Where a re-raised child suspend stashes the deadline it wants to park until.
 /// The parent needs its own slot: the child's is inside the callee.
 pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
+/// The nested child's signal route, re-raised so the park is `on-signal`.
+pub(super) const NESTED_SUSPEND_SIGNAL_PTR_LOCAL: u32 = 189;
+pub(super) const NESTED_SUSPEND_SIGNAL_LEN_LOCAL: u32 = 190;
 
 pub(super) const RUN_LABEL_PTR_LOCAL: u32 = 186;
 pub(super) const RUN_LABEL_LEN_LOCAL: u32 = 187;

@@ -220,10 +220,18 @@ async fn a_root_cancel_racing_a_child_suspend_parks_for_the_environment() -> any
     // here would race that write. What the guest must not do is turn the
     // combination into a failure, a retry, or a lost cancel — a run that exited
     // any other way would never reach the parked-cancellation path at all.
-    assert!(
-        matches!(exit, InvokeExit::Suspended(ref wakes) if wakes.as_slice()
-            == [runtara_component_host::lifecycle::WorkflowWake::OnResume]),
-        "a cancelled waiting child must park for the environment to terminalize, not {exit:?}"
+    let InvokeExit::Suspended(ref wakes) = exit else {
+        panic!("a cancelled waiting child must park for the environment to terminalize: {exit:?}");
+    };
+    let [runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait)] = wakes.as_slice() else {
+        panic!("the park must stay an on-signal park: {wakes:?}");
+    };
+    // An untimed wait must publish NO deadline. `Some(0)` would be epoch zero —
+    // permanently due — and the scheduler would relaunch the parked instance in
+    // a hot loop.
+    assert_eq!(
+        wait.deadline_ms, None,
+        "an untimed wait must park without a deadline"
     );
     assert_eq!(
         child_invocations(&host),
@@ -299,9 +307,20 @@ async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> any
     let first = invoke(&parent, host.clone()).await?;
     let parked_in = started.elapsed();
 
+    // It must park ON THE SIGNAL, not on a bare resume. `park_invoke_suspend`
+    // drops a pure `on-resume` before it reaches `park_instance`, so
+    // `termination_reason` never becomes `waiting_signal`, and
+    // `wake_suspended_on_signal` refuses to relaunch anything else — a parked
+    // wait that carried only `on-resume` would never wake at all.
+    let InvokeExit::Suspended(ref wakes) = first else {
+        panic!("an untimed nested wait must park the chain on its own: {first:?}");
+    };
     assert!(
-        matches!(first, InvokeExit::Suspended(_)),
-        "an untimed nested wait must park the chain on its own: {first:?}"
+        matches!(
+            wakes.as_slice(),
+            [runtara_component_host::lifecycle::WorkflowWake::OnSignal(_)]
+        ),
+        "a parked nested wait must carry an on-signal wake, got {wakes:?}"
     );
     assert!(
         parked_in < Duration::from_secs(2),
@@ -353,10 +372,20 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     let InvokeExit::Suspended(ref wakes) = first else {
         panic!("a timed nested wait must park: {first:?}");
     };
+    // Both halves must survive: the route so the waker can reach this child if
+    // the signal lands early, and the deadline so the timeout still fires.
+    let [runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait)] = wakes.as_slice() else {
+        panic!("a timed nested wait must park on its signal: {wakes:?}");
+    };
+    assert!(
+        wait.checkpoint_id.contains("waiting-child") && wait.checkpoint_id.contains("hold"),
+        "the park must name the child's own wait route: {}",
+        wait.checkpoint_id
+    );
     assert_eq!(
-        wakes.as_slice(),
-        [runtara_component_host::lifecycle::WorkflowWake::At(1_150)],
-        "the park must carry the child's own deadline, not a bare resume"
+        wait.deadline_ms,
+        Some(1_150),
+        "the park must carry the child's own deadline"
     );
 
     // Relaunch past the deadline: the wait must now take its timeout path
