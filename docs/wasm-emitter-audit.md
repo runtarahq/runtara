@@ -93,6 +93,7 @@ evidence; the table above is the consolidated current work list.
 
 | Stage | Recorded verification | Scope and limits |
 | --- | --- | --- |
+| CI item closure (AUDIT-50) | Linux `env-db` 417 tests clean after freeing disk; nine CodeQL alerts restructured; scoped suite serialized; six clean 730-test runs | The Linux failure was a full disk, not a defect. One compiler-suite flake remains unidentified and unreproduced. |
 | Environment round trip (AUDIT-44) | 8 scoped-runner and 4 cooperative-stop cases, environment db-integration, 728 compiler, 400 execution, and the five-case E2E, all clean | Executes park and wake against real PostgreSQL. The wake scheduler's own relaunch of a due nested-wait instance is still not exercised. |
 | Nested wait wake fix (AUDIT-43) | 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Fixes a parked nested wait that never woke and an untimed park that published an epoch-zero deadline. The environment half of the round trip is still not executed end to end. |
 | Parking staging marker (AUDIT-42) | 221 DSL, 728 feature-gated compiler and 400 execution tests, no failures; workspace Clippy, formatting, whitespace | Closes the older-parent hazard by making `parks-on-wait:1` exclusive with `non-suspending:1`. The publish gate is untouched and nothing stamps the marker outside tests. |
@@ -3608,3 +3609,65 @@ an agent with events on and off must produce byte-identical artifacts. Searching
 the artifact for event names would false-positive on the composed stdlib, which
 exports them whether or not the workflow calls them. Disabling the strip makes the
 artifacts diverge and the test fail.
+
+
+### AUDIT-50 — The Linux failure, the CodeQL alerts, and a flake class
+
+**Status:** two of the three outstanding CI items are closed on evidence; the
+third is addressed at its root but one instance stays unidentified.
+
+**The Linux `env-db` failure was never a defect.** It was carried for several
+stages as the one outstanding item that might be a live bug, because it exited
+101 on Linux while passing on macOS. The saved log says otherwise:
+
+```
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+collect2: fatal error: ld terminated with signal 7 [Bus error]
+```
+
+The VM's 58 GB disk filled with the debug target tree and the linker died writing
+its output; `Bus error` from `ld` is the signature of a truncated mmap on a full
+filesystem. macOS passed because that machine had room. After reclaiming 13 GB the
+suite passes on Linux: **417 tests across 13 suites, no failures**. The answer was
+in a log the whole time, behind a `grep` that had discarded the failure text.
+
+**All nine CodeQL alerts are false positives of one shape.** Each is
+`rust/hard-coded-cryptographic-value` on a `PrecompileRequest::for_artifact`
+call taking a literal 32-byte array, and every one is in test code. The rule reads
+a fixed-byte array near crypto-adjacent code as an embedded key. Nothing here is
+signed, encrypted or authenticated: the value is an artifact identity a fixture
+uses to address a specific precompiled package.
+
+They are restructured rather than dismissed, because the change stands on its own:
+`fixture_digest(7)` says what `[7; 32]` does not, and its doc records why a real
+content hash cannot serve — two requests for the SAME file must be
+distinguishable, so the digests must differ artificially. Silencing a rule would
+not justify the edit; stating intent does.
+
+**The flake class had one enabling condition, not four bugs.** Four flaky tests
+surfaced across this work: a start gate spending its handoff budget on
+precompilation, a wake-scheduler test leasing its siblings' instances through a
+global batch claim, a five-second settle timeout on the heaviest phase of a
+cancellation run, and one unidentified failure in the compiler suite.
+
+The common shape is a test that passes for reasons other than what it asserts
+until timing shifts. For the database-backed suites there was a structural cause:
+**every** such suite in CI runs `--test-threads=1` — core, store-postgres, server,
+object-store, environment-db, connections — except the scoped suite, which shares
+one database and reaches global scheduler operations that select by predicate
+rather than by instance. Concurrently, one test's sweep takes another's rows. That
+suite is now serialized like the rest; thirteen tests of a few seconds each, so
+the cost is negligible and the class is gone rather than its instances patched.
+
+Two suspected sites were cleared rather than churned: `heartbeat_monitor_test`'s
+match is a mock trait implementation, and `conformance.rs`'s global
+`cancel_suspended_instances(None, …)` with its shared-table DDL is already
+protected by `--test-threads=1`. No settle timeout of five seconds or less remains
+anywhere in the tree.
+
+**The unidentified one stays unidentified.** The compiler suite failed 727/1 once,
+during a period of heavy machine contention, and has not reproduced since — six
+consecutive dedicated runs at 730 passed, plus every full-suite run through this
+work. Its two known load-sensitive members in that suite were fixed (the epoch
+ticker, the settle timeouts), so it is plausibly the same class, but that is
+inference rather than evidence and it is recorded as open.
