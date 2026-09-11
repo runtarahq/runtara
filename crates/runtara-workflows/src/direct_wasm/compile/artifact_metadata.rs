@@ -388,7 +388,7 @@ fn check_workflow_agent_checkpoint_scope(
             )));
         }
         // Either certificate composes: `non-suspending:1` proves the child never
-        // suspends, `parks-on-wait:1` says it may but carries its deadline out
+        // suspends, `parks:1` says it may but carries its deadline out
         // through the suspend sentinel and this composer knows how to re-raise
         // it. A child carrying neither is a stale or unproven artifact.
         //
@@ -398,11 +398,11 @@ fn check_workflow_agent_checkpoint_scope(
         // outright instead of dropping the deadline it cannot decode.
         if workflow_agent_capabilities.iter().any(|tags| {
             !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
-                && !tags.contains(&capability_tags::WORKFLOW_AGENT_PARKS_ON_WAIT)
+                && !tags.contains(&capability_tags::WORKFLOW_AGENT_PARKS)
         }) {
             return Err(DirectCompileError::Component(format!(
                 "published workflow-agent `{}` carries neither the non-suspending:1 certification \
-                 nor the parks-on-wait:1 marker; republish it after removing every wait, delay, \
+                 nor the parks:1 marker; republish it after removing every wait, delay, \
                  retry/backoff, and breakpoint path, or republish it as a parking agent",
                 component.agent_id
             )));
@@ -674,7 +674,7 @@ mod tests {
             &[
                 capability_tags::WORKFLOW_AGENT,
                 capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
-                capability_tags::WORKFLOW_AGENT_PARKS_ON_WAIT,
+                capability_tags::WORKFLOW_AGENT_PARKS,
             ],
         );
 
@@ -686,7 +686,7 @@ mod tests {
     fn a_parking_marker_never_accompanies_the_non_suspending_certificate() {
         // The exclusivity is the compatibility guarantee: every composer built
         // before parking existed demands `non-suspending:1`, so a child that
-        // carries only `parks-on-wait:1` is refused by an older parent instead
+        // carries only `parks:1` is refused by an older parent instead
         // of composed by one that would drop the deadline it cannot decode.
         let mut info = runtara_dsl::agent_meta::workflow_agent_info(
             "parking-child",
@@ -696,7 +696,7 @@ mod tests {
             &std::collections::HashMap::new(),
         );
         runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
-        runtara_dsl::agent_meta::certify_workflow_agent_parks_on_wait(&mut info);
+        runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
 
         assert!(runtara_dsl::agent_meta::is_parking_workflow_agent(&info));
         assert!(

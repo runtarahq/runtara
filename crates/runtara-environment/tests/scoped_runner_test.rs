@@ -620,7 +620,7 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
 }
 
 /// Stage a workflow-agent child that waits on a signal, and a parent that calls
-/// it. Returns the parent artifact. The child carries `parks-on-wait:1`, the
+/// it. Returns the parent artifact. The child carries `parks:1`, the
 /// marker that says it may park and carries its wake out through the suspend
 /// sentinel.
 fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilationResult {
@@ -664,7 +664,7 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
         &HashMap::new(),
         &HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_parks_on_wait(&mut info);
+    runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
     std::fs::copy(
         &child.wasm_path,
         staging.join("runtara_agent_parking_child.wasm"),
