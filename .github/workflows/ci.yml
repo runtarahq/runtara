@@ -679,7 +679,15 @@ jobs:
         env:
           TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
-        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test
+        # Serialized like every other database-backed suite here. These tests
+        # share one database and reach global scheduler operations — claiming due
+        # instances, sweeping parked ones — which select by predicate rather than
+        # by instance. Run concurrently, one test's sweep takes another's rows:
+        # that is how a wake-scheduler test came to lease its siblings' instances
+        # thirty seconds into the future and race them for its own. The suite is
+        # thirteen tests of a few seconds each, so serializing costs almost
+        # nothing and removes the whole class.
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test -- --test-threads=1
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.
