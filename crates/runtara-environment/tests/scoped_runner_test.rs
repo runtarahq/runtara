@@ -826,33 +826,39 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
         .sleep_until
         .expect("a timed wait must park with its deadline");
 
-    // Nothing is due yet, so the scheduler must NOT pick it up early.
-    let early = h
-        .persistence
-        .claim_sleeping_instances_due(16, chrono::Utc::now() + chrono::Duration::seconds(30))
-        .await
-        .unwrap();
+    // Nothing is due yet, so the scheduler must not select it early.
+    //
+    // Selection rather than claiming, deliberately: `claim_sleeping_instances_due`
+    // is a GLOBAL batch that claims whatever is due and leases it forward, so
+    // calling it here would reach into the instances the sibling tests in this
+    // binary have parked, and race them for this one. The scheduler's due-ness
+    // predicate is what this test is about, and `get_sleeping_instances_due`
+    // asks exactly that without mutating anyone.
+    let early = h.persistence.get_sleeping_instances_due(256).await.unwrap();
     assert!(
         !early
             .iter()
             .any(|record| record.instance_id == options.instance_id),
-        "a parked wait must not be claimed before its deadline"
+        "a parked wait must not come due before its deadline"
     );
 
     let remaining = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
     tokio::time::sleep(remaining + Duration::from_millis(50)).await;
 
-    // The scheduler's own selection, not a hand-rolled query.
-    let claimed = h
-        .persistence
-        .claim_sleeping_instances_due(16, chrono::Utc::now() + chrono::Duration::seconds(30))
-        .await
-        .unwrap();
+    // The scheduler's own selection now returns it...
+    let due = h.persistence.get_sleeping_instances_due(256).await.unwrap();
     assert!(
-        claimed
-            .iter()
+        due.iter()
             .any(|record| record.instance_id == options.instance_id),
-        "the wake scheduler must claim a due parked nested wait"
+        "the wake scheduler must select a due parked nested wait"
+    );
+    // ...and its claim takes ownership of this exact instance.
+    assert!(
+        h.persistence
+            .claim_sleeping_instance(&options.instance_id)
+            .await
+            .unwrap(),
+        "the scheduler must be able to claim the instance it selected"
     );
 
     // Launch the claimed instance exactly as the scheduler would.

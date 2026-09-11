@@ -2195,6 +2195,7 @@ struct RecordingRuntimeHost {
     /// never fire one (the caller owns instance lifecycle), so a parent+child
     /// run records exactly 1.
     complete_calls: std::sync::atomic::AtomicU32,
+    checkpoints: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl RecordingRuntimeHost {
@@ -2202,6 +2203,7 @@ impl RecordingRuntimeHost {
         Self {
             input: input.to_vec(),
             pending_signal: None,
+            checkpoints: Mutex::new(HashMap::new()),
             acknowledged_commands: Mutex::new(Vec::new()),
             completed: Mutex::new(None),
             failed: Mutex::new(None),
@@ -2254,18 +2256,34 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
     async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
-    async fn get_checkpoint(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+    async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        // The read-only half of the same store. Returning `None` here while
+        // `checkpoint` persisted would make a parked delay recompute a fresh
+        // deadline on every relaunch and never finish.
+        Ok(self
+            .checkpoints
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&checkpoint_id)
+            .cloned())
     }
     async fn checkpoint(
         &self,
-        _checkpoint_id: String,
-        _state: Vec<u8>,
+        checkpoint_id: String,
+        state: Vec<u8>,
     ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        let mut checkpoints = self
+            .checkpoints
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let found = checkpoints.get(&checkpoint_id).cloned();
+        if found.is_none() && !state.is_empty() {
+            checkpoints.insert(checkpoint_id, state);
+        }
         Ok(
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
-                found: false,
-                state: Vec::new(),
+                found: found.is_some(),
+                state: found.unwrap_or_default(),
                 pending_signal: self.pending_signal.clone(),
                 custom_signal: None,
             },
@@ -2579,20 +2597,13 @@ fn direct_wasm_checkpoint_ack_preserves_command_identity() {
             .load_instance_pre(&result.wasm_path)
             .await
             .expect("load host-import artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"value":"command-identity"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"value":"command-identity"}"#.to_vec(),
+        )
+        .await
     });
 
     assert!(
@@ -5770,6 +5781,80 @@ fn stderr_tail(stderr: &str) -> String {
     trimmed[start..].replace('\n', " | ")
 }
 
+/// Relaunch a run while it parks on a timed wake, the way the wake scheduler
+/// does, honouring each deadline rather than skipping it.
+///
+/// A durable Delay parks in a published workflow-agent exactly as it does at the
+/// root, so a fixture that used to finish in one invoke now has its wakes
+/// replayed here. Only timed parks are replayed: a lifecycle `on-resume` is the
+/// caller's to assert, so it is handed back untouched.
+async fn invoke_replaying_parks_with_env(
+    executor: &runtara_component_host::WorkflowExecutor,
+    pre: &wasmtime::component::InstancePre<runtara_component_host::WorkflowState>,
+    host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
+    env: HashMap<String, String>,
+    input: Vec<u8>,
+) -> runtara_component_host::InvokeRunResult {
+    for _ in 0..16 {
+        let run = executor
+            .execute_invoke(
+                pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: env.clone(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                input.clone(),
+            )
+            .await;
+        let runtara_component_host::InvokeExit::Suspended(ref wakes) = run.exit else {
+            return run;
+        };
+        let Some(deadline_ms) = wakes
+            .iter()
+            .filter_map(|wake| match wake {
+                runtara_component_host::lifecycle::WorkflowWake::At(at) => Some(*at),
+                _ => None,
+            })
+            .min()
+        else {
+            return run;
+        };
+        let now = now_ms();
+        if deadline_ms > now {
+            tokio::time::sleep(Duration::from_millis(deadline_ms - now + 5)).await;
+        }
+    }
+    panic!("a parked run must reach a terminal outcome within 16 relaunches");
+}
+
+async fn invoke_replaying_parks(
+    executor: &runtara_component_host::WorkflowExecutor,
+    pre: &wasmtime::component::InstancePre<runtara_component_host::WorkflowState>,
+    host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
+    input: Vec<u8>,
+) -> runtara_component_host::InvokeRunResult {
+    invoke_replaying_parks_with_env(executor, pre, host, HashMap::new(), input).await
+}
+
+/// The delay keys a run wrote, in order.
+///
+/// A durable Delay used to reach the host through `durable-sleep-checkpoint`, so
+/// these fixtures read `sleep_ids`. A parked delay saves its deadline through
+/// `checkpoint` instead, and the kind is carried in the key's own address. What
+/// the assertions are about — one site, one key, however deep the nesting — does
+/// not change.
+fn delay_keys(writes: &[String]) -> Vec<String> {
+    writes
+        .iter()
+        .filter(|id| id.starts_with(r#"runtara:v2:["delay""#))
+        .cloned()
+        .collect()
+}
+
 fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
     static EXECUTOR: std::sync::OnceLock<runtara_component_host::WorkflowExecutor> =
         std::sync::OnceLock::new();
@@ -6851,20 +6936,13 @@ fn direct_wasm_execute_invoke_abi_returns_completed_outcome_in_band() {
             .load_instance_pre(&compiled.wasm_path)
             .await
             .expect("load invoke-shaped artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"input":"invoke-abi"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"input":"invoke-abi"}"#.to_vec(),
+        )
+        .await
     });
 
     let output = match run.exit {
@@ -6942,20 +7020,13 @@ fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
             .load_instance_pre(&compiled.wasm_path)
             .await
             .expect("load invoke-shaped artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"reason":"invoke-abi-error"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"reason":"invoke-abi-error"}"#.to_vec(),
+        )
+        .await
     });
 
     let error = match run.exit {
@@ -7025,20 +7096,13 @@ fn direct_wasm_execute_invoke_abi_runs_durable_agent_step() {
             .load_instance_pre(&compiled.wasm_path)
             .await
             .expect("load invoke-shaped agent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"value":"invoke-agent"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"value":"invoke-agent"}"#.to_vec(),
+        )
+        .await
     });
 
     // A durable agent step (utils return-input) composed under the invoke
@@ -9210,20 +9274,13 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"msg":"hello-child"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"msg":"hello-child"}"#.to_vec(),
+        )
+        .await
     });
 
     let output = match run.exit {
@@ -9372,20 +9429,13 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"msg":"durable-hello"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"msg":"durable-hello"}"#.to_vec(),
+        )
+        .await
     });
 
     let output = match run.exit {
@@ -9565,20 +9615,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
                 .load_instance_pre(&parent.wasm_path)
                 .await
                 .expect("load parent artifact");
-            executor
-                .execute_invoke(
-                    &pre,
-                    runtara_component_host::WorkflowRunSpec {
-                        env: HashMap::new(),
-                        stderr: None,
-                        timeout: Duration::from_secs(60),
-                        cancel: None,
-                        limits: runtara_component_host::WorkflowLimits::default(),
-                        runtime: Some(host),
-                    },
-                    input.to_vec(),
-                )
-                .await
+            invoke_replaying_parks(executor, &pre, host, input.to_vec()).await
         })
     };
 
@@ -9591,7 +9628,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
     // The three child Delay sleeps land on three DISTINCT, site-scoped keys —
     // the exact compositional formula ({workflow_id}::{step}[i]::{child step}),
     // NOT the bare `call` the un-namespaced child would have used thrice.
-    let sleeps = host.sleep_ids.lock().unwrap().clone();
+    let sleeps = delay_keys(&host.checkpoint_writes.lock().unwrap());
     assert_eq!(
         sleeps,
         [0, 1, 2].map(|index| expected_key(
@@ -9610,7 +9647,14 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
     );
     // ...and stay disjoint from the parent's own durable writes for the
     // same-named `call` step (its agent-output checkpoints).
-    let writes = host.checkpoint_writes.lock().unwrap().clone();
+    let writes: Vec<String> = host
+        .checkpoint_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| !id.starts_with(r#"runtara:v2:["delay""#))
+        .cloned()
+        .collect();
     assert!(
         writes.iter().all(|id| !sleeps.contains(id)),
         "child keys must never collide with parent checkpoint ids: {writes:?}"
@@ -9625,9 +9669,9 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
         other => panic!("replay run must complete, got {other:?}"),
     };
     assert_eq!(
-        host.sleep_ids.lock().unwrap().len(),
+        delay_keys(&host.checkpoint_writes.lock().unwrap()).len(),
         3,
-        "a replay must HIT every scoped sleep checkpoint, not re-sleep"
+        "a replay must HIT every scoped delay checkpoint, not re-park"
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&second_output).expect("replay output json"),
@@ -9835,20 +9879,13 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             .load_instance_pre(&top.wasm_path)
             .await
             .expect("load top artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"msg":"nested-hello"}"#.to_vec(),
-            )
-            .await
+        invoke_replaying_parks(
+            executor,
+            &pre,
+            host.clone(),
+            br#"{"msg":"nested-hello"}"#.to_vec(),
+        )
+        .await
     });
 
     let output = match run.exit {
@@ -9864,7 +9901,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
     // top's `call` and the mid's `gcall` — via the same `__` composition
     // nested embeds use. One site, one key, however deep the nesting.
     assert_eq!(
-        host.sleep_ids.lock().unwrap().clone(),
+        delay_keys(&host.checkpoint_writes.lock().unwrap()),
         vec![expected_key(
             "delay",
             "ns-grandchild-wf",
@@ -10336,20 +10373,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                b"{}".to_vec(),
-            )
-            .await
+        invoke_replaying_parks(executor, &pre, host.clone(), b"{}".to_vec()).await
     });
 
     let output = match run.exit {
@@ -10505,20 +10529,7 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                b"{}".to_vec(),
-            )
-            .await
+        invoke_replaying_parks(executor, &pre, host.clone(), b"{}".to_vec()).await
     });
 
     let output = match run.exit {
@@ -10705,20 +10716,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                b"{}".to_vec(),
-            )
-            .await
+        invoke_replaying_parks(executor, &pre, host.clone(), b"{}".to_vec()).await
     });
 
     let output = match run.exit {
@@ -11391,20 +11389,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env,
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                b"{}".to_vec(),
-            )
-            .await
+        invoke_replaying_parks_with_env(executor, &pre, host.clone(), env, b"{}".to_vec()).await
     });
     let _ = stop_tx.send(());
     let _ = server_handle.join();
@@ -11432,7 +11417,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     // the durable child's Delay slept under two different per-call scopes.
     // Unscoped (pre-wrap), call 2 would have HIT call 1's bare `call` key and
     // skipped its sleep entirely.
-    let sleeps = host.sleep_ids.lock().unwrap().clone();
+    let sleeps = delay_keys(&host.checkpoint_writes.lock().unwrap());
     assert_eq!(
         sleeps,
         [0, 1].map(|counter| expected_key(
