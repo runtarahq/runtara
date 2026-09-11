@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | AUDIT-41 lands nested wait parking and AUDIT-47 lands nested Delay parking, so a durable wait or sleep parks everywhere except `wasi:cli/run`. The publish gates remain an open decision. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | AUDIT-41/43/47/48 land parking for every wait-shaped construct in a published agent — wait, AI-tool wait, sleep and retry backoff — leaving `wasi:cli/run` the only blocking ABI. AUDIT-48 lists the four server-side sites the publish gate still needs, and the two items (breakpoints, retry-backoff violations) that need a decision rather than an assumption. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -3482,3 +3482,62 @@ This does not open the publish gate. `analyze_workflow_agent_safety` still refus
 `Delay` and `WaitForSignal`, so both remain library-path only. What it removes is
 the reason `Delay` had to stay refused even if that gate opened: a published agent
 no longer retains a runner slot for the length of a sleep.
+
+
+### AUDIT-48 — Preparing the publish gate: everything parks now
+
+**Status:** the emitter side is ready. A published workflow-agent never retains a
+runner slot for a wait, a sleep or a backoff. The gate itself is untouched, and
+what remains is the policy flip below.
+
+Relaxing `Delay` and `WaitForSignal` in isolation would have made the gate worse,
+not better. `cooperative_waits_supported` is
+`!workflow_agent_requires_runtime(...)`, so a graph that parks needs the runtime,
+which flips that flag false and turns **every** `Agent`, `AiAgent`, `Split` and
+`EmbedWorkflow` step in the same graph into a `retry-or-rate-limit-backoff`
+violation. Publishing a workflow that waits would have failed for a new and more
+confusing reason.
+
+That violation guarded something real: retry backoff held the runner. It parks
+now. `retry_park.rs` returns through the ABI-dispatching emitter, and the gates in
+`agent.rs`, `embed_workflow.rs` and `split.rs` widen from "the invoke export
+only" to "every ABI with a wake channel". The AI-tool wait parks too — an untimed
+human-in-the-loop wait was the worst thing still holding a slot inside a
+published agent.
+
+| Construct | Root / inline Embed / Split / While | Published agent | `wasi:cli/run` |
+| --- | --- | --- | --- |
+| `WaitForSignal` | parks | parks (AUDIT-41/43) | blocks |
+| AI-tool wait | parks | parks | blocks |
+| `Delay` | parks | parks (AUDIT-47) | blocks |
+| Agent / Embed / Split retry backoff | parks | parks | blocks |
+
+`wasi:cli/run` blocks throughout because it has no success arm that can carry a
+wake. That is a capability, not a policy.
+
+The staging marker is renamed `parks:1`, since it now covers sleeps and backoff
+rather than waits alone, and its two wake shapes are documented: an absolute
+deadline in the sentinel's numeric `retry-after`, or a signal route in its
+message. Renaming was free today because nothing outside tests stamps it; it
+would not have been once a sidecar carried the old spelling.
+
+**What opening the gate still needs**, all in `runtara-server`:
+
+| Site | Today | Needed |
+| --- | --- | --- |
+| `analyze_workflow_agent_safety` | `Delay` and `WaitForSignal` are violations | Record them as parking, not unsafe; keep refusing what still cannot park |
+| `require_non_suspending_workflow_agent` | Refuses any violation | Accept a parking graph |
+| The publish stamp | Always `certify_workflow_agent_non_suspending` | Stamp `parks:1` for a graph that parks |
+| `workflow_agents.rs` loader | Requires `non-suspending:1` | Accept either certificate, as composition already does |
+
+Two things deserve a decision rather than an assumption. Breakpoints remain a
+violation: a breakpoint park is an `on-resume` with no deadline and no signal, so
+nothing wakes it without an operator, which is defensible for a debugging feature
+but is a product call. And the `retry-or-rate-limit-backoff` violations can now be
+retired on their merits, since the backoff they guarded parks — but that should be
+verified against a published agent that actually retries, not inferred from this
+change.
+
+Verified: **400** `direct_wasm_execute`, **728** feature-gated compiler, **9 + 4**
+environment and **221** `runtara-dsl` tests, no failures; workspace all-target
+Clippy, formatting and diff whitespace passed.
