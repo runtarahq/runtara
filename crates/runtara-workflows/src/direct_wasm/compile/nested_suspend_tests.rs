@@ -444,6 +444,16 @@ async fn a_cancel_reaching_an_already_parked_child_stops_it_resuming() -> anyhow
     Ok(())
 }
 
+/// One graph with breakpoints on two different step kinds.
+fn breakpointed_graph() -> Value {
+    json!({"durable":false,"entryPoint":"work","steps":{
+        "work":{"id":"work","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
+            "maxRetries":0,"breakpoint":true,"inputMapping":{}},
+        "finish":{"id":"finish","stepType":"Finish","breakpoint":true,"inputMapping":{
+            "value":{"valueType":"reference","value":"steps.work.outputs"}}}},
+        "executionPlan":[{"fromStep":"work","toStep":"finish"}]})
+}
+
 /// A breakpoint does not survive publication as an agent.
 ///
 /// Pausing is an instance-level action and the instance belongs to the caller,
@@ -458,12 +468,7 @@ async fn a_cancel_reaching_an_already_parked_child_stops_it_resuming() -> anyhow
 async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let components = components();
-    let graph = serde_json::from_value(json!({"durable":false,"entryPoint":"work","steps":{
-        "work":{"id":"work","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
-            "maxRetries":0,"breakpoint":true,"inputMapping":{}},
-        "finish":{"id":"finish","stepType":"Finish","breakpoint":true,"inputMapping":{
-            "value":{"valueType":"reference","value":"steps.work.outputs"}}}},
-        "executionPlan":[{"fromStep":"work","toStep":"finish"}]}))?;
+    let graph = serde_json::from_value(breakpointed_graph())?;
     let mut published = compile_direct_workflow_with_abi(
         DirectCompilationInput {
             workflow_id: "breakpointed-child".into(),
@@ -496,20 +501,46 @@ async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
         "a published agent must import nothing that can pause its caller: {imports:?}"
     );
 
+    // Step debug events go the same way, and for a sharper reason than noise:
+    // they carry a BARE step id, not a namespaced route, so this child's `work`
+    // step would be indistinguishable from a caller's own `work` step on the
+    // caller's own timeline. Checkpoints chain the invocation path precisely to
+    // avoid that collision; events have no equivalent, and nothing renders an
+    // agent's internals as a nested waterfall to justify one.
+    //
+    // Asserted as the flag making NO difference: compiling the same graph as an
+    // agent with events off must produce byte-identical output. Searching the
+    // artifact for event names would false-positive on the composed stdlib,
+    // which exports them whether or not this workflow calls them.
+    let mut eventless = compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "breakpointed-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(breakpointed_graph())?,
+            child_workflows: vec![],
+            output_dir: dir.path().join("child-eventless"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("breakpointed-child".into()),
+        },
+        WorkflowAbi::AgentCapabilities,
+        false,
+    )?;
+    compose_direct_workflow(&mut eventless, &components)?;
+    assert_eq!(
+        fs::read(&published.wasm_path)?,
+        fs::read(&eventless.wasm_path)?,
+        "track_events must not change a published agent's artifact: it emits none either way"
+    );
+
     // The same graph compiled as a top-level workflow keeps its breakpoints —
     // this strips them for published agents, it does not remove the feature.
     let root = crate::direct_wasm::compile_direct_workflow(DirectCompilationInput {
         workflow_id: "breakpointed-root".into(),
         version: 1,
         source_checksum: None,
-        execution_graph: serde_json::from_value(
-            json!({"durable":false,"entryPoint":"work","steps":{
-            "work":{"id":"work","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
-                "maxRetries":0,"breakpoint":true,"inputMapping":{}},
-            "finish":{"id":"finish","stepType":"Finish","breakpoint":true,"inputMapping":{
-                "value":{"valueType":"reference","value":"steps.work.outputs"}}}},
-            "executionPlan":[{"fromStep":"work","toStep":"finish"}]}),
-        )?,
+        execution_graph: serde_json::from_value(breakpointed_graph())?,
         child_workflows: vec![],
         output_dir: dir.path().join("root"),
         track_events: true,
