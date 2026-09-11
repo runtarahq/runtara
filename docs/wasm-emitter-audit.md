@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | AUDIT-41 lands nested wait parking. AUDIT-46 finds nested Delay parking is unfinished work rather than a declined trade: the emitter change is small and the checkpoint key is replay-stable, but four tests drive a stub host with no checkpoint store and no virtual clock and must move onto the existing `CheckpointingRuntimeHost` + `drive_wake_scheduler` harness. The publish gates remain an open decision. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | AUDIT-41 lands nested wait parking and AUDIT-47 lands nested Delay parking, so a durable wait or sleep parks everywhere except `wasi:cli/run`. The publish gates remain an open decision. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -3352,6 +3352,8 @@ and an unused seam in the host is not worth carrying for it.
 
 ### AUDIT-46 — Why nested Delay parking is a harness migration, not a flip
 
+**Superseded by AUDIT-47, which completed it.**
+
 **Status:** attempted, reverted, and the real obstacle identified. No production
 change. The four contracts that block it are not the reason, and AUDIT-41's
 framing of the trade was wrong.
@@ -3410,3 +3412,73 @@ contracts encode blocking because it was the only option when they were written,
 not because single-invoke completion is the desired guarantee. The honest
 statement is that nested Delay parking is unfinished work with a known path, not
 a trade-off that was weighed and rejected.
+
+
+### AUDIT-47 — Delay parks in published agents too
+
+**Status:** implemented. A durable `Delay` now parks wherever it can, closing the
+inconsistency AUDIT-46 described. Guest lowering marker advances; `wasi:cli/run`
+is unchanged.
+
+`delay.rs` states the rule its own blocking arm was breaking:
+
+> It must park every durable delay, not merely long ones: short waits are still
+> unbounded in aggregate and must never retain a runner slot.
+
+A root graph, an inline Embed child at any depth, a Split body and a While body
+all parked already, because the emitter lowers them into the root artifact and
+they inherit its ABI. Only a published workflow-agent blocked, because it crosses
+a component boundary — and AUDIT-41 had already built the wake channel across
+that boundary. The capability ABI now routes through the same
+`emit_park_until_deadline` the invoke export uses, with `emit_suspend_at_return`
+dispatching the park's return shape. `wasi:cli/run` keeps blocking: it has no
+wake channel at all.
+
+The checkpoint discipline is what makes reuse safe. The deadline is durable
+before the first park, so a relaunch resumes the ORIGINAL wait rather than
+starting a fresh one. The nested key is replay-stable:
+
+```
+runtara:v2:["delay","durable-child-wf",[["child","durable-parent-wf",[],["call"]]],[],["delay"]]
+```
+
+**Two harness defects that blocking had been hiding.** Both would have made any
+parking workflow impossible under these fixtures, and neither was visible while a
+nested delay slept in place:
+
+- `RecordingRuntimeHost::get_checkpoint` returned `Ok(None)` unconditionally
+  while its `checkpoint` persisted. A parked delay gates on the read half, so it
+  recomputed a fresh deadline on every relaunch and never finished. Instrumenting
+  the park deadlines found this after three wrong hypotheses: they advanced ~32 ms
+  per relaunch, which is the signature of a MISS, not a HIT.
+- The namespacing assertions read `sleep_ids`, which only `durable-sleep-checkpoint`
+  populates. A parked delay saves its deadline through `checkpoint` instead, so
+  they now read the delay keys, filtered by the kind already carried in the key's
+  address. The subject is untouched: one site, one key, however deep the nesting,
+  and the grandchild key still chains both invocation sites.
+
+A third defect was in this branch's own earlier work.
+`the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it` called
+`claim_sleeping_instances_due`, a GLOBAL batch claim, twice — reaching into the
+instances its eight sibling tests had parked, leasing their `sleep_until` thirty
+seconds forward, and racing them for its own. It passed when written because the
+timing happened to suit; the Delay change shifted the timing and exposed it. It
+now asks the same due-ness predicate through `get_sleeping_instances_due`, which
+mutates nothing, then claims that exact instance with `claim_sleeping_instance`.
+
+Verified: **400** `direct_wasm_execute` tests, **728** feature-gated compiler
+tests, and **9 + 4** environment tests, no failures. Formatting, diff whitespace
+and workspace all-target Clippy passed. The execution suite also runs faster,
+because parked delays no longer spend wall clock sleeping.
+
+```sh
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib -- --test-threads=1
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+This does not open the publish gate. `analyze_workflow_agent_safety` still refuses
+`Delay` and `WaitForSignal`, so both remain library-path only. What it removes is
+the reason `Delay` had to stay refused even if that gate opened: a published agent
+no longer retains a runner slot for the length of a sleep.
