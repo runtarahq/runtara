@@ -782,3 +782,105 @@ async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it
         woken.sleep_until
     );
 }
+
+/// The last link: the wake scheduler's own selection must find a parked nested
+/// wait, and the relaunch it performs must resume the child rather than park
+/// again.
+///
+/// The previous test stops at "a wake is scheduled and due", which is what the
+/// scheduler selects on but not proof that it selects it. This drives the real
+/// `claim_sleeping_instances_due` — the statement the scheduler actually runs —
+/// and then launches the claimed instance the way the scheduler does.
+///
+/// A TIMED wait is used deliberately: its deadline is carried in the park, so
+/// the claim needs no knowledge of the child's nested signal route, and the
+/// relaunch resolves through the timeout the child itself owns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
+    let h = Harness::new().await;
+    let parent = parking_child_parent(h.dir.path(), Some(400));
+    let runner = h.runner(None);
+    let mut options = h.options(&parent.wasm_path).await;
+
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runner.wait_for_exit(&handle, Duration::from_millis(20)),
+    )
+    .await
+    .expect("the timed nested wait must park instead of holding its runner");
+
+    let parked = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parked.status, InstanceStatus::Suspended);
+    assert_eq!(
+        parked.termination_reason.as_deref(),
+        Some("waiting_signal"),
+        "a timed wait is still a signal park; its deadline is the timeout, not the wake reason"
+    );
+    let deadline = parked
+        .sleep_until
+        .expect("a timed wait must park with its deadline");
+
+    // Nothing is due yet, so the scheduler must NOT pick it up early.
+    let early = h
+        .persistence
+        .claim_sleeping_instances_due(16, chrono::Utc::now() + chrono::Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(
+        !early
+            .iter()
+            .any(|record| record.instance_id == options.instance_id),
+        "a parked wait must not be claimed before its deadline"
+    );
+
+    let remaining = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(remaining + Duration::from_millis(50)).await;
+
+    // The scheduler's own selection, not a hand-rolled query.
+    let claimed = h
+        .persistence
+        .claim_sleeping_instances_due(16, chrono::Utc::now() + chrono::Duration::seconds(30))
+        .await
+        .unwrap();
+    assert!(
+        claimed
+            .iter()
+            .any(|record| record.instance_id == options.instance_id),
+        "the wake scheduler must claim a due parked nested wait"
+    );
+
+    // Launch the claimed instance exactly as the scheduler would.
+    options.launch_id = format!("wake-{}", options.instance_id);
+    options.prepersisted_input = None;
+    let resumed = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runner.wait_for_exit(&resumed, Duration::from_millis(20)),
+    )
+    .await
+    .expect("the relaunched run must finish");
+
+    let settled = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        settled.status,
+        InstanceStatus::Suspended,
+        "the relaunch must resume the child's wait and resolve it, not park again"
+    );
+    assert_ne!(
+        settled.status,
+        InstanceStatus::Running,
+        "the relaunched run must not leave the instance marked live"
+    );
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+}
