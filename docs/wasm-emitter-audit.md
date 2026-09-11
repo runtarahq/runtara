@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | AUDIT-41 lands nested wait parking; a nested Delay and the publish gates remain open decisions. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture; forcing that tie inside a fully composed execution needs a deterministic hook, since a wall-clock race would only add a flaky test. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | AUDIT-41 lands nested wait parking; a nested Delay and the publish gates remain open decisions. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -3294,3 +3294,57 @@ What this still does not execute is the last link: the wake scheduler claiming a
 due instance and relaunching it. The test asserts the wake is scheduled and due,
 which is what the scheduler selects on, but the relaunch itself is covered only
 by the existing wake-scheduler suites and not by a nested-wait case.
+
+
+### AUDIT-45 — A host clock hook cannot produce the simultaneous-ready tie
+
+**Status:** negative result, established by building the hook and measuring it.
+No production code changed; the attempt is reverted.
+
+The work table has said for several stages that a deterministic composed proof of
+the simultaneous-ready tie "needs a host-side hook". There is an obvious
+candidate: guest budgets read `wasi:clocks/monotonic-clock`, and
+`WasiCtxBuilder::monotonic_clock` accepts a pluggable `HostMonotonicClock`. A
+clock the test can stop and advance would place a deadline exactly where it
+wants relative to a completion, instead of racing them.
+
+It was built — registry-backed so the env variable is only a key into an
+in-process registration, never a switch a production run could trip — wired into
+the invoke path, and unit tested. Then two composed tests measured what it
+actually does, and the answer is: not this.
+
+`wasmtime_wasi::p2::host::clocks::subscribe_instant` reads the pluggable clock
+**once**:
+
+```rust
+let clock_now = self.ctx.monotonic_clock.now();
+let duration = if when > clock_now { Duration::from_nanos(when - clock_now) } else { ZERO };
+subscribe_to_duration(self.table, duration)
+```
+
+From there the pollable waits on real `tokio::time`. Two consequences kill the
+idea:
+
+- **Advancing the clock after subscription fires nothing.** The timer is already
+  a fixed real-time duration. The measured run ended in the host's own run
+  timeout rather than the guest's budget.
+- **Freezing the clock does not extend a budget either.** The guest computes
+  `deadline = now() + timeout`, and `subscribe_instant` immediately subtracts the
+  same frozen `now()`, so the wait is the original duration in real time.
+
+So `HostMonotonicClock` governs `now()` readings, not timer readiness, and
+readiness is exactly what a tie is made of. Controlling it would mean replacing
+the pollable implementation, not the clock — a fork of the WASI timer path, well
+beyond a test seam.
+
+This closes the "needs a host-side hook" line rather than leaving it as an open
+suggestion. The remaining options for a composed tie are to instrument the guest,
+or to accept that AUDIT-21's fixture is the right level: it drives the real
+`WindowWait` helper — production selection code, not a mock — under controlled
+notification orders, with a negative control proving sensitivity. What a composed
+version would add is engine scheduling noise, not coverage of the selection rule,
+which is the part that can be wrong.
+
+The hook itself is not retained. Its only residual effect would be on guest code
+that polls `now()` and compares rather than subscribing, which is speculative,
+and an unused seam in the host is not worth carrying for it.
