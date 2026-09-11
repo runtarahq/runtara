@@ -90,6 +90,16 @@ fn fetch_graph(url: Value, recover: bool, retries: u32) -> Value {
     graph
 }
 
+/// How long a cancellation is allowed to settle before the test calls it hung.
+///
+/// This bounds a HANG, not cancellation latency — the benchmarks own latency.
+/// It was five seconds while covering the heaviest phase of the run (observing
+/// the cancel, cleaning up both HTTP children, reaping them, returning), which
+/// is the one stretch that stretches under load; the arrival wait above it
+/// already allowed ten. On a contended machine that asymmetry failed here while
+/// the cancellation itself was working normally.
+const CANCELLATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) -> InvokeExit {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -270,7 +280,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
     }
     if !root_stop {
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), completions.recv())
+            tokio::time::timeout(CANCELLATION_SETTLE_TIMEOUT, completions.recv())
                 .await
                 .unwrap(),
             Some((true, true))
@@ -283,13 +293,13 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
         );
         release.send(true).unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), completions.recv())
+            tokio::time::timeout(CANCELLATION_SETTLE_TIMEOUT, completions.recv())
                 .await
                 .unwrap(),
             Some((false, false))
         );
     }
-    let result = tokio::time::timeout(Duration::from_secs(5), run)
+    let result = tokio::time::timeout(CANCELLATION_SETTLE_TIMEOUT, run)
         .await
         .unwrap()
         .unwrap();
