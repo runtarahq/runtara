@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | AUDIT-41/43/47/48 land parking for every wait-shaped construct in a published agent — wait, AI-tool wait, sleep and retry backoff — leaving `wasi:cli/run` the only blocking ABI. AUDIT-48 lists the four server-side sites the publish gate still needs, and the two items (breakpoints, retry-backoff violations) that need a decision rather than an assumption. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | AUDIT-41/43/47/48 land parking for every wait-shaped construct in a published agent — wait, AI-tool wait, sleep and retry backoff — leaving `wasi:cli/run` the only blocking ABI. AUDIT-48 lists the four server-side sites the publish gate still needs; AUDIT-49 resolves breakpoints by stripping them from published agents, leaving the retry-backoff violations as the one item needing a decision. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -3530,14 +3530,60 @@ would not have been once a sidecar carried the old spelling.
 | The publish stamp | Always `certify_workflow_agent_non_suspending` | Stamp `parks:1` for a graph that parks |
 | `workflow_agents.rs` loader | Requires `non-suspending:1` | Accept either certificate, as composition already does |
 
-Two things deserve a decision rather than an assumption. Breakpoints remain a
-violation: a breakpoint park is an `on-resume` with no deadline and no signal, so
-nothing wakes it without an operator, which is defensible for a debugging feature
-but is a product call. And the `retry-or-rate-limit-backoff` violations can now be
-retired on their merits, since the backoff they guarded parks — but that should be
-verified against a published agent that actually retries, not inferred from this
-change.
+**Breakpoints are resolved, by a better argument than the one recorded here.**
+This entry reasoned that a breakpoint park is an `on-resume` nothing can wake,
+which is a mechanical objection. The decisive one is ownership: pausing is an
+instance-level action and the instance belongs to the CALLER, exactly as for
+`runtime.complete` and `runtime.fail`, which a composed child already never
+fires. Pause was the third member of that set and the only one handled by
+refusing to publish rather than by suppression. The capability lowering now
+strips breakpoints outright, so publication no longer refuses over one. See
+AUDIT-49.
+
+One item still deserves a decision rather than an assumption: the
+`retry-or-rate-limit-backoff` violations can now be retired on their merits,
+since the backoff they guarded parks — but that should be verified against a
+published agent that actually retries, not inferred from this change.
 
 Verified: **400** `direct_wasm_execute`, **728** feature-gated compiler, **9 + 4**
 environment and **221** `runtara-dsl` tests, no failures; workspace all-target
+Clippy, formatting and diff whitespace passed.
+
+
+### AUDIT-49 — A published agent has no breakpoints
+
+**Status:** implemented. The capability lowering strips breakpoints, and
+publication no longer refuses over one.
+
+A breakpoint inside a published workflow-agent has no owner. There is no separate
+instance to pause: a composed child runs inside the CALLER's instance, so the
+pause halts whichever workflow invoked the agent — for every caller and every
+run, over a debugging aid that workflow's author never asked for. A published
+agent is a unit, and its internals are not its caller's debugging surface.
+
+That is the same rule the emitter already applies twice. A composed child never
+fires `runtime.complete` or `runtime.fail`, because the caller owns instance
+lifecycle; `parent_workflow_invokes_published_durable_workflow_agent` asserts
+exactly one terminal complete for a parent-and-child run. Pause is the third
+member of that set, and it was the only one handled by refusing to publish rather
+than by suppression.
+
+`emit_step_breakpoint` already carried one `if !breakpoint { return; }` gate for
+its ten call sites, so returning early for `AgentCapabilities` strips the
+breakpoint event, the custom event and the pause together.
+
+**Compile-time, not runtime.** The emitted component carries no breakpoint import
+at all, so it cannot pause; `a_published_agent_carries_no_breakpoint` asserts that
+against the decoded component rather than trusting a flag, which could be mis-set.
+The same test compiles the same graph as a top-level workflow and confirms it
+still supports breakpoints: this strips them for published agents, it does not
+remove the feature.
+
+`analyze_workflow_agent_safety` no longer records a `breakpoint-pause` violation,
+and `step_has_breakpoint` went with it — Clippy flagging it as dead is a useful
+sign the removal was complete rather than half-done. The safety test that encoded
+the old refusal now states why there is none.
+
+Verified: **730** feature-gated compiler tests (two new), **400**
+`direct_wasm_execute`, **9 + 4** environment, no failures; workspace all-target
 Clippy, formatting and diff whitespace passed.
