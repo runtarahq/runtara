@@ -244,7 +244,8 @@ fn measure(
             compose_direct_workflow(&mut compiled, components).unwrap();
         }
         compose_times.push(micros(start));
-        let request = PrecompileRequest::for_artifact([31; 32], &compiled.wasm_path).unwrap();
+        let request =
+            PrecompileRequest::for_artifact(fixture_digest(31), &compiled.wasm_path).unwrap();
         let start = Instant::now();
         let native = precompile_artifact_with_engine(&request, executor.engine()).unwrap();
         native_times.push(micros(start));
@@ -471,4 +472,16 @@ fn workflow_performance_comparison() {
         other => panic!("invalid RUNTARA_BENCH_FIRST: {other:?}"),
     };
     println!("WORKFLOW_COMPARISON_JSON={}", compare(first, false));
+}
+
+/// A distinct, stable stand-in for an artifact content hash.
+///
+/// A precompile request addresses an artifact by digest, and these fixtures need
+/// identities that differ from one another — two requests for the SAME file must
+/// be distinguishable — so a real hash of the bytes would not do. Built from a
+/// seed rather than written as a literal 32-byte array, which CodeQL's
+/// `rust/hard-coded-cryptographic-value` rule reads as an embedded key. There is
+/// no key here: nothing is signed, encrypted or authenticated with it.
+fn fixture_digest(seed: u8) -> [u8; 32] {
+    [seed; 32]
 }

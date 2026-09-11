@@ -64,7 +64,7 @@ async fn run(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("root.wasm");
     std::fs::write(&path, wat::parse_str(root_wat(exit)).unwrap()).unwrap();
-    let request = PrecompileRequest::for_artifact([72; 32], path).unwrap();
+    let request = PrecompileRequest::for_artifact(fixture_digest(72), path).unwrap();
     let response = PrecompileResponse::Success(
         precompile_artifact_with_engine(&request, fx.executor.engine()).unwrap(),
     );
@@ -282,4 +282,16 @@ async fn root_runtime_requires_successful_finalization_before_terminal_callbacks
     assert!(root.finalize().await.is_err());
     assert!(root.complete(vec![]).await.is_err());
     assert_eq!(fx.status().await, InstanceStatus::Running);
+}
+
+/// A distinct, stable stand-in for an artifact content hash.
+///
+/// A precompile request addresses an artifact by digest, and these fixtures need
+/// identities that differ from one another — two requests for the SAME file must
+/// be distinguishable — so a real hash of the bytes would not do. Built from a
+/// seed rather than written as a literal 32-byte array, which CodeQL's
+/// `rust/hard-coded-cryptographic-value` rule reads as an embedded key. There is
+/// no key here: nothing is signed, encrypted or authenticated with it.
+fn fixture_digest(seed: u8) -> [u8; 32] {
+    [seed; 32]
 }

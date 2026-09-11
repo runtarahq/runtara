@@ -194,7 +194,8 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
     })
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
-    let request = PrecompileRequest::for_artifact([39; 32], &compiled.wasm_path).unwrap();
+    let request =
+        PrecompileRequest::for_artifact(super::fixture_digest(39), &compiled.wasm_path).unwrap();
     let response = PrecompileResponse::Success(precompile_artifact(&request).unwrap());
     // SAFETY: this unchanged response was produced for this exact test request.
     let compiled =

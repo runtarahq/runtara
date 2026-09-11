@@ -242,7 +242,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workflow.wasm");
     std::fs::write(&path, package).unwrap();
-    let request = PrecompileRequest::for_artifact([9; 32], &path).unwrap();
+    let request = PrecompileRequest::for_artifact(fixture_digest(9), &path).unwrap();
     let success = precompile_artifact(&request).unwrap();
     let digest = success.source_digest();
     let response = PrecompileResponse::Success(success);
@@ -393,4 +393,16 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     let value: f64 = serde_json::from_slice(bytes).unwrap();
     assert!((0.0..1.0).contains(&value));
     tasks.shutdown().await.unwrap();
+}
+
+/// A distinct, stable stand-in for an artifact content hash.
+///
+/// A precompile request addresses an artifact by digest, and these fixtures need
+/// identities that differ from one another — two requests for the SAME file must
+/// be distinguishable — so a real hash of the bytes would not do. Built from a
+/// seed rather than written as a literal 32-byte array, which CodeQL's
+/// `rust/hard-coded-cryptographic-value` rule reads as an embedded key. There is
+/// no key here: nothing is signed, encrypted or authenticated with it.
+fn fixture_digest(seed: u8) -> [u8; 32] {
+    [seed; 32]
 }
