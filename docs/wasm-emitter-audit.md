@@ -3587,3 +3587,24 @@ the old refusal now states why there is none.
 Verified: **730** feature-gated compiler tests (two new), **400**
 `direct_wasm_execute`, **9 + 4** environment, no failures; workspace all-target
 Clippy, formatting and diff whitespace passed.
+
+**Step debug events go the same way, for a sharper reason than noise.** Unlike a
+checkpoint they carry a BARE step id rather than a namespaced route, so an agent's
+internal step would be indistinguishable from a caller's step of the same name on
+the caller's own timeline — the exact collision
+`composed_durable_child_checkpoints_are_namespaced_per_invocation_site` exists to
+prevent for checkpoints, built around precisely that name clash. Nothing renders
+an agent's internals as a nested waterfall, so the events have no consumer to
+justify the ambiguity.
+
+The publish path already passed `track_events: false`, so production was safe by
+policy; the seven `track_events` gates now consult one shared `events_enabled`
+predicate, which makes it structural rather than something the library path can
+bypass. That path is what the audit and measurement work uses, so it was not
+hypothetical.
+
+The assertion is that the flag makes **no difference**: the same graph compiled as
+an agent with events on and off must produce byte-identical artifacts. Searching
+the artifact for event names would false-positive on the composed stdlib, which
+exports them whether or not the workflow calls them. Disabling the strip makes the
+artifacts diverge and the test fail.
