@@ -75,7 +75,7 @@ release gates complete. No product flag or optional cancellation backend is adde
 
 | Work | Completion criterion |
 | --- | --- |
-| Behavior qualification and fixes | AUDIT-41 lands nested wait parking; a nested Delay and the publish gates remain open decisions. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
+| Behavior qualification and fixes | AUDIT-41 lands nested wait parking. AUDIT-46 finds nested Delay parking is unfinished work rather than a declined trade: the emitter change is small and the checkpoint key is replay-stable, but four tests drive a stub host with no checkpoint store and no virtual clock and must move onto the existing `CheckpointingRuntimeHost` + `drive_wake_scheduler` harness. The publish gates remain an open decision. The simultaneous-ready scheduling tie is proven only through AUDIT-21's deterministic helper fixture. AUDIT-45 establishes that a pluggable host clock cannot force that tie in a composed run — WASI timers subscribe once against real time — so the remaining options are instrumenting the guest or accepting the fixture as the right level. Complete real composed-execution race coverage, timeout/cancellation across existing retry fallbacks and deeper mixed recovery cases; qualify durable nested suspension/replay against the supported construct matrix. AUDIT-38 audits the nine CPU-oriented Agents and removes the four unbounded or trapping paths it found, leaving their work bounded by input size; a per-Agent execution measurement for large inputs is still open. AUDIT-21 covers deterministic parallel deadline selection; existing retrying Split/branch graphs retain sequential fallback. |
 | Public timeout support | E128 is retired in AUDIT-32. Public compilation covers authored budgets; complete the remaining simultaneous completion/expiry races and broader lifecycle/release qualification. Existing registered artifacts are unchanged until recompiled. |
 | Server and persistence E2E | Authenticated owner/peer header/body cancellation passes with ownership and remote grace delivery (AUDIT-27). Complete owner disappearance/recovery, partition/clock behavior, concurrent transition and wider load qualification; preserve signal acknowledgement versus emergency-abort semantics. |
 | Final measurements and capacity | Run controlled paired baseline/candidate measurements for raw/compressed `.wasm` and native artifact size, random-double single-step and full-workflow execution, cold/warm startup, cancellation/abort latency, signal/DB cost and memory. Complete Linux latency/throughput and repeated-cancellation resource soak. Earlier reports predate the latest implementation. |
@@ -3348,3 +3348,65 @@ which is the part that can be wrong.
 The hook itself is not retained. Its only residual effect would be on guest code
 that polls `now()` and compares rather than subscribing, which is speculative,
 and an unused seam in the host is not worth carrying for it.
+
+
+### AUDIT-46 — Why nested Delay parking is a harness migration, not a flip
+
+**Status:** attempted, reverted, and the real obstacle identified. No production
+change. The four contracts that block it are not the reason, and AUDIT-41's
+framing of the trade was wrong.
+
+`delay.rs` parks a durable Delay under the invoke export and blocks under the
+capability ABI. Its own comment states the principle the blocking arm violates:
+
+> It must park every durable delay, not merely long ones: short waits are still
+> unbounded in aggregate and must never retain a runner slot.
+
+Inline Embed children, Split bodies and While bodies all park, because the direct
+emitter lowers them into the root artifact's module and they inherit its ABI.
+Nesting was never the obstacle — a published agent is, because it crosses a
+component boundary. AUDIT-41 built the wake channel across that boundary for
+waits, so the reason for blocking Delay no longer exists.
+
+The emitter change is small: route the capability ABI through
+`emit_park_until_deadline` like the invoke export, and let
+`emit_suspend_at_return` dispatch the park's return shape. `wasi:cli/run` keeps
+blocking, having no wake channel at all. That was implemented and it works —
+**the checkpoint key is stable across relaunches and HITs every time**:
+
+```
+runtara:v2:["delay","durable-child-wf",[["child","durable-parent-wf",[],["call"]]],[],["delay"]]
+```
+
+What blocks it is the test harness, and this is the part worth recording.
+`parent_workflow_invokes_published_durable_workflow_agent` and its three
+neighbours drive `RecordingRuntimeHost`, a stub whose `checkpoint` returns
+`found: false` and stores nothing, and which has no virtual clock. Those tests
+were only ever viable because a nested Delay blocked in place: a parked delay
+saves its deadline and resumes through that save, so against a host that persists
+nothing every relaunch restarts the sleep. Giving the stub a real checkpoint store
+is not enough either — a resumed park compares `now-ms` against its stored
+deadline, and a host that cannot move its clock can only ever observe a re-park.
+
+That harness already exists. `CheckpointingRuntimeHost` has checkpoint
+persistence, `clock_offset_ms`, `pinned_clock_ms` and `advance_clock_past`, and
+`drive_wake_scheduler` drives park/decide/relaunch/replay while honouring both
+wake shapes. Its own doc records the same migration being done once before:
+
+> The harness previously invoked exactly once, which cannot be right once a delay
+> parks — a single invoke sees the suspend and nothing after it.
+
+These four were left behind because the agent ABI still blocked when that
+migration happened. So the work is finishing it: move them onto the
+checkpointing host and the wake-scheduler driver. It is not mechanical — they
+assert on `complete_calls` and `failed`, which the checkpointing host does not
+carry — and their subjects (per-invocation checkpoint namespacing, terminal-status
+suppression) must survive intact across a park.
+
+This supersedes AUDIT-41's reasoning. The cost there was given as a full chain
+teardown per nested sleep, and the four contracts as a trade to decline. The
+aggregate-occupancy argument in `delay.rs` outranks the per-sleep cost, and the
+contracts encode blocking because it was the only option when they were written,
+not because single-invoke completion is the desired guarantee. The honest
+statement is that nested Delay parking is unfinished work with a known path, not
+a trade-off that was weighed and rejected.
