@@ -414,6 +414,19 @@ pub(super) fn emit_step_breakpoint(
     if !breakpoint {
         return;
     }
+    // A published workflow-agent has no breakpoints. Pausing is an
+    // instance-level action and the instance belongs to the CALLER — the same
+    // reason a composed child never fires `runtime.complete` or `runtime.fail`.
+    // A breakpoint baked into a reusable agent would halt whichever workflow
+    // invoked it, for every caller and every run, over a debugging aid its
+    // author never asked for.
+    //
+    // Stripped at compile time rather than ignored at runtime: the artifact
+    // then carries no breakpoint import at all, so it cannot pause, and that is
+    // provable from the artifact instead of resting on a flag.
+    if indices.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+        return;
+    }
 
     let step_id = static_data
         .step_id(step_id)

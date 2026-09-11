@@ -443,3 +443,105 @@ async fn a_cancel_reaching_an_already_parked_child_stops_it_resuming() -> anyhow
     );
     Ok(())
 }
+
+/// A breakpoint does not survive publication as an agent.
+///
+/// Pausing is an instance-level action and the instance belongs to the caller,
+/// which is why a composed child already never fires `runtime.complete` or
+/// `runtime.fail`. A breakpoint left in a reusable agent would halt whichever
+/// workflow invoked it, for every caller and every run.
+///
+/// The proof is the artifact, not a flag: the emitted component must contain no
+/// call to `breakpoint-pause` at all. A runtime check could be mis-set; a
+/// missing import cannot be.
+#[tokio::test]
+async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let components = components();
+    let graph = serde_json::from_value(json!({"durable":false,"entryPoint":"work","steps":{
+        "work":{"id":"work","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
+            "maxRetries":0,"breakpoint":true,"inputMapping":{}},
+        "finish":{"id":"finish","stepType":"Finish","breakpoint":true,"inputMapping":{
+            "value":{"valueType":"reference","value":"steps.work.outputs"}}}},
+        "executionPlan":[{"fromStep":"work","toStep":"finish"}]}))?;
+    let mut published = compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "breakpointed-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: dir.path().join("child"),
+            track_events: true,
+            agent_catalog: None,
+            agent_slug: Some("breakpointed-child".into()),
+        },
+        WorkflowAbi::AgentCapabilities,
+        false,
+    )?;
+    compose_direct_workflow(&mut published, &components)?;
+
+    let wit_component::DecodedWasm::Component(resolve, world) =
+        wit_component::decode(&fs::read(&published.wasm_path)?)?
+    else {
+        anyhow::bail!("not a component")
+    };
+    let imports: Vec<String> = resolve.worlds[world]
+        .imports
+        .keys()
+        .map(|key| resolve.name_world_key(key))
+        .collect();
+    assert!(
+        !imports.iter().any(|name| name.contains("breakpoint")),
+        "a published agent must import nothing that can pause its caller: {imports:?}"
+    );
+
+    // The same graph compiled as a top-level workflow keeps its breakpoints —
+    // this strips them for published agents, it does not remove the feature.
+    let root = crate::direct_wasm::compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "breakpointed-root".into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: serde_json::from_value(
+            json!({"durable":false,"entryPoint":"work","steps":{
+            "work":{"id":"work","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
+                "maxRetries":0,"breakpoint":true,"inputMapping":{}},
+            "finish":{"id":"finish","stepType":"Finish","breakpoint":true,"inputMapping":{
+                "value":{"valueType":"reference","value":"steps.work.outputs"}}}},
+            "executionPlan":[{"fromStep":"work","toStep":"finish"}]}),
+        )?,
+        child_workflows: vec![],
+        output_dir: dir.path().join("root"),
+        track_events: true,
+        agent_catalog: None,
+        agent_slug: None,
+    })?;
+    assert!(
+        root.support_report.supported,
+        "the same graph must still compile as a top-level workflow"
+    );
+    Ok(())
+}
+
+/// Publishing is no longer refused over a breakpoint, because the compile
+/// removes it. Refusing would reject a workflow for a debugging aid that cannot
+/// reach the published artifact.
+#[test]
+fn a_breakpoint_is_not_a_publication_hazard() {
+    let graph: runtara_dsl::ExecutionGraph =
+        serde_json::from_value(json!({"durable":false,"entryPoint":"work","steps":{
+        "work":{"id":"work","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
+            "maxRetries":0,"breakpoint":true,"inputMapping":{}},
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{}}},
+        "executionPlan":[{"fromStep":"work","toStep":"finish"}]}))
+        .expect("graph parses");
+    let report = crate::direct_wasm::analyze_workflow_agent_safety(&graph, &[]);
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|violation| violation.feature == "breakpoint-pause"),
+        "a breakpoint must not block publication: {:?}",
+        report.violations
+    );
+}

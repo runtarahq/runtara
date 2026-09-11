@@ -208,15 +208,10 @@ fn collect_workflow_agent_step_safety(
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
     cooperative_waits_supported: bool,
 ) {
-    if step_has_breakpoint(step) {
-        push_workflow_agent_safety_violation(
-            violations,
-            path,
-            step,
-            "breakpoint-pause",
-            "breakpoints can pause an invocation; run this workflow as a top-level workflow or remove the breakpoint before publishing it as an agent",
-        );
-    }
+    // A breakpoint is not a publication hazard: the capability lowering strips
+    // it, so a published agent carries no breakpoint import and cannot pause.
+    // Refusing here would reject a workflow over a debugging aid that does not
+    // survive the compile.
 
     match step {
         Step::Delay(_) => push_workflow_agent_safety_violation(
@@ -376,25 +371,6 @@ fn push_workflow_agent_safety_violation(
         feature: feature.to_string(),
         reason: reason.to_string(),
     });
-}
-
-fn step_has_breakpoint(step: &Step) -> bool {
-    match step {
-        Step::Finish(step) => step.breakpoint == Some(true),
-        Step::Agent(step) => step.breakpoint == Some(true),
-        Step::Conditional(step) => step.breakpoint == Some(true),
-        Step::Split(step) => step.breakpoint == Some(true),
-        Step::Switch(step) => step.breakpoint == Some(true),
-        Step::EmbedWorkflow(step) => step.breakpoint == Some(true),
-        Step::While(step) => step.breakpoint == Some(true),
-        Step::Log(step) => step.breakpoint == Some(true),
-        Step::Error(step) => step.breakpoint == Some(true),
-        Step::Filter(step) => step.breakpoint == Some(true),
-        Step::GroupBy(step) => step.breakpoint == Some(true),
-        Step::Delay(step) => step.breakpoint == Some(true),
-        Step::WaitForSignal(step) => step.breakpoint == Some(true),
-        Step::AiAgent(step) => step.breakpoint == Some(true),
-    }
 }
 
 /// Analyze whether the current production direct emitter can compile `graph`.
@@ -2368,8 +2344,14 @@ mod tests {
         }
     }
 
+    /// A breakpoint used to refuse publication. It no longer does, because the
+    /// capability lowering strips breakpoints entirely: a published agent
+    /// carries no breakpoint import and cannot pause its caller. Refusing here
+    /// would reject a workflow over a debugging aid that cannot survive the
+    /// compile. The artifact-level proof lives in
+    /// `a_published_agent_carries_no_breakpoint`.
     #[test]
-    fn workflow_agent_safety_rejects_a_breakpoint_even_on_a_finish() {
+    fn workflow_agent_safety_allows_a_breakpoint_because_publishing_strips_it() {
         let mut graph = fixture("simple");
         let Some(Step::Finish(finish)) = graph.steps.get_mut("finish") else {
             panic!("expected Finish fixture step");
@@ -2379,9 +2361,10 @@ mod tests {
         let report = analyze_workflow_agent_safety(&graph, &[]);
 
         assert!(
-            report.violations.iter().any(|violation| {
-                violation.path == "root/steps/finish" && violation.feature == "breakpoint-pause"
-            }),
+            !report
+                .violations
+                .iter()
+                .any(|violation| violation.feature == "breakpoint-pause"),
             "{report:?}"
         );
     }
