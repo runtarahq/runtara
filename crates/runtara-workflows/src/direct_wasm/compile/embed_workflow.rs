@@ -617,7 +617,7 @@ fn emit_embed_workflow_child_with_retry(
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
     let lifecycle_retry_park =
-        durable && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+        durable && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp;
     if lifecycle_retry_park {
         // Each failed child attempt is durable on its own. That lets a wake
         // replay the failure/classification and consume the scheduled next

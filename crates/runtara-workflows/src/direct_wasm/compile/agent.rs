@@ -484,9 +484,10 @@ pub(super) fn emit_agent_plan(
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_advance_retry_attempt(body);
         if durable_checkpoint
-            && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+            && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp
         {
-            // A lifecycle invocation must never hold its Store across backoff.
+            // No invocation may hold its Store across backoff — a published agent
+            // would otherwise retain the parent's runner slot for the whole delay.
             // Recompute the delay for checkpoint-replayed failures as well: if a
             // process died after persisting the failure envelope but before it
             // scheduled the wake, this is the first pass that can mint it.

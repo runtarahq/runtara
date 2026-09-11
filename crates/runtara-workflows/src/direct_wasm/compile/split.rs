@@ -555,7 +555,7 @@ pub(super) fn emit_split_plan(
     // schedules that wake, so a restart replays the error decision rather than
     // the items that already ran.
     let lifecycle_retry_park =
-        durable && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+        durable && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp;
     let fresh_failure_target = if retry_enabled {
         Some(DirectFailureTarget::SplitRetry { branch_depth: 0 })
     } else {
