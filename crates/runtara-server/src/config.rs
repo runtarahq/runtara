@@ -1,6 +1,6 @@
 mod runtime;
 
-pub use runtime::RuntimeOverrides;
+pub use runtime::{RuntimeOverrides, RuntimePoolConfig};
 
 use crate::entitlements::EntitlementSnapshot;
 use runtara_environment::execution_timeout::{
@@ -124,10 +124,10 @@ impl Config {
         let tenant_id =
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
 
-        let max_concurrent_executions: usize = std::env::var("MAX_CONCURRENT_EXECUTIONS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_max_concurrent_executions);
+        let max_concurrent_executions: usize = parse_usize_or(
+            "MAX_CONCURRENT_EXECUTIONS",
+            default_max_concurrent_executions(),
+        )?;
 
         let checkpoint_ttl_hours: u64 = parse_u64_or("CHECKPOINT_TTL_HOURS", 48)?;
         let adaptive_rate_limiting_enabled: bool = parse_bool_or("ADAPTIVE_RATE_LIMITING", true)?;

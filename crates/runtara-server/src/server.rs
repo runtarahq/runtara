@@ -1389,7 +1389,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::from_env(
         running_executions.clone(),
         runtime_client.clone(),
-    ));
+    )?);
     let shutdown_signal = shutdown_coordinator.signal();
 
     // A lifecycle callback can commit an Environment transition and then lose

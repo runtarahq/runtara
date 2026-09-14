@@ -25,8 +25,12 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::config::ConfigError;
 use crate::runtime_client::RuntimeClient;
 use crate::types::CancellationHandle;
+
+const SHUTDOWN_GRACE_MS: &str = "RUNTARA_SHUTDOWN_GRACE_MS";
+const SHUTDOWN_INTAKE_GRACE_MS: &str = "RUNTARA_SHUTDOWN_INTAKE_GRACE_MS";
 
 /// Default grace period for waiting on in-flight executions to reach a
 /// checkpoint before force-stopping them.
@@ -35,6 +39,22 @@ pub const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 60_000;
 /// Default grace period for intake workers (trigger/compilation/cron/cleanup)
 /// to finish their current unit of work.
 pub const DEFAULT_INTAKE_GRACE_MS: u64 = 5_000;
+
+fn grace_from_raw(
+    name: &'static str,
+    raw: Option<&str>,
+    default_ms: u64,
+) -> Result<Duration, ConfigError> {
+    match raw {
+        Some(raw) => raw.parse::<u64>().map(Duration::from_millis).map_err(|_| {
+            ConfigError::Invalid(
+                name,
+                "must be a non-negative integer number of milliseconds",
+            )
+        }),
+        None => Ok(Duration::from_millis(default_ms)),
+    }
+}
 
 /// Read-only view of the shutdown flag given to background workers so they
 /// can check it at loop boundaries. Clone freely — all copies share the
@@ -99,29 +119,30 @@ pub struct ShutdownCoordinator {
 impl ShutdownCoordinator {
     /// Create a new coordinator reading `RUNTARA_SHUTDOWN_GRACE_MS` and
     /// `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` from the environment.
+    ///
+    /// A malformed value fails startup. Reverting to the default instead would
+    /// hide the misconfiguration until the one event it governs — a deploy —
+    /// and then cut the drain short by exactly the margin the operator thought
+    /// they had bought.
     pub fn from_env(
         running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
         runtime_client: Option<Arc<RuntimeClient>>,
-    ) -> Self {
-        let grace = Duration::from_millis(
-            std::env::var("RUNTARA_SHUTDOWN_GRACE_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_SHUTDOWN_GRACE_MS),
-        );
-        let intake_grace = Duration::from_millis(
-            std::env::var("RUNTARA_SHUTDOWN_INTAKE_GRACE_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_INTAKE_GRACE_MS),
-        );
-        Self {
+    ) -> Result<Self, ConfigError> {
+        Ok(Self {
             signal: ShutdownSignal::new(),
             running_executions,
             runtime_client,
-            grace,
-            intake_grace,
-        }
+            grace: grace_from_raw(
+                SHUTDOWN_GRACE_MS,
+                std::env::var(SHUTDOWN_GRACE_MS).ok().as_deref(),
+                DEFAULT_SHUTDOWN_GRACE_MS,
+            )?,
+            intake_grace: grace_from_raw(
+                SHUTDOWN_INTAKE_GRACE_MS,
+                std::env::var(SHUTDOWN_INTAKE_GRACE_MS).ok().as_deref(),
+                DEFAULT_INTAKE_GRACE_MS,
+            )?,
+        })
     }
 
     /// Get a cloneable handle to the shutdown signal for workers.
@@ -205,5 +226,52 @@ impl ShutdownCoordinator {
             stragglers = self.running_executions.len(),
             "Grace period expired; remaining executions will be force-stopped downstream"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_grace_keeps_the_default() {
+        assert_eq!(
+            grace_from_raw(SHUTDOWN_GRACE_MS, None, DEFAULT_SHUTDOWN_GRACE_MS).unwrap(),
+            Duration::from_millis(DEFAULT_SHUTDOWN_GRACE_MS)
+        );
+        assert_eq!(
+            grace_from_raw(SHUTDOWN_INTAKE_GRACE_MS, None, DEFAULT_INTAKE_GRACE_MS).unwrap(),
+            Duration::from_millis(DEFAULT_INTAKE_GRACE_MS)
+        );
+    }
+
+    #[test]
+    fn parses_a_configured_grace_including_zero() {
+        assert_eq!(
+            grace_from_raw(SHUTDOWN_GRACE_MS, Some("30000"), DEFAULT_SHUTDOWN_GRACE_MS).unwrap(),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            grace_from_raw(SHUTDOWN_GRACE_MS, Some("0"), DEFAULT_SHUTDOWN_GRACE_MS).unwrap(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_grace_instead_of_reverting_to_the_default() {
+        for raw in ["", "30s", "-1", "30_000", "18446744073709551616"] {
+            for (name, default_ms) in [
+                (SHUTDOWN_GRACE_MS, DEFAULT_SHUTDOWN_GRACE_MS),
+                (SHUTDOWN_INTAKE_GRACE_MS, DEFAULT_INTAKE_GRACE_MS),
+            ] {
+                assert!(
+                    matches!(
+                        grace_from_raw(name, Some(raw), default_ms),
+                        Err(ConfigError::Invalid(reported, _)) if reported == name
+                    ),
+                    "{name}={raw:?}"
+                );
+            }
+        }
     }
 }

@@ -158,10 +158,13 @@ async fn test_run_loop_exits_on_coordinator_shutdown() {
 
     // Use the coordinator to get a signal we can actually flip from a test —
     // `ShutdownSignal::new()` creates its own atomic and exposes no setter.
-    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::from_env(
-        std::sync::Arc::new(dashmap::DashMap::new()),
-        None,
-    ));
+    let coord = std::sync::Arc::new(
+        runtara_server::shutdown::ShutdownCoordinator::from_env(
+            std::sync::Arc::new(dashmap::DashMap::new()),
+            None,
+        )
+        .expect("shutdown grace config"),
+    );
     let signal = coord.signal();
 
     let config = InvocationCleanupWorkerConfig {
@@ -216,10 +219,13 @@ async fn test_run_performs_eager_cleanup_on_startup() {
         "seed precondition: expired oauth_state exists before worker starts"
     );
 
-    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::from_env(
-        std::sync::Arc::new(dashmap::DashMap::new()),
-        None,
-    ));
+    let coord = std::sync::Arc::new(
+        runtara_server::shutdown::ShutdownCoordinator::from_env(
+            std::sync::Arc::new(dashmap::DashMap::new()),
+            None,
+        )
+        .expect("shutdown grace config"),
+    );
     let signal = coord.signal();
 
     // poll_interval is intentionally an hour: only the eager pass can fire
