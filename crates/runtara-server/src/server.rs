@@ -1386,10 +1386,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the shutdown coordinator. It shares the DashMap of running
     // executions so SIGTERM/SIGINT can signal each for graceful drain.
-    let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::from_env(
+    let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
         running_executions.clone(),
         runtime_client.clone(),
-    )?);
+        config::shutdown_grace(),
+    ));
     let shutdown_signal = shutdown_coordinator.signal();
 
     // A lifecycle callback can commit an Environment transition and then lose

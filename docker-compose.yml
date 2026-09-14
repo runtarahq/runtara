@@ -92,10 +92,12 @@ services:
       # Runtime pool tuning. Every instance launch and wake does several round
       # trips on this pool, so its size caps how fast instances start and
       # resume. The three timeouts default to sqlx's own values (30s / 600s /
-      # 1800s); 0 disables the idle timeout or the max lifetime. Unset is fine
-      # — these are here so an operator can find them, not because the defaults
-      # need changing. A malformed value fails startup rather than silently
-      # reverting.
+      # 1800s). 0 disables the idle timeout or the max lifetime; it is NOT
+      # accepted for the acquire timeout, which sqlx deadlines the opening
+      # connection against. Unset is fine — these are here so an operator can
+      # find them, not because the defaults need changing. A malformed value
+      # fails startup, before any pool is opened, rather than silently
+      # reverting to the default.
       # RUNTARA_RUNTIME_MAX_CONNECTIONS: "32"
       # RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS: "30"
       # RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS: "600"

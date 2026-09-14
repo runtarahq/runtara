@@ -144,13 +144,24 @@ impl RuntimePoolConfig {
                 "must be a positive integer",
             ));
         }
+        // Unlike the other two timeouts, zero does not disable this one: sqlx
+        // deadlines the opening connection against it, so a zero acquire
+        // timeout fails the pool before it is built, reported as an opaque
+        // `PoolTimedOut` that names no variable.
+        let acquire_secs = parse_secs(
+            POOL_ACQUIRE_TIMEOUT_SECS,
+            acquire_secs,
+            DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS,
+        )?;
+        if acquire_secs == 0 {
+            return Err(ConfigError::Invalid(
+                POOL_ACQUIRE_TIMEOUT_SECS,
+                "must be a positive number of seconds (0 does not disable it)",
+            ));
+        }
         Ok(Self {
             max_connections,
-            acquire_timeout: Duration::from_secs(parse_secs(
-                POOL_ACQUIRE_TIMEOUT_SECS,
-                acquire_secs,
-                DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS,
-            )?),
+            acquire_timeout: Duration::from_secs(acquire_secs),
             idle_timeout: super::secs_to_opt_duration(parse_secs(
                 POOL_IDLE_TIMEOUT_SECS,
                 idle_secs,
@@ -165,10 +176,87 @@ impl RuntimePoolConfig {
     }
 }
 
+const SERVER_SHUTDOWN_GRACE_MS: &str = "RUNTARA_SHUTDOWN_GRACE_MS";
+const SERVER_INTAKE_GRACE_MS: &str = "RUNTARA_SHUTDOWN_INTAKE_GRACE_MS";
+
+/// How long the server's shutdown drain waits, in its two stages.
+///
+/// Parsed with the rest of the configuration at startup rather than where the
+/// coordinator is built: by that point the pool is open, migrations have run,
+/// and the embedded environment has already relaunched recovered instances, so
+/// a mistyped value would crash-loop through recovery instead of failing before
+/// anything happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownGrace {
+    /// How long in-flight executions get to reach a checkpoint and suspend.
+    pub executions: Duration,
+    /// How long intake workers get to finish their current unit of work.
+    pub intake: Duration,
+}
+
+impl Default for ShutdownGrace {
+    fn default() -> Self {
+        Self {
+            executions: Duration::from_millis(crate::shutdown::DEFAULT_SHUTDOWN_GRACE_MS),
+            intake: Duration::from_millis(crate::shutdown::DEFAULT_INTAKE_GRACE_MS),
+        }
+    }
+}
+
+impl ShutdownGrace {
+    /// Load both grace periods from the process environment.
+    ///
+    /// Reads `RUNTARA_SHUTDOWN_GRACE_MS` and `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS`.
+    /// A malformed value fails startup. Reverting to the default instead would
+    /// hide the misconfiguration until the one event it governs — a deploy —
+    /// and then cut the drain short by exactly the margin the operator thought
+    /// they had bought.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_raw(
+            std::env::var(SERVER_SHUTDOWN_GRACE_MS).ok().as_deref(),
+            std::env::var(SERVER_INTAKE_GRACE_MS).ok().as_deref(),
+        )
+    }
+
+    fn from_raw(executions: Option<&str>, intake: Option<&str>) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            executions: parse_grace_ms(SERVER_SHUTDOWN_GRACE_MS, executions, defaults.executions)?,
+            intake: parse_grace_ms(SERVER_INTAKE_GRACE_MS, intake, defaults.intake)?,
+        })
+    }
+}
+
+fn parse_grace_ms(
+    name: &'static str,
+    raw: Option<&str>,
+    default: Duration,
+) -> Result<Duration, ConfigError> {
+    match raw {
+        Some(raw) => raw
+            .parse::<u32>()
+            .map(|ms| Duration::from_millis(u64::from(ms)))
+            .map_err(|_| {
+                ConfigError::Invalid(
+                    name,
+                    "must be a whole number of milliseconds, at most 4294967295",
+                )
+            }),
+        None => Ok(default),
+    }
+}
+
+/// Parse a seconds value, bounded to `u32` like the execution-timeout parser
+/// next door. The bound is load-bearing rather than cosmetic: sqlx deadlines
+/// the pool with `Instant::now() + acquire_timeout`, and an unbounded `u64`
+/// number of seconds overflows that and panics instead of naming the variable.
 fn parse_secs(name: &'static str, raw: Option<&str>, default: u64) -> Result<u64, ConfigError> {
     match raw {
-        Some(raw) => raw.parse::<u64>().map_err(|_| {
-            ConfigError::Invalid(name, "must be a non-negative integer number of seconds")
+        Some(raw) => raw.parse::<u32>().map(u64::from).map_err(|_| {
+            ConfigError::Invalid(
+                name,
+                "must be a whole number of seconds, at most 4294967295",
+            )
         }),
         None => Ok(default),
     }
@@ -322,10 +410,23 @@ mod tests {
 
     #[test]
     fn zero_seconds_disables_idle_timeout_and_max_lifetime() {
-        let config = RuntimePoolConfig::from_raw(None, Some("0"), Some("0"), Some("0")).unwrap();
-        assert_eq!(config.acquire_timeout, Duration::ZERO);
+        let config = RuntimePoolConfig::from_raw(None, None, Some("0"), Some("0")).unwrap();
         assert_eq!(config.idle_timeout, None);
         assert_eq!(config.max_lifetime, None);
+        assert_eq!(
+            config.acquire_timeout,
+            Duration::from_secs(DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn zero_does_not_disable_the_acquire_timeout_it_is_rejected() {
+        // sqlx deadlines the opening connection against this one, so zero would
+        // fail the pool with an opaque `PoolTimedOut` naming no variable.
+        assert!(matches!(
+            RuntimePoolConfig::from_raw(None, Some("0"), None, None),
+            Err(ConfigError::Invalid(POOL_ACQUIRE_TIMEOUT_SECS, _))
+        ));
     }
 
     #[test]
@@ -352,7 +453,7 @@ mod tests {
             (2, POOL_IDLE_TIMEOUT_SECS),
             (3, POOL_MAX_LIFETIME_SECS),
         ] {
-            for raw in ["", "30s", "-1", "18446744073709551616"] {
+            for raw in ["", "30s", "-1", "4294967296", "18446744073709551616"] {
                 let mut args: [Option<&str>; 3] = [None, None, None];
                 args[position - 1] = Some(raw);
                 assert!(
@@ -363,6 +464,57 @@ mod tests {
                     "{name}={raw:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn unset_grace_keeps_the_defaults() {
+        assert_eq!(
+            ShutdownGrace::from_raw(None, None).unwrap(),
+            ShutdownGrace::default()
+        );
+        assert_eq!(
+            ShutdownGrace::default().executions,
+            Duration::from_millis(crate::shutdown::DEFAULT_SHUTDOWN_GRACE_MS)
+        );
+        assert_eq!(
+            ShutdownGrace::default().intake,
+            Duration::from_millis(crate::shutdown::DEFAULT_INTAKE_GRACE_MS)
+        );
+    }
+
+    #[test]
+    fn parses_each_grace_independently_including_zero() {
+        assert_eq!(
+            ShutdownGrace::from_raw(Some("30000"), Some("0")).unwrap(),
+            ShutdownGrace {
+                executions: Duration::from_millis(30_000),
+                intake: Duration::ZERO,
+            }
+        );
+        assert_eq!(
+            ShutdownGrace::from_raw(Some("1500"), None).unwrap().intake,
+            ShutdownGrace::default().intake
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_grace_instead_of_reverting_to_the_default() {
+        for raw in ["", "30s", "-1", "30_000", "4294967296"] {
+            assert!(
+                matches!(
+                    ShutdownGrace::from_raw(Some(raw), None),
+                    Err(ConfigError::Invalid(SERVER_SHUTDOWN_GRACE_MS, _))
+                ),
+                "executions {raw:?}"
+            );
+            assert!(
+                matches!(
+                    ShutdownGrace::from_raw(None, Some(raw)),
+                    Err(ConfigError::Invalid(SERVER_INTAKE_GRACE_MS, _))
+                ),
+                "intake {raw:?}"
+            );
         }
     }
 

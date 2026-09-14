@@ -273,8 +273,8 @@ pub async fn create_runtara_pool(
 /// The runtime pool's tuning (`RUNTARA_RUNTIME_MAX_CONNECTIONS`,
 /// `RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS`,
 /// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS`,
-/// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) is read here too — see
-/// [`RuntimePoolConfig`]. These apply only to the pool this process opens.
+/// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
+/// already parsed at startup. It applies only to the pool this process opens.
 pub async fn maybe_start_embedded(
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
@@ -288,13 +288,15 @@ pub async fn maybe_start_embedded(
         return Ok(None);
     }
 
-    // Read the server's instance-runtime overrides and the pool's own tuning
-    // before opening the pool, so a malformed value is caught before migrations
-    // run. It aborts the embedded start, which the caller reports and survives
-    // without workflow execution — the same treatment every other failure here
-    // gets.
+    // Read the server's instance-runtime overrides before opening the pool, so
+    // a malformed value is caught before migrations run. It aborts the embedded
+    // start, which the caller reports and survives without workflow execution —
+    // the same treatment every other failure here gets. The pool's own tuning
+    // is not read here at all: it is parsed in `config` at startup, because
+    // "boots fine, executes nothing" is a worse answer to a typo than refusing
+    // to start.
     let core_overrides = RuntimeOverrides::from_env()?;
-    let pool_config = RuntimePoolConfig::from_env()?;
+    let pool_config = crate::config::runtime_pool_config();
 
     // Create Runtara database pool
     let pool = match create_runtara_pool(pool_config).await? {
