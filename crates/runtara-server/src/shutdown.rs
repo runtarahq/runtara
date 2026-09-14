@@ -50,6 +50,47 @@ pub const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 60_000;
 /// to finish their current unit of work.
 pub const DEFAULT_INTAKE_GRACE_MS: u64 = 5_000;
 
+/// Park on `notify` until it fires, unless `already_set` reports that the
+/// state being waited on has flipped in the meantime.
+///
+/// The registration has to happen *before* `already_set` runs, which is what
+/// the `pin` + [`Notified::enable`] dance buys. The only waker on this
+/// `Notify` is [`Notify::notify_waiters`], which stores no permit — it wakes
+/// receivers that are already registered and nobody else. Reading the flag
+/// first would leave a window between that load and the construction of the
+/// `Notified` in which a concurrent [`request_shutdown`] wakes nobody and is
+/// then lost for good: `Notified` snapshots the `notify_waiters` call count
+/// when it is built, so one built *after* the broadcast starts out believing
+/// it has already seen it. The worker then parks until whatever fallback timer
+/// its loop has, which for [`InvocationCleanupWorker`] is a poll interval
+/// defaulting to an hour — long enough that `drain_intake` reports it as a
+/// straggler on every deploy.
+///
+/// Registering first closes the window: a shutdown landing from here on wakes
+/// the registered waiter, and one landing before it is caught by `already_set`.
+///
+/// This is a free function taking the check as a closure so that ordering can
+/// be tested without having to win the race — a test passes a closure that
+/// fires `notify_waiters` at the exact instant of the check. The window is two
+/// adjacent atomic loads wide, so nothing that merely races two threads can
+/// hit it reliably.
+///
+/// [`Notified::enable`]: tokio::sync::futures::Notified::enable
+/// [`request_shutdown`]: ShutdownCoordinator::request_shutdown
+/// [`InvocationCleanupWorker`]: crate::workers::invocation_cleanup_worker::InvocationCleanupWorker
+async fn park_until(notify: &Notify, already_set: impl FnOnce() -> bool) {
+    let notified = notify.notified();
+    tokio::pin!(notified);
+    // Registers this future with the `Notify` without waiting on it, so a
+    // `notify_waiters` from here on has someone to wake.
+    notified.as_mut().enable();
+
+    if already_set() {
+        return;
+    }
+    notified.await;
+}
+
 /// Read-only view of the shutdown flag given to background workers so they
 /// can check it at loop boundaries. Clone freely — all copies share the
 /// same atomic.
@@ -76,10 +117,7 @@ impl ShutdownSignal {
     /// Resolves once shutdown has been requested. Useful with
     /// `axum::serve(..).with_graceful_shutdown(signal.wait())`.
     pub async fn wait(self) {
-        if self.is_shutting_down() {
-            return;
-        }
-        self.notify.notified().await;
+        park_until(&self.notify, || self.is_shutting_down()).await;
     }
 
     /// Flip this signal directly (waking any `wait()`-ers). Idempotent.
@@ -357,8 +395,11 @@ mod tests {
             });
         }
 
-        // Let the workers reach `wait()` before the flag flips; `wait()` parks
-        // on `notify_waiters`, which only wakes receivers already waiting.
+        // Let the workers reach `wait()` first, so this covers the path where
+        // they are genuinely parked and woken by the broadcast rather than
+        // short-circuiting on a flag that is already set —
+        // `wait_returns_when_the_flag_flips_without_an_intervening_yield`
+        // covers that one.
         tokio::task::yield_now().await;
         coord.request_shutdown();
 
@@ -374,6 +415,55 @@ mod tests {
             start.elapsed() < Duration::from_secs(30),
             "drain should return on the last worker, not on the grace"
         );
+    }
+
+    /// The lost-wakeup regression: [`park_until`] must register with the
+    /// `Notify` *before* it reads the flag.
+    ///
+    /// `notify_waiters` stores no permit, and a `Notified` snapshots the
+    /// broadcast counter when it is built — so a `Notified` constructed after
+    /// the broadcast starts out believing it already saw it and parks forever.
+    /// The losing window in the check-first order is therefore the gap between
+    /// the flag load and that construction: two adjacent atomic loads. No
+    /// amount of racing two threads hits that reliably, so the check is handed
+    /// in as a closure and fires the broadcast itself, which puts the shutdown
+    /// exactly in the window every time.
+    #[tokio::test]
+    async fn park_until_registers_before_it_reads_the_flag() {
+        let notify = Arc::new(Notify::new());
+        let broadcaster = Arc::clone(&notify);
+
+        let parked = park_until(&notify, move || {
+            // Stands in for `request_shutdown` landing on another thread
+            // mid-check: the broadcast goes out, and the flag this call
+            // returns is the one loaded just before it.
+            broadcaster.notify_waiters();
+            false
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("shutdown notification was lost: park_until read the flag before registering");
+    }
+
+    /// A worker parked on [`ShutdownSignal::wait`] wakes even when the flag
+    /// flips in the same scheduler tick, with no yield in between.
+    ///
+    /// This one passes under either ordering — the flag is already set before
+    /// the worker is first polled — but it pins the end-to-end behaviour that
+    /// `park_until_registers_before_it_reads_the_flag` covers structurally.
+    #[tokio::test]
+    async fn wait_returns_when_the_flag_flips_without_an_intervening_yield() {
+        let coord = coordinator(Duration::from_secs(30));
+        let signal = coord.signal();
+
+        let worker = tokio::spawn(async move { signal.wait().await });
+        coord.request_shutdown();
+
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("worker never woke on the shutdown signal")
+            .expect("worker panicked");
     }
 
     /// The reason the grace exists: a worker that only notices the flag at a
