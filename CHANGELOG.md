@@ -182,6 +182,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SCENARIO_ID=...` for OTel, switch to `WORKFLOW_ID`.
 - Historical rows in `error_history.error_code = 'CHILD_SCENARIO_FAILED'`
   are left as-is; only new errors use the new code.
+  **Correction:** `error_history` was dropped in
+  `crates/runtara-store-postgres/migrations/postgresql/017_drop_structured_errors_and_schedules.sql`.
+  Nothing ever wrote to the table, so there were no historical rows to leave
+  as-is and nothing to migrate. Comments elsewhere that plan a rewrite of
+  those rows — including one in
+  `crates/runtara-server/migrations/20260419000000_rename_scenarios_to_workflows.sql`,
+  which is applied and checksummed and so cannot be corrected in place —
+  describe work that does not exist.
 
 ## [1.8.0] - 2026-04-13
 

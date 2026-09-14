@@ -1403,7 +1403,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             runtime_client,
         );
         let reconcile_shutdown = shutdown_signal.clone();
-        tokio::spawn(async move { reconciler.run(reconcile_shutdown).await });
+        shutdown_coordinator.spawn_intake(async move { reconciler.run(reconcile_shutdown).await });
         println!("✓ Execution admission reconciler started");
     }
 
@@ -1412,7 +1412,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     {
         let cleanup_pool = pool.clone();
         let cleanup_shutdown = shutdown_signal.clone();
-        tokio::spawn(async move {
+        shutdown_coordinator.spawn_intake(async move {
             let cfg = workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
             let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
                 cleanup_pool,
@@ -1437,7 +1437,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 product_events_config,
                 shutdown_signal.clone(),
             );
-            tokio::spawn(drain.run());
+            shutdown_coordinator.spawn_intake(drain.run());
         }
         None => {
             println!(
@@ -1534,7 +1534,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             let running_for_worker = trigger_running_executions.clone();
             let client_for_worker = trigger_runtime_client.clone();
             let cfg_for_worker = trigger_worker_config.clone();
-            tokio::spawn(async move {
+            shutdown_coordinator.spawn_intake(async move {
                 let worker_config = workers::trigger_worker::TriggerWorkerConfig {
                     tenant_id: trigger_worker_tenant_id,
                     batch_size: trigger_batch_size,
@@ -1566,7 +1566,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let compilation_shutdown = shutdown_signal.clone();
         let compilation_agent_catalog = Some(agent_catalog.clone());
         let compilation_events = product_event_sink.clone();
-        tokio::spawn(async move {
+        shutdown_coordinator.spawn_intake(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
                 compilation_worker_config.connection_url(),
             );
@@ -1589,7 +1589,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         {
             let reconcile_pool = pool.clone();
             let reconcile_shutdown = shutdown_signal.clone();
-            tokio::spawn(async move {
+            shutdown_coordinator.spawn_intake(async move {
                 workers::admission_counter::run_reconciler(reconcile_pool, reconcile_shutdown).await
             });
         }
@@ -1603,7 +1603,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 publisher,
             );
             let relay_shutdown = shutdown_signal.clone();
-            tokio::spawn(async move { relay.run(relay_shutdown).await });
+            shutdown_coordinator.spawn_intake(async move { relay.run(relay_shutdown).await });
         } else {
             tracing::warn!("Execution outbox relay not started: Valkey publisher unavailable");
         }
@@ -1611,7 +1611,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // NOTE: Container monitoring is now handled directly by runtara-environment.
         // Instance status queries are proxied to Runtara via the Management SDK.
 
-        // Start cleanup task for Redis streams
+        // Start cleanup task for Redis streams. Deliberately a plain spawn and
+        // not `spawn_intake`: it trims streams on its own interval and never
+        // reads the shutdown flag, so waiting for it would spend the whole
+        // intake grace on every shutdown for a task that cannot exit.
         tokio::spawn(async move {
             let redis_url = cleanup_config.connection_url();
             match valkey::open_client(redis_url.as_str()) {
@@ -1697,7 +1700,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let cron_engine = Arc::clone(&execution_engine);
         let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
-        tokio::spawn(async move {
+        shutdown_coordinator.spawn_intake(async move {
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
                 check_interval_secs: 60,
@@ -1740,7 +1743,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let sampler_feed = pipeline_feed.clone();
         let sampler_latest = pipeline_latest.clone();
         let sampler_shutdown = shutdown_signal.clone();
-        tokio::spawn(async move {
+        shutdown_coordinator.spawn_intake(async move {
             workers::pipeline_sampler::run(
                 sampler_inputs,
                 sampler_feed,
@@ -2910,6 +2913,17 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // another reason (e.g. a bind error).
         shutdown_coordinator.request_shutdown();
         signal_task.abort();
+
+        // Let the intake workers finish the unit of work they are holding,
+        // bounded by RUNTARA_SHUTDOWN_INTAKE_GRACE_MS. This runs in dev mode
+        // too: it is what makes the dev-mode message below true, and workers
+        // that park on the signal return immediately, so Ctrl+C stays prompt
+        // unless something is genuinely mid-task.
+        //
+        // Before the execution drain, not after — `drain_executions` takes its
+        // list of executions up front, so an execution a trigger worker is
+        // still launching would never be signalled.
+        shutdown_coordinator.drain_intake().await;
 
         // Drain running executions and embedded instances unless we're in dev
         // mode — local `cargo run` users want Ctrl+C to exit promptly instead

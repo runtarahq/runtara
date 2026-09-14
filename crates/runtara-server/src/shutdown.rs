@@ -6,6 +6,11 @@
 //!
 //! 1. Stops new intake — background workers (trigger, compilation, cron,
 //!    cleanup) observe the flag and exit at the next loop boundary.
+//!    [`ShutdownCoordinator::drain_intake`] then waits up to
+//!    `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` for them to actually return, so a
+//!    worker that is mid-launch finishes rather than being aborted when the
+//!    process drops the runtime. Only workers spawned through
+//!    [`ShutdownCoordinator::spawn_intake`] are waited on.
 //! 2. Drains active synchronous executions — the DashMap of
 //!    `CancellationHandle`s is walked, each `cancel_flag` is flipped, and a
 //!    `Shutdown` signal is written via the `RuntimeClient` so the SDK
@@ -13,15 +18,23 @@
 //! 3. Force-stops stragglers after `RUNTARA_SHUTDOWN_GRACE_MS` so deploys
 //!    are bounded.
 //!
+//! Intake is drained before executions on purpose: [`drain_executions`] takes
+//! its list of executions up front, so a trigger worker still launching would
+//! slip past it and die with the process.
+//!
 //! The actual orchestration lives in [`ShutdownCoordinator::drain`]; workers
 //! only need a read-only handle via [`ShutdownSignal`].
+//!
+//! [`drain_executions`]: ShutdownCoordinator::drain_executions
 
-use std::sync::Arc;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -95,6 +108,17 @@ pub struct ShutdownCoordinator {
     runtime_client: Option<Arc<RuntimeClient>>,
     grace: Duration,
     intake_grace: Duration,
+    /// Handles of the intake workers spawned through [`spawn_intake`], so
+    /// [`drain_intake`] has something to wait on. Every other background task
+    /// stays a plain `tokio::spawn`: waiting on a loop that never reads the
+    /// shutdown flag would burn the whole grace on every shutdown.
+    ///
+    /// A `std::sync::Mutex` is enough — `JoinSet::spawn` is not async and the
+    /// guard is never held across an await.
+    ///
+    /// [`spawn_intake`]: ShutdownCoordinator::spawn_intake
+    /// [`drain_intake`]: ShutdownCoordinator::drain_intake
+    intake_workers: Mutex<JoinSet<()>>,
 }
 
 impl ShutdownCoordinator {
@@ -113,6 +137,7 @@ impl ShutdownCoordinator {
             runtime_client,
             grace: grace.executions,
             intake_grace: grace.intake,
+            intake_workers: Mutex::new(JoinSet::new()),
         }
     }
 
@@ -136,6 +161,91 @@ impl ShutdownCoordinator {
         if !self.signal.flag.swap(true, Ordering::SeqCst) {
             self.signal.notify.notify_waiters();
             info!("Shutdown requested");
+        }
+    }
+
+    /// Spawn a background worker that observes [`ShutdownSignal`], keeping its
+    /// handle so [`drain_intake`] can wait for it to return.
+    ///
+    /// Use this for anything that stops itself on the shutdown flag. A task
+    /// that loops forever regardless — a pool monitor, say — should stay a
+    /// plain `tokio::spawn`, or every shutdown pays the full intake grace
+    /// waiting for something that is never going to exit.
+    ///
+    /// [`drain_intake`]: ShutdownCoordinator::drain_intake
+    pub fn spawn_intake<F>(&self, worker: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.intake_workers
+            .lock()
+            .expect("intake worker registry mutex poisoned")
+            .spawn(worker);
+    }
+
+    /// Wait up to `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` for every worker spawned
+    /// through [`spawn_intake`] to return.
+    ///
+    /// Call this after [`request_shutdown`] — the workers only start winding
+    /// down once the flag is set. Workers that park on [`ShutdownSignal::wait`]
+    /// return at once; those that check [`ShutdownSignal::is_shutting_down`] at
+    /// a loop boundary take up to one iteration, which is what the grace is
+    /// for.
+    ///
+    /// Stragglers still running when the budget expires are aborted as the
+    /// registry drops. That is no worse than before this wait existed, when
+    /// every worker was aborted without any grace at all as the process
+    /// dropped the runtime.
+    ///
+    /// [`spawn_intake`]: ShutdownCoordinator::spawn_intake
+    /// [`request_shutdown`]: ShutdownCoordinator::request_shutdown
+    pub async fn drain_intake(&self) {
+        let mut workers = {
+            let mut registry = self
+                .intake_workers
+                .lock()
+                .expect("intake worker registry mutex poisoned");
+            std::mem::take(&mut *registry)
+        };
+
+        let total = workers.len();
+        if total == 0 {
+            info!("No intake workers to drain");
+            return;
+        }
+
+        info!(
+            count = total,
+            grace_ms = self.intake_grace.as_millis(),
+            "Waiting for intake workers to stop"
+        );
+
+        let deadline = tokio::time::Instant::now() + self.intake_grace;
+        let mut stopped = 0usize;
+        loop {
+            match tokio::time::timeout_at(deadline, workers.join_next()).await {
+                // A worker returned — or panicked, which we surface rather
+                // than let a silent count make shutdown look orderly.
+                Ok(Some(result)) => {
+                    if let Err(e) = result {
+                        warn!(error = %e, "Intake worker did not exit cleanly");
+                    }
+                    stopped += 1;
+                }
+                Ok(None) => {
+                    info!(count = total, "All intake workers stopped");
+                    return;
+                }
+                Err(_) => {
+                    warn!(
+                        stragglers = total - stopped,
+                        of = total,
+                        grace_ms = self.intake_grace.as_millis(),
+                        "Intake grace expired; remaining workers will be aborted"
+                    );
+                    return;
+                }
+            }
         }
     }
 
@@ -196,6 +306,134 @@ impl ShutdownCoordinator {
         warn!(
             stragglers = self.running_executions.len(),
             "Grace period expired; remaining executions will be force-stopped downstream"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ShutdownGrace;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A coordinator with no running executions and the given intake budget.
+    fn coordinator(intake: Duration) -> ShutdownCoordinator {
+        ShutdownCoordinator::new(
+            Arc::new(DashMap::new()),
+            None,
+            ShutdownGrace {
+                executions: Duration::from_millis(DEFAULT_SHUTDOWN_GRACE_MS),
+                intake,
+            },
+        )
+    }
+
+    /// The ordinary path: workers that park on the signal come back as soon as
+    /// the flag flips, so the drain costs nothing like the grace.
+    #[tokio::test(start_paused = true)]
+    async fn drain_intake_returns_once_every_worker_stops() {
+        let coord = coordinator(Duration::from_secs(30));
+        let stopped = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..3 {
+            let signal = coord.signal();
+            let stopped = Arc::clone(&stopped);
+            coord.spawn_intake(async move {
+                signal.wait().await;
+                stopped.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        // Let the workers reach `wait()` before the flag flips; `wait()` parks
+        // on `notify_waiters`, which only wakes receivers already waiting.
+        tokio::task::yield_now().await;
+        coord.request_shutdown();
+
+        let start = tokio::time::Instant::now();
+        coord.drain_intake().await;
+
+        assert_eq!(
+            stopped.load(Ordering::SeqCst),
+            3,
+            "every worker should have run to completion"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "drain should return on the last worker, not on the grace"
+        );
+    }
+
+    /// The reason the grace exists: a worker that only notices the flag at a
+    /// loop boundary is given time to get there instead of being aborted
+    /// mid-iteration.
+    #[tokio::test(start_paused = true)]
+    async fn drain_intake_waits_for_a_worker_that_polls_at_a_loop_boundary() {
+        let coord = coordinator(Duration::from_secs(30));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let signal = coord.signal();
+        let worker_finished = Arc::clone(&finished);
+        coord.spawn_intake(async move {
+            loop {
+                // Stands in for a unit of work that ignores the signal while
+                // it is in flight.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if signal.is_shutting_down() {
+                    break;
+                }
+            }
+            worker_finished.store(true, Ordering::SeqCst);
+        });
+
+        tokio::task::yield_now().await;
+        coord.request_shutdown();
+        coord.drain_intake().await;
+
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "worker should have finished its iteration inside the grace"
+        );
+    }
+
+    /// A worker that never stops must not hold shutdown open: the wait is
+    /// bounded by the grace and the straggler is left to be aborted.
+    #[tokio::test(start_paused = true)]
+    async fn drain_intake_gives_up_on_a_straggler_at_the_grace() {
+        let intake = Duration::from_secs(5);
+        let coord = coordinator(intake);
+
+        coord.spawn_intake(async {
+            // Ignores the flag entirely, and outlives any plausible grace.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+
+        tokio::task::yield_now().await;
+        coord.request_shutdown();
+
+        let start = tokio::time::Instant::now();
+        coord.drain_intake().await;
+        let waited = start.elapsed();
+
+        assert!(
+            waited >= intake && waited < Duration::from_secs(3600),
+            "drain should return at the grace ({intake:?}), waited {waited:?}"
+        );
+    }
+
+    /// Draining twice — or before anything was spawned — is a no-op rather
+    /// than a second full grace period.
+    #[tokio::test(start_paused = true)]
+    async fn drain_intake_is_a_no_op_without_tracked_workers() {
+        let coord = coordinator(Duration::from_secs(30));
+
+        let start = tokio::time::Instant::now();
+        coord.drain_intake().await;
+        coord.drain_intake().await;
+
+        assert_eq!(
+            start.elapsed(),
+            Duration::ZERO,
+            "an empty registry should not wait at all"
         );
     }
 }
