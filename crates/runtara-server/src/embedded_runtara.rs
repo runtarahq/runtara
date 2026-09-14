@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::RuntimeOverrides;
+use crate::config::{RuntimeOverrides, RuntimePoolConfig};
 use runtara_core::persistence::Persistence;
 use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
 use runtara_environment::runtime::{DrainReport, EnvironmentRuntime};
@@ -212,9 +212,18 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Err
 
 /// Create a connection pool for Runtara's dedicated database.
 ///
-/// Reads from `RUNTARA_DATABASE_URL` environment variable.
-pub async fn create_runtara_pool()
--> Result<Option<PgPool>, Box<dyn std::error::Error + Send + Sync>> {
+/// Reads the URL from `RUNTARA_DATABASE_URL`; the caller supplies the tuning so
+/// every variable is parsed before anything opens a connection.
+///
+/// Every instance launch and every wake does several round trips on this pool,
+/// so its size is a direct cap on how fast instances can be started and
+/// resumed. The timeouts stay at sqlx's own defaults until a deployment
+/// overrides them, so sizing this pool no longer means also accepting whatever
+/// the driver happens to do about a connection that is idle, aged out, or
+/// unavailable.
+pub async fn create_runtara_pool(
+    pool_config: RuntimePoolConfig,
+) -> Result<Option<PgPool>, Box<dyn std::error::Error + Send + Sync>> {
     let database_url = match std::env::var("RUNTARA_DATABASE_URL") {
         Ok(url) => url,
         Err(_) => {
@@ -223,22 +232,25 @@ pub async fn create_runtara_pool()
         }
     };
 
-    // Every instance launch and every wake does several round trips on this
-    // pool, so its size is a direct cap on how fast instances can be started
-    // and resumed — ten connections serialise the whole runtime. Configurable
-    // like the object-model pool already is, and defaulting to something that
-    // does not throttle a multi-core host.
-    let max_connections: u32 = std::env::var("RUNTARA_RUNTIME_MAX_CONNECTIONS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(32);
-    info!(max_connections, "Connecting to Runtara database...");
+    info!("Connecting to Runtara database...");
     let pool = PgPoolOptions::new()
-        .max_connections(max_connections)
+        .max_connections(pool_config.max_connections)
+        .acquire_timeout(pool_config.acquire_timeout)
+        .idle_timeout(pool_config.idle_timeout)
+        .max_lifetime(pool_config.max_lifetime)
         .connect(&database_url)
         .await?;
-    info!("✓ Connected to Runtara database");
+    // Read back off the pool rather than echoing the request, so the line says
+    // what this process is actually running with. `0` means the timeout is
+    // disabled, the same way the environment variables spell it.
+    let options = pool.options();
+    info!(
+        max_connections = options.get_max_connections(),
+        acquire_timeout_secs = options.get_acquire_timeout().as_secs(),
+        idle_timeout_secs = options.get_idle_timeout().map_or(0, |d| d.as_secs()),
+        max_lifetime_secs = options.get_max_lifetime().map_or(0, |d| d.as_secs()),
+        "✓ Connected to Runtara database"
+    );
 
     Ok(Some(pool))
 }
@@ -257,6 +269,12 @@ pub async fn create_runtara_pool()
 /// `RUNTARA_CORE_SHUTDOWN_GRACE_MS`) are read here and applied to the runtime
 /// builder. Unset values preserve the builder's defaults, so the cap stays
 /// disabled unless a deployment asks for one.
+///
+/// The runtime pool's tuning (`RUNTARA_RUNTIME_MAX_CONNECTIONS`,
+/// `RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS`,
+/// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS`,
+/// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
+/// already parsed at startup. It applies only to the pool this process opens.
 pub async fn maybe_start_embedded(
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
@@ -270,14 +288,18 @@ pub async fn maybe_start_embedded(
         return Ok(None);
     }
 
-    // Read the server's instance-runtime overrides before opening the pool,
-    // so a malformed value is caught before migrations run. It aborts the
-    // embedded start, which the caller reports and survives without workflow
-    // execution — the same treatment every other failure here gets.
+    // Read the server's instance-runtime overrides before opening the pool, so
+    // a malformed value is caught before migrations run. It aborts the embedded
+    // start, which the caller reports and survives without workflow execution —
+    // the same treatment every other failure here gets. The pool's own tuning
+    // is not read here at all: it is parsed in `config` at startup, because
+    // "boots fine, executes nothing" is a worse answer to a typo than refusing
+    // to start.
     let core_overrides = RuntimeOverrides::from_env()?;
+    let pool_config = crate::config::runtime_pool_config();
 
     // Create Runtara database pool
-    let pool = match create_runtara_pool().await? {
+    let pool = match create_runtara_pool(pool_config).await? {
         Some(pool) => pool,
         None => return Ok(None),
     };

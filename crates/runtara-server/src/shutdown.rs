@@ -25,6 +25,7 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::config::ShutdownGrace;
 use crate::runtime_client::RuntimeClient;
 use crate::types::CancellationHandle;
 
@@ -97,30 +98,21 @@ pub struct ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
-    /// Create a new coordinator reading `RUNTARA_SHUTDOWN_GRACE_MS` and
-    /// `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` from the environment.
-    pub fn from_env(
+    /// Create a new coordinator with the grace periods the host already
+    /// parsed. The variables behind them are read in [`crate::config`], with
+    /// the rest of the configuration, so a malformed value stops the process
+    /// before it opens a pool or recovers any instance.
+    pub fn new(
         running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
         runtime_client: Option<Arc<RuntimeClient>>,
+        grace: ShutdownGrace,
     ) -> Self {
-        let grace = Duration::from_millis(
-            std::env::var("RUNTARA_SHUTDOWN_GRACE_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_SHUTDOWN_GRACE_MS),
-        );
-        let intake_grace = Duration::from_millis(
-            std::env::var("RUNTARA_SHUTDOWN_INTAKE_GRACE_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_INTAKE_GRACE_MS),
-        );
         Self {
             signal: ShutdownSignal::new(),
             running_executions,
             runtime_client,
-            grace,
-            intake_grace,
+            grace: grace.executions,
+            intake_grace: grace.intake,
         }
     }
 

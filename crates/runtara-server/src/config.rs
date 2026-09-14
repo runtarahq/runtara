@@ -1,6 +1,6 @@
 mod runtime;
 
-pub use runtime::RuntimeOverrides;
+pub use runtime::{RuntimeOverrides, RuntimePoolConfig, ShutdownGrace};
 
 use crate::entitlements::EntitlementSnapshot;
 use runtara_environment::execution_timeout::{
@@ -50,6 +50,12 @@ pub struct Config {
     pub object_model_soft_delete: bool,
     /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
     pub object_model_bulk_request_limit: usize,
+    /// Connection-pool tuning for the runtime database the embedded runtime
+    /// owns. Parsed here so a malformed value stops the process before it
+    /// opens a pool, rather than only disabling workflow execution.
+    pub runtime_pool: RuntimePoolConfig,
+    /// How long each stage of the shutdown drain waits.
+    pub shutdown_grace: ShutdownGrace,
     /// Guard rails for workflow-facing raw SQL (query-sql / execute-sql
     /// capabilities on the internal API). The runtime/MCP SQL routes are
     /// unguarded for now — retrofit is tracked separately.
@@ -124,10 +130,19 @@ impl Config {
         let tenant_id =
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
 
-        let max_concurrent_executions: usize = std::env::var("MAX_CONCURRENT_EXECUTIONS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_max_concurrent_executions);
+        let max_concurrent_executions: usize = parse_usize_or(
+            "MAX_CONCURRENT_EXECUTIONS",
+            default_max_concurrent_executions(),
+        )?;
+
+        // The embedded runtime's pool and the shutdown drain are configured
+        // here rather than at the point of use. Both used to be read much
+        // later — the pool after the server had already booted, and the drain
+        // after the environment had relaunched recovered instances — so a typo
+        // in either produced a running server with no workflow engine, or a
+        // crash loop through recovery, instead of a startup failure.
+        let runtime_pool = RuntimePoolConfig::from_env()?;
+        let shutdown_grace = ShutdownGrace::from_env()?;
 
         let checkpoint_ttl_hours: u64 = parse_u64_or("CHECKPOINT_TTL_HOURS", 48)?;
         let adaptive_rate_limiting_enabled: bool = parse_bool_or("ADAPTIVE_RATE_LIMITING", true)?;
@@ -294,6 +309,8 @@ impl Config {
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
+            runtime_pool,
+            shutdown_grace,
             raw_sql_guardrails,
             object_model_pool,
             object_model_pool_cache_max,
@@ -692,6 +709,16 @@ pub fn object_model_database_url() -> String {
 }
 
 /// Get the maximum number of connections for the object model database pool.
+/// Connection-pool tuning for the embedded runtime's database.
+pub fn runtime_pool_config() -> RuntimePoolConfig {
+    get().runtime_pool
+}
+
+/// Grace periods for the two stages of the shutdown drain.
+pub fn shutdown_grace() -> ShutdownGrace {
+    get().shutdown_grace
+}
+
 pub fn object_model_max_connections() -> u32 {
     get().object_model_max_connections
 }
