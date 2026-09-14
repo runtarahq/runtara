@@ -177,9 +177,12 @@ impl ShutdownCoordinator {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        // A poisoned registry is still a perfectly usable `JoinSet`, and this
+        // runs on the shutdown path where a panic would take out the orderly
+        // shutdown entirely. Recover the guard instead of unwrapping.
         self.intake_workers
             .lock()
-            .expect("intake worker registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .spawn(worker);
     }
 
@@ -192,10 +195,15 @@ impl ShutdownCoordinator {
     /// a loop boundary take up to one iteration, which is what the grace is
     /// for.
     ///
-    /// Stragglers still running when the budget expires are aborted as the
-    /// registry drops. That is no worse than before this wait existed, when
-    /// every worker was aborted without any grace at all as the process
-    /// dropped the runtime.
+    /// Stragglers still running when the budget expires are **detached, not
+    /// aborted**. Dropping a `JoinSet` aborts everything still in it, which
+    /// would be a regression: before this wait existed these were detached
+    /// `tokio::spawn`s that kept running until the process dropped the runtime,
+    /// so they survived the execution drain and the embedded shutdown after it.
+    /// Killing them at the intake grace would cut that short — the compilation
+    /// worker takes its request off Valkey with a destructive `BLPOP` and no
+    /// redelivery, so an abort mid-compile loses the request outright.
+    /// Detaching keeps the old lifetime and makes this wait a pure improvement.
     ///
     /// [`spawn_intake`]: ShutdownCoordinator::spawn_intake
     /// [`request_shutdown`]: ShutdownCoordinator::request_shutdown
@@ -204,7 +212,7 @@ impl ShutdownCoordinator {
             let mut registry = self
                 .intake_workers
                 .lock()
-                .expect("intake worker registry mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             std::mem::take(&mut *registry)
         };
 
@@ -237,11 +245,16 @@ impl ShutdownCoordinator {
                     return;
                 }
                 Err(_) => {
+                    // Hand the stragglers back to the runtime rather than
+                    // letting `workers` drop and abort them: they keep running
+                    // through the execution drain and the embedded shutdown,
+                    // exactly as they did before this wait existed.
+                    workers.detach_all();
                     warn!(
                         stragglers = total - stopped,
                         of = total,
                         grace_ms = self.intake_grace.as_millis(),
-                        "Intake grace expired; remaining workers will be aborted"
+                        "Intake grace expired; remaining workers left running until process exit"
                     );
                     return;
                 }
@@ -396,7 +409,7 @@ mod tests {
     }
 
     /// A worker that never stops must not hold shutdown open: the wait is
-    /// bounded by the grace and the straggler is left to be aborted.
+    /// bounded by the grace.
     #[tokio::test(start_paused = true)]
     async fn drain_intake_gives_up_on_a_straggler_at_the_grace() {
         let intake = Duration::from_secs(5);
@@ -420,8 +433,47 @@ mod tests {
         );
     }
 
-    /// Draining twice — or before anything was spawned — is a no-op rather
-    /// than a second full grace period.
+    /// Giving up on a straggler must not kill it. Before the grace existed
+    /// these were detached `tokio::spawn`s that ran until the process dropped
+    /// the runtime — past the execution drain and the embedded shutdown. A
+    /// `JoinSet` aborts on drop, so `drain_intake` has to detach what is left;
+    /// otherwise this wait would *shorten* a straggler's life and, for the
+    /// compilation worker, lose the request its destructive `BLPOP` took.
+    #[tokio::test(start_paused = true)]
+    async fn drain_intake_leaves_a_straggler_running_rather_than_aborting_it() {
+        let intake = Duration::from_secs(5);
+        let coord = coordinator(intake);
+
+        // Observable from outside the JoinSet: an aborted task never reaches
+        // the store, a detached one does.
+        let ran_to_completion = Arc::new(AtomicBool::new(false));
+        let worker_flag = Arc::clone(&ran_to_completion);
+        coord.spawn_intake(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            worker_flag.store(true, Ordering::SeqCst);
+        });
+
+        tokio::task::yield_now().await;
+        coord.request_shutdown();
+        coord.drain_intake().await;
+
+        assert!(
+            !ran_to_completion.load(Ordering::SeqCst),
+            "precondition: the straggler is still mid-work when the drain gives up"
+        );
+
+        // Stand in for the rest of shutdown, which the worker used to outlive.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+
+        assert!(
+            ran_to_completion.load(Ordering::SeqCst),
+            "straggler was aborted at the grace instead of being left to finish"
+        );
+    }
+
+    /// With nothing tracked — nothing spawned, or a second call after the
+    /// first took the registry — the drain returns immediately instead of
+    /// spending another full grace period.
     #[tokio::test(start_paused = true)]
     async fn drain_intake_is_a_no_op_without_tracked_workers() {
         let coord = coordinator(Duration::from_secs(30));
