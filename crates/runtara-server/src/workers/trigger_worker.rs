@@ -279,11 +279,27 @@ pub async fn run(
         // Bind before matching: a guard held in the match scrutinee lives for the
         // whole match, so the spawned tasks below would wait on a lock this loop
         // is still holding while it waits for them — a deadlock.
+        //
+        // The read also races shutdown. `block_timeout_ms` defaults to the same
+        // 5s as the intake grace, so a worker that only noticed the flag at the
+        // top of the loop would routinely still be inside this call when the
+        // grace expired.
+        //
+        // Abandoning an in-flight XREADGROUP is safe here in a way it would not
+        // be for a destructive pop: anything the server had already delivered is
+        // in this consumer's PEL, and PHASE 1 above reclaims it via XAUTOCLAIM
+        // on the next process. No event is lost, only delayed.
         let read = {
             let mut guard = consumer.lock().await;
-            guard
-                .read_events(worker_config.block_timeout_ms, worker_config.batch_size)
-                .await
+            tokio::select! {
+                biased;
+                _ = shutdown.clone().wait() => None,
+                read = guard.read_events(worker_config.block_timeout_ms, worker_config.batch_size) => Some(read),
+            }
+        };
+        let Some(read) = read else {
+            info!(worker_id = %worker_id, "Trigger worker exiting on shutdown signal");
+            return;
         };
         match read {
             Ok(events) => {
