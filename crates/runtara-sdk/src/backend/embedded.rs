@@ -928,6 +928,16 @@ mod tests {
             Ok(vec![])
         }
 
+        /// Empty, because the due scan above is. Nothing here exercises the
+        /// wake path.
+        async fn claim_sleeping_instances_due(
+            &self,
+            _limit: i64,
+            _retry_at: DateTime<Utc>,
+        ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
+            Ok(vec![])
+        }
+
         async fn list_events(
             &self,
             _instance_id: &str,

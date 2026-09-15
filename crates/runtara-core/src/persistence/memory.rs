@@ -761,6 +761,45 @@ impl Persistence for InMemoryPersistence {
         due.sort_by_key(|i| i.sleep_until);
         Ok(due.into_iter().take(limit.max(0) as usize).collect())
     }
+
+    /// Selects and leases in a single critical section.
+    ///
+    /// Holding the store lock across both halves is what makes this a claim
+    /// rather than a scan: no other caller can observe -- or claim -- a row
+    /// between its selection and its new deadline. Selecting and then leasing
+    /// under two separate locks would leave rows briefly unclaimed and, worse,
+    /// briefly deadline-less.
+    async fn claim_sleeping_instances_due(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        let now = Utc::now();
+        let mut store = self.store.lock().unwrap();
+
+        // Same candidate set and ordering as `get_sleeping_instances_due`:
+        // earliest deadline first, so a backlog drains in the order it fell due.
+        let mut candidates: Vec<_> = store
+            .instances
+            .values()
+            .filter(|i| i.status == CoreInstanceStatus::Suspended)
+            .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
+            .map(|i| (i.instance_id.clone(), i.sleep_until))
+            .collect();
+        candidates.sort_by_key(|(_, sleep_until)| *sleep_until);
+
+        let mut claimed = Vec::new();
+        for (instance_id, _) in candidates.into_iter().take(limit.max(0) as usize) {
+            let Some(instance) = store.instances.get_mut(&instance_id) else {
+                continue;
+            };
+            instance.sleep_until = Some(retry_at);
+            // Cloned after the stamp, so the record carries the lease it was
+            // claimed under rather than the deadline it was selected on.
+            claimed.push(instance.clone());
+        }
+        Ok(claimed)
+    }
 }
 
 /// Events for one instance that satisfy `filter`.
@@ -948,6 +987,16 @@ mod tests {
     async fn in_memory_backend_claims_a_sleeping_instance_atomically() {
         let backend = std::sync::Arc::new(InMemoryPersistence::new());
         crate::persistence::conformance::run_concurrent_claim_sequence(backend).await;
+    }
+
+    /// A batch claim must never expose a row without a wake deadline.
+    ///
+    /// Multi-threaded on purpose: the reader has to be schedulable while the
+    /// claim is mid-flight, or it cannot see the window it is watching for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_backend_leases_a_batch_without_stranding_it() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::run_batch_claim_never_strands_sequence(backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

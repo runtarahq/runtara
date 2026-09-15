@@ -1540,3 +1540,158 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
         .await
         .expect("delete_instances_batch failed (concurrent claim cleanup)");
 }
+
+/// A batch claim must never expose a row without a wake deadline.
+///
+/// [`Persistence::claim_sleeping_instances_due`] leases rather than clears, and
+/// the point of the lease is recovery: a row whose claimer dies becomes due
+/// again on its own. That only holds if the row carries a deadline at *every*
+/// instant. A claim assembled from a clear and a later re-stamp satisfies every
+/// before-and-after assertion -- the deadline is there when you look afterwards
+/// -- while still leaving a window in which the row is `suspended` with
+/// `sleep_until = NULL`. That is the shape of a signal waiter, which no sweep
+/// collects: the wake scan skips it for having no deadline, the retention sweep
+/// for not being terminal. A process that dies inside that window strands its
+/// whole batch permanently.
+///
+/// So this watches *during* the claim instead of after it. A reader samples the
+/// rows continuously while the batch is claimed, and the claim is only correct
+/// if the deadline-less state is never observable.
+///
+/// Takes an `Arc` and spawns for the same reason as
+/// [`run_concurrent_claim_sequence`], and must likewise run on a multi-threaded
+/// runtime: on a current-thread runtime the reader cannot be scheduled while
+/// the claim is between its own steps, and the window closes for the wrong
+/// reason.
+pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
+    backend: std::sync::Arc<P>,
+) {
+    /// Enough rows that a per-row claim has to loop, widening the window a
+    /// reader can land in, while staying inside a small connection pool.
+    const SLEEPERS: usize = 12;
+    /// Bounded so a genuine strand fails the test rather than hanging it.
+    const CLAIM_ROUNDS: usize = 10;
+
+    let tenant_id = "conformance-tenant-batch-lease";
+    let mut sleepers = Vec::with_capacity(SLEEPERS);
+    for _ in 0..SLEEPERS {
+        let instance_id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&instance_id, tenant_id)
+            .await
+            .expect("register_instance failed (batch lease)");
+        backend
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("update_instance_status suspended failed (batch lease)");
+        backend
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(30))
+            .await
+            .expect("set_instance_sleep failed (batch lease)");
+        sleepers.push(instance_id);
+    }
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stranded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+    let reader = {
+        let backend = std::sync::Arc::clone(&backend);
+        let stop = std::sync::Arc::clone(&stop);
+        let stranded = std::sync::Arc::clone(&stranded);
+        let watched = sleepers.clone();
+        tokio::spawn(async move {
+            // One sighting already fails the assertion; the rest are only
+            // there to make the message concrete. Stop early rather than
+            // keep sampling a backend that has already been caught.
+            const ENOUGH: usize = 16;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                for instance_id in &watched {
+                    let Ok(Some(record)) = backend.get_instance(instance_id).await else {
+                        continue;
+                    };
+                    if record.status == CoreInstanceStatus::Suspended
+                        && record.sleep_until.is_none()
+                    {
+                        let mut seen = stranded.lock().unwrap();
+                        seen.push(instance_id.clone());
+                        if seen.len() >= ENOUGH {
+                            return;
+                        }
+                    }
+                }
+                // Yield rather than sleep: the window this is hunting for is as
+                // short as two adjacent statements.
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let ours: std::collections::HashSet<_> = sleepers.iter().cloned().collect();
+    let mut claimed_by_us = Vec::new();
+    for _ in 0..CLAIM_ROUNDS {
+        let batch = backend
+            .claim_sleeping_instances_due(200, Utc::now() + Duration::seconds(120))
+            .await
+            .expect("claim_sleeping_instances_due failed (batch lease)");
+        if batch.is_empty() {
+            break;
+        }
+        // Asserted over every record, not just ours: a returned row the caller
+        // is told to launch must carry the lease it was claimed under, or a
+        // failed launch has no deadline to fall back to.
+        for record in &batch {
+            assert!(
+                record
+                    .sleep_until
+                    .is_some_and(|deadline| deadline > Utc::now()),
+                "a claimed record must carry its lease deadline, but {} came back with {:?}",
+                record.instance_id,
+                record.sleep_until
+            );
+        }
+        claimed_by_us.extend(
+            batch
+                .into_iter()
+                .map(|r| r.instance_id)
+                .filter(|id| ours.contains(id)),
+        );
+        if claimed_by_us.len() >= SLEEPERS {
+            break;
+        }
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.await.expect("lease reader task panicked");
+
+    // The assertion this sequence exists for.
+    let sightings = stranded.lock().unwrap().clone();
+    assert!(
+        sightings.is_empty(),
+        "a batch claim left {} row(s) `suspended` with no wake deadline, e.g. {:?}; \
+         nothing sweeps that state, so a claimer that died here would strand them \
+         permanently",
+        sightings.len(),
+        &sightings[..sightings.len().min(3)]
+    );
+
+    // Liveness. Zero claims would satisfy the assertion above while waking
+    // nothing, and that is the other half of this method's contract. A rival
+    // test sharing this store may take some rows first -- the claim is global
+    // with no tenant filter -- so this asserts progress, not a full sweep.
+    assert!(
+        !claimed_by_us.is_empty(),
+        "no round of {CLAIM_ROUNDS} claimed any of {SLEEPERS} due instances: \
+         this claim never succeeds, so nothing would ever wake"
+    );
+
+    for instance_id in &sleepers {
+        backend
+            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .await
+            .expect("update_instance_status failed (batch lease cleanup)");
+    }
+    backend
+        .delete_instances_batch(&sleepers)
+        .await
+        .expect("delete_instances_batch failed (batch lease cleanup)");
+}

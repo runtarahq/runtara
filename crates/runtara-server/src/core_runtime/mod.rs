@@ -641,6 +641,16 @@ mod tests {
             Ok(Vec::new())
         }
 
+        /// This mock holds no instances, so there is never a batch to claim.
+        /// These tests drive the health endpoint, not the wake path.
+        async fn claim_sleeping_instances_due(
+            &self,
+            _limit: i64,
+            _retry_at: DateTime<Utc>,
+        ) -> Result<Vec<InstanceRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
         async fn list_events(
             &self,
             _instance_id: &str,
