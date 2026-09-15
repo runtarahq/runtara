@@ -1604,19 +1604,31 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
     // claim's way. Without this, a run where every read failed would leave
     // `stranded` empty and pass the headline assertion having observed nothing.
     let samples = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Holds the claim back until the reader has completed a full pass.
+    //
+    // `tokio::spawn` only queues a task, and an in-memory backend's `await`
+    // points resolve inline without ever yielding to the executor — so on a
+    // busy machine the whole claim can finish before the reader is scheduled
+    // even once. Sequencing it here makes the observer's participation a fact
+    // rather than a hope; without this the sample assertion below is itself a
+    // race, and fails on whichever runner happens to schedule least eagerly.
+    let observing = std::sync::Arc::new(tokio::sync::Barrier::new(2));
 
     let reader = {
         let backend = std::sync::Arc::clone(&backend);
         let stop = std::sync::Arc::clone(&stop);
         let stranded = std::sync::Arc::clone(&stranded);
         let samples = std::sync::Arc::clone(&samples);
+        let observing = std::sync::Arc::clone(&observing);
         let watched = sleepers.clone();
         tokio::spawn(async move {
             // One sighting already fails the assertion; the rest are only
             // there to make the message concrete. Stop early rather than
             // keep sampling a backend that has already been caught.
             const ENOUGH: usize = 16;
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            // Released after the first pass, never again.
+            let mut gate = Some(observing);
+            loop {
                 for instance_id in &watched {
                     let Ok(Some(record)) = backend.get_instance(instance_id).await else {
                         continue;
@@ -1625,12 +1637,31 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
                     if record.status == CoreInstanceStatus::Suspended
                         && record.sleep_until.is_none()
                     {
-                        let mut seen = stranded.lock().unwrap();
-                        seen.push(instance_id.clone());
-                        if seen.len() >= ENOUGH {
+                        // Scoped so the guard is provably released before the
+                        // await below; holding it across one makes this future
+                        // non-`Send` and it cannot be spawned.
+                        let seen_enough = {
+                            let mut seen = stranded.lock().unwrap();
+                            seen.push(instance_id.clone());
+                            seen.len() >= ENOUGH
+                        };
+                        if seen_enough {
+                            // Still release the claim, or it waits forever.
+                            if let Some(gate) = gate.take() {
+                                gate.wait().await;
+                            }
                             return;
                         }
                     }
+                }
+                // Every row carries a past deadline at this point, so this
+                // first pass can see no sighting — it only proves the reader
+                // is live and reading before the claim begins.
+                if let Some(gate) = gate.take() {
+                    gate.wait().await;
+                }
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
                 }
                 // Yield rather than sleep: the window this is hunting for is as
                 // short as two adjacent statements.
@@ -1638,6 +1669,19 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
             }
         })
     };
+
+    // Reached only once the reader has sampled every row at least once, so it
+    // is provably watching before anything is claimed.
+    //
+    // Bounded so a reader that somehow never arrives fails this sequence
+    // instead of hanging it: a test that never finishes is worse than one that
+    // reports what went wrong. Expiring here leaves `samples` at zero, which
+    // the assertion after the claim reports.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        std::sync::Arc::clone(&observing).wait(),
+    )
+    .await;
 
     let ours: std::collections::HashSet<_> = sleepers.iter().cloned().collect();
     let mut claimed_by_us = Vec::new();
