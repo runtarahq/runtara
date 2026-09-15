@@ -940,6 +940,16 @@ mod tests {
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
     }
 
+    /// Parallel wakers racing for one instance must produce a single winner.
+    ///
+    /// Multi-threaded on purpose: a current-thread runtime serializes the
+    /// contenders and the race never happens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_backend_claims_a_sleeping_instance_atomically() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::run_concurrent_claim_sequence(backend).await;
+    }
+
     fn foreign_vocabulary() -> EventVocabulary {
         // Shares nothing with the workflow DSL: if any name were baked into the
         // pairing, none of these records would pair.
