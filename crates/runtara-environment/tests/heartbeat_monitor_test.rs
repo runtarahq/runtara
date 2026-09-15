@@ -472,8 +472,10 @@ impl Persistence for MockPersistence {
         Ok(())
     }
 
-    /// Claimed under the instance map's lock, so two concurrent callers cannot
-    /// both win.
+    /// Nothing here ever sleeps — `schedule_wake` above is a no-op and every
+    /// seeded instance carries `sleep_until: None` — so the due-ness guard
+    /// always fails and this only ever loses. Kept faithful anyway, so it
+    /// starts working if a test later seeds a sleeping instance.
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
         let mut instances = self.instances.lock().unwrap();
         let Some(instance) = instances.get_mut(instance_id) else {

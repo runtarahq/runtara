@@ -919,14 +919,14 @@ pub trait Persistence: Send + Sync {
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
-    /// Claim due sleeping instances for waking, leasing them until `retry_at`.
+    /// Select **and claim** up to `limit` due sleeping instances in one step,
+    /// leasing them until `retry_at`.
     ///
-    /// The claim moves `sleep_until` forward rather than clearing it, so a
+    /// The claim should move `sleep_until` forward rather than clear it, so a
     /// caller that dies between claiming and launching does not strand its
     /// batch: the rows simply become due again when the lease expires. Clearing
     /// leaves a row `suspended` with no deadline, which is exactly what a
     /// signal waiter looks like, so no sweep can tell them apart.
-    /// Select **and claim** up to `limit` due sleeping instances in one step.
     ///
     /// Every returned record is already claimed — the caller owns it and must
     /// launch it, exactly as if [`Persistence::claim_sleeping_instance`] had
@@ -940,9 +940,12 @@ pub trait Persistence: Send + Sync {
     /// that window entirely, and costs one round trip per batch instead of one
     /// per instance.
     ///
-    /// The default composes the two existing operations and is correct but
-    /// non-atomic. A backend that can select and claim in one operation should
-    /// override it.
+    /// The default composes the two existing operations. Each individual claim
+    /// is atomic, so it cannot double-launch — but it does **not** provide the
+    /// lease-forward property above: it clears `sleep_until` in the claim and
+    /// re-stamps it in a second statement, and a caller that dies between the
+    /// two strands that row exactly as described. A backend that can select and
+    /// claim in one operation should override it.
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,

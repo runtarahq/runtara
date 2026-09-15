@@ -1460,6 +1460,8 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
     const ROUNDS: usize = 20;
 
     let tenant_id = "conformance-tenant-concurrent";
+    let mut rounds_won = 0usize;
+    let mut claimed_instances: Vec<String> = Vec::with_capacity(ROUNDS);
 
     for round in 0..ROUNDS {
         let instance_id = Uuid::new_v4().to_string();
@@ -1501,10 +1503,40 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
             }
         }
 
-        assert_eq!(
-            winners, 1,
-            "exactly one of {CONTENDERS} concurrent claims may win (round {round}); \
+        // Safety, asserted per round: never more than one winner. Each extra
+        // winner is another launch of this instance.
+        assert!(
+            winners <= 1,
+            "at most one of {CONTENDERS} concurrent claims may win (round {round}); \
              {winners} winners is {winners} launches of the same instance"
         );
+        rounds_won += winners;
+        claimed_instances.push(instance_id);
     }
+
+    // Liveness, asserted once over the whole run: zero winners in a round is
+    // legal — `claim_sleeping_instances_due` is a global claim with no tenant
+    // filter, so a rival test sharing this database can take the row first —
+    // but a backend whose claim *never* succeeds would satisfy the safety
+    // assertion above in every round while waking nothing. This is what
+    // separates the two.
+    assert!(
+        rounds_won > 0,
+        "no round of {ROUNDS} produced a winner: this claim never succeeds, \
+         so nothing would ever wake"
+    );
+
+    // Leave nothing behind: a claimed instance is `suspended` with no
+    // `sleep_until`, which neither the retention sweep (terminal only) nor the
+    // wake scan (`sleep_until` present) will ever collect.
+    for instance_id in &claimed_instances {
+        backend
+            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .await
+            .expect("update_instance_status failed (concurrent claim cleanup)");
+    }
+    backend
+        .delete_instances_batch(&claimed_instances)
+        .await
+        .expect("delete_instances_batch failed (concurrent claim cleanup)");
 }

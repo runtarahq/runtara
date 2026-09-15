@@ -498,7 +498,12 @@ impl Persistence for MockPersistence {
         Ok(())
     }
 
-    async fn clear_instance_sleep(&self, _instance_id: &str) -> std::result::Result<(), CoreError> {
+    /// Clears the map, matching `schedule_wake` above. A no-op here would let
+    /// a test assert sleep state against a mock that never cleared anything.
+    async fn clear_instance_sleep(&self, instance_id: &str) -> std::result::Result<(), CoreError> {
+        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+            inst.sleep_until = None;
+        }
         Ok(())
     }
 
