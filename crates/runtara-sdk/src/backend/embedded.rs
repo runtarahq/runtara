@@ -905,6 +905,22 @@ mod tests {
             Ok(())
         }
 
+        /// Claimed under the write guard, so two concurrent callers cannot both
+        /// win.
+        async fn claim_sleeping_instance(&self, instance_id: &str) -> CoreResult<bool> {
+            let mut instances = self.instances.write().await;
+            let Some(inst) = instances.get_mut(instance_id) else {
+                return Ok(false);
+            };
+            if inst.status != runtara_core::domain::InstanceStatus::Suspended
+                || !inst.sleep_until.is_some_and(|t| t <= Utc::now())
+            {
+                return Ok(false);
+            }
+            inst.sleep_until = None;
+            Ok(true)
+        }
+
         async fn get_sleeping_instances_due(
             &self,
             _limit: i64,

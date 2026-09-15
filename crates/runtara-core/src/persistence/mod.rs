@@ -470,9 +470,15 @@ impl<'a> CompleteInstanceParams<'a> {
 }
 
 /// Persistence interface used by core handlers.
-#[allow(missing_docs)]
 #[async_trait]
 pub trait Persistence: Send + Sync {
+    /// Insert a new instance row for `instance_id`, owned by `tenant_id`, in
+    /// its initial pending state.
+    ///
+    /// The id is the primary key, so a second call for the same id is an
+    /// error, not an update. A caller that treats the id as an idempotency key
+    /// and needs to know which way the race went should use
+    /// [`Self::try_register_instance`], which reports it.
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError>;
 
     /// Register an instance, reporting whether this call created the row.
@@ -504,6 +510,12 @@ pub trait Persistence: Send + Sync {
         Ok(true)
     }
 
+    /// Read an instance's full row, launch input included.
+    ///
+    /// `Ok(None)` for an id that was never registered — an unknown instance is
+    /// an answer here, not an error. Use [`Self::get_instance_meta`] instead
+    /// whenever the input is not what the caller came for; that blob is the
+    /// expensive part of this row.
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError>;
 
     /// Like [`Self::get_instance`] but without the `input` blob, for callers
@@ -529,6 +541,16 @@ pub trait Persistence: Send + Sync {
         }))
     }
 
+    /// Set an instance's status, stamping `started_at` when one is supplied
+    /// and leaving it untouched when it is not.
+    ///
+    /// The raw write, with no policy of its own: it applies the status it is
+    /// given. The launch path wants [`Self::mark_instance_started`] or
+    /// [`Self::mark_instance_running`], which guard the transition, and a
+    /// terminal transition wants [`Self::complete_instance`], which is what
+    /// stamps `finished_at`.
+    ///
+    /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_status(
         &self,
         instance_id: &str,
@@ -536,6 +558,10 @@ pub trait Persistence: Send + Sync {
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError>;
 
+    /// Point an instance at the checkpoint it most recently wrote, so a
+    /// relaunch knows where to resume from.
+    ///
+    /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_checkpoint(
         &self,
         instance_id: &str,
@@ -577,6 +603,12 @@ pub trait Persistence: Send + Sync {
         Ok(())
     }
 
+    /// Write the serialized `state` for `(instance_id, checkpoint_id)`.
+    ///
+    /// Saving the same pair again **refreshes** it rather than failing.
+    /// Replay is ordinary here: a relaunched instance re-runs the durable
+    /// steps it already checkpointed, and a save that rejected the repeat
+    /// would turn every recovery into an error.
     async fn save_checkpoint(
         &self,
         instance_id: &str,
@@ -584,12 +616,22 @@ pub trait Persistence: Send + Sync {
         state: &[u8],
     ) -> Result<(), CoreError>;
 
+    /// Read back one checkpoint by `(instance_id, checkpoint_id)`.
+    ///
+    /// `Ok(None)` for a pair that was never saved — a step that has not run
+    /// yet, which is what a replaying instance is asking about.
     async fn load_checkpoint(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError>;
 
+    /// Page through an instance's checkpoints.
+    ///
+    /// Every filter is optional and narrows the set: `checkpoint_id` to a
+    /// single id, `created_after` inclusive, `created_before` exclusive — a
+    /// half-open window, so back-to-back pages tile a time range without
+    /// double-counting the boundary.
     async fn list_checkpoints(
         &self,
         instance_id: &str,
@@ -600,6 +642,11 @@ pub trait Persistence: Send + Sync {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError>;
 
+    /// Count what [`Self::list_checkpoints`] would return for the same
+    /// filters, ignoring `limit`/`offset`.
+    ///
+    /// The total a paginating caller reports, not the size of the page it
+    /// just read.
     async fn count_checkpoints(
         &self,
         instance_id: &str,
@@ -628,6 +675,13 @@ pub trait Persistence: Send + Sync {
         payload: &[u8],
     ) -> Result<(), CoreError>;
 
+    /// Read the lifecycle command waiting for an instance, if one is.
+    ///
+    /// Only *unacknowledged* commands: once
+    /// [`Self::acknowledge_signal`] accepts one it must never be handed back.
+    /// A guest acknowledges on read precisely so the command is consumed once,
+    /// and redelivering a cancel or shutdown would re-suspend a relaunched
+    /// instance on a command it already handled.
     async fn get_pending_signal(
         &self,
         instance_id: &str,
@@ -698,6 +752,11 @@ pub trait Persistence: Send + Sync {
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError>;
 
+    /// Record that a durable step failed and is being retried.
+    ///
+    /// An audit trail: nothing in this crate reads it back, and no execution
+    /// decision depends on it. Re-saving the same `(checkpoint_id, attempt)`
+    /// updates that record in place rather than appending a duplicate.
     async fn save_retry_attempt(
         &self,
         instance_id: &str,
@@ -706,6 +765,12 @@ pub trait Persistence: Send + Sync {
         error_message: Option<&str>,
     ) -> Result<(), CoreError>;
 
+    /// Page through instances, newest first, optionally narrowed to one
+    /// tenant and/or one status.
+    ///
+    /// The returned records carry no `input`, like
+    /// [`Self::get_instance_meta`] — a listing that loaded every launch
+    /// payload would pay for the one field none of its callers want.
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
@@ -717,6 +782,19 @@ pub trait Persistence: Send + Sync {
     /// Whether the store is reachable and answering.
     async fn health_check(&self) -> Result<bool, CoreError>;
 
+    /// Count the instances currently occupying a concurrency slot, meaning
+    /// those that are `running`.
+    ///
+    /// `suspended` is deliberately excluded. Durable sleep and a signal-wait
+    /// both park an instance there, parking is a steady state rather than a
+    /// transient one, and a workflow can sit suspended for days while running
+    /// no code and holding no host resource. Counting those rows would let a
+    /// handful of long-parked workflows hold a concurrency cap closed
+    /// indefinitely.
+    ///
+    /// A row left `running` by a crashed host still counts, and nothing in
+    /// this crate reaps one — the heartbeat monitor that does lives in the
+    /// embedding host.
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
 
     /// Promote an instance to `running` on a relaunch, preserving its
@@ -808,39 +886,32 @@ pub trait Persistence: Send + Sync {
 
     /// Atomically claim a due sleeping instance before waking it.
     ///
-    /// Conditionally clears `sleep_until` only while the instance is still
-    /// suspended with a present `sleep_until` that is **already
-    /// due** (`sleep_until <= now`), and reports whether
-    /// this caller won the claim. Returns `true` if it did, `false` if another
-    /// waker (or another scheduler sharing this store) already took it.
-    /// Callers MUST launch only when this returns `true` — this is what
+    /// Clear `sleep_until` only while the instance is still suspended with a
+    /// present `sleep_until` that is **already due** (`sleep_until <= now`),
+    /// and report whether this caller won the claim: `true` if it did, `false`
+    /// if another waker (or another scheduler sharing this store) already took
+    /// it. Callers MUST launch only when this returns `true` — this is what
     /// prevents concurrent double-launch of the same instance. On a launch
     /// failure after a successful claim, re-stamp `sleep_until` via
     /// [`Persistence::set_instance_sleep`] so the instance is retried.
     ///
-    /// The default reads the instance and then clears it, so it reports a
-    /// loss against an instance that is no longer claimable but can still let
-    /// two concurrent callers both win: each may read a claimable row before
-    /// either clears it. **A backend serving more than one waker must override
-    /// this** with an operation whose atomicity it can vouch for -- an indivisible
-    /// conditional mutation, such as a claim taken under the store's own lock.
-    /// Taking the default and running two wakers double-launches instances.
-    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
-        match self.get_instance(instance_id).await? {
-            // The due-ness check is what makes a lease a lease: a batch claim
-            // pushes `sleep_until` into the future rather than clearing it, and
-            // an instance leased that way must lose a later claim until the
-            // lease expires.
-            Some(instance)
-                if instance.status == crate::domain::InstanceStatus::Suspended
-                    && instance.sleep_until.is_some_and(|t| t <= Utc::now()) =>
-            {
-                self.clear_instance_sleep(instance_id).await?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
+    /// The due-ness check is what makes a lease a lease: a batch claim pushes
+    /// `sleep_until` into the future rather than clearing it, and an instance
+    /// leased that way must lose a later claim until the lease expires.
+    ///
+    /// The test and the mutation must be **one indivisible operation** — a
+    /// conditional statement whose own report of what it changed is the claim,
+    /// or a claim taken under the store's own lock. Read-then-clear does not
+    /// qualify: two callers can each read a claimable row before either clears
+    /// it, and both win.
+    ///
+    /// There is deliberately no default. Double-launch protection is the whole
+    /// reason this method exists, and a backend cannot inherit it from a
+    /// composition of the other methods on this trait — only from a statement
+    /// its own store executes indivisibly. A backend that genuinely cannot do
+    /// that must say so by never claiming (`Ok(false)`), which parks instances
+    /// rather than running them twice.
+    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError>;
 
     /// Get instances that are due to wake (sleep_until <= now).
     async fn get_sleeping_instances_due(

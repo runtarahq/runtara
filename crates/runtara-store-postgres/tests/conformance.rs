@@ -38,6 +38,17 @@ async fn postgres_backend_passes_conformance_sequence() {
     runtara_core::persistence::conformance::run_wake_reason_sequence(&backend).await;
 }
 
+/// Parallel wakers racing for one instance must produce a single winner.
+///
+/// Multi-threaded on purpose: a current-thread runtime serializes the
+/// contenders and the race never happens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_backend_claims_a_sleeping_instance_atomically() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = std::sync::Arc::new(PostgresPersistence::new(pool));
+    runtara_core::persistence::conformance::run_concurrent_claim_sequence(backend).await;
+}
+
 /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
 /// local setups that already have a database running), then falls back to a
 /// fresh testcontainers-managed container. Infrastructure failures are test

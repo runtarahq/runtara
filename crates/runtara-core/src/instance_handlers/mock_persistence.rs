@@ -502,6 +502,25 @@ impl Persistence for MockPersistence {
         Ok(())
     }
 
+    /// Claimed under the instance map's lock, so two concurrent callers cannot
+    /// both win.
+    async fn claim_sleeping_instance(
+        &self,
+        instance_id: &str,
+    ) -> std::result::Result<bool, CoreError> {
+        let mut instances = self.instances.lock().unwrap();
+        let Some(instance) = instances.get_mut(instance_id) else {
+            return Ok(false);
+        };
+        if instance.status != CoreInstanceStatus::Suspended
+            || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
+        {
+            return Ok(false);
+        }
+        instance.sleep_until = None;
+        Ok(true)
+    }
+
     async fn get_sleeping_instances_due(
         &self,
         _limit: i64,

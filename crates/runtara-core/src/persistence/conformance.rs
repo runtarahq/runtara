@@ -670,6 +670,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "second claim of an already-claimed instance must lose"
     );
 
+    // Sequential claims only prove the *second* caller sees the first one's
+    // write. Overlapping callers are a separate question, and
+    // `run_concurrent_claim_sequence` is where it is asked.
+
     backend
         .clear_instance_sleep(&instance_id)
         .await
@@ -1429,5 +1433,78 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
         assert!(ended.sleep_until.is_none());
         assert!(ended.wake_reason.is_none());
         backend.delete_instances_batch(&[id]).await.unwrap();
+    }
+}
+
+/// Race real, parallel wakers for one due instance and require a single winner.
+///
+/// [`run_conformance_sequence`] claims twice in a row, which only proves the
+/// second caller observes the first one's write. It says nothing about two
+/// callers *overlapping*, and overlapping is the case
+/// [`Persistence::claim_sleeping_instance`] exists for: a claim that reads a
+/// claimable row and then clears it in a separate step lets every concurrent
+/// caller read before any of them writes, and they all win. Each extra winner
+/// is another launch of the same instance.
+///
+/// Takes an `Arc` and spawns, rather than polling futures concurrently on one
+/// task: a claim whose steps never yield to the executor completes before the
+/// next future is polled, and no amount of `join!` interleaves it. Run this on
+/// a multi-threaded runtime — `#[tokio::test(flavor = "multi_thread")]` —
+/// since a single-threaded one reintroduces exactly the serialization this is
+/// trying to avoid.
+pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: std::sync::Arc<P>) {
+    /// Enough contenders that a lost race is overwhelmingly likely to show up,
+    /// while staying inside a small connection pool.
+    const CONTENDERS: usize = 8;
+    /// Repeats, because a race that only sometimes interleaves is still a race.
+    const ROUNDS: usize = 20;
+
+    let tenant_id = "conformance-tenant-concurrent";
+
+    for round in 0..ROUNDS {
+        let instance_id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&instance_id, tenant_id)
+            .await
+            .expect("register_instance failed (concurrent claim)");
+        backend
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("update_instance_status suspended failed (concurrent claim)");
+        backend
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(30))
+            .await
+            .expect("set_instance_sleep failed (concurrent claim)");
+
+        // Release every contender at once, so they reach the claim together
+        // instead of in spawn order.
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(CONTENDERS));
+        let mut contenders = Vec::with_capacity(CONTENDERS);
+        for _ in 0..CONTENDERS {
+            let backend = std::sync::Arc::clone(&backend);
+            let gate = std::sync::Arc::clone(&gate);
+            let instance_id = instance_id.clone();
+            contenders.push(tokio::spawn(async move {
+                gate.wait().await;
+                backend.claim_sleeping_instance(&instance_id).await
+            }));
+        }
+
+        let mut winners = 0;
+        for contender in contenders {
+            let claimed = contender
+                .await
+                .expect("claim task panicked")
+                .expect("claim_sleeping_instance (concurrent) failed");
+            if claimed {
+                winners += 1;
+            }
+        }
+
+        assert_eq!(
+            winners, 1,
+            "exactly one of {CONTENDERS} concurrent claims may win (round {round}); \
+             {winners} winners is {winners} launches of the same instance"
+        );
     }
 }
