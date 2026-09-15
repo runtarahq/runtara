@@ -533,6 +533,17 @@ impl Persistence for MockPersistence {
         Ok(Vec::new())
     }
 
+    /// Empty, because the due scan above is. These tests drive the instance
+    /// handlers, not the wake path; a batch claim that selected rows the scan
+    /// never offers would be an invention, not a mock.
+    async fn claim_sleeping_instances_due(
+        &self,
+        _limit: i64,
+        _retry_at: DateTime<Utc>,
+    ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
+        Ok(Vec::new())
+    }
+
     async fn list_events(
         &self,
         _instance_id: &str,

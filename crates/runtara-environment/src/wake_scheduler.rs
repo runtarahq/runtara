@@ -429,12 +429,15 @@ impl WakeScheduler {
         );
 
         // The instance is already claimed: `claim_sleeping_instances_due`
-        // cleared `sleep_until` on exactly the rows it returned, which is what
-        // takes them out of the wake candidate set and stops a concurrent poll
-        // — or a second Environment sharing this Core DB — from launching a
-        // duplicate guest for the same (possibly non-idempotent) in-flight
-        // step. Every early return below must therefore either drive the
-        // instance to terminal or re-stamp `sleep_until`, or it is stranded.
+        // pushed `sleep_until` forward to the lease deadline on exactly the
+        // rows it returned, which is what takes them out of the wake candidate
+        // set and stops a concurrent poll — or a second Environment sharing
+        // this Core DB — from launching a duplicate guest for the same
+        // (possibly non-idempotent) in-flight step. Every early return below
+        // should still drive the instance to terminal or re-stamp
+        // `sleep_until` with a deadline of its own: the lease only expires
+        // after `claim_lease`, so relying on it means waiting that long for a
+        // relaunch rather than being stranded outright.
 
         // A cancel that arrived while the instance slept has nobody to observe
         // it: the guest is not running, and a relaunch replays into a checkpoint

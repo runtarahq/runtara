@@ -49,6 +49,17 @@ async fn postgres_backend_claims_a_sleeping_instance_atomically() {
     runtara_core::persistence::conformance::run_concurrent_claim_sequence(backend).await;
 }
 
+/// A batch claim must never expose a row without a wake deadline.
+///
+/// Multi-threaded on purpose: the reader has to be schedulable while the claim
+/// is mid-flight, or it cannot see the window it is watching for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_backend_leases_a_batch_without_stranding_it() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = std::sync::Arc::new(PostgresPersistence::new(pool));
+    runtara_core::persistence::conformance::run_batch_claim_never_strands_sequence(backend).await;
+}
+
 /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
 /// local setups that already have a database running), then falls back to a
 /// fresh testcontainers-managed container. Infrastructure failures are test

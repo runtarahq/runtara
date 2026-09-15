@@ -497,6 +497,18 @@ impl Persistence for MockPersistence {
         Ok(vec![])
     }
 
+    /// Empty, because the due scan above is. Nothing here ever sleeps --
+    /// `schedule_wake` is a no-op and every seeded instance carries
+    /// `sleep_until: None` -- so there is no batch to claim. These tests drive
+    /// the heartbeat monitor, not the wake path.
+    async fn claim_sleeping_instances_due(
+        &self,
+        _limit: i64,
+        _retry_at: DateTime<Utc>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        Ok(vec![])
+    }
+
     async fn list_events(
         &self,
         _instance_id: &str,

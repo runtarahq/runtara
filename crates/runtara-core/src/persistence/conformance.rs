@@ -1540,3 +1540,244 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
         .await
         .expect("delete_instances_batch failed (concurrent claim cleanup)");
 }
+
+/// A batch claim must never expose a row without a wake deadline.
+///
+/// [`Persistence::claim_sleeping_instances_due`] leases rather than clears, and
+/// the point of the lease is recovery: a row whose claimer dies becomes due
+/// again on its own. That only holds if the row carries a deadline at *every*
+/// instant. A claim assembled from a clear and a later re-stamp satisfies every
+/// before-and-after assertion -- the deadline is there when you look afterwards
+/// -- while still leaving a window in which the row is `suspended` with
+/// `sleep_until = NULL`. That is the shape of a signal waiter, which no sweep
+/// collects: the wake scan skips it for having no deadline, the retention sweep
+/// for not being terminal. A process that dies inside that window strands its
+/// whole batch permanently.
+///
+/// So this watches *during* the claim instead of after it. A reader samples the
+/// rows continuously while the batch is claimed, and the claim is only correct
+/// if the deadline-less state is never observable.
+///
+/// Takes an `Arc` and spawns for the same reason as
+/// [`run_concurrent_claim_sequence`], and must likewise run on a multi-threaded
+/// runtime: on a current-thread runtime the reader cannot be scheduled while
+/// the claim is between its own steps, and the window closes for the wrong
+/// reason.
+pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
+    backend: std::sync::Arc<P>,
+) {
+    /// Enough rows that a per-row claim has to loop, widening the window a
+    /// reader can land in, while staying inside a small connection pool.
+    const SLEEPERS: usize = 12;
+    /// Bounded so a genuine strand fails the test rather than hanging it.
+    const CLAIM_ROUNDS: usize = 10;
+    /// Backdated far enough that these rows are the *oldest* due ones in the
+    /// store. The claim is global and orders by `sleep_until` ascending, so
+    /// rows seeded a few seconds back would sort behind any older backlog a
+    /// shared database happens to hold -- and a bounded loop would then never
+    /// reach them, failing the liveness assertion below against a backend that
+    /// is working correctly, after leasing that entire backlog forward.
+    const BACKDATE: i64 = 86_400;
+
+    let tenant_id = "conformance-tenant-batch-lease";
+    let mut sleepers = Vec::with_capacity(SLEEPERS);
+    for _ in 0..SLEEPERS {
+        let instance_id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&instance_id, tenant_id)
+            .await
+            .expect("register_instance failed (batch lease)");
+        backend
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("update_instance_status suspended failed (batch lease)");
+        backend
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(BACKDATE))
+            .await
+            .expect("set_instance_sleep failed (batch lease)");
+        sleepers.push(instance_id);
+    }
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stranded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    // Counted because the reader swallows read errors to stay out of the
+    // claim's way. Without this, a run where every read failed would leave
+    // `stranded` empty and pass the headline assertion having observed nothing.
+    let samples = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Holds the claim back until the reader has completed a full pass.
+    //
+    // `tokio::spawn` only queues a task, and an in-memory backend's `await`
+    // points resolve inline without ever yielding to the executor — so on a
+    // busy machine the whole claim can finish before the reader is scheduled
+    // even once. Sequencing it here makes the observer's participation a fact
+    // rather than a hope; without this the sample assertion below is itself a
+    // race, and fails on whichever runner happens to schedule least eagerly.
+    let observing = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let reader = {
+        let backend = std::sync::Arc::clone(&backend);
+        let stop = std::sync::Arc::clone(&stop);
+        let stranded = std::sync::Arc::clone(&stranded);
+        let samples = std::sync::Arc::clone(&samples);
+        let observing = std::sync::Arc::clone(&observing);
+        let watched = sleepers.clone();
+        tokio::spawn(async move {
+            // One sighting already fails the assertion; the rest are only
+            // there to make the message concrete. Stop early rather than
+            // keep sampling a backend that has already been caught.
+            const ENOUGH: usize = 16;
+            // Released after the first pass, never again.
+            let mut gate = Some(observing);
+            loop {
+                for instance_id in &watched {
+                    let Ok(Some(record)) = backend.get_instance(instance_id).await else {
+                        continue;
+                    };
+                    samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if record.status == CoreInstanceStatus::Suspended
+                        && record.sleep_until.is_none()
+                    {
+                        // Scoped so the guard is provably released before the
+                        // await below; holding it across one makes this future
+                        // non-`Send` and it cannot be spawned.
+                        let seen_enough = {
+                            let mut seen = stranded.lock().unwrap();
+                            seen.push(instance_id.clone());
+                            seen.len() >= ENOUGH
+                        };
+                        if seen_enough {
+                            // Still release the claim, or it waits forever.
+                            if let Some(gate) = gate.take() {
+                                gate.wait().await;
+                            }
+                            return;
+                        }
+                    }
+                }
+                // Every row carries a past deadline at this point, so this
+                // first pass can see no sighting — it only proves the reader
+                // is live and reading before the claim begins.
+                if let Some(gate) = gate.take() {
+                    gate.wait().await;
+                }
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                // Yield rather than sleep: the window this is hunting for is as
+                // short as two adjacent statements.
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    // Reached only once the reader has sampled every row at least once, so it
+    // is provably watching before anything is claimed.
+    //
+    // Bounded so a reader that somehow never arrives fails this sequence
+    // instead of hanging it: a test that never finishes is worse than one that
+    // reports what went wrong. Expiring here leaves `samples` at zero, which
+    // the assertion after the claim reports.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        std::sync::Arc::clone(&observing).wait(),
+    )
+    .await;
+
+    let ours: std::collections::HashSet<_> = sleepers.iter().cloned().collect();
+    let mut claimed_by_us = Vec::new();
+    for _ in 0..CLAIM_ROUNDS {
+        // Sized to this sequence's own rows rather than a big round number: the
+        // claim is global, so a larger limit would lease an unrelated backlog
+        // 120s into the future on a shared store and delay real wakes.
+        let batch = backend
+            .claim_sleeping_instances_due(SLEEPERS as i64, Utc::now() + Duration::seconds(120))
+            .await
+            .expect("claim_sleeping_instances_due failed (batch lease)");
+        if batch.is_empty() {
+            break;
+        }
+        // Asserted over every record, not just ours: a returned row the caller
+        // is told to launch must carry the lease it was claimed under, or a
+        // failed launch has no deadline to fall back to.
+        for record in &batch {
+            assert!(
+                record
+                    .sleep_until
+                    .is_some_and(|deadline| deadline > Utc::now()),
+                "a claimed record must carry its lease deadline, but {} came back with {:?}",
+                record.instance_id,
+                record.sleep_until
+            );
+        }
+        claimed_by_us.extend(
+            batch
+                .into_iter()
+                .map(|r| r.instance_id)
+                .filter(|id| ours.contains(id)),
+        );
+        if claimed_by_us.len() >= SLEEPERS {
+            break;
+        }
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.await.expect("lease reader task panicked");
+
+    // An empty sighting list only means something if the reader could read at
+    // all. This keeps "never observed the window" from reading as "the window
+    // does not exist".
+    assert!(
+        samples.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the reader never sampled an instance successfully, so it proves \
+         nothing about whether the claim leaves rows without a deadline"
+    );
+
+    // The assertion this sequence exists for.
+    let sightings = stranded.lock().unwrap().clone();
+    assert!(
+        sightings.is_empty(),
+        "a batch claim left {} row(s) `suspended` with no wake deadline, e.g. {:?}; \
+         nothing sweeps that state, so a claimer that died here would strand them \
+         permanently",
+        sightings.len(),
+        &sightings[..sightings.len().min(3)]
+    );
+
+    // Liveness. A backend that never claims would satisfy the assertion above
+    // while waking nothing, and that is the other half of this method's
+    // contract. But the claim is global with no tenant filter, so a rival test
+    // sharing this store may legitimately take these rows first -- and losing
+    // that race is not a defect. What must hold either way is that every row
+    // ended up leased by *somebody*: still suspended, still carrying a future
+    // deadline. Only a store where nothing was claimed at all fails here.
+    let mut leased_by_someone = 0usize;
+    for instance_id in &sleepers {
+        let record = backend
+            .get_instance(instance_id)
+            .await
+            .expect("get_instance failed (batch lease liveness)")
+            .expect("sleeper should exist");
+        if record.status == CoreInstanceStatus::Suspended
+            && record.sleep_until.is_some_and(|d| d > Utc::now())
+        {
+            leased_by_someone += 1;
+        }
+    }
+    assert!(
+        !claimed_by_us.is_empty() || leased_by_someone > 0,
+        "none of {SLEEPERS} due instances was claimed by this caller or leased \
+         by any other in {CLAIM_ROUNDS} rounds: this claim never succeeds, so \
+         nothing would ever wake"
+    );
+
+    for instance_id in &sleepers {
+        backend
+            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .await
+            .expect("update_instance_status failed (batch lease cleanup)");
+    }
+    backend
+        .delete_instances_batch(&sleepers)
+        .await
+        .expect("delete_instances_batch failed (batch lease cleanup)");
+}

@@ -884,7 +884,11 @@ pub trait Persistence: Send + Sync {
     /// Clear the sleep_until timestamp for an instance.
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;
 
-    /// Atomically claim a due sleeping instance before waking it.
+    /// Atomically claim one due sleeping instance before waking it.
+    ///
+    /// The per-row form, for a caller that already holds a single instance id.
+    /// The scheduler's wake path claims a whole batch at once — see
+    /// [`Persistence::claim_sleeping_instances_due`], which is what it calls.
     ///
     /// Clear `sleep_until` only while the instance is still suspended with a
     /// present `sleep_until` that is **already due** (`sleep_until <= now`),
@@ -893,7 +897,8 @@ pub trait Persistence: Send + Sync {
     /// it. Callers MUST launch only when this returns `true` — this is what
     /// prevents concurrent double-launch of the same instance. On a launch
     /// failure after a successful claim, re-stamp `sleep_until` via
-    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    /// [`Persistence::schedule_wake`], carrying the instance's existing
+    /// `wake_reason` over, so it is retried without losing why it was parked.
     ///
     /// The due-ness check is what makes a lease a lease: a batch claim pushes
     /// `sleep_until` into the future rather than clearing it, and an instance
@@ -914,6 +919,10 @@ pub trait Persistence: Send + Sync {
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError>;
 
     /// Get instances that are due to wake (sleep_until <= now).
+    ///
+    /// Selects without claiming, so two callers see the same rows. The wake
+    /// path claims as it selects instead — see
+    /// [`Persistence::claim_sleeping_instances_due`].
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,
@@ -922,16 +931,31 @@ pub trait Persistence: Send + Sync {
     /// Select **and claim** up to `limit` due sleeping instances in one step,
     /// leasing them until `retry_at`.
     ///
-    /// The claim should move `sleep_until` forward rather than clear it, so a
+    /// This is the wake path: the scheduler relaunches exactly what this
+    /// returns, and calls nothing else to decide what is due.
+    ///
+    /// `retry_at` must be strictly in the future. A lease already in the past
+    /// leaves every claimed row immediately re-claimable, which is the
+    /// double-launch this method exists to prevent; backends stamp what they
+    /// are given and cannot repair it.
+    ///
+    /// Move `sleep_until` forward to `retry_at` rather than clearing it, so a
     /// caller that dies between claiming and launching does not strand its
     /// batch: the rows simply become due again when the lease expires. Clearing
     /// leaves a row `suspended` with no deadline, which is exactly what a
-    /// signal waiter looks like, so no sweep can tell them apart.
+    /// signal waiter looks like, so no sweep can tell them apart — the wake
+    /// scan skips it for having no deadline and the retention sweep skips it
+    /// for not being terminal, and the instance is parked for good.
     ///
     /// Every returned record is already claimed — the caller owns it and must
     /// launch it, exactly as if [`Persistence::claim_sleeping_instance`] had
-    /// returned `true`. On a launch failure, re-stamp `sleep_until` via
-    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    /// returned `true` — and carries its new `retry_at` deadline, not the one
+    /// it was selected on. On a launch failure, re-stamp `sleep_until` via
+    /// [`Persistence::schedule_wake`], passing the record's own existing
+    /// `wake_reason`, so the instance is retried sooner than the lease would.
+    /// Not [`Persistence::set_instance_sleep`]: that one hardcodes
+    /// [`crate::domain::WakeReason::Timer`], so re-stamping through it would
+    /// rewrite why the instance was parked in the first place.
     ///
     /// Separate from `get_sleeping_instances_due` + `claim_sleeping_instance`
     /// because a scheduler that polls back-to-back (rather than sleeping a
@@ -940,28 +964,27 @@ pub trait Persistence: Send + Sync {
     /// that window entirely, and costs one round trip per batch instead of one
     /// per instance.
     ///
-    /// The default composes the two existing operations. Each individual claim
-    /// is atomic, so it cannot double-launch — but it does **not** provide the
-    /// lease-forward property above: it clears `sleep_until` in the claim and
-    /// re-stamps it in a second statement, and a caller that dies between the
-    /// two strands that row exactly as described. A backend that can select and
-    /// claim in one operation should override it.
+    /// The selection and the lease must be **one indivisible operation** — a
+    /// single statement that returns the rows it just stamped, or a claim taken
+    /// under the store's own lock.
+    ///
+    /// There is deliberately no default. Composing the two operations above
+    /// cannot produce this contract: the per-row claim clears `sleep_until` and
+    /// the re-stamp is a second statement, so a caller that dies between them
+    /// strands that row in precisely the undetectable state described above. A
+    /// backend inherits the batch shape but not the guarantee, which is the
+    /// failure this signature exists to prevent.
+    ///
+    /// A backend that cannot select and lease indivisibly must refuse at
+    /// startup. It must **not** quietly return an empty `Vec` forever: nothing
+    /// distinguishes that from a store with nothing due, so the scheduler logs
+    /// an ordinary idle poll while every durable sleep silently never wakes —
+    /// no error, no metric, no failed instance.
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,
         retry_at: DateTime<Utc>,
-    ) -> Result<Vec<InstanceRecord>, CoreError> {
-        let due = self.get_sleeping_instances_due(limit).await?;
-        let mut claimed = Vec::with_capacity(due.len());
-        for record in due {
-            if self.claim_sleeping_instance(&record.instance_id).await? {
-                self.set_instance_sleep(&record.instance_id, retry_at)
-                    .await?;
-                claimed.push(record);
-            }
-        }
-        Ok(claimed)
-    }
+    ) -> Result<Vec<InstanceRecord>, CoreError>;
 
     /// List events for an instance with filtering and pagination.
     ///
