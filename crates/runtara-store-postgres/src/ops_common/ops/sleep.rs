@@ -146,9 +146,10 @@ macro_rules! impl_sleep_ops {
             /// SELECT due instances and claim them in one statement.
             ///
             /// The inner SELECT is `op_get_sleeping_instances_due` plus
-            /// `FOR UPDATE SKIP LOCKED`, and the surrounding UPDATE clears
-            /// `sleep_until` on exactly the rows it locked — so every row this
-            /// returns is claimed by this caller and by nobody else. Two
+            /// `FOR UPDATE SKIP LOCKED`, and the surrounding UPDATE moves
+            /// `sleep_until` forward on exactly the rows it locked — so every
+            /// row this returns is claimed by this caller and by nobody else,
+            /// and none of them is left without a deadline. Two
             /// concurrent pollers (or two Environments sharing this Core DB)
             /// skip past each other's locked rows instead of contending for
             /// them, which is the same guarantee

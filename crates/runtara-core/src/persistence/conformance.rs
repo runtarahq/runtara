@@ -1571,6 +1571,13 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
     const SLEEPERS: usize = 12;
     /// Bounded so a genuine strand fails the test rather than hanging it.
     const CLAIM_ROUNDS: usize = 10;
+    /// Backdated far enough that these rows are the *oldest* due ones in the
+    /// store. The claim is global and orders by `sleep_until` ascending, so
+    /// rows seeded a few seconds back would sort behind any older backlog a
+    /// shared database happens to hold -- and a bounded loop would then never
+    /// reach them, failing the liveness assertion below against a backend that
+    /// is working correctly, after leasing that entire backlog forward.
+    const BACKDATE: i64 = 86_400;
 
     let tenant_id = "conformance-tenant-batch-lease";
     let mut sleepers = Vec::with_capacity(SLEEPERS);
@@ -1585,7 +1592,7 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
             .await
             .expect("update_instance_status suspended failed (batch lease)");
         backend
-            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(30))
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(BACKDATE))
             .await
             .expect("set_instance_sleep failed (batch lease)");
         sleepers.push(instance_id);
@@ -1593,11 +1600,16 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stranded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    // Counted because the reader swallows read errors to stay out of the
+    // claim's way. Without this, a run where every read failed would leave
+    // `stranded` empty and pass the headline assertion having observed nothing.
+    let samples = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let reader = {
         let backend = std::sync::Arc::clone(&backend);
         let stop = std::sync::Arc::clone(&stop);
         let stranded = std::sync::Arc::clone(&stranded);
+        let samples = std::sync::Arc::clone(&samples);
         let watched = sleepers.clone();
         tokio::spawn(async move {
             // One sighting already fails the assertion; the rest are only
@@ -1609,6 +1621,7 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
                     let Ok(Some(record)) = backend.get_instance(instance_id).await else {
                         continue;
                     };
+                    samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if record.status == CoreInstanceStatus::Suspended
                         && record.sleep_until.is_none()
                     {
@@ -1629,8 +1642,11 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
     let ours: std::collections::HashSet<_> = sleepers.iter().cloned().collect();
     let mut claimed_by_us = Vec::new();
     for _ in 0..CLAIM_ROUNDS {
+        // Sized to this sequence's own rows rather than a big round number: the
+        // claim is global, so a larger limit would lease an unrelated backlog
+        // 120s into the future on a shared store and delay real wakes.
         let batch = backend
-            .claim_sleeping_instances_due(200, Utc::now() + Duration::seconds(120))
+            .claim_sleeping_instances_due(SLEEPERS as i64, Utc::now() + Duration::seconds(120))
             .await
             .expect("claim_sleeping_instances_due failed (batch lease)");
         if batch.is_empty() {
@@ -1663,6 +1679,15 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     reader.await.expect("lease reader task panicked");
 
+    // An empty sighting list only means something if the reader could read at
+    // all. This keeps "never observed the window" from reading as "the window
+    // does not exist".
+    assert!(
+        samples.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the reader never sampled an instance successfully, so it proves \
+         nothing about whether the claim leaves rows without a deadline"
+    );
+
     // The assertion this sequence exists for.
     let sightings = stranded.lock().unwrap().clone();
     assert!(
@@ -1674,14 +1699,31 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
         &sightings[..sightings.len().min(3)]
     );
 
-    // Liveness. Zero claims would satisfy the assertion above while waking
-    // nothing, and that is the other half of this method's contract. A rival
-    // test sharing this store may take some rows first -- the claim is global
-    // with no tenant filter -- so this asserts progress, not a full sweep.
+    // Liveness. A backend that never claims would satisfy the assertion above
+    // while waking nothing, and that is the other half of this method's
+    // contract. But the claim is global with no tenant filter, so a rival test
+    // sharing this store may legitimately take these rows first -- and losing
+    // that race is not a defect. What must hold either way is that every row
+    // ended up leased by *somebody*: still suspended, still carrying a future
+    // deadline. Only a store where nothing was claimed at all fails here.
+    let mut leased_by_someone = 0usize;
+    for instance_id in &sleepers {
+        let record = backend
+            .get_instance(instance_id)
+            .await
+            .expect("get_instance failed (batch lease liveness)")
+            .expect("sleeper should exist");
+        if record.status == CoreInstanceStatus::Suspended
+            && record.sleep_until.is_some_and(|d| d > Utc::now())
+        {
+            leased_by_someone += 1;
+        }
+    }
     assert!(
-        !claimed_by_us.is_empty(),
-        "no round of {CLAIM_ROUNDS} claimed any of {SLEEPERS} due instances: \
-         this claim never succeeds, so nothing would ever wake"
+        !claimed_by_us.is_empty() || leased_by_someone > 0,
+        "none of {SLEEPERS} due instances was claimed by this caller or leased \
+         by any other in {CLAIM_ROUNDS} rounds: this claim never succeeds, so \
+         nothing would ever wake"
     );
 
     for instance_id in &sleepers {

@@ -897,7 +897,8 @@ pub trait Persistence: Send + Sync {
     /// it. Callers MUST launch only when this returns `true` — this is what
     /// prevents concurrent double-launch of the same instance. On a launch
     /// failure after a successful claim, re-stamp `sleep_until` via
-    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    /// [`Persistence::schedule_wake`], carrying the instance's existing
+    /// `wake_reason` over, so it is retried without losing why it was parked.
     ///
     /// The due-ness check is what makes a lease a lease: a batch claim pushes
     /// `sleep_until` into the future rather than clearing it, and an instance
@@ -933,6 +934,11 @@ pub trait Persistence: Send + Sync {
     /// This is the wake path: the scheduler relaunches exactly what this
     /// returns, and calls nothing else to decide what is due.
     ///
+    /// `retry_at` must be strictly in the future. A lease already in the past
+    /// leaves every claimed row immediately re-claimable, which is the
+    /// double-launch this method exists to prevent; backends stamp what they
+    /// are given and cannot repair it.
+    ///
     /// Move `sleep_until` forward to `retry_at` rather than clearing it, so a
     /// caller that dies between claiming and launching does not strand its
     /// batch: the rows simply become due again when the lease expires. Clearing
@@ -945,8 +951,11 @@ pub trait Persistence: Send + Sync {
     /// launch it, exactly as if [`Persistence::claim_sleeping_instance`] had
     /// returned `true` — and carries its new `retry_at` deadline, not the one
     /// it was selected on. On a launch failure, re-stamp `sleep_until` via
-    /// [`Persistence::set_instance_sleep`] so the instance is retried sooner
-    /// than the lease would.
+    /// [`Persistence::schedule_wake`], passing the record's own existing
+    /// `wake_reason`, so the instance is retried sooner than the lease would.
+    /// Not [`Persistence::set_instance_sleep`]: that one hardcodes
+    /// [`crate::domain::WakeReason::Timer`], so re-stamping through it would
+    /// rewrite why the instance was parked in the first place.
     ///
     /// Separate from `get_sleeping_instances_due` + `claim_sleeping_instance`
     /// because a scheduler that polls back-to-back (rather than sleeping a
