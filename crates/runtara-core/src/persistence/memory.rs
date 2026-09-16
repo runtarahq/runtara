@@ -289,6 +289,9 @@ impl Persistence for InMemoryPersistence {
             .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
         {
             existing.state = state.to_vec();
+            // A refresh restamps: the trait dates a checkpoint by when its
+            // state was written, and `list_checkpoints` pages on that field.
+            existing.created_at = Utc::now();
             return Ok(());
         }
         store.checkpoints.push(CheckpointRecord {
@@ -325,13 +328,26 @@ impl Persistence for InMemoryPersistence {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
         let store = self.store.lock().unwrap();
-        Ok(store
+        let mut found: Vec<&CheckpointRecord> = store
             .checkpoints
             .iter()
             .filter(|c| c.instance_id == instance_id)
             .filter(|c| checkpoint_id.is_none_or(|id| c.checkpoint_id == id))
             .filter(|c| created_after.is_none_or(|t| c.created_at >= t))
             .filter(|c| created_before.is_none_or(|t| c.created_at < t))
+            .collect();
+        // Ordered by `(created_at, checkpoint_id)`: the id breaks ties so
+        // checkpoints written inside one clock tick still page deterministically.
+        // Sorting has to precede the skip/take, or `offset` pages the raw
+        // insertion order and only the page contents come out sorted.
+        found.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.checkpoint_id.cmp(&b.checkpoint_id))
+        });
+        found.reverse();
+        Ok(found
+            .into_iter()
             .skip(offset.max(0) as usize)
             .take(limit.max(0) as usize)
             .cloned()

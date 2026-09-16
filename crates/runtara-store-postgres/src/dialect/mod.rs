@@ -111,6 +111,11 @@ pub(crate) trait Dialect: Send + Sync + 'static {
 
     /// SQL for `list_checkpoints` (binds: instance_id, checkpoint_id_filter,
     /// created_after, created_before, limit, offset).
+    ///
+    /// Must order by `created_at DESC, checkpoint_id DESC`. `created_at`
+    /// comes from the transaction clock, so two checkpoints can share one, and
+    /// the id is what keeps the order total — an `OFFSET` over a partial order
+    /// pages a set the planner may re-shuffle between calls.
     fn sql_list_checkpoints() -> &'static str;
 
     /// SQL for `count_checkpoints` (binds: instance_id,

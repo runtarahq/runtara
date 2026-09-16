@@ -637,6 +637,12 @@ pub trait Persistence: Send + Sync {
     /// Replay is ordinary here: a relaunched instance re-runs the durable
     /// steps it already checkpointed, and a save that rejected the repeat
     /// would turn every recovery into an error.
+    ///
+    /// A refresh restamps `created_at` to the time of the rewrite, so the
+    /// timestamp is when this state was written and not when the key was
+    /// first used. [`Self::list_checkpoints`] pages on that field, so a
+    /// backend that keeps the original stamp pages a replayed instance in a
+    /// different order than one that does not.
     async fn save_checkpoint(
         &self,
         instance_id: &str,
@@ -654,7 +660,17 @@ pub trait Persistence: Send + Sync {
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError>;
 
-    /// Page through an instance's checkpoints.
+    /// Page through an instance's checkpoints, newest first.
+    ///
+    /// Ordered by `(created_at, checkpoint_id)` descending. The id breaks
+    /// ties so checkpoints written inside one clock tick still page
+    /// deterministically — Postgres stamps `created_at` from the transaction
+    /// clock, so equal timestamps are ordinary rather than hypothetical. It
+    /// is a tie-break and nothing more: id order carries no meaning of its
+    /// own, it just has to be the same order every time and on every backend.
+    /// Without a total order, `offset` walks a set the store is free to
+    /// re-shuffle between pages, and a paginating caller silently skips and
+    /// repeats rows.
     ///
     /// Every filter is optional and narrows the set: `checkpoint_id` to a
     /// single id, `created_after` inclusive, `created_before` exclusive — a
