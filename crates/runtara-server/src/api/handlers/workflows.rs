@@ -3310,6 +3310,12 @@ mod checkpoint_pagination_tests {
     /// left the order decided by the id tie-break and varying run to run.
     /// Sleeping makes the stamps distinct and in write order, which is what
     /// keeps the fixture's order both deterministic and unlike either id order.
+    ///
+    /// A millisecond assumes the clock resolves finer than that, which holds on
+    /// Linux and macOS. Nothing relies on it holding silently: a clock too
+    /// coarse to separate the saves ties every stamp, the order collapses onto
+    /// `checkpoint_id` descending, and the descending half of the assertion in
+    /// `a_page_keeps_the_order_the_store_returned_it_in` fails.
     const SAVE_GAP: std::time::Duration = std::time::Duration::from_millis(1);
 
     fn lazy_pool() -> PgPool {
