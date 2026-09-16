@@ -99,7 +99,7 @@ impl Dialect for PostgresDialect {
            AND ($2::TEXT IS NULL OR checkpoint_id = $2) \
            AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3) \
            AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4) \
-         ORDER BY created_at DESC, checkpoint_id DESC \
+         ORDER BY created_at DESC, checkpoint_id COLLATE \"C\" DESC \
          LIMIT $5 OFFSET $6"
     }
 

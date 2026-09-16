@@ -662,15 +662,22 @@ pub trait Persistence: Send + Sync {
 
     /// Page through an instance's checkpoints, newest first.
     ///
-    /// Ordered by `(created_at, checkpoint_id)` descending. The id breaks
-    /// ties so checkpoints written inside one clock tick still page
-    /// deterministically — Postgres stamps `created_at` from the transaction
-    /// clock, so equal timestamps are ordinary rather than hypothetical. It
-    /// is a tie-break and nothing more: id order carries no meaning of its
-    /// own, it just has to be the same order every time and on every backend.
-    /// Without a total order, `offset` walks a set the store is free to
-    /// re-shuffle between pages, and a paginating caller silently skips and
-    /// repeats rows.
+    /// Ordered by `(created_at, checkpoint_id)` descending, comparing the id
+    /// **bytewise**. Without a total order, `offset` walks a set the store is
+    /// free to re-shuffle between pages, and a paginating caller silently
+    /// skips and repeats rows.
+    ///
+    /// The id is a tie-break and nothing more: its order carries no meaning of
+    /// its own, it just has to be the same order every time and on every
+    /// backend. Bytewise is what makes that last part true — a SQL backend
+    /// sorting text under its database collation orders `-`, `_` and case
+    /// differently from every backend that compares the raw bytes, so it must
+    /// ask for the byte order explicitly.
+    ///
+    /// Ties are rare rather than routine: a backend that stamps `created_at`
+    /// per write has to land two writes inside one tick of its clock to
+    /// produce one. The tie-break is here so that the order is defined when
+    /// that happens, not because it happens often.
     ///
     /// Every filter is optional and narrows the set: `checkpoint_id` to a
     /// single id, `created_after` inclusive, `created_before` exclusive — a

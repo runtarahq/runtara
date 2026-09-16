@@ -20,13 +20,20 @@ use crate::persistence::{
     ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, Persistence,
 };
 
-/// Assert a page of checkpoints descends by `(created_at, checkpoint_id)`.
+/// Assert a page of checkpoints descends by `(created_at, checkpoint_id)`,
+/// comparing the id bytewise.
 ///
 /// The ids are unique within an instance, so the order is total and each
-/// neighbouring pair must be strictly decreasing. This is what pins the
-/// tie-break: it holds vacuously when no two rows share a timestamp, and bites
-/// when they do — a case no fixture can force, since `save_checkpoint` takes no
-/// timestamp and the backend supplies its own.
+/// neighbouring pair must be strictly decreasing.
+///
+/// This checks the primary key of the sort, not the tie-break. `save_checkpoint`
+/// takes no timestamp — the backend supplies its own — so no fixture written
+/// against this trait can make two rows share a `created_at`, which leaves the
+/// id clause here permanently unreached. Pinning the tie-break means forcing a
+/// tie through a backend's own storage, so it belongs in that backend's tests:
+/// see `checkpoints_sharing_a_timestamp_break_the_tie_bytewise` in
+/// `runtara-store-postgres`, where the database collation makes the byte order
+/// a real requirement rather than an obvious one.
 fn assert_checkpoints_ordered(page: &[CheckpointRecord]) {
     for pair in page.windows(2) {
         let (newer, older) = (&pair[0], &pair[1]);

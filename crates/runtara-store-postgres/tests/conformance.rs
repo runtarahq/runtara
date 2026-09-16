@@ -565,3 +565,73 @@ async fn legacy_resume_is_retired_and_not_delivered_by_old_writers() {
     );
     backend.delete_instances_batch(&[id]).await.unwrap();
 }
+
+/// Checkpoints sharing a `created_at` fall back to the id, compared bytewise.
+///
+/// The tie is forced with raw SQL because it cannot be produced through the
+/// trait: `save_checkpoint` stamps `NOW()` server-side and each call is its own
+/// autocommit statement, so two saves never share a microsecond. That is also
+/// why the shared conformance sequence cannot cover this.
+///
+/// The ids are chosen to order differently under the two candidate rules. Under
+/// a bare `ORDER BY checkpoint_id DESC` on an `en_US.utf8` database, punctuation
+/// and case are weak, giving `Fetch-Order, fetchOrder, fetch_order, fetch-order`.
+/// Bytewise — what `COLLATE "C"` asks for, and what every backend comparing raw
+/// bytes produces — `_` (0x5F) outranks `O` (0x4F) outranks `-` (0x2D), and the
+/// capital `F` (0x46) sorts below every lowercase `f` (0x66). A regression that
+/// drops the collation fails here rather than silently paging two backends
+/// apart on ids that carry `-`, `_` or mixed case, which real ones do.
+#[tokio::test]
+async fn checkpoints_sharing_a_timestamp_break_the_tie_bytewise() {
+    use runtara_core::persistence::Persistence;
+
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "checkpoint-tie")
+        .await
+        .unwrap();
+
+    // One timestamp for every row: the tie-break alone decides the order.
+    let shared_at = chrono::Utc::now();
+    for checkpoint_id in ["fetch_order", "fetch-order", "fetchOrder", "Fetch-Order"] {
+        sqlx::query(
+            "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&id)
+        .bind(checkpoint_id)
+        .bind(checkpoint_id.as_bytes())
+        .bind(shared_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let listed = backend
+        .list_checkpoints(&id, None, 50, 0, None, None)
+        .await
+        .unwrap();
+    let order: Vec<&str> = listed.iter().map(|c| c.checkpoint_id.as_str()).collect();
+    assert_eq!(
+        order,
+        ["fetch_order", "fetchOrder", "fetch-order", "Fetch-Order"],
+        "tied checkpoints must break the tie on the id compared bytewise, not \
+         under the database collation"
+    );
+
+    // The same order has to survive paging, which is the reason it is pinned:
+    // an OFFSET over a partial order skips and repeats rows.
+    let mut paged = Vec::new();
+    for offset in 0..4 {
+        let page = backend
+            .list_checkpoints(&id, None, 1, offset, None, None)
+            .await
+            .unwrap();
+        paged.push(page[0].checkpoint_id.clone());
+    }
+    assert_eq!(paged, order, "paging must tile the tie-broken order");
+
+    backend.delete_instances_batch(&[id]).await.unwrap();
+}
