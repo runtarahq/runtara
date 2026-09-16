@@ -567,8 +567,19 @@ impl Persistence for InMemoryPersistence {
             .filter(|i| status.is_none_or(|s| i.status == s))
             .cloned()
             .collect();
-        // Return newest instances first.
-        found.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        // Newest first, ordered by `(created_at, instance_id)`: the id breaks
+        // ties so instances registered inside one clock tick still page
+        // deterministically. `sort_by_key(Reverse(created_at))` alone left
+        // tied rows in `HashMap` iteration order, which is arbitrary and
+        // re-shuffles as the map rehashes — so `offset` walked a different
+        // set on every call. `String::cmp` is bytewise, which is the order
+        // the trait specifies.
+        found.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.instance_id.cmp(&b.instance_id))
+        });
+        found.reverse();
         Ok(found
             .into_iter()
             .skip(offset.max(0) as usize)
@@ -989,6 +1000,60 @@ fn matches_filter(record: &PairedRecordSummary, filter: &ListPairedRecordsFilter
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    /// Instances sharing a `created_at` fall back to the id, compared bytewise.
+    ///
+    /// The tie is forced by stamping the store directly. Registrations *do*
+    /// tie through the trait — `Utc::now()` resolves to a microsecond on
+    /// macOS, and four back-to-back registrations land inside one tick
+    /// roughly one run in five — but "roughly" is not a test. Reaching into
+    /// `Store` makes it every run, which is the only way this pins anything.
+    ///
+    /// The ids are the ones the shared conformance sequence uses, and they
+    /// order differently bytewise than under a text collation. That matters
+    /// for the other backend rather than this one: `String::cmp` is bytewise
+    /// and has no alternative, while a SQL backend has to ask for the byte
+    /// order explicitly. Pinning the same expectation on both sides is what
+    /// makes them comparable.
+    #[tokio::test]
+    async fn in_memory_instances_sharing_a_timestamp_break_the_tie_bytewise() {
+        let backend = InMemoryPersistence::new();
+        let tenant = "instance-tie";
+        for suffix in ["Step-A", "step-a", "stepA", "step_a"] {
+            backend.register_instance(suffix, tenant).await.unwrap();
+        }
+        // One timestamp for every row: the tie-break alone decides the order.
+        let shared_at = Utc::now();
+        {
+            let mut store = backend.store.lock().unwrap();
+            for instance in store.instances.values_mut() {
+                instance.created_at = shared_at;
+            }
+        }
+
+        let listed = backend
+            .list_instances(Some(tenant), None, 50, 0)
+            .await
+            .unwrap();
+        let order: Vec<&str> = listed.iter().map(|i| i.instance_id.as_str()).collect();
+        assert_eq!(
+            order,
+            ["step_a", "stepA", "step-a", "Step-A"],
+            "tied instances must break the tie on the id compared bytewise"
+        );
+
+        // The same order has to survive paging, which is the reason it is
+        // pinned: an OFFSET over a partial order skips and repeats rows.
+        let mut paged = Vec::new();
+        for offset in 0..4 {
+            let page = backend
+                .list_instances(Some(tenant), None, 1, offset)
+                .await
+                .unwrap();
+            paged.push(page[0].instance_id.clone());
+        }
+        assert_eq!(paged, order, "paging must tile the tie-broken order");
+    }
 
     /// Run the backend contract against the in-memory implementation.
     #[tokio::test]
