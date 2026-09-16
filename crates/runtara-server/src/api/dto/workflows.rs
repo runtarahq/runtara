@@ -1034,6 +1034,12 @@ pub struct WorkflowStepDto {
 pub struct CheckpointMetadataDto {
     /// Position in the full ordered list, not within this page: with
     /// `size=20`, `page=2` starts at `seq` 40.
+    ///
+    /// Derived from the offset that was asked for rather than from the row
+    /// itself, so it identifies a row only within one request. Checkpoints
+    /// written or removed between two requests shift the list under the
+    /// offset, and a row can then repeat or be missed across pages — a
+    /// property of offset pagination, not of this field.
     pub seq: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "stepId")]

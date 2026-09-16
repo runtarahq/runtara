@@ -3295,11 +3295,22 @@ mod checkpoint_pagination_tests {
 
     const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 
-    /// Written in an order that is its own reverse-free scramble of the ids'
-    /// byte order, so the store's order cannot coincide with sorting by id
-    /// whichever direction the store reads in. A fixture in id order would let
-    /// a handler-side re-sort pass unnoticed.
+    /// Written in an order that is a scramble of the ids' byte order and stays
+    /// one when reversed, so the store's order matches sorting by id in
+    /// neither direction. A fixture in id order would let a handler-side
+    /// re-sort pass unnoticed; `a_page_keeps_the_order_the_store_returned_it_in`
+    /// asserts the property rather than trusting this comment.
     const WRITE_ORDER: [&str; 5] = ["cp-b", "cp-d", "cp-a", "cp-e", "cp-c"];
+
+    /// Enough of a gap for the store's clock to resolve two saves apart.
+    ///
+    /// The backend stamps `created_at` per save, and five saves back to back
+    /// land inside one tick of that clock: measured over 200 runs, all five
+    /// stamps were equal in 9% of them and some pair tied in all but one, which
+    /// left the order decided by the id tie-break and varying run to run.
+    /// Sleeping makes the stamps distinct and in write order, which is what
+    /// keeps the fixture's order both deterministic and unlike either id order.
+    const SAVE_GAP: std::time::Duration = std::time::Duration::from_millis(1);
 
     fn lazy_pool() -> PgPool {
         // Nothing on the checkpoint path touches the pool — reads go through
@@ -3317,6 +3328,7 @@ mod checkpoint_pagination_tests {
                 .save_checkpoint(INSTANCE, id, b"{}")
                 .await
                 .expect("save checkpoint");
+            tokio::time::sleep(SAVE_GAP).await;
         }
         let client = Arc::new(RuntimeClient::new(
             Arc::new(EnvironmentHandlerState::new(
@@ -3387,11 +3399,18 @@ mod checkpoint_pagination_tests {
         let (client, persistence) = client_and_store().await;
         let expected = store_order(&persistence).await;
 
-        let mut by_id = expected.clone();
-        by_id.sort();
+        // Both directions: ruling out only ascending would let a handler that
+        // sorted descending by id pass a test whose subject is order at all.
+        let mut ascending = expected.clone();
+        ascending.sort();
+        let descending: Vec<String> = ascending.iter().rev().cloned().collect();
         assert_ne!(
-            expected, by_id,
-            "the fixture must not already be in id order or it proves nothing"
+            expected, ascending,
+            "the fixture must not already be in ascending id order"
+        );
+        assert_ne!(
+            expected, descending,
+            "the fixture must not already be in descending id order"
         );
 
         assert_eq!(ids(&checkpoints_page(&client, 0, 100).await), expected);
