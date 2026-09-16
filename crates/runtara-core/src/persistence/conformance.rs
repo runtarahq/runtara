@@ -285,8 +285,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         )
         .await
         .expect("seed running failed");
+    // Park it the way a drain force-stop does, through `complete_instance`,
+    // which is what stamps the terminal fields. A bare status write to
+    // `suspended` leaves them unset, and then the promotion assertions below
+    // only prove that a field nothing ever wrote is still empty.
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
+                .with_termination("sleeping", None),
+        )
         .await
         .expect("suspend failed");
     let before = backend
@@ -295,6 +302,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("get_instance failed")
         .expect("instance should exist");
     assert_eq!(before.status, CoreInstanceStatus::Suspended);
+    assert!(
+        before.finished_at.is_some(),
+        "precondition: parking an instance must stamp finished_at"
+    );
+    assert!(
+        before.termination_reason.is_some(),
+        "precondition: parking an instance must stamp termination_reason"
+    );
 
     backend
         .mark_instance_running(&instance_id, Utc::now())
@@ -314,9 +329,29 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         promoted.started_at, before.started_at,
         "mark_instance_running must keep the original started_at"
     );
-    assert!(promoted.finished_at.is_none());
+    // The stamps above describe a run that is no longer over. Carrying them
+    // into `running` puts `finished_at` before `started_at`, which renders as
+    // a negative duration.
+    assert!(
+        promoted.finished_at.is_none(),
+        "promoting a parked instance must clear the stale finished_at"
+    );
+    assert!(
+        promoted.termination_reason.is_none(),
+        "promoting a parked instance must clear the stale termination_reason"
+    );
 
     // --- update status → running -------------------------------------------
+    // Same clear, asserted on the raw write rather than through
+    // `mark_instance_running`, so a backend that overrides the promotion
+    // helpers is still pinned here.
+    backend
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
+                .with_termination("sleeping", None),
+        )
+        .await
+        .expect("re-park before the raw status write failed");
     backend
         .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
@@ -328,6 +363,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("instance must still exist");
     assert_eq!(record.status, CoreInstanceStatus::Running);
     assert!(record.started_at.is_some());
+    assert!(
+        record.finished_at.is_none(),
+        "a status write that stamps started_at must clear the stale finished_at"
+    );
+    assert!(
+        record.termination_reason.is_none(),
+        "a status write that stamps started_at must clear the stale termination_reason"
+    );
 
     // --- checkpoints --------------------------------------------------------
     let checkpoint_id = "ckpt-1";

@@ -544,11 +544,26 @@ pub trait Persistence: Send + Sync {
     /// Set an instance's status, stamping `started_at` when one is supplied
     /// and leaving it untouched when it is not.
     ///
-    /// The raw write, with no policy of its own: it applies the status it is
-    /// given. The launch path wants [`Self::mark_instance_started`] or
-    /// [`Self::mark_instance_running`], which guard the transition, and a
-    /// terminal transition wants [`Self::complete_instance`], which is what
-    /// stamps `finished_at`.
+    /// Supplying `started_at` says the row is entering a run, and carries one
+    /// required guarantee with it: `finished_at` and `termination_reason` are
+    /// cleared in the same write. A row that ran before may still hold both
+    /// from an earlier suspend or drain force-stop; those describe a run that
+    /// is no longer over, and leaving them puts `finished_at` before
+    /// `started_at`, which renders a resumed run as a negative duration.
+    /// `exit_code` is deliberately not part of the clear. Omitting
+    /// `started_at` writes the status alone and touches nothing else.
+    ///
+    /// The clear is not optional for a backend to implement, and it is not
+    /// only this method's concern: the default
+    /// [`Self::mark_instance_running`] and [`Self::mark_instance_started`]
+    /// both route here with a `started_at`, so they inherit it, and a backend
+    /// overriding either owes the same clear there.
+    ///
+    /// Past that, the raw write: it applies the status it is given and guards
+    /// the transition not at all. The launch path wants
+    /// [`Self::mark_instance_started`] or [`Self::mark_instance_running`],
+    /// which do guard it, and a terminal transition wants
+    /// [`Self::complete_instance`], which is what stamps `finished_at`.
     ///
     /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_status(

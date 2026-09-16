@@ -205,6 +205,12 @@ impl Persistence for InMemoryPersistence {
         inst.status = status;
         if let Some(at) = started_at {
             inst.started_at = Some(at);
+            // Stamping `started_at` means the row is entering a run, so the
+            // terminal fields left by the previous one no longer describe it.
+            // Keeping them would put `finished_at` before `started_at` and
+            // render a resumed run as a negative duration.
+            inst.finished_at = None;
+            inst.termination_reason = None;
         }
         Ok(())
     }
