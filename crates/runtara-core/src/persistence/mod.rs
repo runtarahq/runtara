@@ -560,10 +560,13 @@ pub trait Persistence: Send + Sync {
     /// overriding either owes the same clear there.
     ///
     /// Past that, the raw write: it applies the status it is given and guards
-    /// the transition not at all. The launch path wants
-    /// [`Self::mark_instance_started`] or [`Self::mark_instance_running`],
-    /// which do guard it, and a terminal transition wants
-    /// [`Self::complete_instance`], which is what stamps `finished_at`.
+    /// the transition not at all. A caller stamping `running` after a launch
+    /// wants [`Self::mark_instance_started`], which refuses once the run has
+    /// moved past the pre-run states; a wake or resume wants
+    /// [`Self::mark_instance_running`], which is deliberately unguarded
+    /// because it promotes from `suspended` — the state the other one refuses.
+    /// A terminal transition wants [`Self::complete_instance`], which is what
+    /// stamps `finished_at`.
     ///
     /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_status(
@@ -589,8 +592,18 @@ pub trait Persistence: Send + Sync {
     /// overlapping `complete_instance*` variants. The behavior is
     /// controlled entirely by the [`CompleteInstanceParams`] struct —
     /// see its documentation for the per-field semantics (which fields are
-    /// replaced and which are merged, terminal-only `finished_at`, guard
-    /// against races).
+    /// replaced and which are merged, guard against races).
+    ///
+    /// `finished_at` is stamped for `completed`, `failed`, `cancelled` **and**
+    /// `suspended`. Parking counts: it ends the attempt that was in flight,
+    /// even though the instance will run again. A `running` transition carries
+    /// metadata without finalizing anything and stamps nothing. A supplied
+    /// `termination_reason` is written on the same transition.
+    ///
+    /// Those two fields are what [`Self::update_instance_status`] clears when a
+    /// later call supplies a `started_at`. The pairing is the whole reason a
+    /// resumed run does not report a negative duration, so a backend that
+    /// declines to stamp here silently weakens the clear over there.
     ///
     /// Return value:
     /// - `Ok(true)` — the update matched a row.
