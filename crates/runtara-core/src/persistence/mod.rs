@@ -544,10 +544,28 @@ pub trait Persistence: Send + Sync {
     /// Set an instance's status, stamping `started_at` when one is supplied
     /// and leaving it untouched when it is not.
     ///
-    /// The raw write, with no policy of its own: it applies the status it is
-    /// given. The launch path wants [`Self::mark_instance_started`] or
-    /// [`Self::mark_instance_running`], which guard the transition, and a
-    /// terminal transition wants [`Self::complete_instance`], which is what
+    /// Supplying `started_at` says the row is entering a run, and carries one
+    /// required guarantee with it: `finished_at` and `termination_reason` are
+    /// cleared in the same write. A row that ran before may still hold both
+    /// from an earlier suspend or drain force-stop; those describe a run that
+    /// is no longer over, and leaving them puts `finished_at` before
+    /// `started_at`, which renders a resumed run as a negative duration.
+    /// `exit_code` is deliberately not part of the clear. Omitting
+    /// `started_at` writes the status alone and touches nothing else.
+    ///
+    /// The clear is not optional for a backend to implement, and it is not
+    /// only this method's concern: the default
+    /// [`Self::mark_instance_running`] and [`Self::mark_instance_started`]
+    /// both route here with a `started_at`, so they inherit it, and a backend
+    /// overriding either owes the same clear there.
+    ///
+    /// Past that, the raw write: it applies the status it is given and guards
+    /// the transition not at all. A caller stamping `running` after a launch
+    /// wants [`Self::mark_instance_started`], which refuses once the run has
+    /// moved past the pre-run states; a wake or resume wants
+    /// [`Self::mark_instance_running`], which is deliberately unguarded
+    /// because it promotes from `suspended` — the state the other one refuses.
+    /// A terminal transition wants [`Self::complete_instance`], which is what
     /// stamps `finished_at`.
     ///
     /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
@@ -574,8 +592,18 @@ pub trait Persistence: Send + Sync {
     /// overlapping `complete_instance*` variants. The behavior is
     /// controlled entirely by the [`CompleteInstanceParams`] struct —
     /// see its documentation for the per-field semantics (which fields are
-    /// replaced and which are merged, terminal-only `finished_at`, guard
-    /// against races).
+    /// replaced and which are merged, guard against races).
+    ///
+    /// `finished_at` is stamped for `completed`, `failed`, `cancelled` **and**
+    /// `suspended`. Parking counts: it ends the attempt that was in flight,
+    /// even though the instance will run again. A `running` transition carries
+    /// metadata without finalizing anything and stamps nothing. A supplied
+    /// `termination_reason` is written on the same transition.
+    ///
+    /// Those two fields are what [`Self::update_instance_status`] clears when a
+    /// later call supplies a `started_at`. The pairing is the whole reason a
+    /// resumed run does not report a negative duration, so a backend that
+    /// declines to stamp here silently weakens the clear over there.
     ///
     /// Return value:
     /// - `Ok(true)` — the update matched a row.
