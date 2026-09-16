@@ -111,6 +111,19 @@ pub(crate) trait Dialect: Send + Sync + 'static {
 
     /// SQL for `list_checkpoints` (binds: instance_id, checkpoint_id_filter,
     /// created_after, created_before, limit, offset).
+    ///
+    /// Must order by `created_at DESC, checkpoint_id COLLATE "C" DESC`. The id
+    /// keeps the order total, so an `OFFSET` never pages a set the planner is
+    /// free to re-shuffle between calls.
+    ///
+    /// `COLLATE "C"` is not optional. A bare `ORDER BY checkpoint_id` sorts
+    /// under the database collation, which reorders punctuation and case
+    /// against the byte order the core contract specifies and every non-SQL
+    /// backend sorts by: under `en_US.utf8`, `Fetch-Order` leads `fetch_order`
+    /// and under `C` it trails it. Checkpoint ids carry `-`, `_` and mixed
+    /// case, so the two disagree on real input. Leaving it off would also tie
+    /// the page order to the deployment's locale and libc version, where an
+    /// ICU upgrade reshuffles pages underneath a paginating caller.
     fn sql_list_checkpoints() -> &'static str;
 
     /// SQL for `count_checkpoints` (binds: instance_id,

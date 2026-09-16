@@ -16,9 +16,35 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::persistence::{
-    CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec, ListEventsFilter,
-    ListPairedRecordsFilter, PairedRecordStatus, Persistence,
+    CheckpointRecord, CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec,
+    ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, Persistence,
 };
+
+/// Assert a page of checkpoints descends by `(created_at, checkpoint_id)`,
+/// comparing the id bytewise.
+///
+/// The ids are unique within an instance, so the order is total and each
+/// neighbouring pair must be strictly decreasing.
+///
+/// This checks the primary key of the sort, not the tie-break. `save_checkpoint`
+/// takes no timestamp — the backend supplies its own — so no fixture written
+/// against this trait can make two rows share a `created_at`, which leaves the
+/// id clause here permanently unreached. Pinning the tie-break means forcing a
+/// tie through a backend's own storage, so it belongs in that backend's tests:
+/// see `checkpoints_sharing_a_timestamp_break_the_tie_bytewise` in
+/// `runtara-store-postgres`, where the database collation makes the byte order
+/// a real requirement rather than an obvious one.
+fn assert_checkpoints_ordered(page: &[CheckpointRecord]) {
+    for pair in page.windows(2) {
+        let (newer, older) = (&pair[0], &pair[1]);
+        assert!(
+            (newer.created_at, &newer.checkpoint_id) > (older.created_at, &older.checkpoint_id),
+            "checkpoints must descend by (created_at, checkpoint_id), but {} precedes {}",
+            newer.checkpoint_id,
+            older.checkpoint_id
+        );
+    }
+}
 
 /// Run the full conformance sequence against `backend`.
 ///
@@ -455,6 +481,97 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         total_after_resave, 1,
         "only one checkpoint has been saved for this instance"
     );
+
+    // --- checkpoint ordering ------------------------------------------------
+    // `list_checkpoints` pages with limit/offset, so it needs a *total* order or
+    // `offset` walks a set the store is free to re-shuffle between calls. The
+    // contract is `(created_at, checkpoint_id)` descending. These ids sort
+    // lexicographically in write order, so the expected sequence holds whether
+    // or not two writes land in the same clock tick.
+    for id in ["ckpt-2", "ckpt-3"] {
+        backend
+            .save_checkpoint(&instance_id, id, id.as_bytes())
+            .await
+            .expect("save_checkpoint failed (ordering fixture)");
+    }
+
+    let ordered = backend
+        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .await
+        .expect("list_checkpoints for ordering failed");
+    let ids: Vec<String> = ordered.iter().map(|c| c.checkpoint_id.clone()).collect();
+    assert_eq!(
+        ids,
+        ["ckpt-3", "ckpt-2", "ckpt-1"],
+        "list_checkpoints must return newest first"
+    );
+    assert_checkpoints_ordered(&ordered);
+
+    // Offset pagination must tile that same order. This is the symptom an
+    // unstated order produces: matching totals, mismatched pages.
+    let mut one_at_a_time = Vec::new();
+    for offset in 0..3 {
+        let page = backend
+            .list_checkpoints(&instance_id, None, 1, offset, None, None)
+            .await
+            .expect("single-row page of list_checkpoints failed");
+        assert_eq!(
+            page.len(),
+            1,
+            "offset {offset} over three checkpoints must yield a row"
+        );
+        one_at_a_time.push(page[0].checkpoint_id.clone());
+    }
+    assert_eq!(
+        one_at_a_time, ids,
+        "paging one row at a time must tile the unpaged order, not a second one"
+    );
+
+    let first_page = backend
+        .list_checkpoints(&instance_id, None, 2, 0, None, None)
+        .await
+        .expect("first page of list_checkpoints failed");
+    let second_page = backend
+        .list_checkpoints(&instance_id, None, 2, 2, None, None)
+        .await
+        .expect("second page of list_checkpoints failed");
+    let tiled: Vec<String> = first_page
+        .iter()
+        .chain(second_page.iter())
+        .map(|c| c.checkpoint_id.clone())
+        .collect();
+    assert_eq!(
+        tiled, ids,
+        "two-row pages must tile the unpaged order without skipping or repeating a row"
+    );
+
+    // A re-save restamps `created_at`. Replay re-saves every key it already
+    // wrote, so a backend that keeps the original stamp pages a resumed instance
+    // in a different order than one that does not — with the sort above still in
+    // place, which is what makes this worth pinning here. Compared against the
+    // newest existing stamp rather than by position: a backend that fails to
+    // restamp leaves this checkpoint strictly older, while a tie between two
+    // same-tick writes is conformant.
+    let newest_before_resave = ordered[0].created_at;
+    backend
+        .save_checkpoint(&instance_id, checkpoint_id, &refreshed_state)
+        .await
+        .expect("re-saving for the restamp check failed");
+    let restamped = backend
+        .list_checkpoints(&instance_id, Some(checkpoint_id), 50, 0, None, None)
+        .await
+        .expect("list_checkpoints after re-save failed");
+    assert_eq!(restamped.len(), 1, "a re-save must not add a second row");
+    assert!(
+        restamped[0].created_at >= newest_before_resave,
+        "a re-save must restamp created_at: {checkpoint_id} still dates from before \
+         the checkpoints written after it, so it pages as the oldest"
+    );
+    let reordered = backend
+        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .await
+        .expect("list_checkpoints after re-save failed");
+    assert_checkpoints_ordered(&reordered);
 
     // --- update instance checkpoint pointer --------------------------------
     backend
