@@ -5,7 +5,7 @@
 //! Each one describes a happy-path call: the input the dispatcher should
 //! accept and what the returned output must contain. The runner walks every
 //! `crates/agents/runtara-agent-*/fixtures/` directory, loads the production bundle
-//! (`target/wasm32-wasip2/release/`), and invokes each fixture through
+//! (`target/agent-components/`), and invokes each fixture through
 //! `ComponentDispatcherService::test_capability`.
 //!
 //! Keeping fixtures inside the agent crate keeps each agent self-contained —
@@ -40,6 +40,8 @@
 //! looked up from that crate's staged `meta.json`, so hyphen↔underscore
 //! variation between crate names and agent ids is handled automatically.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -57,7 +59,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn bundle_dir() -> PathBuf {
-    workspace_root().join("target/wasm32-wasip2/release")
+    common::bundle_dir()
 }
 
 fn agents_crates_dir() -> PathBuf {
@@ -67,7 +69,6 @@ fn agents_crates_dir() -> PathBuf {
 fn env() -> DispatcherEnv {
     DispatcherEnv {
         proxy_url: "http://localhost:9999".into(),
-        agent_service_url: "http://localhost:9998".into(),
         object_model_url: "http://localhost:9997".into(),
         core_http_url: "http://localhost:9996".into(),
     }

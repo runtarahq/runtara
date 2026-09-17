@@ -204,7 +204,7 @@ Acquire a connection dynamically within a workflow, enabling agent-like behavior
 
 **Fields:**
 - `connectionId` - Reference to connection in the connection registry
-- `integrationId` - Type of connection (bearer, api_key, basic_auth, sftp, etc.)
+- `integrationId` - Type of connection (bearer, api_key, basic_auth, mcp, etc.)
 
 **Behavior:**
 - Uses same connection callbacks as agents (fetch from connection service)
@@ -247,7 +247,6 @@ Agents declare security capability via `secure` flag in metadata:
 | Agent | secure | Can receive connection data |
 |-------|--------|---------------------------|
 | HTTP | true | Yes |
-| SFTP | true | Yes |
 | Transform | false | No |
 | Utils | false | No |
 | Text | false | No |
@@ -321,11 +320,11 @@ Runtime enforcement will wrap step execution with tokio::time::timeout.
 #### Connection Step Security
 The connection step implementation includes:
 1. `secure: bool` field added to `AgentModuleConfig` in agent_meta.rs
-   - HTTP and SFTP agents are marked as secure
+   - The HTTP agent is marked as secure
    - All other agents are not secure
 2. `ConnectionStep` type added to schema_types.rs with:
    - `connectionId` - Reference to connection in registry
-   - `integrationId` - Type of connection (bearer, api_key, basic_auth, sftp)
+   - `integrationId` - Type of connection (bearer, api_key, basic_auth, mcp)
 3. Connection fetch code generation in `steps/connection.rs`
    - Fetches connection from external service
    - Handles rate limiting with durable sleep and heartbeat

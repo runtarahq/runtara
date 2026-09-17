@@ -34,7 +34,7 @@ pub struct ValidateMappingsParams {
 #[serde(deny_unknown_fields)]
 pub struct ListConnectionsParams {
     #[schemars(
-        description = "Filter by integration type (the connection's `integrationId`, e.g., 'shopify_access_token', 'openai_api_key', 'sftp', 'http_bearer'). Discover valid values from each agent's `integrationIds` field returned by list_agents — do not pass an agent id like 'shopify' here."
+        description = "Filter by integration type (the connection's `integrationId`, e.g., 'shopify_access_token', 'openai_api_key', 'mcp', 'http_bearer'). Discover valid values from each agent's `integrationIds` field returned by list_agents — do not pass an agent id like 'shopify' here."
     )]
     pub integration_id: Option<String>,
 }

@@ -2615,32 +2615,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libssh2-sys"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "220e4f05ad4a218192533b300327f5150e809b54c4ec83b5a1d91833601811b9"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "openssl-sys",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "libz-sys"
-version = "1.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3127,15 +3101,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "openssl-src"
-version = "300.6.0+3.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8e8cbfd3a4a8c8f089147fd7aaa33cf8c7450c4d09f8f80698a0cf093abeff4"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "openssl-sys"
 version = "0.9.116"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3143,7 +3108,6 @@ checksum = "f28a22dc7140cda5f096e5e7724a6962ca81a7f8bfd2979f9b18c11af56318c4"
 dependencies = [
  "cc",
  "libc",
- "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
@@ -4311,7 +4275,6 @@ dependencies = [
  "runtara-agent-openai",
  "runtara-agent-quickbooks",
  "runtara-agent-s3-storage",
- "runtara-agent-sftp",
  "runtara-agent-sharepoint",
  "runtara-agent-shopify",
  "runtara-agent-slack",
@@ -4513,18 +4476,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtara-agent-sftp"
-version = "8.9.10"
-dependencies = [
- "runtara-agent-macro",
- "runtara-dsl",
- "runtara-http",
- "serde",
- "serde_json",
- "wit-bindgen 0.58.0",
-]
-
-[[package]]
 name = "runtara-agent-sharepoint"
 version = "8.9.10"
 dependencies = [
@@ -4675,14 +4626,12 @@ name = "runtara-agents"
 version = "8.9.10"
 dependencies = [
  "base64 0.22.1",
- "openssl",
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
  "serial_test",
- "ssh2",
  "strum",
  "tempfile",
  "tokio",
@@ -5968,18 +5917,6 @@ dependencies = [
  "http-body",
  "http-body-util",
  "pin-project-lite",
-]
-
-[[package]]
-name = "ssh2"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f84d13b3b8a0d4e91a2629911e951db1bb8671512f5c09d7d4ba34500ba68c8"
-dependencies = [
- "bitflags",
- "libc",
- "libssh2-sys",
- "parking_lot",
 ]
 
 [[package]]

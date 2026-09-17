@@ -102,7 +102,7 @@ async fn seed(pool: &PgPool) {
             "http_api_key",
             "INVALID_CREDENTIALS",
         ),
-        ("sftp-active", TENANT, "sftp", "ACTIVE"),
+        ("mcp-active", TENANT, "mcp", "ACTIVE"),
         ("postgres-active", TENANT, "postgres", "ACTIVE"),
         ("other-tenant-key", "someone_else", "http_api_key", "ACTIVE"),
     ];

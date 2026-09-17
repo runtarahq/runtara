@@ -40,7 +40,6 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("openai", runtara_agent_openai::agent_info()),
         ("s3-storage", runtara_agent_s3_storage::agent_info()),
         ("sqs", runtara_agent_sqs::agent_info()),
-        ("sftp", runtara_agent_sftp::agent_info()),
         ("sharepoint", runtara_agent_sharepoint::agent_info()),
         ("shopify", runtara_agent_shopify::agent_info()),
         ("slack", runtara_agent_slack::agent_info()),

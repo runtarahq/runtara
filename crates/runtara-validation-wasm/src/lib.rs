@@ -717,7 +717,7 @@ mod tests {
                 json!({"auth_mode": "bearer"}),
             ),
             (
-                "sftp-private-key",
+                "conditional-private-key",
                 r#"{
                     "fields": {
                         "auth_mode": {"type":"string","required":true},

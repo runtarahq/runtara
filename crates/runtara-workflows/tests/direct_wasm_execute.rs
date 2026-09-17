@@ -12874,7 +12874,7 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
 // ============================================================================
 //
 // Both agents used to forward every capability call to a native handler in the
-// server process over `$RUNTARA_AGENT_SERVICE_URL`. They now do the work in
+// server process over HTTP. They now do the work in
 // the sandbox, so these two runs prove the real implementations survive
 // composition into a workflow component — not just standalone invocation.
 // Nothing here stands up an agent service; a surviving forwarder would fail.

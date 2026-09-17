@@ -430,7 +430,7 @@ pub async fn delete_connection_handler(
     get,
     path = "/api/runtime/connections/operator/{operatorName}",
     params(
-        ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'SFTP')"),
+        ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'MCP')"),
         ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)")
     ),
     responses(

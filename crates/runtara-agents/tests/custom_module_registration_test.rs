@@ -81,21 +81,20 @@ fn test_capability_macro_emits_module_metadata_static() {
 }
 
 #[test]
-fn test_capability_macro_emits_executor_static() {
+fn test_capability_macro_emits_wasm_executor_wrapper() {
     let input = serde_json::json!({
         "value": "hello world"
     });
 
-    let output = (__CAPABILITY_EXECUTOR_CUSTOM_TEST_ACTION.execute)(input)
-        .expect("capability execution should succeed");
+    let output = __executor_custom_test_action(input).expect("capability execution should succeed");
 
     assert_eq!(output, serde_json::json!("Processed: hello world"));
 }
 
 #[test]
 fn test_static_registry_includes_builtin_modules() {
-    use runtara_agents::registry::{find_agent_module, get_all_agent_modules};
     use runtara_dsl::agent_meta::BUILTIN_AGENT_MODULES;
+    use runtara_dsl::agent_meta::{find_agent_module, get_all_agent_modules};
 
     let modules = get_all_agent_modules();
     let module_ids: Vec<&str> = modules.iter().map(|m| m.id).collect();

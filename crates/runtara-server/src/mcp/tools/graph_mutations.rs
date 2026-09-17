@@ -905,7 +905,7 @@ pub struct AddAgentStepParams {
     )]
     pub on_error_step: Option<String>,
     #[schemars(
-        description = "Connection UUID for agents that need credentials (shopify, openai, sftp, …). \
+        description = "Connection UUID for agents that need credentials (shopify, openai, mcp, …). \
                        This is the `id` field from list_connections — NOT the connection title or \
                        integrationId. Discover candidates with list_agents (see `integrationIds`) \
                        then list_connections(integration_id=<one of those>)."
