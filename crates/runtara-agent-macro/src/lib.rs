@@ -336,18 +336,11 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Generate metadata registration
     let meta_ident = format_ident!("__CAPABILITY_META_{}", fn_name.to_string().to_uppercase());
-    let executor_ident = format_ident!(
-        "__CAPABILITY_EXECUTOR_{}",
-        fn_name.to_string().to_uppercase()
-    );
     let executor_fn_ident = format_ident!("__executor_{}", fn_name);
 
     let display_name_token = option_to_tokens(&display_name);
     let description_token = option_to_tokens(&description);
     let module_token = option_to_tokens(&module);
-
-    // For executor, module must be provided
-    let module_str = module.clone().unwrap_or_else(|| "unknown".to_string());
 
     // Parse the input type as an identifier for the executor function
     let input_type_ident = format_ident!("{}", input_type);
@@ -410,10 +403,11 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let await_result = asyncness.map(|_| quote! { .await });
     let invoke_fn_ident = format_ident!("__invoke_{}", fn_name);
     let executor_wrapper = quote! {
-        // A uniform, directly awaited adapter for component dispatch. Native
-        // executor descriptors retain their existing sync/async types.
+        // A uniform, directly awaited adapter for component dispatch. Crate
+        // visible so `agent_component!` can dispatch a capability declared in
+        // a child module.
         #[doc(hidden)]
-        async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+        pub(crate) async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
             #executor_fn_ident(input)#await_result
         }
 
@@ -503,28 +497,6 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { &[] }
     };
 
-    let executor_registration = if asyncness.is_some() {
-        quote! {
-            #[allow(non_upper_case_globals)]
-            #[doc(hidden)]
-            pub static #executor_ident: runtara_dsl::agent_meta::AsyncCapabilityExecutor = runtara_dsl::agent_meta::AsyncCapabilityExecutor {
-                module: #module_str,
-                capability_id: #capability_id,
-                execute: |input| Box::pin(#executor_fn_ident(input)),
-            };
-        }
-    } else {
-        quote! {
-            #[allow(non_upper_case_globals)]
-            #[doc(hidden)]
-            pub static #executor_ident: runtara_dsl::agent_meta::CapabilityExecutor = runtara_dsl::agent_meta::CapabilityExecutor {
-                module: #module_str,
-                capability_id: #capability_id,
-                execute: #executor_fn_ident,
-            };
-        }
-    };
-
     let expanded = quote! {
         #input_fn
 
@@ -552,7 +524,6 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #executor_wrapper
 
-        #executor_registration
 
         #module_registration
     };

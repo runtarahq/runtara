@@ -403,7 +403,7 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         invoke_agent(
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             "http-request",
             input,
         ),

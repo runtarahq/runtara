@@ -431,10 +431,10 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         &svc,
         "t",
         json!({
-            "title": "sftp", "integrationId": "sftp",
+            "title": "mcp", "integrationId": "mcp",
             "connectionParameters": {
-                "host": "files.example.com", "port": 22, "username": "alice",
-                "auth_mode": "password", "password": "old-password"
+                "url": "https://mcp.example.com",
+                "auth_mode": "bearer", "bearer_token": "old-password"
             }
         }),
     )
@@ -445,8 +445,8 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         .unwrap()
         .edit_projection
         .unwrap();
-    assert!(projection.secret_state["password"].configured);
-    assert!(projection.secret_state["password"].clearable);
+    assert!(projection.secret_state["bearer_token"].configured);
+    assert!(projection.secret_state["bearer_token"].clearable);
 
     update(
         &svc,
@@ -455,12 +455,15 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         json!({
             "version": projection.version,
             "connectionParameterPatch": {
-                "write": {"password": "new-password"}
+                "write": {"bearer_token": "new-password"}
             }
         }),
     )
     .await;
-    assert_eq!(params_of(&fx.pool, &id).await["password"], "new-password");
+    assert_eq!(
+        params_of(&fx.pool, &id).await["bearer_token"],
+        "new-password"
+    );
 
     let projection = svc
         .get_connection(&id, "t")
@@ -475,16 +478,16 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         json!({
             "version": projection.version,
             "connectionParameterPatch": {
-                "set": {"auth_mode": "private_key"},
-                "write": {"private_key": "key-material"},
-                "clear": ["password"]
+                "set": {"auth_mode": "api_key"},
+                "write": {"api_key_value": "key-material"},
+                "clear": ["bearer_token"]
             }
         }),
     )
     .await;
     let switched = params_of(&fx.pool, &id).await;
-    assert!(switched.get("password").is_none());
-    assert_eq!(switched["private_key"], "key-material");
+    assert!(switched.get("bearer_token").is_none());
+    assert_eq!(switched["api_key_value"], "key-material");
     assert_eq!(status_of(&fx.pool, &id).await, "ACTIVE");
 
     let qb = create(
@@ -521,5 +524,50 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
     assert_eq!(
         params_of(&fx.pool, &qb).await["client_secret"],
         "required-secret"
+    );
+}
+
+#[tokio::test]
+async fn legacy_sftp_connection_remains_redacted_listable_and_deletable() {
+    let fx = PgFixture::start().await;
+    let svc = service(&fx.pool);
+    let id = create(
+        &svc,
+        "legacy-tenant",
+        json!({
+            "title": "Removed integration",
+            "integrationId": "mcp",
+            "connectionParameters": {"url": "https://mcp.example.com", "auth_mode": "none"}
+        }),
+    )
+    .await;
+    // Simulate a row retained across the upgrade; public creation no longer
+    // accepts this descriptor. Never restore an SFTP schema just to read it.
+    sqlx::query("UPDATE connection_data_entity SET integration_id = 'sftp', connection_parameters = $1 WHERE id = $2")
+        .bind(json!({"password": "legacy-secret-sentinel"}))
+        .bind(&id)
+        .execute(&fx.pool).await.unwrap();
+    let connection = svc.get_connection(&id, "legacy-tenant").await.unwrap();
+    assert!(
+        !serde_json::to_string(&connection)
+            .unwrap()
+            .contains("legacy-secret-sentinel")
+    );
+    let listed = svc
+        .list_connections("legacy-tenant", None, None)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(
+        !serde_json::to_string(&listed)
+            .unwrap()
+            .contains("legacy-secret-sentinel")
+    );
+    svc.delete_connection(&id, "legacy-tenant").await.unwrap();
+    assert!(
+        svc.list_connections("legacy-tenant", None, None)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

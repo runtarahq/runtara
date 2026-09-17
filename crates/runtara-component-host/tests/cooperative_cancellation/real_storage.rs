@@ -1,5 +1,5 @@
 //! Storage components use the production linker against local HTTP stubs.
-//! These tests do not contact object storage, an SSH server or a real signer.
+//! These tests do not contact object storage or a real signer.
 use super::real_agent::{
     compose_agent, invoke_named_agent, request_headers, respond, run_cancellation_fixture,
 };
@@ -9,10 +9,10 @@ use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 fn connection(agent: &str) -> Value {
-    json!({"connection_id":"fixture-connection","integration_id":match agent {"s3-storage"=>"s3_compatible","azure-blob-storage"=>"azure_blob_storage",_=>"sftp"},"parameters":{}})
+    json!({"connection_id":"fixture-connection","integration_id":match agent {"s3-storage"=>"s3_compatible","azure-blob-storage"=>"azure_blob_storage",_=>unreachable!()},"parameters":{}})
 }
 fn input(agent: &str) -> Value {
-    json!({"_connection":connection(agent),"bucket":"bucket","key":"dir/file name.txt","content":"aGVsbG8=","is_base64":"true","source_bucket":"source","source_key":"source.txt","destination_bucket":"bucket","destination_key":"dir/file name.txt","operation":"download","expires_in_seconds":"123","content_type":"text/plain","path":"/before.txt"})
+    json!({"_connection":connection(agent),"bucket":"bucket","key":"dir/file name.txt","content":"aGVsbG8=","is_base64":"true","source_bucket":"source","source_key":"source.txt","destination_bucket":"bucket","destination_key":"dir/file name.txt","operation":"download","expires_in_seconds":"123","content_type":"text/plain"})
 }
 
 async fn request(socket: &mut tokio::net::TcpStream) -> anyhow::Result<(String, Value)> {
@@ -187,7 +187,7 @@ async fn cloud_cancel(
     });
     let output = run_cancellation_fixture(
         bytes,
-        CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+        CallContext::for_test("fixture-tenant", proxy, "", ""),
         started,
         cleaned,
         server,
@@ -245,60 +245,6 @@ async fn presign_cancel_stops_headers_and_body_for_both_proxy_url_shapes() -> an
 }
 
 #[tokio::test]
-async fn sftp_wrapper_cancel_stops_every_capability_and_reuses_instance() -> anyhow::Result<()> {
-    for capability in [
-        "sftp-list-files",
-        "sftp-download-file",
-        "sftp-upload-file",
-        "sftp-delete-file",
-    ] {
-        for partial in [false, true] {
-            let bytes = compose_agent(
-                "sftp",
-                capability,
-                &serde_json::to_vec(&input("sftp"))?,
-                "sftp-download-file",
-                &serde_json::to_vec(
-                    &json!({"_connection":connection("sftp"),"path":"/after.txt"}),
-                )?,
-            )?;
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let base = format!("http://{}/agent", listener.local_addr()?);
-            let started = Arc::new(Notify::new());
-            let cleaned = Arc::new(Notify::new());
-            let server = tokio::spawn({
-                let started = started.clone();
-                let cleaned = cleaned.clone();
-                async move {
-                    let (mut socket, _) = listener.accept().await?;
-                    let (line, body) = request(&mut socket).await?;
-                    assert_eq!(line, format!("POST /agent/sftp/{capability} HTTP/1.1"));
-                    assert_eq!(body["_connection"], connection("sftp"));
-                    assert_eq!(body["path"], "/before.txt");
-                    wait_closed(&mut socket, &started, &cleaned, partial).await?;
-                    let (mut socket, _) = listener.accept().await?;
-                    let (line, body) = request(&mut socket).await?;
-                    assert_eq!(line, "POST /agent/sftp/sftp-download-file HTTP/1.1");
-                    assert_eq!(body["path"], "/after.txt");
-                    assert_eq!(body["response_format"], "text");
-                    raw_response(&mut socket, 200, br#"{"success":true,"output":"after"}"#).await
-                }
-            });
-            let output = run_cancellation_fixture(
-                bytes,
-                CallContext::for_test("fixture-tenant", "http://127.0.0.1:1/unused", base, "", ""),
-                started,
-                cleaned,
-                server,
-            )
-            .await?;
-            assert_eq!(output, json!("after"));
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn presign_preserves_success_and_soft_failure_shapes() -> anyhow::Result<()> {
     for agent in ["s3-storage", "azure-blob-storage"] {
         for (status, response) in [
@@ -323,7 +269,7 @@ async fn presign_preserves_success_and_soft_failure_shapes() -> anyhow::Result<(
                 Duration::from_secs(10),
                 invoke_named_agent(
                     agent,
-                    CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+                    CallContext::for_test("fixture-tenant", proxy, "", ""),
                     "storage-generate-presigned-url",
                     serde_json::to_vec(&input(agent))?,
                 ),
@@ -393,7 +339,7 @@ async fn object_storage_preserves_delete_statuses_and_download_head_fallback() -
                     Duration::from_secs(10),
                     invoke_named_agent(
                         agent,
-                        CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+                        CallContext::for_test("fixture-tenant", proxy, "", ""),
                         capability,
                         serde_json::to_vec(&input(agent))?,
                     ),
@@ -426,55 +372,6 @@ async fn object_storage_preserves_delete_statuses_and_download_head_fallback() -
                 }
             }
         }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn sftp_wrapper_preserves_http_envelope_and_output_errors() -> anyhow::Result<()> {
-    for (status, body, code) in [
-        (503, "unavailable", "SFTP_NATIVE_AGENT_HTTP_503"),
-        (200, "not json", "SFTP_NATIVE_AGENT_PARSE_ERROR"),
-        (
-            200,
-            r#"{"success":false,"error":"fixture rejection"}"#,
-            "SFTP_NATIVE_AGENT_ERROR",
-        ),
-        (
-            200,
-            r#"{"success":true,"output":{}}"#,
-            "SFTP_OUTPUT_DESERIALIZATION_ERROR",
-        ),
-    ] {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let base = format!("http://{}/agent", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await?;
-            let (line, _) = request(&mut socket).await?;
-            assert_eq!(line, "POST /agent/sftp/sftp-download-file HTTP/1.1");
-            raw_response(&mut socket, status, body.as_bytes()).await
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            invoke_named_agent(
-                "sftp",
-                CallContext::for_test("fixture-tenant", "", base, "", ""),
-                "sftp-download-file",
-                serde_json::to_vec(&input("sftp"))?,
-            ),
-        )
-        .await;
-        let error = match result {
-            Ok(Ok(Err(error))) => error,
-            other => {
-                server.abort();
-                let _ = server.await;
-                anyhow::bail!("expected native wrapper error: {other:?}");
-            }
-        };
-        server.await??;
-        assert_eq!(error.code, code);
-        assert!(!error.retryable);
     }
     Ok(())
 }

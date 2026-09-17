@@ -19,7 +19,7 @@ pub struct RawConnection {
     pub connection_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_subtype: Option<String>,
-    /// Connection type identifier that maps to a connection schema (e.g., bearer, api_key, sftp)
+    /// Connection type identifier that maps to a connection schema (e.g., bearer, api_key, mcp)
     pub integration_id: String,
     pub parameters: Value,
     #[serde(skip_serializing_if = "Option::is_none")]

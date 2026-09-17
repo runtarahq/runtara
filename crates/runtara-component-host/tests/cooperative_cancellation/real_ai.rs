@@ -177,7 +177,7 @@ async fn cancellation(
         Duration::from_secs(15),
         cancel_and_reuse(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             started,
             cleaned,
         ),
@@ -306,7 +306,7 @@ async fn exchange(
         Duration::from_secs(10),
         invoke_named_agent(
             agent,
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             capability,
             serde_json::to_vec(&input(provider, capability))?,
         ),

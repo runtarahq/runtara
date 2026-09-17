@@ -106,7 +106,7 @@ required-features = ["valkey-tls-integration-tests"]
 runtara-workflows = { path = "../runtara-workflows" }
 runtara-workflow-wit = { path = "../runtara-workflow-wit", features = ["isolation-package"] }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
-runtara-agents = { path = "../runtara-agents", default-features = false, features = ["native"] }
+runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }

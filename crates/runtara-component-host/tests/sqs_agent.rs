@@ -12,6 +12,8 @@
 //! The explicit suite fails if the .wasm is missing — build it first with
 //! `cargo component build --release --target wasm32-wasip2 -p runtara-agent-sqs`.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,20 +22,7 @@ use runtara_component_host::{
 };
 
 fn agent_wasm_path() -> PathBuf {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    // cargo-component drops the finalized component under wasm32-wasip2/
-    // (the wasm32-wasip1/ artifact is a malformed intermediate — don't use it).
-    // A separately built revision stages its components outside the
-    // workspace target tree; honour the directory the suites are given.
-    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target/wasm32-wasip2/release"))
-        .join("runtara_agent_sqs.wasm")
+    common::bundle_dir().join("runtara_agent_sqs.wasm")
 }
 
 type InvokeFunc = wasmtime::component::TypedFunc<
@@ -57,7 +46,6 @@ async fn sqs_dispatch_pipeline() -> anyhow::Result<()> {
     let ctx = Arc::new(CallContext::for_test(
         "tenant-test",
         "http://localhost:9999",
-        "http://localhost:9998",
         "http://localhost:9997",
         "http://localhost:9996",
     ));

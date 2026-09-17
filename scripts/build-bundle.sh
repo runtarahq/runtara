@@ -21,6 +21,7 @@
 #   ./scripts/build-bundle.sh --output-dir /tmp # write bundle to custom dir
 #
 # Prerequisites (BUILD-time only — used to build the agent/shared components):
+#   - Python 3.9+ for staging the declared component set
 #   - rustup with the version from rust-toolchain.toml installed
 #   - wasm32-wasip1 + wasm32-wasip2 targets installed (rust-toolchain.toml handles this)
 
@@ -205,51 +206,13 @@ assemble_bundle() {
     strip "$bundle/bin/runtara-server" 2>/dev/null || warn "strip failed (non-critical)"
 
     # ── Agent components ──
-    # Each of the 23 component agents ships as a .wasm + sibling .meta.json
-    # pair. At server boot, RUNTARA_AGENT_COMPONENTS_DIR points at this
-    # directory; the ComponentDispatcherService loads each pair and exposes
-    # the agents to the validator and workflow runtime.
-    # The same directory also carries the direct workflow stdlib/runtime
-    # components used by static direct composition.
+    # Stage the declared component set, excluding stale artifacts from removed agents.
     info "Copying agent and direct workflow WASM components"
-    # `wasm32-wasip2/release/` holds the finalized components emitted by
-    # rustc's wasm-component-ld (plain cargo build --target wasm32-wasip2).
-    local agent_src="${TARGET_DIR}/wasm32-wasip2/release"
-    local wasm_count=0
-    local meta_count=0
-    for f in "$agent_src"/runtara_agent_*.wasm; do
-        [ -f "$f" ] || continue
-        cp "$f" "$bundle/agents/"
-        wasm_count=$((wasm_count + 1))
-    done
-    for f in "$agent_src"/runtara_agent_*.meta.json; do
-        [ -f "$f" ] || continue
-        cp "$f" "$bundle/agents/"
-        meta_count=$((meta_count + 1))
-    done
-    if [ "$wasm_count" -eq 0 ] || [ "$meta_count" -eq 0 ]; then
-        echo "Error: expected runtara_agent_*.{wasm,meta.json} in ${agent_src}, found ${wasm_count} wasm and ${meta_count} meta files" >&2
-        exit 1
-    fi
-    info "  Agents: ${wasm_count} .wasm + ${meta_count} .meta.json"
-
-    local workflow_component_count=0
-    local workflow_component_meta_count=0
-    for f in "$agent_src"/runtara_workflow_*.wasm; do
-        [ -f "$f" ] || continue
-        cp "$f" "$bundle/agents/"
-        workflow_component_count=$((workflow_component_count + 1))
-    done
-    for f in "$agent_src"/runtara_workflow_*.meta.json; do
-        [ -f "$f" ] || continue
-        cp "$f" "$bundle/agents/"
-        workflow_component_meta_count=$((workflow_component_meta_count + 1))
-    done
-    if [ "$workflow_component_count" -ne 2 ] || [ "$workflow_component_meta_count" -ne 2 ]; then
-        echo "Error: expected 2 runtara_workflow_*.{wasm,meta.json} shared components in ${agent_src}, found ${workflow_component_count} wasm and ${workflow_component_meta_count} meta files" >&2
-        exit 1
-    fi
-    info "  Direct workflow shared components: ${workflow_component_count} .wasm + ${workflow_component_meta_count} .meta.json"
+    python3 "$ROOT_DIR/scripts/stage-agent-components.py" \
+        "${TARGET_DIR}/wasm32-wasip2/release" "$bundle/agents"
+    local wasm_count workflow_component_count
+    wasm_count=$(find "$bundle/agents" -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l | tr -d ' ')
+    workflow_component_count=$(find "$bundle/agents" -maxdepth 1 -name 'runtara_workflow_*.wasm' | wc -l | tr -d ' ')
 
     # ── Licenses ──
     info "Copying licenses"

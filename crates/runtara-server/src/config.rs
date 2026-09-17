@@ -74,8 +74,6 @@ pub struct Config {
     pub http_proxy_url: String,
     /// Object-model internal API URL forwarded to workflow processes.
     pub object_model_url: String,
-    /// Agent service URL forwarded to workflow processes for native-only capabilities.
-    pub agent_service_url: String,
     /// Base URL workflows use to resolve connections. Served by the internal
     /// listener, so it tracks `INTERNAL_PORT` unless `CONNECTION_SERVICE_URL`
     /// overrides it.
@@ -231,10 +229,7 @@ impl Config {
             )
         });
 
-        let agent_service_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/agents", internal_port));
-
-        // Derived from `internal_port` like the three above, because
+        // Derived from `internal_port` like the two above, because
         // `/api/connections` is nested on the very same internal listener.
         // Leaving it undderived meant a server on any non-default INTERNAL_PORT
         // handed workflows a connection endpoint pointing at 7002 — either
@@ -322,7 +317,6 @@ impl Config {
             internal_port,
             http_proxy_url,
             object_model_url,
-            agent_service_url,
             connection_service_url,
             agent_components_dir,
             direct_wasm_components_dir,

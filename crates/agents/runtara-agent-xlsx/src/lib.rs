@@ -1,13 +1,8 @@
 //! XLSX agent — WebAssembly component.
 //!
 //! Excel / OpenDocument spreadsheet parsing (XLSX, XLS, XLSB, ODS), executed
-//! entirely inside the wasm sandbox. This agent used to be a thin forwarder to
-//! a native host handler at `$RUNTARA_AGENT_SERVICE_URL/xlsx/{capability}`;
-//! that hop is gone. `calamine` is pure Rust and builds for wasm32-wasip2 with
-//! its default features, and these capabilities only ever used its in-memory
-//! reader (`open_workbook_auto_from_rs`) — no filesystem access is involved.
-//! `rust_xlsxwriter`, named in the old header as the other blocker, was never
-//! actually a dependency: there is no write capability.
+//! entirely inside the wasm sandbox. `calamine` is pure Rust; capabilities use
+//! its in-memory reader (`open_workbook_auto_from_rs`) without filesystem access.
 //!
 //! Capability metadata travels through `#[capability_input]` / `#[capability]`
 //! / `#[capability_output]` annotations on the same Rust types and functions
@@ -96,11 +91,8 @@ impl From<AgentError> for String {
 // ============================================================================
 //
 // The xlsx agent itself doesn't use connections (`supports_connections: false`),
-// but the macro-derived dispatcher path still pipes the optional `_connection`
-// field through input deserialization, and `forward_to_native` re-serializes it
-// when shipping the request to the host. We keep the shape consistent with the
-// other migrated HTTP agents so any future capability that does take a
-// connection slots in without surgery.
+// but its input structs retain the optional `_connection` field for schema
+// compatibility. Keep this shape consistent with the other component agents.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawConnection {
@@ -119,10 +111,8 @@ pub struct RawConnection {
 // ============================================================================
 //
 // The wasm component has no filesystem access, so spreadsheet bytes always
-// arrive base64-encoded inside the input JSON. We mirror the legacy shapes from
-// `crates/runtara-agents/src/agents/xlsx.rs` so the host's native handler — which
-// reuses the same legacy struct definitions — deserializes our forwarded body
-// unchanged.
+// arrive inside the input JSON. These shapes preserve compatibility with
+// existing workflows while spreadsheet processing runs inside the component.
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileData {

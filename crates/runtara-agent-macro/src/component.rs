@@ -53,19 +53,32 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 .into_compile_error()
                 .into();
         };
-        let Some(name) = path.path.get_ident() else {
-            return syn::Error::new_spanned(capability, "capabilities must be in this module")
+        // A capability may live in a child module (`downloads::download_file`);
+        // its generated ID and adapter sit beside it in that module.
+        let segments = &path.path.segments;
+        let Some(last) = segments.last() else {
+            return syn::Error::new_spanned(capability, "expected a capability function name")
                 .into_compile_error()
                 .into();
         };
-        if !seen.insert(name.to_string()) {
+        if path.path.leading_colon.is_some()
+            || segments.iter().any(|segment| !segment.arguments.is_none())
+        {
+            return syn::Error::new_spanned(capability, "capabilities must be in this crate")
+                .into_compile_error()
+                .into();
+        }
+        let name = &last.ident;
+        let key = quote!(#path).to_string();
+        if !seen.insert(key) {
             return syn::Error::new_spanned(capability, "duplicate capability function")
                 .into_compile_error()
                 .into();
         }
+        let module: Vec<_> = segments.iter().take(segments.len() - 1).collect();
         let id = format_ident!("__CAPABILITY_ID_{}", name.to_string().to_uppercase());
         let invoke = format_ident!("__invoke_{name}");
-        arms.push(quote! { #id => #invoke(value).await, });
+        arms.push(quote! { #(#module::)* #id => #(#module::)* #invoke(value).await, });
     }
     quote! {
         #[cfg(target_arch = "wasm32")]

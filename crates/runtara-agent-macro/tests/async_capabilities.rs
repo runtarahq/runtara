@@ -43,13 +43,10 @@ fn ready<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn async_and_sync_descriptors_preserve_coercion_and_metadata() {
+fn async_and_sync_executors_preserve_coercion_and_metadata() {
     let input = json!({"count":"42"});
-    let expected = (__CAPABILITY_EXECUTOR_SYNC_VALUE.execute)(input.clone()).unwrap();
-    assert_eq!(
-        ready((__CAPABILITY_EXECUTOR_VALUE.execute)(input)).unwrap(),
-        expected
-    );
+    let expected = __executor_sync_value(input.clone()).unwrap();
+    assert_eq!(ready(__executor_value(input)).unwrap(), expected);
     assert_eq!(
         __CAPABILITY_META_VALUE.input_type,
         __CAPABILITY_META_SYNC_VALUE.input_type
@@ -58,8 +55,8 @@ fn async_and_sync_descriptors_preserve_coercion_and_metadata() {
         __CAPABILITY_META_VALUE.output_type,
         __CAPABILITY_META_SYNC_VALUE.output_type
     );
-    assert_eq!(__CAPABILITY_EXECUTOR_VALUE.module, "test");
-    assert_eq!(__CAPABILITY_EXECUTOR_VALUE.capability_id, "async-value");
+    assert_eq!(__CAPABILITY_META_VALUE.module, Some("test"));
+    assert_eq!(__CAPABILITY_ID_VALUE, "async-value");
 }
 
 #[test]
@@ -138,10 +135,12 @@ fn uniform_component_adapter_preserves_sync_and_async_results() {
     );
 }
 
+type Invocation = std::pin::Pin<Box<dyn Future<Output = Result<Value, String>>>>;
+
 #[test]
 fn dropping_the_dispatch_future_drops_the_pending_capability() {
-    let calls = [
-        (__CAPABILITY_EXECUTOR_PENDING.execute)(json!({"count":1})),
+    let calls: [Invocation; 2] = [
+        Box::pin(__executor_pending(json!({"count":1}))),
         Box::pin(__invoke_pending(json!({"count":1}))),
     ];
     for (index, mut invocation) in calls.into_iter().enumerate() {

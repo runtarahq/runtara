@@ -190,7 +190,6 @@ async fn cancellation(operation: Operation, blocked: usize, partial: bool) -> an
             CallContext::for_test(
                 "fixture-tenant",
                 "http://127.0.0.1:1/proxy-must-not-be-used",
-                "",
                 base,
                 "",
             ),
@@ -273,7 +272,6 @@ async fn sql_read_and_write_keep_distinct_retry_contracts() -> anyhow::Result<()
                     CallContext::for_test(
                         "fixture-tenant",
                         "http://127.0.0.1:1/proxy-must-not-be-used",
-                        "",
                         base,
                         "",
                     ),

@@ -6,33 +6,20 @@
 //! closed if the .wasm is missing — run `scripts/build-agent-components.sh`
 //! first. `RUNTARA_AGENT_COMPONENTS_DIR` selects an isolated component build.
 
+mod common;
+
 use std::path::PathBuf;
 
 use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
 fn crypto_wasm_path() -> PathBuf {
-    let p = component_dir().join("runtara_agent_crypto.wasm");
+    let p = common::bundle_dir().join("runtara_agent_crypto.wasm");
     assert!(
         p.exists(),
         "component-integration-tests requires {}; run scripts/build-agent-components.sh",
         p.display()
     );
     p
-}
-
-fn component_dir() -> PathBuf {
-    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"))
 }
 
 /// Build a one-agent bundle dir (mirrors the production layout) and return its
@@ -54,7 +41,6 @@ fn build_test_bundle() -> tempfile::TempDir {
 fn env() -> DispatcherEnv {
     DispatcherEnv {
         proxy_url: "http://localhost:9999".into(),
-        agent_service_url: "http://localhost:9998".into(),
         object_model_url: "http://localhost:9997".into(),
         core_http_url: "http://localhost:9996".into(),
     }
@@ -218,13 +204,13 @@ async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Res
 }
 
 /// Production bundle-shaped load: point the dispatcher at
-/// the selected component directory (where the bundle script stages all Agent
+/// `target/agent-components/` (where the bundle script stages all declared
 /// `.wasm` + `.meta.json` pairs), verify every loaded capability is routed,
 /// and assert the count matches expectations. The explicit suite fails if the
 /// bundle has not been built.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
-    let bundle_dir = component_dir();
+    let bundle_dir = common::bundle_dir();
     let crypto_wasm = bundle_dir.join("runtara_agent_crypto.wasm");
     let crypto_meta = bundle_dir.join("runtara_agent_crypto.meta.json");
     assert!(
@@ -243,6 +229,17 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
         loaded.len(),
         loaded
     );
+
+    assert!(
+        !loaded.iter().any(|id| id == "sftp"),
+        "removed SFTP component must not be staged"
+    );
+    for retained in ["http", "s3-storage", "object-model"] {
+        assert!(
+            dispatcher.has_agent(retained),
+            "retained agent {retained} must load"
+        );
+    }
 
     for agent_id in &loaded {
         let info = dispatcher

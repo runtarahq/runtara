@@ -151,7 +151,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
         });
         let output = run_cancellation_fixture(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             started,
             cleaned,
             server,
@@ -192,7 +192,7 @@ async fn invoke_response(
         Duration::from_secs(10),
         invoke_named_agent(
             "hubspot",
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             capability,
             input,
         ),
@@ -315,7 +315,7 @@ async fn hubspot_transport_parse_and_validation_failures_stay_distinct() -> anyh
             Duration::from_secs(10),
             invoke_named_agent(
                 "hubspot",
-                CallContext::for_test("fixture-tenant", "http://127.0.0.1:1/unused", "", "", ""),
+                CallContext::for_test("fixture-tenant", "http://127.0.0.1:1/unused", "", ""),
                 capability,
                 serde_json::to_vec(&input)?,
             ),

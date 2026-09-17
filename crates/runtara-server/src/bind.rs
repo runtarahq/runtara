@@ -49,7 +49,7 @@ pub fn enforce_loopback_for_unauthenticated(
 /// shared-secret authenticator is configured for the internal routes.
 ///
 /// Unlike the public listener, the internal API (`/api/internal/proxy`,
-/// `/api/internal/agents`, internal object-model) is *always* unauthenticated
+/// internal object-model) is *always* unauthenticated
 /// and derives the tenant from an `X-Org-Id` header. It also injects connection
 /// credentials server-side and performs outbound egress, so exposing it on a
 /// non-loopback bind would let any host that can send an `X-Org-Id` header drive
@@ -70,7 +70,7 @@ pub fn enforce_internal_listener_safe(
     Err(format!(
         "INTERNAL_HOST='{internal_host}' is not a loopback address and no \
          RUNTARA_INTERNAL_SHARED_SECRET is configured. The internal API \
-         (/api/internal/proxy, /api/internal/agents, internal object-model) is \
+         (/api/internal/proxy, internal object-model) is \
          UNAUTHENTICATED and injects connection credentials server-side; exposing \
          it on a non-loopback bind would let any host that can send an X-Org-Id \
          header drive credentialed egress and SSRF. Bind INTERNAL_HOST to a \

@@ -457,7 +457,6 @@ fn random_service(
                 "",
                 "",
                 "",
-                "",
             )));
             let (mut store, instance) = instantiate(engine, &agent.pre, state).await.unwrap();
             let iface = instance

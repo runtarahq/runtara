@@ -410,7 +410,7 @@ async fn cancellation(cases: Vec<Case>, partial: bool) -> anyhow::Result<()> {
             });
             let result = run_cancellation_fixture(
                 bytes,
-                CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+                CallContext::for_test("fixture-tenant", proxy, "", ""),
                 started,
                 cleaned,
                 server,
@@ -436,7 +436,7 @@ async fn normal(case: Case) -> anyhow::Result<Result<Vec<u8>, runtara_component_
         Duration::from_secs(20),
         invoke_named_agent(
             case.agent,
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             case.capability,
             serde_json::to_vec(&case.input)?,
         ),
@@ -568,7 +568,6 @@ async fn every_builtin_uses_shared_callback_export_and_error_contract() -> anyho
         "openai",
         "quickbooks",
         "s3-storage",
-        "sftp",
         "sharepoint",
         "shopify",
         "slack",

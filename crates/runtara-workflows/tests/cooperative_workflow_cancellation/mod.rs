@@ -216,7 +216,6 @@ enum Scenario {
     ObjectExecute,
     StorageDownload(&'static str, bool),
     StoragePresign(&'static str),
-    Sftp,
     SharepointDownload,
     SharepointDownloadBody,
     SharepointContentAfterMetadata,
@@ -307,10 +306,7 @@ impl Scenario {
         )
     }
     fn is_storage(self) -> bool {
-        matches!(
-            self,
-            Self::StorageDownload(..) | Self::StoragePresign(_) | Self::Sftp
-        )
+        matches!(self, Self::StorageDownload(..) | Self::StoragePresign(_))
     }
     fn is_object(self) -> bool {
         matches!(self, Self::ObjectQuery | Self::ObjectExecute)
@@ -709,13 +705,12 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         let (agent, capability) = match scenario {
             Scenario::StorageDownload(agent, _) => (agent, "storage-download-file"),
             Scenario::StoragePresign(agent) => (agent, "storage-generate-presigned-url"),
-            Scenario::Sftp => ("sftp", "sftp-download-file"),
             _ => unreachable!(),
         };
         let integration = match agent {
             "s3-storage" => "s3_compatible",
             "azure-blob-storage" => "azure_blob_storage",
-            _ => "sftp",
+            _ => unreachable!(),
         };
         graph["steps"]["fetch"]["agentId"] = agent.into();
         graph["steps"]["fetch"]["capabilityId"] = capability.into();
@@ -930,18 +925,12 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                 assert_eq!(body["connectionId"], "fixture-connection");
                                 assert_eq!(body["sql"], "SELECT 1");
                             }
-                            if matches!(scenario, Scenario::StoragePresign(_) | Scenario::Sftp) {
+                            if matches!(scenario, Scenario::StoragePresign(_)) {
                                 let body: Value = serde_json::from_slice(&request[end..end + length])?;
-                                if scenario == Scenario::Sftp {
-                                    assert!(request.starts_with(b"POST /agent/sftp/sftp-download-file "));
-                                    assert_eq!(body["_connection"]["connection_id"], "fixture-connection");
-                                    assert_eq!(body["path"], "/file.txt");
-                                } else {
-                                    assert!(request.starts_with(b"POST /presign "));
-                                    assert_eq!(body["connection_id"], "fixture-connection");
-                                    assert_eq!(body["method"], "GET");
-                                    assert_eq!(body["path"], "/bucket/file.txt");
-                                }
+                                assert!(request.starts_with(b"POST /presign "));
+                                assert_eq!(body["connection_id"], "fixture-connection");
+                                assert_eq!(body["method"], "GET");
+                                assert_eq!(body["path"], "/bucket/file.txt");
                             }
                         }
                         if scenario.is_ai() {
@@ -1403,11 +1392,6 @@ async fn emitted_storage_presign_cancel_bypasses_soft_failure_and_recovery() -> 
         run(Scenario::StoragePresign(agent)).await?;
     }
     Ok(())
-}
-
-#[tokio::test]
-async fn emitted_sftp_cancel_stops_native_service_wait_without_recovery() -> anyhow::Result<()> {
-    run(Scenario::Sftp).await
 }
 
 #[tokio::test]

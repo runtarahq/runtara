@@ -26,6 +26,8 @@ mod wasi_backend;
 #[cfg(all(feature = "wasi", not(feature = "native")))]
 pub use wasi_backend::WasiHttpClient as HttpClient;
 
+pub mod download;
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -177,7 +179,7 @@ impl RequestBuilder {
     /// The original request is serialized as JSON and POSTed to the proxy URL.
     /// The proxy response is deserialized back into an `HttpResponse`.
     fn call_via_proxy(self, proxy_url: &str) -> Result<HttpResponse, HttpError> {
-        let proxy_request = self.prepare_proxy_request(proxy_url);
+        let proxy_request = self.prepare_proxy_request(proxy_url)?;
         // Execute directly (bypass proxy check to avoid recursion). Under
         // WASI the proxy hop rides the host-io import (func_wrap_concurrent
         // host-side) so concurrent Split subtasks overlap their agent I/O —
@@ -205,14 +207,14 @@ impl RequestBuilder {
         static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
         let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
         if let Some(proxy) = proxy_url {
-            let response = self.prepare_proxy_request(proxy).call_async().await?;
+            let response = self.prepare_proxy_request(proxy)?.call_async().await?;
             Self::decode_proxy_response(response)
         } else {
             self.call_async().await
         }
     }
 
-    fn prepare_proxy_request(self, proxy_url: &str) -> RequestBuilder {
+    fn prepare_proxy_request(self, proxy_url: &str) -> Result<RequestBuilder, HttpError> {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -253,6 +255,13 @@ impl RequestBuilder {
             .map(|(_, v)| v.clone());
 
         // Remove X-Runtara-* headers from forwarded headers
+        let max_response_bytes = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-max-response-bytes"))
+            .map(|(_, v)| v.parse::<u64>())
+            .transpose()
+            .map_err(|_| HttpError::Transport("Invalid response byte limit".into()))?;
         let clean_headers: Vec<(String, String)> = self
             .headers
             .iter()
@@ -283,6 +292,7 @@ impl RequestBuilder {
             "endpoint": endpoint,
             "endpoint_ref": endpoint_ref,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
+            "max_response_bytes": max_response_bytes,
         });
 
         // Create a new request to the proxy
@@ -310,7 +320,7 @@ impl RequestBuilder {
                 .push(("X-Org-Id".to_string(), tenant_id.clone()));
         }
 
-        proxy_request
+        Ok(proxy_request)
     }
 
     fn decode_proxy_response(proxy_response: HttpResponse) -> Result<HttpResponse, HttpError> {

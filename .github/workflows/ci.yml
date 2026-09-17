@@ -631,14 +631,17 @@ jobs:
           RUNTARA_NO_INSTALL_TOOLS: "1"
         run: scripts/build-agent-components.sh
 
+      - name: Test component staging
+        run: python3 scripts/test_stage_agent_components.py
+
       - name: Verify every agent component + meta.json is present
         run: |
           # Expected = one component per agent crate under crates/agents/. Derived
           # (not hardcoded) so adding an agent never breaks this check; it still
           # catches a component that silently failed to build or emit its meta.
           expected=$(ls -d crates/agents/runtara-agent-*/ | wc -l)
-          wasm_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
-          meta_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
+          wasm_count=$(find target/agent-components -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
+          meta_count=$(find target/agent-components -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
           echo "expected=$expected wasm=$wasm_count meta=$meta_count"
           test "$wasm_count" -eq "$expected"
           test "$meta_count" -eq "$expected"
@@ -662,7 +665,7 @@ jobs:
       # composition graph.
       - name: Run direct WASM workflow execution smoke tests
         env:
-          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/agent-components
         # Unlike the db-integration suites above (which serialize on a shared
         # Postgres/Valkey), this suite owns no shared external resource: each
         # test binds an ephemeral port for its own mock, executes the workflow

@@ -203,8 +203,8 @@ mod tests {
         let service = AgentsService::new();
 
         assert_eq!(
-            service.integration_ids_of(&agent("sftp", &["sftp"])),
-            vec!["sftp".to_string()]
+            service.integration_ids_of(&agent("mcp", &["mcp"])),
+            vec!["mcp".to_string()]
         );
     }
 }

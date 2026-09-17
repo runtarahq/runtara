@@ -98,7 +98,7 @@ async fn cancellation(agent: &'static str, blocked: usize, partial: bool) -> any
     });
     let output = run_cancellation_fixture(
         bytes,
-        CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+        CallContext::for_test("fixture-tenant", proxy, "", ""),
         started,
         cleaned,
         server,
@@ -147,7 +147,7 @@ async fn messaging_async_exports_preserve_error_classification() -> anyhow::Resu
                 Duration::from_secs(10),
                 invoke_named_agent(
                     agent,
-                    CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+                    CallContext::for_test("fixture-tenant", proxy, "", ""),
                     capability,
                     serde_json::to_vec(&input(agent, true))?,
                 ),

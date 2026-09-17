@@ -137,7 +137,7 @@ async fn cancellation(method: &'static str, blocked: usize, partial: bool) -> an
             anyhow::Ok(())
         }
     });
-    let mut context = CallContext::for_test("fixture-tenant", format!("{base}/proxy"), "", "", "");
+    let mut context = CallContext::for_test("fixture-tenant", format!("{base}/proxy"), "", "");
     context.connection_service_url = Some(base);
     let output = run_cancellation_fixture(bytes, context, started, cleaned, server).await?;
     assert_eq!(
@@ -208,7 +208,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
             Duration::from_secs(10),
             invoke_named_agent(
                 "mcp",
-                CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+                CallContext::for_test("fixture-tenant", proxy, "", ""),
                 "mcp-tool-invoke",
                 serde_json::to_vec(&input(false, false))?,
             ),
@@ -256,7 +256,7 @@ async fn mcp_async_search_preserves_tool_scope_and_schema() -> anyhow::Result<()
         Duration::from_secs(10),
         invoke_named_agent(
             "mcp",
-            CallContext::for_test("fixture-tenant", proxy, "", "", ""),
+            CallContext::for_test("fixture-tenant", proxy, "", ""),
             "mcp-tool-search",
             serde_json::to_vec(&input(false, false))?,
         ),

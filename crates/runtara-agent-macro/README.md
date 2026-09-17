@@ -72,7 +72,7 @@ Standalone WASM agents depend on this macro crate directly; `runtara-agents` is 
 ## Inside Runtara
 
 - Primary consumers: standalone component crates under `crates/agents/runtara-agent-*`.
-- `runtara-agents/src/agents/extractors/*` uses `#[derive(ConnectionParams)]` for the built-in connection types (`http_bearer`, `http_api_key`, `sftp`).
+- `runtara-agents/src/agents/extractors/*` uses `#[derive(ConnectionParams)]` for the built-in connection types (`http_bearer`, `http_api_key`, `mcp`).
 - Generated metadata targets types in `runtara-dsl::agent_meta` and is indexed by each component's `agent_info()` registry.
 - Deps: `syn` 2 (full/parsing/extra-traits), `quote`, `proc-macro2`, `darling` 0.20.
 - The `#[capability]` executor wrapper normalizes errors into JSON envelopes (`code` / `message` / `category` / `severity`) so the `#[resilient]` layer can make retry decisions.

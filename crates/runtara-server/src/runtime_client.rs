@@ -312,10 +312,6 @@ impl RuntimeClient {
         options = options.with_env_var("RUNTARA_TENANT_ID", &server_config.tenant_id);
         options = options.with_env_var("RUNTARA_HTTP_PROXY_URL", &server_config.http_proxy_url);
         options = options.with_env_var("RUNTARA_OBJECT_MODEL_URL", &server_config.object_model_url);
-        options = options.with_env_var(
-            "RUNTARA_AGENT_SERVICE_URL",
-            &server_config.agent_service_url,
-        );
 
         // Debug mode (pause at breakpoints)
         if debug {

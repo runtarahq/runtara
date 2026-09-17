@@ -119,8 +119,8 @@ jobs:
       - name: Verify every component + meta.json is present
         run: |
           expected=$(ls -d crates/agents/runtara-agent-*/ | wc -l)
-          wasm_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
-          meta_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
+          wasm_count=$(find target/agent-components -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
+          meta_count=$(find target/agent-components -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
           echo "expected=$expected wasm=$wasm_count meta=$meta_count"
           test "$wasm_count" -eq "$expected"
           test "$meta_count" -eq "$expected"
@@ -130,8 +130,8 @@ jobs:
         with:
           name: release-components
           path: |
-            target/wasm32-wasip2/release/*.wasm
-            target/wasm32-wasip2/release/*.meta.json
+            target/agent-components/*.wasm
+            target/agent-components/*.meta.json
           if-no-files-found: error
           retention-days: 1
 

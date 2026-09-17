@@ -19,7 +19,7 @@
 # no cargo-component, no committed bindings.rs, no separate `wasm-tools
 # component new` step.
 #
-# Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/wasm32-wasip2/release in
+# Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/agent-components in
 # the server env to load agents at boot and to let direct composition find the
 # shared workflow components.
 
@@ -170,8 +170,11 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     echo "==> emit-meta"
     cargo run --quiet -p runtara-agent-bundle-emit --bin emit-meta -- "$out_dir"
 
-    wasm_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_agent_*.wasm' 2>/dev/null | wc -l | tr -d ' ')
-    meta_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_agent_*.meta.json' 2>/dev/null | wc -l | tr -d ' ')
+    # Stage the exact workspace component set. Old Cargo outputs are left intact
+    # but can never reintroduce a removed agent into the runtime/release bundle.
+    python3 "$workspace/scripts/stage-agent-components.py" "$out_dir" "$target_dir/agent-components"
+    wasm_count=$count
+    meta_count=$count
 fi
 workflow_wasm_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_workflow_*.wasm' 2>/dev/null | wc -l | tr -d ' ')
 workflow_meta_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_workflow_*.meta.json' 2>/dev/null | wc -l | tr -d ' ')
@@ -192,4 +195,8 @@ fi
 
 echo
 echo "Add this to your .env to load agents and direct workflow components on server boot:"
-echo "  RUNTARA_AGENT_COMPONENTS_DIR=$out_dir"
+if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" = "1" ]; then
+    echo "  RUNTARA_AGENT_COMPONENTS_DIR=$out_dir"
+else
+    echo "  RUNTARA_AGENT_COMPONENTS_DIR=$target_dir/agent-components"
+fi
