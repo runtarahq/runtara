@@ -28,7 +28,6 @@ import { DangerZoneSection } from '../DangerZoneSection';
 import { ConnectionStatusCard } from '../../ConnectionStatusCard';
 import { DeleteConnectionDialog } from '../../DeleteConnectionDialog';
 import { patchStripsAuthorization } from '../../../utils/reauthorization';
-import { DefaultFileStorageSection } from '../DefaultFileStorageSection';
 import { DefaultForSection } from '../DefaultForSection';
 import { RateLimitSection } from '../RateLimitSection';
 import {
@@ -40,7 +39,6 @@ import {
 } from './adapter';
 import { ConnectionFieldFrame } from './ConnectionFieldFrame';
 
-const FILE_STORAGE_CATEGORIES = new Set(['file_storage', 'storage']);
 const EMPTY_SECRET_STATE: NonNullable<EditProjection['secretState']> = {};
 
 type DynamicConnectionFormProps = {
@@ -141,9 +139,6 @@ export function DynamicConnectionForm({
   reconnectNotice,
   oauthCreateHint,
 }: DynamicConnectionFormProps) {
-  const isFileStorage = FILE_STORAGE_CATEGORIES.has(
-    connectionType.category ?? ''
-  );
   const editProjection = initValues?.editProjection as
     EditProjection | undefined;
   const secretState = editProjection?.secretState ?? EMPTY_SECRET_STATE;
@@ -468,7 +463,6 @@ export function DynamicConnectionForm({
                 })
               )}
             />
-            {isFileStorage && <DefaultFileStorageSection />}
             <DefaultForSection connectionType={connectionType} />
             <CollapsedSection
               label="Advanced"

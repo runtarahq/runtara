@@ -26,6 +26,8 @@ mod wasi_backend;
 #[cfg(all(feature = "wasi", not(feature = "native")))]
 pub use wasi_backend::WasiHttpClient as HttpClient;
 
+pub mod download;
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -217,6 +219,13 @@ impl RequestBuilder {
             .map(|(_, v)| v.clone());
 
         // Remove X-Runtara-* headers from forwarded headers
+        let max_response_bytes = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-max-response-bytes"))
+            .map(|(_, v)| v.parse::<u64>())
+            .transpose()
+            .map_err(|_| HttpError::Transport("Invalid response byte limit".into()))?;
         let clean_headers: Vec<(String, String)> = self
             .headers
             .iter()
@@ -247,6 +256,7 @@ impl RequestBuilder {
             "endpoint": endpoint,
             "endpoint_ref": endpoint_ref,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
+            "max_response_bytes": max_response_bytes,
         });
 
         // Create a new request to the proxy

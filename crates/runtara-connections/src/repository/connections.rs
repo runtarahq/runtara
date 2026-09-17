@@ -949,60 +949,6 @@ impl ConnectionRepository {
             .transpose()
     }
 
-    /// Get the default file storage connection for a tenant.
-    /// Returns the single connection where is_default_file_storage = TRUE,
-    /// including connection_parameters for internal use.
-    ///
-    /// SECURITY WARNING: Returns sensitive credentials. Internal use only.
-    pub async fn get_default_file_storage(
-        &self,
-        tenant_id: &str,
-    ) -> Result<Option<ConnectionWithParameters>, sqlx::Error> {
-        let result = sqlx::query_as::<
-            _,
-            (
-                String,                    // id
-                String,                    // tenant_id
-                Option<String>,            // integration_id
-                Option<String>,            // connection_subtype
-                Option<serde_json::Value>, // connection_parameters
-                Option<serde_json::Value>, // rate_limit_config
-            ),
-        >(
-            r#"
-            SELECT id, tenant_id, integration_id, connection_subtype, connection_parameters, rate_limit_config
-            FROM connection_data_entity
-            WHERE tenant_id = $1 AND is_default_file_storage = TRUE
-            LIMIT 1
-            "#,
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        result
-            .map(
-                |(
-                    id,
-                    tid,
-                    integration_id,
-                    connection_subtype,
-                    connection_parameters,
-                    rate_limit_config,
-                )| {
-                    Ok::<_, sqlx::Error>(ConnectionWithParameters {
-                        id,
-                        tenant_id: Some(tid),
-                        integration_id,
-                        connection_subtype,
-                        connection_parameters: self.unseal(connection_parameters)?,
-                        rate_limit_config,
-                    })
-                },
-            )
-            .transpose()
-    }
-
     /// Update connection parameters and status atomically.
     /// Used by OAuth callback to store tokens and set status to ACTIVE.
     pub async fn update_parameters_and_status(

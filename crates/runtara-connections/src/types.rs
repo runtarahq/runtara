@@ -409,7 +409,7 @@ pub struct ConnectionDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "rateLimitStats")]
     pub rate_limit_stats: Option<PeriodStatsDto>,
-    /// When true, this connection is the default S3 storage for webhook attachments
+    /// Legacy alias for the object_storage default; does not persist webhook attachments.
     #[serde(rename = "isDefaultFileStorage")]
     pub is_default_file_storage: bool,
     /// Agent/operator ids this connection is the tenant default for.

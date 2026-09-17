@@ -4404,6 +4404,7 @@ dependencies = [
 name = "runtara-agent-mailgun"
 version = "8.9.10"
 dependencies = [
+ "base64 0.22.1",
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
@@ -4628,7 +4629,6 @@ dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
  "runtara-dsl",
- "runtara-http",
  "serde",
  "serde_json",
  "serial_test",
@@ -4657,6 +4657,7 @@ version = "8.9.10"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "getrandom 0.3.4",

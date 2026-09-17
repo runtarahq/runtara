@@ -287,19 +287,6 @@ impl ConnectionsFacade {
             .map_err(ConnectionsError::Database)
     }
 
-    /// Get the default file storage connection for a tenant.
-    ///
-    /// SECURITY: Returns sensitive credentials. Internal use only.
-    pub async fn get_default_file_storage(
-        &self,
-        tenant_id: &str,
-    ) -> Result<Option<ConnectionWithParameters>, ConnectionsError> {
-        self.repo()
-            .get_default_file_storage(tenant_id)
-            .await
-            .map_err(ConnectionsError::Database)
-    }
-
     // ── Validation ──────────────────────────────────────────────────────
 
     /// Check which connection IDs exist for a tenant.

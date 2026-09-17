@@ -1,0 +1,46 @@
+{
+  "name": "Slack attachment download",
+  "description": "Select the provider connection before compiling. This example downloads the first attachment; filter metadata before this step when needed.",
+  "steps": {
+    "download": {
+      "stepType": "Agent",
+      "id": "download",
+      "agentId": "slack",
+      "capabilityId": "download-file",
+      "connectionId": "REPLACE_WITH_PROVIDER_CONNECTION_ID",
+      "inputMapping": {
+        "file_id": {
+          "valueType": "reference",
+          "value": "data.attachments.0.id"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "file": {
+          "valueType": "reference",
+          "value": "steps.download.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "download",
+  "executionPlan": [
+    {
+      "fromStep": "download",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "outputSchema": {}
+}

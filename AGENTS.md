@@ -22,7 +22,7 @@ scoped README files, examples.
 - Workflow agents are standalone component crates under
   `crates/agents/runtara-agent-*`.
 - `crates/runtara-agents` contains host-only support, including connection
-  extractors and the server's S3 client. Do not add a
+  extractors. Do not add a
   normal workflow agent there.
 - `crates/runtara-connections` owns credential storage, OAuth, connection
   schemas, and rate limiting.
