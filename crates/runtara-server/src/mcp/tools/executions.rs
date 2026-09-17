@@ -1,4 +1,4 @@
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -12,7 +12,7 @@ const RUNTIME_NESTED_REFERENCE_NOTE: &str =
     "Nested condition references are resolved by workflow runtime before agent dispatch.";
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
+    Ok(CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&value).unwrap_or_default(),
     )]))
 }
