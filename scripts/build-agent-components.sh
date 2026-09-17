@@ -19,7 +19,7 @@
 # no cargo-component, no committed bindings.rs, no separate `wasm-tools
 # component new` step.
 #
-# Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/wasm32-wasip2/release in
+# Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/agent-components in
 # the server env to load agents at boot and to let direct composition find the
 # shared workflow components.
 
@@ -195,4 +195,8 @@ fi
 
 echo
 echo "Add this to your .env to load agents and direct workflow components on server boot:"
-echo "  RUNTARA_AGENT_COMPONENTS_DIR=$target_dir/agent-components"
+if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" = "1" ]; then
+    echo "  RUNTARA_AGENT_COMPONENTS_DIR=$out_dir"
+else
+    echo "  RUNTARA_AGENT_COMPONENTS_DIR=$target_dir/agent-components"
+fi

@@ -21,6 +21,7 @@
 #   ./scripts/build-bundle.sh --output-dir /tmp # write bundle to custom dir
 #
 # Prerequisites (BUILD-time only — used to build the agent/shared components):
+#   - Python 3.9+ for staging the declared component set
 #   - rustup with the version from rust-toolchain.toml installed
 #   - wasm32-wasip1 + wasm32-wasip2 targets installed (rust-toolchain.toml handles this)
 
@@ -209,6 +210,9 @@ assemble_bundle() {
     info "Copying agent and direct workflow WASM components"
     python3 "$ROOT_DIR/scripts/stage-agent-components.py" \
         "${TARGET_DIR}/wasm32-wasip2/release" "$bundle/agents"
+    local wasm_count workflow_component_count
+    wasm_count=$(find "$bundle/agents" -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l | tr -d ' ')
+    workflow_component_count=$(find "$bundle/agents" -maxdepth 1 -name 'runtara_workflow_*.wasm' | wc -l | tr -d ' ')
 
     # ── Licenses ──
     info "Copying licenses"

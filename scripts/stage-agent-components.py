@@ -3,16 +3,26 @@
 
 import argparse
 from pathlib import Path
+import json
 import shutil
-import tomllib
+import subprocess
 
 
 def component_names(workspace: Path) -> list[str]:
-    manifest = tomllib.loads((workspace / "Cargo.toml").read_text())
+    # Cargo resolves workspace membership; this also works with Python 3.9/3.10
+    # shipped by the release builders, without requiring a TOML dependency.
+    metadata = json.loads(subprocess.check_output([
+        "cargo", "metadata", "--no-deps", "--format-version", "1",
+        "--manifest-path", str(workspace / "Cargo.toml"),
+    ], text=True))
+    members = set(metadata["workspace_members"])
+    agents_dir = (workspace / "crates" / "agents").resolve()
     agents = [
-        Path(member).name.replace("-", "_")
-        for member in manifest["workspace"]["members"]
-        if member.startswith("crates/agents/runtara-agent-")
+        package["name"].replace("-", "_")
+        for package in metadata["packages"]
+        if package["id"] in members
+        and Path(package["manifest_path"]).resolve().parent.parent == agents_dir
+        and package["name"].startswith("runtara-agent-")
     ]
     if not agents:
         raise ValueError("workspace declares no agent components")
