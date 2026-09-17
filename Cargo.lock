@@ -5065,6 +5065,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "getrandom 0.3.4",
  "minijinja",
  "runtara-agent-wit",
  "runtara-component-host",

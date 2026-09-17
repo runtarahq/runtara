@@ -75,3 +75,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # must behave identically under the in-process WorkflowExecutor.
 runtara-component-host = { path = "../runtara-component-host" }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+# Precompile fixtures draw per-launch nonces the way the embedded runner does.
+getrandom = "0.3"
