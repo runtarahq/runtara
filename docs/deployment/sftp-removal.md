@@ -28,6 +28,7 @@ new connection creation or credential patches are rejected as an unknown type.
 There is no database migration or automatic workflow rewrite.
 
 S3, Azure presigning, HTTP credential injection, Object Model, and the connection
-service retain their existing APIs. The `runtara-agents` native feature still
-selects native HTTP for the server's S3 client. SSH/libssh2 dependencies are gone;
-OpenSSL remains necessary for database TLS.
+service retain their existing APIs. The server's native S3 client and the
+`runtara-agents` native feature were subsequently removed with
+[workflow-owned channel attachments](../workflow-attachments.md).
+SSH/libssh2 dependencies are gone; OpenSSL remains necessary for database TLS.

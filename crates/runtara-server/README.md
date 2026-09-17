@@ -102,9 +102,9 @@ from invalidating every cargo build. Assets from a disk source are served
 - Depends on `runtara-workflows`, `runtara-core`, and `runtara-environment` for
   execution, persistence, and the object model. Core is transport-free, so this
   crate owns the instance protocol's HTTP surface in `core_runtime`.
-- Links `runtara-agents` with `integrations` + `native` features and
-  re-exports `runtara_agents::integrations` so the static agent registry keeps
-  integration modules reachable.
+- Links `runtara-agents` for host connection support and the static metadata
+  registry. Workflow capabilities execute in standalone WASM components,
+  including [Slack and Mailgun attachment downloads](../../docs/workflow-attachments.md).
 - Pulls in `runtara-dsl`, `runtara-connections`,
   `runtara-object-store`, `runtara-text-parser`, and `runtara-workflow-stdlib`
   to expose their functionality over the HTTP API.
