@@ -29,7 +29,7 @@
 //! the proxy injects auth headers server-side.
 //!
 //! Routing:
-//!   runtara_http::HttpClient::request(...).call_agent()
+//!   runtara_http::HttpClient::request(...).call_agent_async().await
 //!     → POST $RUNTARA_HTTP_PROXY_URL with body = JSON-RPC envelope
 //!     → server-side: resolve connection → inject Authorization → forward
 //!     → MCP server: respond with tools/list or tools/call payload
@@ -46,23 +46,6 @@ use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-mcp/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 pub mod client;
 pub mod search;
@@ -175,7 +158,9 @@ pub struct RawConnection {
 /// proxy uses the same endpoint internally — this just gives the agent
 /// the same view so it can read `url` / `tool_hints` / `tool_scope` /
 /// `extra_headers` directly.
-fn resolve_connection_params(connection: &RawConnection) -> Result<RawConnection, AgentError> {
+async fn resolve_connection_params(
+    connection: &RawConnection,
+) -> Result<RawConnection, AgentError> {
     let params_is_empty = connection
         .parameters
         .as_object()
@@ -217,13 +202,17 @@ fn resolve_connection_params(connection: &RawConnection) -> Result<RawConnection
         connection.connection_id
     );
     let client = runtara_http::HttpClient::with_timeout(std::time::Duration::from_millis(10_000));
-    let resp = client.request("GET", &endpoint).call().map_err(|e| {
-        AgentError::permanent(
-            "MCP_NO_PARAMS",
-            format!("fallback fetch of connection params from {endpoint} failed: {e}"),
-        )
-        .with_attr("integration", "MCP")
-    })?;
+    let resp = client
+        .request("GET", &endpoint)
+        .call_async()
+        .await
+        .map_err(|e| {
+            AgentError::permanent(
+                "MCP_NO_PARAMS",
+                format!("fallback fetch of connection params from {endpoint} failed: {e}"),
+            )
+            .with_attr("integration", "MCP")
+        })?;
     if !(200..300).contains(&resp.status) {
         return Err(AgentError::permanent(
             "MCP_NO_PARAMS",
@@ -380,16 +369,17 @@ pub struct McpToolSearchOutput {
     side_effects = false,
     tags = "mcp:search"
 )]
-pub fn mcp_tool_search(input: McpToolSearchInput) -> Result<McpToolSearchOutput, AgentError> {
+pub async fn mcp_tool_search(input: McpToolSearchInput) -> Result<McpToolSearchOutput, AgentError> {
     let raw = require_connection(input._connection.as_ref())?;
-    let connection = resolve_connection_params(raw)?;
+    let connection = resolve_connection_params(raw).await?;
     let url = extract_url(&connection)?;
     let hints = extract_hints(&connection);
     let scope = extract_scope(&connection);
     let extra_headers = extract_extra_headers(&connection);
     let limit = input.limit.map(|n| n as usize).unwrap_or(5).clamp(1, 20);
 
-    let tools: Vec<Tool> = client::list_tools(&url, &connection.connection_id, &extra_headers)?;
+    let tools: Vec<Tool> =
+        client::list_tools(&url, &connection.connection_id, &extra_headers).await?;
     let total = tools.len() as u32;
 
     let results = search::search(&tools, &hints, &scope, &input.query, limit);
@@ -463,9 +453,9 @@ pub struct McpToolInvokeOutput {
     side_effects = true,
     tags = "mcp:invoke"
 )]
-pub fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput, AgentError> {
+pub async fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput, AgentError> {
     let raw = require_connection(input._connection.as_ref())?;
-    let connection = resolve_connection_params(raw)?;
+    let connection = resolve_connection_params(raw).await?;
     let url = extract_url(&connection)?;
     let scope = extract_scope(&connection);
     let extra_headers = extract_extra_headers(&connection);
@@ -488,7 +478,8 @@ pub fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput,
         &extra_headers,
         &input.tool_name,
         &input.args,
-    )?;
+    )
+    .await?;
     let text = result.to_text();
     let content_json: Vec<Value> = result
         .content
@@ -568,99 +559,10 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_mcp::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "mcp-tool-search" => __executor_mcp_tool_search(value),
-            "mcp-tool-invoke" => __executor_mcp_tool_invoke(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("mcp agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "mcp",
+    capabilities = [mcp_tool_search, mcp_tool_invoke,],
+);
 
 // Force usage of fields that exist only for serde — these aren't read in
 // host-side code paths.

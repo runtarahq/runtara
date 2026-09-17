@@ -38,6 +38,8 @@ use super::{
 
 fn push_while_frame(body: &mut WasmFunction) {
     super::loop_deadline::push_frame(body);
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
@@ -51,7 +53,7 @@ fn push_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_HEAP_BASE_LOCAL));
 }
 
-fn pop_while_frame(body: &mut WasmFunction) {
+fn pop_while_frame(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_HEAP_BASE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_VARIABLES_LEN_LOCAL));
@@ -63,7 +65,9 @@ fn pop_while_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
-    super::loop_deadline::pop_frame(body);
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_WHILE_PARENT_STEPS_PTR_LOCAL));
+    super::loop_deadline::pop_frame(body, indices);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -130,7 +134,7 @@ pub(super) fn emit_while_plan(
     // locals, then restoring the parent steps context and routing the captured
     // error after the loop. Lifecycle suspension (cancel/pause/shutdown) still
     // returns early without routing, matching the existing While durability path.
-    let has_error_plan = error_plan.is_some();
+    let has_error_plan = error_plan.is_some() || indices.monotonic_now.is_some();
     let internal_failure_target = if has_error_plan {
         Some(DirectFailureTarget::StepError { branch_depth: 0 })
     } else {
@@ -207,6 +211,8 @@ pub(super) fn emit_while_plan(
             ),
             timeout_ms,
             DIRECT_WHILE_DEADLINE_MS_LOCAL,
+            super::deadline_scope::owner(while_id, false),
+            &static_data.while_timeout_error,
         );
     }
 
@@ -238,21 +244,8 @@ pub(super) fn emit_while_plan(
         DIRECT_WHILE_STATE_LEN_LOCAL,
     );
 
-    // Enforce the wall-clock timeout before each iteration. On expiry the While
-    // step fails with the static WHILE_TIMEOUT payload, routed through the same
-    // failure target as any other in-loop failure: an onError handler when
-    // present, otherwise the enclosing aggregation or `runtime.fail`.
-    if timeout_ms.is_some() {
-        super::loop_deadline::check(
-            body,
-            indices,
-            DIRECT_WHILE_DEADLINE_MS_LOCAL,
-            &static_data.while_timeout_error,
-            loop_failure_target,
-            (output_ptr_local, output_len_local),
-            (route_ptr_local, route_len_local),
-        );
-    }
+    // Untimed inner loops still observe an enclosing scope's budget.
+    super::loop_deadline::check(body, indices, loop_failure_target);
 
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_MAX_ITERATIONS_LOCAL));
@@ -298,20 +291,28 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_is_cancelled));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        loop_failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+    if indices.omit_runtime {
+        super::cooperative_wait::emit_iteration_boundary(body, indices);
+    } else {
+        // Keep the legacy consuming check only when no sibling window owns
+        // unresolved calls. The non-consuming poll above cleans first on Cancel.
+        super::cooperative_wait::emit_if_safe_boundary(body, indices);
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_is_cancelled));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target.map(|target| target.nested(1)),
+            route_ptr_local,
+            route_len_local,
+        );
+        push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+        super::abi::emit_entry_suspend_return(body, indices);
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
@@ -391,7 +392,7 @@ pub(super) fn emit_while_plan(
         } else {
             loop_failure_target
         },
-        if has_error_plan {
+        if error_plan.is_some() {
             Some(DirectHandledTarget { branch_depth: 0 })
         } else {
             None
@@ -401,32 +402,36 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::End);
         pop_step_error_frame(body);
     }
-    pop_while_frame(body);
+    pop_while_frame(body, indices);
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        loop_failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
+    if !indices.omit_runtime {
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        loop_failure_target,
-        route_ptr_local,
-        route_len_local,
-    );
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+        super::cooperative_wait::emit_if_safe_boundary(body, indices);
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.runtime_check_signals));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            loop_failure_target.map(|target| target.nested(1)),
+            route_ptr_local,
+            route_len_local,
+        );
+        push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+        super::abi::emit_entry_suspend_return(body, indices);
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    }
 
     body.instruction(&Instruction::I32Const(while_id as i32));
     body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
@@ -488,9 +493,9 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::End);
     }
 
-    pop_while_frame(body);
+    pop_while_frame(body, indices);
 
-    if let Some(error_plan) = error_plan {
+    if has_error_plan {
         // A failure inside the loop set the step-error flag and branched to the
         // capture block end. Restore the parent steps context and route the
         // captured error through the shared onError machinery.
@@ -500,6 +505,7 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::LocalSet(steps_ptr_local));
         body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_STEPS_LEN_LOCAL));
         body.instruction(&Instruction::LocalSet(steps_len_local));
+        super::deadline_scope::claim(body, super::deadline_scope::owner(while_id, false));
         emit_agent_error_route_or_fail(
             body,
             indices,
@@ -517,7 +523,7 @@ pub(super) fn emit_while_plan(
             output_len_local,
             route_ptr_local,
             route_len_local,
-            Some(error_plan),
+            error_plan,
             data_ptr_local,
             data_len_local,
             workflow_log_kind,

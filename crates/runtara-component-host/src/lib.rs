@@ -17,11 +17,14 @@
 //!   `DispatcherService`.
 
 pub mod bindings;
+mod cleanup_alarm;
 pub mod connection_resolver_host;
 pub mod dispatcher;
 pub mod engine;
+pub mod execution_host;
 pub(crate) mod host_io;
 pub mod host_state;
+pub mod isolated_tasks;
 pub mod lifecycle;
 pub mod precompile;
 pub mod registry;
@@ -38,8 +41,11 @@ pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
-    InvokeExit, InvokeRunResult, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
-    WorkflowRunResult, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
+    CapabilityInvocation, ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory,
+    InvokeExit, InvokeRunResult, PreparedChildCatalog, PreparedInvocationLauncher,
+    PreparedWorkflow, RootExecutionCoordinator, RootLifecycleDecision, WorkflowExecutor,
+    WorkflowExit, WorkflowLimits, WorkflowRunResult, WorkflowRunSpec, WorkflowStartConfirmation,
+    WorkflowState,
 };
 
 /// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the

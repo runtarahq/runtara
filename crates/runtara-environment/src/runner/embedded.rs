@@ -9,16 +9,14 @@
 //! a tokio task with its own wasmtime `Store`.
 //!
 //! Semantics (vs the retired wasmtime-CLI process runner):
-//! - `RunnerHandle.spawned_pid` is `None`. Startup recovery treats pid-less
-//!   registry entries as dead, which is exactly right here: an in-process
-//!   instance cannot survive a server restart, and resumes go through the
-//!   durable checkpoint path.
+//! - Each accepted handoff has a distinct physical handle, even if queue
+//!   recovery reuses its durable launch ID. A run dies with its owning process;
+//!   a shared registry may also contain runs in other, still-live processes.
 //! - `stop()` raises a cancel flag; the executor's epoch/watchdog rings end
 //!   the run within ~one tick (100 ms).
 //! - Memory metrics come from the store's resource limiter (exact guest
 //!   linear-memory peak); CPU metrics are absent.
 
-#[cfg(all(test, feature = "db-integration-tests"))]
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
 use async_trait::async_trait;
@@ -37,17 +35,14 @@ use tracing::{debug, error, info, warn};
 
 use runtara_component_host::precompile::{
     PRECOMPILE_NONCE_BYTES, PRECOMPILE_WORKER_ARGUMENT, PrecompileRequest, PrecompileResponse,
-    deserialize_trusted_precompiled_component, read_precompile_response_async,
+    deserialize_trusted_precompiled_package, read_precompile_response_async,
     validate_precompile_response, write_precompile_request_async,
 };
 use runtara_component_host::{
     EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
     WorkflowRunSpec, WorkflowStartConfirmation, build_engine, spawn_epoch_ticker,
 };
-use runtara_core::instance_handlers::{
-    InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
-};
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 
 use crate::config::{ProcessEnv, Vars, positive};
 
@@ -82,8 +77,56 @@ async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
 /// Per-launch bookkeeping for detached runs.
 struct InstanceTask {
     cancel: CancelToken,
+    abort_deadline: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
     finished: AtomicBool,
     done: tokio::sync::Notify,
+}
+
+impl InstanceTask {
+    fn schedule_abort(&self, deadline: tokio::time::Instant) -> bool {
+        if self.finished.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.abort_deadline.send_if_modified(|current| {
+            if current.is_none_or(|earlier| deadline < earlier) {
+                *current = Some(deadline);
+                true
+            } else {
+                false
+            }
+        });
+        true
+    }
+
+    fn spawn_abort_timer(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let deadline = self.abort_deadline.subscribe();
+        let task = Arc::downgrade(self);
+        tokio::spawn(async move {
+            if wait_for_abort_deadline(deadline).await
+                && let Some(task) = task.upgrade()
+                && !task.finished.load(Ordering::SeqCst)
+            {
+                task.cancel.store(true, Ordering::SeqCst);
+            }
+        })
+    }
+}
+
+/// Wait independently of guest polling. Sender updates only shorten deadlines.
+async fn wait_for_abort_deadline(
+    mut deadline: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+) -> bool {
+    loop {
+        let current = *deadline.borrow_and_update();
+        if let Some(current) = current {
+            tokio::select! {
+                _ = tokio::time::sleep_until(current) => return true,
+                changed = deadline.changed() => if changed.is_err() { return false; },
+            }
+        } else if deadline.changed().await.is_err() {
+            return false;
+        }
+    }
 }
 
 /// Environment's bridge from the runner-owned in-memory gate to the
@@ -115,13 +158,17 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
     }
 }
 
+mod scoped;
+pub use scoped::ScopedAgentRunnerConfig;
+
+// Keys identify physical executions, not reusable durable launch rows.
 type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
 
 /// Remove a detached task only when this generation still owns the registry
 /// entry. A replacement can be installed while an old task is unwinding; an
 /// unconditional remove would make the live replacement invisible to stop and
 /// monitoring paths.
-fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<InstanceTask>) {
+fn remove_task_if_current(registry: &TaskRegistry, handle_id: &str, task: &Arc<InstanceTask>) {
     let mut tasks = registry
         .lock()
         // This can run while a guest task is already unwinding. Recovering
@@ -129,10 +176,10 @@ fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<I
         // abort that permanently leaks the visible runner handle.
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if tasks
-        .get(launch_id)
+        .get(handle_id)
         .is_some_and(|current| Arc::ptr_eq(current, task))
     {
-        tasks.remove(launch_id);
+        tasks.remove(handle_id);
     }
 }
 
@@ -143,15 +190,22 @@ fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<I
 /// signal to monitors. Leaving it `finished = false` after a panic makes a
 /// completed generation look permanently live until an unrelated cleanup.
 struct TaskCompletionGuard {
+    // Take/drop this before publishing completion, including an unpolled task.
+    run_slot: Option<RunSlot>,
+    abort_timer: Option<tokio::task::AbortHandle>,
     task: Arc<InstanceTask>,
     registry: TaskRegistry,
-    launch_id: String,
+    handle_id: String,
 }
 
 impl Drop for TaskCompletionGuard {
     fn drop(&mut self) {
+        if let Some(timer) = self.abort_timer.take() {
+            timer.abort();
+        }
+        drop(self.run_slot.take());
         self.task.finished.store(true, Ordering::SeqCst);
-        remove_task_if_current(&self.registry, &self.launch_id, &self.task);
+        remove_task_if_current(&self.registry, &self.handle_id, &self.task);
         self.task.done.notify_waiters();
     }
 }
@@ -159,6 +213,7 @@ impl Drop for TaskCompletionGuard {
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
+    scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     /// Address legacy HTTP-composed artifacts use for runtara-core. Modern
     /// HostImport-composed artifacts receive the native runtime host instead.
     core_http_url: Option<String>,
@@ -209,14 +264,14 @@ pub struct EmbeddedWasmRunner {
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
-/// A run permit holder, keyed by launch generation.
+/// A run permit holder, keyed by physical execution handle.
 #[derive(Clone)]
 struct RunSlotEntry {
     instance_id: String,
     taken_at: Instant,
 }
 
-/// Acquisition times of the run permits currently held, keyed by launch.
+/// Acquisition times of the run permits currently held, keyed by physical handle.
 type RunSlotRegistry = Arc<Mutex<HashMap<String, RunSlotEntry>>>;
 
 /// A preparation permit holder, keyed by launch generation.
@@ -252,7 +307,7 @@ type PrecompileChildRegistry = Arc<Mutex<HashMap<String, PrecompileChildSlotEntr
 struct RunSlot {
     /// Dropped with the struct; that release is the whole point of the field.
     _permit: tokio::sync::OwnedSemaphorePermit,
-    launch_id: String,
+    handle_id: String,
     registry: RunSlotRegistry,
     /// Bumped as the permit returns, so the count of finished runs cannot drift
     /// from the count of released permits.
@@ -495,11 +550,11 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         // the component-host protocol writer. The protocol validation checks
         // its nonce, digest, and engine fingerprint before Wasmtime sees it.
         let component = unsafe {
-            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
+            deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
         .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
         let workflow = executor
-            .prepare_precompiled(component)
+            .prepare_precompiled_package(component)
             .await
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
@@ -569,11 +624,11 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         // function in-process and immediately wraps its exact output in the
         // protocol response used by production.
         let component = unsafe {
-            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
+            deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
         .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
         let workflow = executor
-            .prepare_precompiled(component)
+            .prepare_precompiled_package(component)
             .await
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link test precompiled workflow: {error:#}"))
@@ -757,7 +812,7 @@ impl Drop for RunSlot {
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slots.remove(&self.launch_id);
+        slots.remove(&self.handle_id);
         self.finished.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -790,6 +845,7 @@ impl EmbeddedWasmRunner {
         Ok(Self {
             config,
             core_http_url: None,
+            scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits: Arc::new(tokio::sync::Semaphore::new(preparation_limit)),
             preparation_limit,
@@ -805,6 +861,14 @@ impl EmbeddedWasmRunner {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             handler_state,
         })
+    }
+
+    /// Opt into reviewed scoped Agent packages. Legacy artifacts retain their
+    /// existing path. Package reviews must come from trusted operator policy.
+    pub fn with_scoped_agents(mut self, config: ScopedAgentRunnerConfig) -> Result<Self> {
+        config.validate()?;
+        self.scoped_agents = Some(Arc::new(config));
+        Ok(self)
     }
 
     /// Attach an observer that counts guest events as they cross the host.
@@ -868,7 +932,10 @@ impl EmbeddedWasmRunner {
         timeout: Duration,
         cancel: Option<CancelToken>,
         prepared_input: Option<Vec<u8>>,
-    ) -> WorkflowRunSpec {
+    ) -> (
+        WorkflowRunSpec,
+        Arc<crate::runtime_host::PersistenceRuntimeHost>,
+    ) {
         // Always attach the native runtime host. A HostImport-composed
         // artifact consumes it; a legacy composed artifact satisfies the
         // runtime interface internally (HTTP loopback) and never calls it —
@@ -898,14 +965,17 @@ impl EmbeddedWasmRunner {
             host = host.with_guest_interrupt(Arc::new(move || engine.increment_epoch()));
         }
         let runtime = Arc::new(host);
-        WorkflowRunSpec {
-            env,
-            stderr,
-            timeout,
-            cancel,
-            limits: self.limits.clone(),
-            runtime: Some(runtime),
-        }
+        (
+            WorkflowRunSpec {
+                env,
+                stderr,
+                timeout,
+                cancel,
+                limits: self.limits.clone(),
+                runtime: Some(runtime.clone()),
+            },
+            runtime,
+        )
     }
 
     /// Load the exact durable envelope required by a queued preparation.
@@ -988,6 +1058,8 @@ impl EmbeddedWasmRunner {
             ));
         }
 
+        scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
+
         // This is a cancellable database operation, so it observes the same
         // absolute preparation lease deadline as the dispatcher. Missing or
         // malformed durable input is a real launch error, never a synthetic
@@ -1012,11 +1084,11 @@ impl EmbeddedWasmRunner {
         ))
     }
 
-    fn task_of(&self, launch_id: &str) -> Option<Arc<InstanceTask>> {
+    fn task_of(&self, handle_id: &str) -> Option<Arc<InstanceTask>> {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .get(launch_id)
+            .get(handle_id)
             .cloned()
     }
 }
@@ -1310,6 +1382,69 @@ async fn wake_if_signal_already_arrived(
     false
 }
 
+/// Record an unacknowledged cancellation after the guest has exited. Preserve
+/// accepted terminal outcomes. The host cannot provide a guest cleanup receipt:
+/// leave the command pending and mark an unclean exit only if still running.
+async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+    match persistence.get_pending_signal(instance_id).await {
+        Ok(Some(signal))
+            if signal.signal_type == runtara_core::domain::SignalType::Cancel
+                && signal.acknowledged_at.is_none() =>
+        {
+            let result = persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
+                        .if_running()
+                        .with_termination("aborted", None),
+                )
+                .await;
+            match result {
+                Ok(true) => warn!(
+                    instance_id,
+                    "Run exited without a cancellation receipt; recording an unclean cancellation"
+                ),
+                Ok(false) => debug!(
+                    instance_id,
+                    "Preserving the already accepted outcome after an unacknowledged cancellation"
+                ),
+                Err(error) => {
+                    error!(instance_id, %error, "Failed to record unacknowledged cancellation exit")
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(instance_id, %error, "Could not check pending cancellation after the run")
+        }
+    }
+}
+
+/// A cleanup alarm ends the whole Store without acknowledging any command.
+/// Preserve accepted terminal state and distinguish this from a normal timeout.
+async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+    let status = match persistence.get_pending_signal(instance_id).await {
+        Ok(Some(signal)) if signal.signal_type == runtara_core::domain::SignalType::Cancel => {
+            CoreInstanceStatus::Cancelled
+        }
+        Ok(_) => CoreInstanceStatus::Failed,
+        Err(error) => {
+            warn!(instance_id, %error, "Could not classify cleanup abort against pending cancellation");
+            return;
+        }
+    };
+    if let Err(error) = persistence
+        .complete_instance(
+            CompleteInstanceParams::new(instance_id, status)
+                .if_running()
+                .with_error("Cooperative cleanup grace expired; whole execution aborted")
+                .with_termination("aborted", None),
+        )
+        .await
+    {
+        warn!(instance_id, %error, "Could not record cleanup abort after Store disposal");
+    }
+}
+
 /// Park an invoke-shaped instance that returned `outcome::suspended` (the
 /// store-freeing durable-sleep / wait-for-signal paths). Stamps
 /// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
@@ -1332,63 +1467,6 @@ async fn wake_if_signal_already_arrived(
 /// pause/breakpoint suspend has no marker and must never be signal-woken) or
 /// `sleeping` for pure timed parks. Relaunch clears the marker with the
 /// running transition.
-/// Terminal backstop for a cancel the guest never acknowledged.
-///
-/// Status `cancelled` is otherwise written only when the guest observes the
-/// signal and acks it. A workflow artifact compiled before the Delay poll site
-/// existed has no way to observe one, so without this a cancelled run reports
-/// whatever it reached on its own — usually `completed`, a silent success for a
-/// run the user stopped.
-///
-/// Runs after the guest is gone, so nothing inside the workflow can intercept
-/// it, and it makes no assumptions about call ordering — which is what makes it
-/// the floor under the host-side escalation in `PersistenceRuntimeHost`. That
-/// escalation is the fast path; this one is the guarantee.
-///
-/// A cancel landing in the instant a run legitimately finishes is recorded
-/// `cancelled` (the ack overwrites the terminal status). Deliberate: a cancel
-/// was requested and demonstrably not honoured, and reporting clean success for
-/// it is the failure mode this exists to prevent.
-async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id: &str) {
-    // `acknowledged_at` is re-checked even though `get_pending_signal` already
-    // filters on `acknowledged_at IS NULL`: defence in depth. This backstop
-    // overwrites a terminal status, so a regression in that predicate must not
-    // re-cancel a run whose guest handled its signal properly. The check is free.
-    match persistence.get_pending_signal(instance_id).await {
-        Ok(Some(signal))
-            if signal.signal_type == runtara_core::domain::SignalType::Cancel
-                && signal.acknowledged_at.is_none() =>
-        {
-            warn!(
-                instance_id = %instance_id,
-                "Run ended with an unacknowledged cancel; recording cancelled"
-            );
-            let state = InstanceHandlerState::new(Arc::clone(persistence));
-            if let Err(e) = handle_signal_ack(
-                &state,
-                SignalAck {
-                    command_id: signal.command_id,
-                    instance_id: instance_id.to_string(),
-                    signal_type: SignalType::SignalCancel as i32,
-                    acknowledged: true,
-                },
-            )
-            .await
-            {
-                error!(instance_id = %instance_id, error = %e, "Failed to record cancelled");
-            }
-        }
-        Ok(_) => {}
-        Err(e) => {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "Could not check for an unacknowledged cancel after the run"
-            );
-        }
-    }
-}
-
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
@@ -1519,6 +1597,12 @@ impl Runner for EmbeddedWasmRunner {
             input,
         } = prepared.take()?;
 
+        // A prepared token can outlive configuration construction or come from
+        // another runner. Recheck policy before taking any active run capacity.
+        let scoped_authority =
+            scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
+        let scoped_config = self.scoped_agents.clone();
+
         // The child compiler already read, hashed, compiled, and returned the
         // exact serialized component held by `workflow`; no parent artifact
         // reread is permitted at this boundary. Releasing preparation before
@@ -1539,11 +1623,15 @@ impl Runner for EmbeddedWasmRunner {
                         RunnerError::Other("run semaphore closed".to_string())
                     }
                 })?;
+        // Queue recovery may reuse a durable launch ID. Every accepted runner
+        // handoff needs a distinct identity so an old Stop, grace timer or
+        // monitor can never address a later execution of that launch.
+        let handle_id = format!("wasm_{}", uuid::Uuid::new_v4());
         self.run_slots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(
-                options.launch_id.clone(),
+                handle_id.clone(),
                 RunSlotEntry {
                     instance_id: options.instance_id.clone(),
                     taken_at: Instant::now(),
@@ -1552,7 +1640,7 @@ impl Runner for EmbeddedWasmRunner {
         self.runs_started.fetch_add(1, Ordering::Relaxed);
         let run_slot = RunSlot {
             _permit: permit,
-            launch_id: options.launch_id.clone(),
+            handle_id: handle_id.clone(),
             registry: Arc::clone(&self.run_slots),
             finished: Arc::clone(&self.runs_finished),
         };
@@ -1561,21 +1649,28 @@ impl Runner for EmbeddedWasmRunner {
         let cancel: CancelToken = Arc::new(AtomicBool::new(false));
         let task = Arc::new(InstanceTask {
             cancel: Arc::clone(&cancel),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .insert(options.launch_id.clone(), Arc::clone(&task));
+            .insert(handle_id.clone(), Arc::clone(&task));
+        // One emergency timer per existing run, on a separate task so a
+        // guest stuck in cancellation cannot prevent the deadline from firing.
+        // The existing completion guard owns and aborts this timer on every exit.
+        let abort_timer = task.spawn_abort_timer();
         // Construct this before `tokio::spawn`, not inside the task body. A
         // runtime shutdown can drop an unpolled future immediately after the
         // map insertion; moving the guard into that future still retires the
         // exact map entry in its Drop implementation.
         let completion = TaskCompletionGuard {
+            run_slot: Some(run_slot),
+            abort_timer: Some(abort_timer.abort_handle()),
             task: Arc::clone(&task),
             registry: Arc::clone(&self.tasks),
-            launch_id: options.launch_id.clone(),
+            handle_id: handle_id.clone(),
         };
 
         let metrics = Arc::new(tokio::sync::Mutex::new(ContainerMetrics::default()));
@@ -1585,7 +1680,7 @@ impl Runner for EmbeddedWasmRunner {
         // its epoch/watchdog rings cover guest work after the start gate
         // opens. `Duration::MAX` overflows its monotonic HTTP deadline and
         // lets an otherwise healthy gated run panic before it can park.
-        let spec = self.run_spec(
+        let (spec, runtime_host) = self.run_spec(
             options,
             env,
             // Durable prepared launches intentionally do not create a
@@ -1618,7 +1713,6 @@ impl Runner for EmbeddedWasmRunner {
         // allocation. It moves into the task so every completion/error/panic
         // returns capacity and retires its occupancy timestamp together.
         tokio::spawn(async move {
-            let _run_slot = run_slot;
             let _completion = completion;
             if let Some(gate) = start_gate {
                 // The durable dispatcher may open the in-memory gate once it
@@ -1661,14 +1755,28 @@ impl Runner for EmbeddedWasmRunner {
                 if !supervisor_owns_lifecycle {
                     mark_running(persistence.as_ref(), &instance_id).await;
                 }
-                let run = executor
-                    .execute_invoke_with_start_confirmation(
-                        workflow.instance_pre(),
+                let run = if let Some(authority) = scoped_authority {
+                    scoped::execute(
+                        &executor,
+                        &workflow,
                         spec,
+                        runtime_host,
                         input,
                         start_confirmation.clone(),
+                        authority,
+                        scoped_config.as_ref().expect("admitted scoped policy"),
                     )
-                    .await;
+                    .await
+                } else {
+                    executor
+                        .execute_invoke_with_start_confirmation(
+                            workflow.instance_pre(),
+                            spec,
+                            input,
+                            start_confirmation.clone(),
+                        )
+                        .await
+                };
                 {
                     let mut guard = metrics_for_task.lock().await;
                     *guard = invoke_metrics_of(&run);
@@ -1697,6 +1805,9 @@ impl Runner for EmbeddedWasmRunner {
                     InvokeExit::Cancelled => {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
+                    InvokeExit::CleanupAborted => {
+                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                    }
                 }
                 if matches!(&run.exit, InvokeExit::Suspended(_)) {
                     // A cancel may arrive after the guest's last poll but before
@@ -1709,7 +1820,7 @@ impl Runner for EmbeddedWasmRunner {
                         warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
                     }
                 } else {
-                    enforce_unacked_cancel(&persistence, &instance_id).await;
+                    record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
                 }
             } else if let Some(pre) = workflow.command() {
                 // Generic non-workflow components retain their established
@@ -1741,8 +1852,11 @@ impl Runner for EmbeddedWasmRunner {
                     WorkflowExit::Cancelled => {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
+                    WorkflowExit::CleanupAborted => {
+                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                    }
                 }
-                enforce_unacked_cancel(&persistence, &instance_id).await;
+                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
             } else {
                 error!(
                     instance_id = %instance_id,
@@ -1759,7 +1873,7 @@ impl Runner for EmbeddedWasmRunner {
 
         Ok(RunnerHandle {
             launch_id: options.launch_id.clone(),
-            handle_id: format!("wasm_{}", options.launch_id),
+            handle_id,
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: chrono::Utc::now(),
@@ -1768,7 +1882,7 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
-        match self.task_of(&handle.launch_id) {
+        match self.task_of(&handle.handle_id) {
             Some(task) => !task.finished.load(Ordering::SeqCst),
             None => false,
         }
@@ -1776,7 +1890,7 @@ impl Runner for EmbeddedWasmRunner {
 
     async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
         loop {
-            let Some(task) = self.task_of(&handle.launch_id) else {
+            let Some(task) = self.task_of(&handle.handle_id) else {
                 return;
             };
             if task.finished.load(Ordering::SeqCst) {
@@ -1792,11 +1906,22 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
-        if let Some(task) = self.task_of(&handle.launch_id) {
+        if let Some(task) = self.task_of(&handle.handle_id) {
             info!(instance_id = %handle.instance_id, launch_id = %handle.launch_id, "Cancelling embedded workflow run");
             task.cancel.store(true, Ordering::SeqCst);
         }
         Ok(())
+    }
+
+    async fn schedule_abort(
+        &self,
+        handle: &RunnerHandle,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        let Some(task) = self.task_of(&handle.handle_id) else {
+            return Ok(false);
+        };
+        Ok(task.schedule_abort(deadline))
     }
 
     async fn collect_result(
@@ -1833,6 +1958,107 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    fn abort_test_task() -> Arc<InstanceTask> {
+        Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_timer_waits_for_request_and_never_extends_grace() {
+        let task = abort_test_task();
+        let timer = task.spawn_abort_timer();
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert!(task.schedule_abort(deadline));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        assert!(task.schedule_abort(deadline + Duration::from_secs(600)));
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        timer.await.unwrap();
+        assert!(task.cancel.load(Ordering::SeqCst));
+        assert_eq!(tokio::time::Instant::now(), deadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_timer_accepts_shorter_zero_and_elapsed_deadlines() {
+        for grace in [Duration::from_secs(10), Duration::ZERO] {
+            let task = abort_test_task();
+            let timer = task.spawn_abort_timer();
+            let now = tokio::time::Instant::now();
+            assert!(task.schedule_abort(now + Duration::from_secs(600)));
+            tokio::task::yield_now().await;
+            assert!(task.schedule_abort(now + grace));
+            timer.await.unwrap();
+            assert_eq!(tokio::time::Instant::now(), now + grace);
+            assert!(task.cancel.load(Ordering::SeqCst));
+        }
+        let task = abort_test_task();
+        let elapsed = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // Also covers a deadline stored before the timer's first poll.
+        assert!(task.schedule_abort(elapsed));
+        task.spawn_abort_timer().await.unwrap();
+        assert!(task.cancel.load(Ordering::SeqCst));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            elapsed + Duration::from_secs(1)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_run_retires_timer_and_cannot_abort_replacement() {
+        let task = abort_test_task();
+        let timer = task.spawn_abort_timer();
+        task.schedule_abort(tokio::time::Instant::now() + Duration::from_secs(60));
+        tokio::task::yield_now().await;
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let replacement = abort_test_task();
+        registry
+            .lock()
+            .unwrap()
+            .insert("same-launch".into(), replacement.clone());
+        let (slot, permits) = completion_test_slot("same-launch");
+        let completion = TaskCompletionGuard {
+            run_slot: Some(slot),
+            abort_timer: Some(timer.abort_handle()),
+            task: task.clone(),
+            registry: registry.clone(),
+            handle_id: "same-launch".into(),
+        };
+        drop(completion);
+        assert!(timer.await.unwrap_err().is_cancelled());
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!task.schedule_abort(tokio::time::Instant::now()));
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        assert!(!replacement.cancel.load(Ordering::SeqCst));
+        assert!(Arc::ptr_eq(
+            registry.lock().unwrap().get("same-launch").unwrap(),
+            &replacement
+        ));
+        assert_eq!(permits.available_permits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_timer_does_not_keep_a_disappeared_run_alive() {
+        let task = abort_test_task();
+        let weak = Arc::downgrade(&task);
+        let timer = task.spawn_abort_timer();
+        task.schedule_abort(tokio::time::Instant::now() + Duration::from_secs(600));
+        tokio::task::yield_now().await;
+        let before = tokio::time::Instant::now();
+        drop(task);
+        timer.await.unwrap();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(tokio::time::Instant::now(), before);
+    }
 
     /// Nothing running must be reported as "nothing running", not as "unknown".
     ///
@@ -1951,7 +2177,7 @@ mod tests {
             );
             let _slot = RunSlot {
                 _permit: permit,
-                launch_id: "launch-1".to_string(),
+                handle_id: "launch-1".to_string(),
                 registry: Arc::clone(&registry),
                 finished: Arc::clone(&finished),
             };
@@ -1998,7 +2224,7 @@ mod tests {
         );
         let slot = RunSlot {
             _permit: permit,
-            launch_id: "launch-doomed".to_string(),
+            handle_id: "launch-doomed".to_string(),
             registry: Arc::clone(&registry),
             finished: Arc::clone(&finished),
         };
@@ -2029,11 +2255,13 @@ mod tests {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let old = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
         let replacement = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2057,11 +2285,75 @@ mod tests {
         assert!(Arc::ptr_eq(&current, &replacement));
     }
 
+    fn completion_test_slot(launch: &str) -> (RunSlot, Arc<tokio::sync::Semaphore>) {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = RunSlot {
+            _permit: permits.clone().try_acquire_owned().unwrap(),
+            handle_id: launch.into(),
+            registry: Arc::new(Mutex::new(
+                [(
+                    launch.into(),
+                    RunSlotEntry {
+                        instance_id: "test".into(),
+                        taken_at: Instant::now(),
+                    },
+                )]
+                .into(),
+            )),
+            finished: Arc::new(AtomicU64::new(0)),
+        };
+        (slot, permits)
+    }
+
+    #[test]
+    fn completion_is_never_visible_before_run_capacity_returns() {
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let task = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+        registry
+            .lock()
+            .unwrap()
+            .insert("ordered".into(), task.clone());
+        let (run_slot, permits) = completion_test_slot("ordered");
+        let completion = TaskCompletionGuard {
+            abort_timer: None,
+            run_slot: Some(run_slot),
+            task: task.clone(),
+            registry: registry.clone(),
+            handle_id: "ordered".into(),
+        };
+        // Freeze handle removal immediately after its finished flag is set.
+        // This exposes the precise publication window without timing a tiny
+        // race between the task finishing and its permit's later destruction.
+        let hold = registry.lock().unwrap();
+        let dropping = std::thread::spawn(move || drop(completion));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !task.finished.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "completion flag was never published"
+            );
+            std::thread::yield_now();
+        }
+        let available_at_publication = permits.available_permits();
+        drop(hold);
+        dropping.join().unwrap();
+        assert_eq!(
+            available_at_publication, 1,
+            "exit publication must follow permit return"
+        );
+    }
+
     #[tokio::test]
     async fn panicking_task_still_retires_its_runner_handle() {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let task = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2069,10 +2361,13 @@ mod tests {
             .lock()
             .expect("registry")
             .insert("launch-doomed".to_string(), Arc::clone(&task));
+        let (run_slot, permits) = completion_test_slot("launch-doomed");
         let guard = TaskCompletionGuard {
+            abort_timer: None,
+            run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
-            launch_id: "launch-doomed".to_string(),
+            handle_id: "launch-doomed".to_string(),
         };
 
         let join = tokio::spawn(async move {
@@ -2080,6 +2375,7 @@ mod tests {
             panic!("runner task panicked before its manual cleanup tail");
         });
         assert!(join.await.is_err(), "test task must panic");
+        assert_eq!(permits.available_permits(), 1);
         assert!(task.finished.load(Ordering::SeqCst));
         assert!(
             registry.lock().expect("registry").is_empty(),
@@ -2092,6 +2388,7 @@ mod tests {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let task = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2102,10 +2399,13 @@ mod tests {
         // This mirrors production: construct the guard before `tokio::spawn`
         // moves it into the task future. Dropping that future before its first
         // poll is what runtime shutdown does for a just-spawned task.
+        let (run_slot, permits) = completion_test_slot("launch-never-polled");
         let completion = TaskCompletionGuard {
+            abort_timer: None,
+            run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
-            launch_id: "launch-never-polled".to_string(),
+            handle_id: "launch-never-polled".to_string(),
         };
         let never_polled = async move {
             let _completion = completion;
@@ -2113,6 +2413,7 @@ mod tests {
         };
 
         drop(never_polled);
+        assert_eq!(permits.available_permits(), 1);
 
         assert!(task.finished.load(Ordering::SeqCst));
         assert!(
@@ -2437,41 +2738,144 @@ mod tests {
         test_support::running_instance("backstop").await
     }
 
-    /// The floor under the host-side escalation: a guest that reported success
-    /// while a cancel sat unacknowledged must still land on `cancelled`. This is
-    /// what a workflow artifact with no poll site does, and it is the silent
-    /// success the backstop exists to prevent.
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
-    async fn unacked_cancel_overrides_a_reported_completion() {
-        let (persistence, instance_id) = backstop_fixture().await;
+    async fn cleanup_abort_records_unclean_failure_or_cancel_without_acknowledgement() {
+        for requested_cancel in [false, true] {
+            let (persistence, id) = backstop_fixture().await;
+            if requested_cancel {
+                persistence
+                    .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+                    .await
+                    .unwrap();
+            }
+            record_cleanup_aborted_exit(&persistence, &id).await;
+            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(
+                after.status,
+                if requested_cancel {
+                    CoreInstanceStatus::Cancelled
+                } else {
+                    CoreInstanceStatus::Failed
+                }
+            );
+            assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
+            assert!(
+                after
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("cleanup grace expired")
+            );
+            assert!(after.finished_at.is_some());
+            let pending = persistence.get_pending_signal(&id).await.unwrap();
+            if requested_cancel {
+                assert!(pending.unwrap().acknowledged_at.is_none());
+            } else {
+                assert!(pending.is_none());
+            }
+        }
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn cleanup_abort_preserves_accepted_terminal_outcomes() {
+        for status in [
+            CoreInstanceStatus::Completed,
+            CoreInstanceStatus::Failed,
+            CoreInstanceStatus::Cancelled,
+        ] {
+            let (persistence, id) = backstop_fixture().await;
+            persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, status)
+                        .with_output(b"accepted output")
+                        .with_error("accepted error")
+                        .with_termination("crashed", Some(9)),
+                )
+                .await
+                .unwrap();
+            let before = persistence.get_instance(&id).await.unwrap().unwrap();
+            record_cleanup_aborted_exit(&persistence, &id).await;
+            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.finished_at, before.finished_at);
+            assert_eq!(after.termination_reason, before.termination_reason);
+            assert_eq!(after.exit_code, before.exit_code);
+        }
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn unacknowledged_cancel_preserves_accepted_terminal_outcomes() {
+        for status in [
+            CoreInstanceStatus::Completed,
+            CoreInstanceStatus::Failed,
+            CoreInstanceStatus::Cancelled,
+        ] {
+            let (persistence, id) = backstop_fixture().await;
+            persistence
+                .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+                .await
+                .unwrap();
+            persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, status)
+                        .with_output(b"result")
+                        .with_error("error")
+                        .with_termination("crashed", Some(9)),
+                )
+                .await
+                .unwrap();
+            let before = persistence.get_instance(&id).await.unwrap().unwrap();
+            record_unacknowledged_cancel_exit(&persistence, &id).await;
+            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(after.status, status);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.finished_at, before.finished_at);
+            assert_eq!(after.termination_reason, before.termination_reason);
+            assert_eq!(after.exit_code, before.exit_code);
+            assert!(
+                persistence
+                    .get_pending_signal(&id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .acknowledged_at
+                    .is_none()
+            );
+        }
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn unacknowledged_cancel_exit_does_not_fabricate_a_guest_receipt() {
+        let (persistence, id) = backstop_fixture().await;
         persistence
-            .insert_signal(
-                instance_id.as_str(),
-                runtara_core::domain::SignalType::Cancel,
-                b"",
-            )
+            .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
             .await
             .unwrap();
-        persistence
-            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                instance_id.as_str(),
-                CoreInstanceStatus::Completed,
-            ))
-            .await
-            .unwrap();
-
-        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
-
+        let command = persistence.get_pending_signal(&id).await.unwrap().unwrap();
+        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        let after = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(after.status, CoreInstanceStatus::Cancelled);
+        assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
+        assert!(after.finished_at.is_some());
+        let pending = persistence.get_pending_signal(&id).await.unwrap().unwrap();
+        assert_eq!(pending.command_id, command.command_id);
+        assert!(pending.acknowledged_at.is_none());
+        record_unacknowledged_cancel_exit(&persistence, &id).await;
         assert_eq!(
             persistence
-                .get_instance(instance_id.as_str())
+                .get_instance(&id)
                 .await
                 .unwrap()
                 .unwrap()
-                .status,
-            CoreInstanceStatus::Cancelled,
-            "cancel wins the exit race: a stop was requested and not honoured"
+                .finished_at,
+            after.finished_at
         );
     }
 
@@ -2512,7 +2916,7 @@ mod tests {
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence
@@ -2539,7 +2943,7 @@ mod tests {
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence

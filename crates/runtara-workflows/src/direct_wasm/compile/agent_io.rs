@@ -9,7 +9,7 @@
 //! key from the same canonical source the step sees is what gives stable cache hits
 //! across retries and replays.
 
-use wasm_encoder::{Function as WasmFunction, Instruction};
+use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
     emit_fail_if_retptr_error_inplace, load_retptr_list, push_retptr_arg, push_retptr_i32_load,
@@ -30,7 +30,10 @@ pub(super) fn emit_agent_connection_input(
     input_len_local: u32,
     source_ptr_local: u32,
     source_len_local: u32,
+    own_deadline: bool,
 ) {
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(super::cooperative_wait::TIMED_OUT));
     if !static_data.agent_has_connection(agent_id) {
         return;
     }
@@ -50,8 +53,10 @@ pub(super) fn emit_agent_connection_input(
     // consumed, avoiding scratch locals for both the id and descriptor.
     push_retptr_i32_load(body, 4);
     push_retptr_i32_load(body, 8);
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.connection_resolver_describe));
+    emit_connection_description(body, indices, own_deadline);
+    body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
     emit_fail_if_retptr_error_inplace(body, indices);
 
     body.instruction(&Instruction::I32Const(agent_id as i32));
@@ -64,6 +69,32 @@ pub(super) fn emit_agent_connection_input(
     emit_fail_if_retptr_error_inplace(body, indices);
     load_retptr_list(body, input_ptr_local, input_len_local);
     body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+}
+
+/// Stack input: connection ID pointer and length. The standard async lookup
+/// returns its result at zero. Cancellation resolves the lookup before returning
+/// TIMED_OUT; callers must skip descriptor injection and Agent invocation then.
+pub(super) fn emit_connection_description(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    own_deadline: bool,
+) {
+    super::cooperative_wait::emit_poll_before_call(body, indices);
+    if indices.monotonic_now.is_some() {
+        super::deadline_scope::arm(body, indices, own_deadline);
+    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(
+        indices.connection_resolver_describe_async,
+    ));
+    super::cooperative_wait::emit_await_call(body, indices);
+    if indices.monotonic_now.is_some() {
+        body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        super::deadline_scope::select(body);
+        body.instruction(&Instruction::End);
+    }
 }
 
 /// Wrap a workflow-agent child's input in the canonical `{data, variables}`

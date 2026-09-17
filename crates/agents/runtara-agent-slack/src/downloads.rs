@@ -31,7 +31,7 @@ pub struct GetFileInfoOutput {
     side_effects = false,
     rate_limited = true
 )]
-pub fn get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
+pub async fn get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(missing_connection)?;
     if input.file_id.is_empty() {
         return Err(AgentError::permanent(
@@ -39,7 +39,8 @@ pub fn get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, Agent
             "file_id must not be empty",
         ));
     }
-    let response = slack_api_call("files.info", connection, &json!({"file": input.file_id}))?;
+    let response =
+        slack_api_call("files.info", connection, &json!({"file": input.file_id})).await?;
     let file = response
         .get("file")
         .filter(|file| file.is_object())
@@ -92,13 +93,14 @@ pub struct DownloadFileOutput {
     side_effects = false,
     rate_limited = true
 )]
-pub fn download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
+pub async fn download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
     let limit = runtara_http::download::byte_limit(input.max_bytes).map_err(download_error)?;
     let connection = input._connection.as_ref().ok_or_else(missing_connection)?;
     let file = get_file_info(GetFileInfoInput {
         _connection: Some(connection.clone()),
         file_id: input.file_id,
-    })?
+    })
+    .await?
     .file;
     if file
         .get("size")
@@ -129,6 +131,7 @@ pub fn download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, Age
         "application/octet-stream",
         limit,
     )
+    .await
     .map_err(download_error)?;
     Ok(DownloadFileOutput {
         content: base64::engine::general_purpose::STANDARD.encode(&response.body),
@@ -195,13 +198,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn download_requires_connection_and_valid_limit_before_network() {
+    #[tokio::test]
+    async fn download_requires_connection_and_valid_limit_before_network() {
         let error = download_file(DownloadFileInput {
             _connection: None,
             file_id: "F123".into(),
             max_bytes: None,
         })
+        .await
         .unwrap_err();
         assert_eq!(error.code, "SLACK_MISSING_CONNECTION");
         let error = download_file(DownloadFileInput {
@@ -209,17 +213,8 @@ mod tests {
             file_id: "F123".into(),
             max_bytes: Some(0),
         })
+        .await
         .unwrap_err();
         assert_eq!(error.code, "INVALID_DOWNLOAD_LIMIT");
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn execute_get_file_info(input: Value) -> Result<Value, String> {
-    __executor_get_file_info(input)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn execute_download_file(input: Value) -> Result<Value, String> {
-    __executor_download_file(input)
 }

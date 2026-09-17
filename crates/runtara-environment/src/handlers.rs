@@ -709,9 +709,8 @@ pub struct StopInstanceRequest {
     pub reason: String,
     /// Grace period before force kill in seconds.
     ///
-    /// Accepted for wire compatibility but not currently observed: the stop
-    /// path cancels the guest immediately via `Runner::stop`. It previously
-    /// only ever populated the cancellation token, which nothing read.
+    /// Cooperative cancellation is signalled immediately. Zero requests a full
+    /// abort without waiting; longer grace never extends an earlier deadline.
     pub grace_period_seconds: u64,
 }
 
@@ -732,6 +731,30 @@ pub async fn handle_stop_instance(
     state: &EnvironmentHandlerState,
     request: StopInstanceRequest,
 ) -> Result<StopInstanceResponse> {
+    let Some(abort_at) = tokio::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(request.grace_period_seconds))
+    else {
+        return Ok(StopInstanceResponse {
+            success: false,
+            error: Some("Cancellation grace period exceeds the monotonic clock range".into()),
+        });
+    };
+    let Some(instance) = state
+        .persistence
+        .get_instance_meta(&request.instance_id)
+        .await?
+    else {
+        return Ok(StopInstanceResponse {
+            success: false,
+            error: Some(format!("Instance '{}' not found", request.instance_id)),
+        });
+    };
+    if instance.status.is_terminal() {
+        return Ok(StopInstanceResponse {
+            success: true,
+            error: None,
+        });
+    }
     info!(
         instance_id = %request.instance_id,
         reason = %request.reason,
@@ -739,8 +762,7 @@ pub async fn handle_stop_instance(
     );
 
     // A queued/leased launch has no runner handle yet. Cancel it in the same
-    // transaction that terminalizes Core, before falling back to the legacy
-    // registry-based running cancellation path.
+    // transaction that terminalizes Core, before signalling an active guest.
     let launches = LaunchRepository::new(state.pool.clone());
     match launches.get_active_for_instance(&request.instance_id).await {
         Ok(Some(active)) => match launches.cancel_before_start(&active.launch_id).await {
@@ -778,18 +800,46 @@ pub async fn handle_stop_instance(
         }
     }
 
+    let signal = handle_send_signal(
+        state,
+        &request.instance_id,
+        "cancel",
+        Some(request.reason.as_bytes()),
+    )
+    .await?;
+    match signal {
+        SendSignalOutcome::Delivered => {}
+        SendSignalOutcome::NotSignalable { .. } => {
+            return Ok(StopInstanceResponse {
+                success: true,
+                error: None,
+            });
+        }
+        other => {
+            return Ok(StopInstanceResponse {
+                success: false,
+                error: Some(format!("Could not deliver cancellation: {other:?}")),
+            });
+        }
+    }
+    if state
+        .persistence
+        .get_instance_meta(&request.instance_id)
+        .await?
+        .is_some_and(|instance| instance.status.is_terminal())
+    {
+        return Ok(StopInstanceResponse {
+            success: true,
+            error: None,
+        });
+    }
+
     // Look up container
     let container_registry = ContainerRegistry::new(state.pool.clone());
     let container = match container_registry.get(&request.instance_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
-            return Ok(StopInstanceResponse {
-                success: false,
-                error: Some(format!(
-                    "Instance '{}' not found in container registry",
-                    request.instance_id
-                )),
-            });
+            return stop_after_handle_retired(state, &request).await;
         }
         Err(e) => {
             error!(error = %e, "Failed to look up container");
@@ -811,59 +861,87 @@ pub async fn handle_stop_instance(
         metrics: None,
     };
 
-    if let Err(e) = state.runner.stop(&handle).await {
-        warn!(error = %e, "Runner stop returned error");
+    match state.runner.schedule_abort(&handle, abort_at).await {
+        Ok(true) => {}
+        Ok(false) => {
+            // Cooperative signals are already durable. A peer additionally
+            // needs proof that the physical owner armed whole-run emergency
+            // grace; persisting a request alone is not that proof.
+            let delivery = async {
+                let Some(deadline) = container_registry.request_abort(&handle, abort_at).await?
+                else {
+                    return stop_after_handle_retired(state, &request).await;
+                };
+                loop {
+                    if container_registry.abort_is_armed(&handle, deadline).await?
+                        || state
+                            .persistence
+                            .get_instance_meta(&request.instance_id)
+                            .await?
+                            .is_some_and(|instance| instance.status.is_terminal())
+                    {
+                        return Ok(StopInstanceResponse {
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            };
+            // This bounds acknowledgement waiting only. The persisted deadline
+            // retains the original request budget, including zero grace.
+            return match tokio::time::timeout(std::time::Duration::from_secs(5), delivery).await {
+                Ok(result) => result,
+                Err(_) => Ok(StopInstanceResponse {
+                    success: false,
+                    error: Some("Cancellation was signalled, but its owner did not confirm the emergency deadline".into()),
+                }),
+            };
+        }
+        Err(error) => {
+            return Ok(StopInstanceResponse {
+                success: false,
+                error: Some(format!(
+                    "Cancellation was signalled, but its grace deadline could not be armed: {error}"
+                )),
+            });
+        }
     }
-
-    // Update instance status to cancelled via Persistence trait
-    let _ = state
-        .persistence
-        .complete_instance(CompleteInstanceParams::new(
-            &request.instance_id,
-            CoreInstanceStatus::Cancelled,
-        ))
-        .await;
-
-    // The runner was already handed this generation, so the queue is released
-    // only after the Core cancellation write above has committed. A concurrent
-    // monitor can win this transition; in that case it also owns notification.
-    match launches
-        .mark_terminal(
-            &container.launch_id,
-            LaunchState::Cancelled,
-            Some(&request.reason),
-        )
-        .await
-    {
-        Ok(Some(cancelled)) => state
-            .lifecycle_observers
-            .notify_released(&cancelled, "cancelled"),
-        Ok(None) => {}
-        Err(error) => warn!(
-            instance_id = %request.instance_id,
-            launch_id = %container.launch_id,
-            error = %error,
-            "Failed to terminalize cancelled launch generation"
-        ),
-    }
-
-    // Clean up container registry
-    let _ = container_registry
-        .cleanup_handle(
-            &request.instance_id,
-            &container.launch_id,
-            &handle.handle_id,
-        )
-        .await;
-
-    info!("Instance stopped successfully");
-
+    // The guest acknowledgement or runner exit owns terminal publication.
+    // The existing monitor releases the launch and registry after actual exit.
+    info!("Cancellation requested and grace deadline armed");
     Ok(StopInstanceResponse {
         success: true,
         error: None,
     })
 }
 
+async fn stop_after_handle_retired(
+    state: &EnvironmentHandlerState,
+    request: &StopInstanceRequest,
+) -> Result<StopInstanceResponse> {
+    // Completion/parking can retire the handle after the initial signal. The
+    // existing idempotent signal path also resolves parked cancellation. A
+    // still-running foreign/missing handle cannot promise grace enforcement.
+    handle_send_signal(
+        state,
+        &request.instance_id,
+        "cancel",
+        Some(request.reason.as_bytes()),
+    )
+    .await?;
+    let terminal = state
+        .persistence
+        .get_instance_meta(&request.instance_id)
+        .await?
+        .is_some_and(|instance| instance.status.is_terminal());
+    Ok(StopInstanceResponse {
+        success: terminal,
+        error: (!terminal).then(|| {
+            "Cancellation was signalled, but this runner does not own an active handle for its grace deadline".into()
+        }),
+    })
+}
 // ============================================================================
 // Resume Instance
 // ============================================================================
@@ -1512,10 +1590,15 @@ pub fn spawn_container_monitor(
     // allowed; a closed gate is bounded by its separate handoff lease. The
     // durable attempt fences cleanup when a recovered launch reuses its id.
     start_gate: Option<(StartGate, i32)>,
+    execution_lease: Option<crate::execution_lease::ExecutionLease>,
 ) {
     let instance_id = handle.instance_id.clone();
 
-    tokio::spawn(async move {
+    let lease_runner = runner.clone();
+    let lease_handle = handle.clone();
+    let lease_pool = pool.clone();
+    let lease_gate = start_gate.as_ref().map(|(gate, _)| gate.clone());
+    let monitoring = async move {
         if let Some((gate, attempt_count)) = start_gate {
             // Matched exhaustively rather than tested for `Opened`: a variant
             // added later must not silently join the failure set.
@@ -1656,6 +1739,29 @@ pub fn spawn_container_monitor(
                     timeout,
                 )
                 .await;
+            }
+        }
+    };
+    tokio::spawn(async move {
+        tokio::pin!(monitoring);
+        let Some(lease) = execution_lease else {
+            monitoring.await;
+            return;
+        };
+        tokio::select! {
+            () = &mut monitoring => {}
+            reason = lease.watch(&lease_pool, &lease_handle) => {
+                warn!(instance_id = %lease_handle.instance_id, handle_id = %lease_handle.handle_id, reason,
+                    "Stopping physical execution after ownership loss");
+                if let Err(error) = lease_runner.stop(&lease_handle).await {
+                    error!(%error, "Failed to stop execution after ownership loss");
+                }
+                if let Some(gate) = lease_gate {
+                    gate.cancel();
+                }
+                // The normal monitor still owns actual-exit observation,
+                // terminal fallback and exact-handle resource release.
+                monitoring.await;
             }
         }
     });

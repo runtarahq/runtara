@@ -37,7 +37,8 @@ pub fn byte_limit(requested: Option<usize>) -> Result<usize, DownloadError> {
 
 /// The caller selects a provider-approved URL and endpoint. The proxy enforces
 /// the connection destination, injects auth, bounds bytes, and refuses redirects.
-pub fn get(
+/// Async so a cancelled Agent call drops the in-flight download.
+pub async fn get(
     connection_id: &str,
     url: &str,
     endpoint: Option<&str>,
@@ -60,12 +61,15 @@ pub fn get(
     if let Some(endpoint) = endpoint {
         request = request.header("X-Runtara-Connection-Endpoint", endpoint);
     }
-    let response = request.call_agent().map_err(|_| DownloadError {
-        code: "DOWNLOAD_NETWORK_ERROR",
-        message: "Download request failed".into(),
-        transient: true,
-        retry_after_ms: None,
-    })?;
+    let response = request
+        .call_agent_async()
+        .await
+        .map_err(|_| DownloadError {
+            code: "DOWNLOAD_NETWORK_ERROR",
+            message: "Download request failed".into(),
+            transient: true,
+            retry_after_ms: None,
+        })?;
     check_response(response, limit)
 }
 

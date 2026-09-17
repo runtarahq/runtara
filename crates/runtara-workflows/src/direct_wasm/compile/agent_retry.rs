@@ -133,39 +133,35 @@ pub(super) fn emit_agent_retry_sleep(
     sleep_key_ptr_local: u32,
     sleep_key_len_local: u32,
 ) {
+    if !durable_checkpoint {
+        // Keep the invocation's stack alive while waiting. Root lifecycle
+        // signals and parent cancellation use the same standard wait/cleanup
+        // as an outbound Agent call.
+        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+        super::cooperative_wait::emit_timer_wait(body, indices);
+        return;
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
-    if durable_checkpoint {
-        body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-        body.instruction(&Instruction::LocalGet(cache_key_len_local));
-        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
-        return_if_retptr_error(body, indices);
-        load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
+    return_if_retptr_error(body, indices);
+    load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
 
-        body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
-        body.instruction(&Instruction::LocalGet(sleep_key_len_local));
-        push_segment_args(body, &static_data.agent_rate_limit_wait);
-    }
+    body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(sleep_key_len_local));
+    push_segment_args(body, &static_data.agent_rate_limit_wait);
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    if durable_checkpoint {
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-        return_if_retptr_error(body, indices);
-    } else {
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-        return_if_retptr_error(body, indices);
-    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
+    return_if_retptr_error(body, indices);
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(if durable_checkpoint {
-        indices.runtime_durable_sleep
-    } else {
-        indices.runtime_blocking_sleep
-    }));
+    body.instruction(&Instruction::Call(indices.runtime_durable_sleep));
     return_if_retptr_error(body, indices);
     body.instruction(&Instruction::End);
 }
@@ -179,6 +175,7 @@ pub(super) fn emit_agent_retry_park(
     indices: &DirectCoreFunctionIndices,
     cache_key_ptr_local: u32,
     cache_key_len_local: u32,
+    deadline: Option<u32>,
 ) {
     body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
     body.instruction(&Instruction::LocalGet(cache_key_len_local));
@@ -200,6 +197,7 @@ pub(super) fn emit_agent_retry_park(
         DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
         DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
         DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
+        deadline,
     );
 }
 

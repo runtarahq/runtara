@@ -224,7 +224,7 @@ pub fn compile_workflow_direct(
         "generating",
         "Generating direct workflow component",
     );
-    let mut direct_result = compile_direct_workflow(DirectCompilationInput {
+    let direct_input = DirectCompilationInput {
         workflow_id,
         version,
         source_checksum: options.source_checksum,
@@ -234,9 +234,9 @@ pub fn compile_workflow_direct(
         track_events,
         agent_catalog,
         agent_slug,
-    })
-    .map_err(direct_compile_error_to_io)?;
-
+    };
+    let mut direct_result =
+        compile_direct_workflow(direct_input).map_err(direct_compile_error_to_io)?;
     report_progress(
         &progress_callback,
         "composing",
@@ -248,7 +248,6 @@ pub fn compile_workflow_direct(
         &options.extra_component_dirs,
     )
     .map_err(direct_compile_error_to_io)?;
-
     let package_size = direct_artifact_package_size(&direct_result.build_dir);
 
     Ok(NativeCompilationResult {

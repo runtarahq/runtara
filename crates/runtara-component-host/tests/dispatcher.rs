@@ -3,9 +3,8 @@
 //! Builds a tmp `bundles/` directory by copying the freshly-built
 //! `runtara_agent_crypto.wasm` and the source `meta.json` together, then runs
 //! the dispatcher against it. The explicit component integration suite fails
-//! closed if the .wasm is missing — run
-//! `cargo component build --release --target wasm32-wasip2 -p
-//! runtara-agent-crypto` first.
+//! closed if the .wasm is missing — run `scripts/build-agent-components.sh`
+//! first. `RUNTARA_AGENT_COMPONENTS_DIR` selects an isolated component build.
 
 mod common;
 
@@ -24,7 +23,7 @@ fn crypto_wasm_path() -> PathBuf {
 }
 
 /// Build a one-agent bundle dir (mirrors the production layout) and return its
-/// path. Returns `None` if the crypto .wasm hasn't been built yet. The
+/// path. Fails if the crypto .wasm hasn't been built yet. The
 /// `meta.json` sidecar is emitted on the fly by calling the agent crate's
 /// host-only `agent_info()` and serializing — same source-of-truth the
 /// production `runtara-agent-bundle-emit` binary uses.

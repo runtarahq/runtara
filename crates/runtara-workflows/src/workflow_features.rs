@@ -139,6 +139,35 @@ impl WorkflowFeatureSummary {
         })
     }
 
+    /// Runtime ownership for one graph of a callable workflow. Agent/Embed/Split retries use
+    /// cancellable host-I/O timers and connections use the separate resolver.
+    /// Agent/Embed deadlines use guest clocks; `runtime_timeouts` identifies
+    /// other timeout owners whose lowering still calls the lifecycle runtime.
+    /// Callers must also apply the complete workflow-agent safety gate and
+    /// inspect every supplied Embed child graph.
+    #[cfg(all(
+        feature = "compiler",
+        not(all(target_family = "wasm", not(target_os = "wasi")))
+    ))]
+    pub(crate) fn needs_agent_runtime(&self, track_events: bool, runtime_timeouts: bool) -> bool {
+        if track_events || self.root_durable || runtime_timeouts {
+            return true;
+        }
+        self.features.iter().any(|feature| {
+            matches!(
+                feature,
+                WorkflowFeature::AiAgent
+                    | WorkflowFeature::LogEvent
+                    | WorkflowFeature::ExplicitError
+                    | WorkflowFeature::Delay
+                    | WorkflowFeature::WaitForSignal
+                    | WorkflowFeature::SuspendResume
+                    | WorkflowFeature::Durability
+                    | WorkflowFeature::Breakpoint
+            )
+        })
+    }
+
     /// Whether the emitted component must import `runtara:workflow-runtime/runtime`
     /// — i.e. any lowered step would call a `runtime.*` host function beyond the
     /// terminal `complete`/`fail` (which the omit path suppresses in favor of the
@@ -328,6 +357,14 @@ impl FeatureAnalyzer {
             }
             Step::Split(step) => {
                 self.summary.features.insert(WorkflowFeature::SplitSubgraph);
+                if step
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.timeout)
+                    .is_some()
+                {
+                    self.summary.features.insert(WorkflowFeature::Timeout);
+                }
                 if graph_durable && step.durable.unwrap_or(true) {
                     self.summary.features.insert(WorkflowFeature::Durability);
                 }

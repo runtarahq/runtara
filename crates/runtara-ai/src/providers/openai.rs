@@ -105,9 +105,51 @@ impl CompletionModel for OpenAICompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
+        let req = self.prepare_http_request(request)?;
+        let response = if self.client.uses_proxy() {
+            req.call_agent()
+        } else {
+            req.call()
+        }
+        .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+        self.finish_http_response(response)
+    }
+
+    fn completion_async(
+        &self,
+        request: CompletionRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + '_>,
+    > {
+        Box::pin(async move {
+            let req = self.prepare_http_request(request)?;
+            let response = if self.client.uses_proxy() {
+                req.call_agent_async().await
+            } else {
+                req.call_async().await
+            }
+            .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+            self.finish_http_response(response)
+        })
+    }
+}
+
+/// Whether `model` belongs to the OpenAI "o-series" reasoning family
+/// (o1/o3/o4). These models reject `max_tokens` (requiring
+/// `max_completion_tokens` instead) and reject any `temperature` other than
+/// the default of `1`.
+fn is_openai_o_series(model: &str) -> bool {
+    model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
+}
+
+impl OpenAICompletionModel {
+    fn prepare_http_request(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<runtara_http::RequestBuilder, CompletionError> {
         let body = self.build_request_body(request)?;
 
-        let response = if self.client.uses_proxy() {
+        let req = if self.client.uses_proxy() {
             // Proxy mode: relative path + connection_id header
             let mut req = self
                 .client
@@ -120,8 +162,7 @@ impl CompletionModel for OpenAICompletionModel {
             if let Some(ms) = self.timeout_ms {
                 req = req.timeout(std::time::Duration::from_millis(ms));
             }
-            req.call_agent()
-                .map_err(|e| CompletionError::HttpError(e.to_string()))?
+            req
         } else {
             // Direct mode: full URL + API key
             let url = format!("{}/chat/completions", self.client.base_url);
@@ -135,10 +176,16 @@ impl CompletionModel for OpenAICompletionModel {
             if let Some(ms) = self.timeout_ms {
                 req = req.timeout(std::time::Duration::from_millis(ms));
             }
-            req.call()
-                .map_err(|e| CompletionError::HttpError(e.to_string()))?
+            req
         };
 
+        Ok(req)
+    }
+
+    fn finish_http_response(
+        &self,
+        response: runtara_http::HttpResponse,
+    ) -> Result<CompletionResponse, CompletionError> {
         if response.status >= 400 {
             let error_body = String::from_utf8_lossy(&response.body).to_string();
             #[cfg(feature = "tracing")]
@@ -165,17 +212,7 @@ impl CompletionModel for OpenAICompletionModel {
 
         self.parse_response(api_resp)
     }
-}
 
-/// Whether `model` belongs to the OpenAI "o-series" reasoning family
-/// (o1/o3/o4). These models reject `max_tokens` (requiring
-/// `max_completion_tokens` instead) and reject any `temperature` other than
-/// the default of `1`.
-fn is_openai_o_series(model: &str) -> bool {
-    model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
-}
-
-impl OpenAICompletionModel {
     /// Build the JSON body for the OpenAI `/chat/completions` endpoint.
     fn build_request_body(&self, request: CompletionRequest) -> Result<Value, CompletionError> {
         // Assemble the `messages` array.

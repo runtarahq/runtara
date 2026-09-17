@@ -70,6 +70,35 @@ impl CompletionModel for BedrockCompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
+        let response = self
+            .prepare_http_request(request)?
+            .call_agent()
+            .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+        self.finish_http_response(response)
+    }
+
+    fn completion_async(
+        &self,
+        request: CompletionRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + '_>,
+    > {
+        Box::pin(async move {
+            let response = self
+                .prepare_http_request(request)?
+                .call_agent_async()
+                .await
+                .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+            self.finish_http_response(response)
+        })
+    }
+}
+
+impl BedrockCompletionModel {
+    fn prepare_http_request(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<runtara_http::RequestBuilder, CompletionError> {
         let body = self.build_request_body(request)?;
         let path = format!("/model/{}/converse", self.model);
 
@@ -84,10 +113,13 @@ impl CompletionModel for BedrockCompletionModel {
         if let Some(ms) = self.timeout_ms {
             req = req.timeout(std::time::Duration::from_millis(ms));
         }
-        let response = req
-            .call_agent()
-            .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+        Ok(req)
+    }
 
+    fn finish_http_response(
+        &self,
+        response: runtara_http::HttpResponse,
+    ) -> Result<CompletionResponse, CompletionError> {
         if response.status >= 400 {
             let error_body = String::from_utf8_lossy(&response.body).to_string();
             #[cfg(feature = "tracing")]
@@ -112,9 +144,7 @@ impl CompletionModel for BedrockCompletionModel {
         let response_json: Value = serde_json::from_str(&response_text)?;
         self.parse_response(response_json)
     }
-}
 
-impl BedrockCompletionModel {
     fn build_request_body(&self, request: CompletionRequest) -> Result<Value, CompletionError> {
         let mut messages: Vec<Value> = Vec::new();
 

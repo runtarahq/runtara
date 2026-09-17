@@ -280,6 +280,7 @@ pub(super) fn emit_agent_error_route_or_fail(
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
+    super::deadline_scope::propagate(body, indices, failure_target);
     if let Some(error_plan) = error_plan {
         emit_error_steps(
             body,
@@ -587,6 +588,7 @@ fn emit_terminal_run_plan_mapping(
         if indices.report_terminal_status() {
             super::core_module::emit_complete(body, indices, output_ptr_local, output_len_local);
         }
+        super::deadline_scope::close_alarm(body, indices);
         match indices.abi {
             crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
                 load_retptr_tag(body);

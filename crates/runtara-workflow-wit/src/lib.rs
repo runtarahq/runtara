@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Canonical WIT contracts for direct-emitted workflow components.
 
+#[cfg(feature = "isolation-package")]
+pub mod isolation_package;
+
+/// Generic owned child-execution imports, independent of the DSL schema.
+pub const EXECUTION_INTERFACE_NAME: &str = "runtara:workflow-execution/tasks@0.1.0";
+pub const EXECUTION_WIT: &str = include_str!("../wit/execution/runtara-workflow-execution.wit");
+
 /// First workflow WIT ABI version.
 pub const WORKFLOW_WIT_VERSION: &str = "0.1.0";
 
@@ -9,16 +16,23 @@ pub const WORKFLOW_WIT_VERSION: &str = "0.1.0";
 pub const STDLIB_PACKAGE: &str = "runtara:workflow-stdlib@0.1.0";
 
 /// WIT package name for the runtime/SDK lifecycle component.
-pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.3.0";
+pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.4.0";
 
 /// Runtime interface imported by compiled workflows and implemented by the host.
-pub const RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.3.0";
+pub const RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.4.0";
+
+/// Previous contract, retained by the host for already-built workflow artifacts.
+pub const LEGACY_RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.3.0";
 
 /// WIT package name for safe runtime connection resolution.
-pub const CONNECTION_RESOLVER_PACKAGE: &str = "runtara:connection-resolver@0.1.0";
+pub const CONNECTION_RESOLVER_PACKAGE: &str = "runtara:connection-resolver@0.2.0";
 
 /// Fully-qualified component import name of the connection resolver.
-pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = "runtara:connection-resolver/resolver@0.1.0";
+pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = "runtara:connection-resolver/resolver@0.2.0";
+
+/// Previous synchronous contract, retained for already-built workflow artifacts.
+pub const LEGACY_CONNECTION_RESOLVER_INTERFACE_NAME: &str =
+    "runtara:connection-resolver/resolver@0.1.0";
 
 /// WIT package name for the neutral shared ABI vocabulary.
 pub const ABI_PACKAGE: &str = "runtara:abi@0.1.0";
@@ -38,10 +52,10 @@ pub const LIFECYCLE_INTERFACE_NAME_V1: &str = "runtara:workflow-lifecycle/lifecy
 /// WIT text for `runtara:workflow-stdlib@0.1.0`.
 pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib.wit");
 
-/// WIT text for `runtara:workflow-runtime@0.3.0`.
+/// WIT text for `runtara:workflow-runtime@0.4.0`.
 pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runtime.wit");
 
-/// WIT text for `runtara:connection-resolver@0.1.0`.
+/// WIT text for `runtara:connection-resolver@0.2.0`.
 pub const CONNECTION_RESOLVER_WIT: &str =
     include_str!("../wit/connection-resolver/runtara-connection-resolver.wit");
 
@@ -178,6 +192,10 @@ mod tests {
                 interface.functions.contains_key(function),
                 "missing connection resolver function {function}"
             );
+            assert!(matches!(
+                interface.functions[function].kind,
+                wit_parser::FunctionKind::AsyncFreestanding
+            ));
         }
 
         let world_id = package.worlds["connection-resolver"];
@@ -272,6 +290,7 @@ mod tests {
             "debug-mode-enabled",
             "breakpoint-pause",
             "heartbeat",
+            "poll-signal",
             "is-cancelled",
             "check-signals",
             "poll-custom-signal",
@@ -306,5 +325,51 @@ mod tests {
                 .values()
                 .any(|item| matches!(item, WorldItem::Interface { id, .. } if *id == interface_id))
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    #[test]
+    fn execution_contract_uses_resources_and_async_joins() {
+        use wit_parser::{FunctionKind, TypeDefKind};
+        let mut resolve = wit_parser::Resolve::default();
+        resolve.push_str("abi.wit", super::ABI_WIT).unwrap();
+        resolve
+            .push_str("lifecycle.wit", super::LIFECYCLE_WIT)
+            .unwrap();
+        let id = resolve
+            .push_str("execution.wit", super::EXECUTION_WIT)
+            .unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), "runtara:workflow-execution@0.1.0");
+        let tasks = &resolve.interfaces[package.interfaces["tasks"]];
+        assert!(matches!(
+            resolve.types[tasks.types["task"]].kind,
+            TypeDefKind::Resource
+        ));
+        assert!(matches!(
+            tasks.functions["start"].kind,
+            FunctionKind::Freestanding
+        ));
+        for name in ["join", "release"] {
+            assert!(matches!(
+                tasks.functions[name].kind,
+                FunctionKind::AsyncFreestanding
+            ));
+        }
+        assert!(matches!(
+            tasks.functions["request-cancel"].kind,
+            FunctionKind::Freestanding
+        ));
+        for name in [
+            "entry",
+            "invocation-context",
+            "execution-error",
+            "cancel-status",
+            "task-outcome",
+        ] {
+            assert!(tasks.types.contains_key(name));
+        }
     }
 }

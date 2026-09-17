@@ -1,3 +1,4 @@
+pub mod isolation;
 mod runtime;
 
 pub use runtime::{RuntimeOverrides, RuntimePoolConfig, ShutdownGrace};
@@ -84,6 +85,8 @@ pub struct Config {
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
+    /// Runtime approvals retained solely for previously compiled isolation artifacts.
+    pub isolation_policy: Option<std::sync::Arc<isolation::IsolationPolicy>>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -247,6 +250,7 @@ impl Config {
             agent_components_dir.as_deref(),
         );
 
+        let isolation_policy = isolation::IsolationPolicy::from_env()?;
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
         );
@@ -316,6 +320,7 @@ impl Config {
             connection_service_url,
             agent_components_dir,
             direct_wasm_components_dir,
+            isolation_policy,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,
@@ -565,6 +570,17 @@ pub fn get() -> &'static Config {
     CONFIG.get().expect("Config must be initialized before use")
 }
 
+/// Legacy artifact runtime approvals. Never rereads the file.
+pub fn isolation_policy() -> Option<std::sync::Arc<isolation::IsolationPolicy>> {
+    try_get().and_then(|config| config.isolation_policy.clone())
+}
+
+/// New compilation always uses standard component composition. Legacy runtime
+/// approvals cannot change cache identity or select another compiler backend.
+pub fn workflow_lowering_tag() -> String {
+    runtara_workflows::direct_lowering_tag()
+}
+
 /// Initialize the global configuration for a unit test, if nothing has yet.
 ///
 /// The global is a `OnceLock` shared by every test in this binary, so this
@@ -798,6 +814,14 @@ pub fn valkey_admission_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_lowering_identity_uses_standard_composition() {
+        let actual = workflow_lowering_tag();
+        assert_eq!(actual, runtara_workflows::direct_lowering_tag());
+        assert!(actual.contains("agent-composition=standard-v1"));
+        assert!(!actual.contains("isolation=v1-"));
+    }
 
     /// The admission ceiling exists to bound work the runner will execute, so
     /// it must stay anchored to the runner's own bound. These drifted apart

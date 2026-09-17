@@ -11,6 +11,7 @@ categories = ["wasm"]
 
 [features]
 component-integration-tests = []
+# Test-only experiment: guest-owned orchestration across disposable Stores.
 
 [[test]]
 name = "capability_fixtures"
@@ -50,7 +51,7 @@ runtara-agent-wit = { path = "../runtara-agent-wit" }
 runtara-dsl = { path = "../runtara-dsl" }
 # Canonical LIFECYCLE_INTERFACE_NAME — one source of truth for the invoke
 # export name shared with the compiler.
-runtara-workflow-wit = { path = "../runtara-workflow-wit" }
+runtara-workflow-wit = { path = "../runtara-workflow-wit", features = ["isolation-package"] }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
 wasmtime = { version = "46", default-features = false, features = [
@@ -101,7 +102,9 @@ tokio = { version = "1", features = ["macros", "rt", "time", "sync", "io-util"] 
 
 [dev-dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+# Standard composition in cancellation integration fixtures.
+wac-graph = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "test-util"] }
 tempfile = "3"
 getrandom = "0.3"
 # Serialize small component-text fixtures to binary for lifecycle ABI tests.

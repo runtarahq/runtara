@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtara_dsl::agent_meta::{
-    AgentCatalog, AgentInfo, is_certified_non_suspending_workflow_agent,
+    AgentCatalog, AgentInfo, is_certified_non_suspending_workflow_agent, is_parking_workflow_agent,
 };
 
 /// Per-tenant staging dir for published workflow-agents.
@@ -133,10 +133,14 @@ pub fn stage(
     composed_wasm: &std::path::Path,
     info: &AgentInfo,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
-    if !is_certified_non_suspending_workflow_agent(info) {
+    // Either certificate stages, exactly as composition accepts either: a proof
+    // the agent never suspends, or a declaration that it parks and carries its
+    // wake out through the suspend sentinel. Neither is a stale or unproven
+    // artifact.
+    if !is_certified_non_suspending_workflow_agent(info) && !is_parking_workflow_agent(info) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "workflow-agent metadata lacks the required non-suspending:1 certification",
+            "workflow-agent metadata carries neither the non-suspending:1 certification nor the parks:1 marker",
         ));
     }
     let dir = staging_dir(tenant_id);

@@ -39,7 +39,7 @@ env:
   # plus embed-ui. Used by the lint and build jobs so `--all-targets` really
   # means all targets. Static value — no workflow-context interpolation.
   GATE_FEATURES: >-
-    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-environment/db-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-workflows/direct-wasm-integration-tests
+    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-environment/db-integration-tests,runtara-environment/scoped-workflow-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-workflows/direct-wasm-integration-tests
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
@@ -592,6 +592,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: wit-package
 
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: scoped_runner_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -635,6 +649,13 @@ jobs:
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --features component-integration-tests --tests
 
+      - name: Qualify emitted Agent deadlines before relaxing E128
+        env:
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        # These composed tests need private emitter access while the public
+        # support gate remains closed, so they are a feature-gated lib target.
+        run: cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests
+
       # Direct WASM smoke: use the staged stdlib/runtime/agent component
       # bundle, then compile direct workflow fixtures, compose them in-process
       # (wac-graph), execute the final artifacts, and assert the fake SDK
@@ -656,6 +677,20 @@ jobs:
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
             --test direct_wasm_execute
+
+      - name: Run composed runner DSL, cancellation and persistence integration tests
+        env:
+          TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        # Serialized like every other database-backed suite here. These tests
+        # share one database and reach global scheduler operations — claiming due
+        # instances, sweeping parked ones — which select by predicate rather than
+        # by instance. Run concurrently, one test's sweep takes another's rows:
+        # that is how a wake-scheduler test came to lease its siblings' instances
+        # thirty seconds into the future and race them for its own. The suite is
+        # thirteen tests of a few seconds each, so serializing costs almost
+        # nothing and removes the whole class.
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test -- --test-threads=1
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

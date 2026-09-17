@@ -67,10 +67,39 @@ pub struct DirectArtifactMetadata {
     pub shared_components: Vec<DirectComponentDependencyMetadata>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectComponentDependencyMetadata>,
+    /// Explicit experimental isolated Agent selection; absent for legacy artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<DirectIsolationMetadata>,
+    /// Policy decisions, including reasons for packages retained on the legacy path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_selection: Option<super::AgentIsolationReport>,
     /// Preloaded child workflows that will be statically inlined by the direct
     /// emitter once `EmbedWorkflow` lowering is enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_workflows: Vec<DirectChildWorkflowDependencyMetadata>,
+}
+
+/// Composition-stage isolated Agent inventory. The context contract distinguishes
+/// live v1 adapter calls from replay-stable v2 logical step/attempt identities.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectIsolationMetadata {
+    /// Raw package version required by the selected runtime. V2 retains the
+    /// compiler invocation manifest; older inventory sidecars default to v1.
+    #[serde(default = "legacy_package_version")]
+    pub package_version: u32,
+    /// Guest bridge contract version.
+    pub adapter_version: u32,
+    /// Identity semantics supplied to the scoped launcher.
+    pub context_contract: String,
+    /// Exact packaged components and their invocation interfaces.
+    pub bindings: Vec<runtara_workflow_wit::isolation_package::Binding>,
+    /// Packages left with their original component lifetime.
+    pub legacy_agents: Vec<String>,
+}
+
+fn legacy_package_version() -> u32 {
+    1
 }
 
 /// File identity captured in direct artifact metadata.
@@ -188,6 +217,8 @@ pub(super) fn initial_artifact_metadata(
             size_bytes: input.workflow_logic_size as u64,
         },
         composed_wasm: None,
+        isolation: None,
+        isolation_selection: None,
         shared_components: input
             .component_artifacts
             .shared_components
@@ -356,13 +387,23 @@ fn check_workflow_agent_checkpoint_scope(
                 component.agent_id
             )));
         }
-        if workflow_agent_capabilities
-            .iter()
-            .any(|tags| !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING))
-        {
+        // Either certificate composes: `non-suspending:1` proves the child never
+        // suspends, `parks:1` says it may but carries its deadline out
+        // through the suspend sentinel and this composer knows how to re-raise
+        // it. A child carrying neither is a stale or unproven artifact.
+        //
+        // The two are mutually exclusive by construction, which is what makes
+        // the second one safe to add: every composer built before parking
+        // existed demands `non-suspending:1`, so it refuses a parking child
+        // outright instead of dropping the deadline it cannot decode.
+        if workflow_agent_capabilities.iter().any(|tags| {
+            !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
+                && !tags.contains(&capability_tags::WORKFLOW_AGENT_PARKS)
+        }) {
             return Err(DirectCompileError::Component(format!(
-                "published workflow-agent `{}` lacks the required non-suspending:1 certification; \
-                 republish it after removing every wait, delay, retry/backoff, and breakpoint path",
+                "published workflow-agent `{}` carries neither the non-suspending:1 certification \
+                 nor the parks:1 marker; republish it after removing every wait, delay, \
+                 retry/backoff, and breakpoint path, or republish it as a parking agent",
                 component.agent_id
             )));
         }
@@ -399,6 +440,13 @@ fn check_workflow_agent_checkpoint_scope(
 /// don't count: only what the composed child still asks the outside world
 /// for matters.
 fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompileError> {
+    component_imports_prefix(wasm, "runtara:workflow-runtime/runtime")
+}
+
+pub(super) fn component_imports_prefix(
+    wasm: &[u8],
+    prefix: &str,
+) -> Result<bool, DirectCompileError> {
     let parse_error = |err: wasmparser::BinaryReaderError| {
         DirectCompileError::Component(format!(
             "failed to parse staged workflow-agent component: {err}"
@@ -413,11 +461,7 @@ fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompile
             wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
                 for import in reader {
                     let import = import.map_err(parse_error)?;
-                    if import
-                        .name
-                        .0
-                        .starts_with("runtara:workflow-runtime/runtime")
-                    {
+                    if import.name.0.starts_with(prefix) {
                         return Ok(true);
                     }
                 }
@@ -556,6 +600,30 @@ pub(super) fn write_artifact_metadata(
 mod tests {
     use super::*;
 
+    #[test]
+    fn import_classification_ignores_nested_components_but_scans_later_root_sections() {
+        use wasm_encoder::{
+            Component, ComponentImportSection, ComponentTypeRef, ComponentTypeSection,
+            InstanceType, NestedComponentSection,
+        };
+        let mut types = ComponentTypeSection::new();
+        types.instance(&InstanceType::new());
+        let mut imports = ComponentImportSection::new();
+        imports.import(
+            "wasi:http/outgoing-handler@0.2.0",
+            ComponentTypeRef::Instance(0),
+        );
+        let mut child = Component::new();
+        child.section(&types).section(&imports);
+        let mut root = Component::new();
+        root.section(&NestedComponentSection(&child));
+        assert!(!component_imports_prefix(root.as_slice(), "wasi:http/").unwrap());
+        root.section(&types).section(&imports);
+        assert!(component_imports_prefix(root.as_slice(), "wasi:http/").unwrap());
+        assert!(!component_imports_workflow_runtime(root.as_slice()).unwrap());
+        assert!(component_imports_prefix(b"invalid wasm", "wasi:http/").is_err());
+    }
+
     fn component_requirement() -> DirectAgentComponentRequirement {
         DirectAgentComponentRequirement {
             agent_id: "published-flow".to_string(),
@@ -595,6 +663,46 @@ mod tests {
             .expect_err("an old workflow-agent sidecar must not compose");
 
         assert!(error.to_string().contains("non-suspending:1"), "{error}");
+    }
+
+    #[test]
+    fn a_parking_workflow_agent_composes_without_the_non_suspending_certificate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let component = component_requirement();
+        write_sidecar(
+            dir.path(),
+            &[
+                capability_tags::WORKFLOW_AGENT,
+                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
+                capability_tags::WORKFLOW_AGENT_PARKS,
+            ],
+        );
+
+        check_workflow_agent_checkpoint_scope(dir.path(), &component)
+            .expect("a parking workflow-agent composes on its own marker");
+    }
+
+    #[test]
+    fn a_parking_marker_never_accompanies_the_non_suspending_certificate() {
+        // The exclusivity is the compatibility guarantee: every composer built
+        // before parking existed demands `non-suspending:1`, so a child that
+        // carries only `parks:1` is refused by an older parent instead
+        // of composed by one that would drop the deadline it cannot decode.
+        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+            "parking-child",
+            "parking-child",
+            "fixture",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+        runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
+
+        assert!(runtara_dsl::agent_meta::is_parking_workflow_agent(&info));
+        assert!(
+            !runtara_dsl::agent_meta::is_certified_non_suspending_workflow_agent(&info),
+            "parking must strip the non-suspending certificate it contradicts"
+        );
     }
 
     #[test]

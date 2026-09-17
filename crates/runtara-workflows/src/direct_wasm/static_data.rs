@@ -33,6 +33,12 @@ const DIRECT_AGENT_EMPTY_PARAMETERS: &[u8] = b"{}";
 /// `Finish`); matches the generated compiler's `Ok(Value::Null)`.
 const DIRECT_OUTPUT_NULL: &[u8] = b"null";
 pub(super) const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
+pub(super) const AGENT_TIMEOUT_FIELDS: [&str; 4] = [
+    "AGENT_TIMEOUT",
+    "Agent step exceeded its configured timeout",
+    "timeout",
+    "error",
+];
 /// Structured failure payload emitted when a `While` step exceeds its configured
 /// timeout. Generated Rust parses `WhileConfig.timeout` but does not enforce it;
 /// direct mode is the first to honor the documented "if exceeded, step fails"
@@ -160,10 +166,17 @@ pub(super) struct DirectCoreStaticData {
     pub(super) output_null: DirectDataSegment,
     pub(super) agent_rate_limit_wait: DirectDataSegment,
     pub(super) loop_deadline_state_error: DirectDataSegment,
+    pub(super) agent_timeout_error: DirectDataSegment,
+    pub(super) agent_deadline_state_error: DirectDataSegment,
+    pub(super) embed_timeout_error: DirectDataSegment,
+    pub(super) embed_deadline_state_error: DirectDataSegment,
+    agent_timeouts: BTreeMap<u32, u64>,
+    monotonic_clock: bool,
     pub(super) while_timeout_error: DirectDataSegment,
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
+    invocation_sites: BTreeMap<(u32, u32, u32), u32>,
     /// Agents with a literal `connection_id`. Not baked — the stdlib injects the
     /// connection from the manifest (`agent-connection-input`); this only gates
     /// the pre-invoke injection call.
@@ -279,6 +292,57 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let agent_timeouts = super::manifest::agent_timeouts(graph, child_workflows);
+        let timeout_bytes = if !super::manifest::needs_monotonic_clock(graph, child_workflows) {
+            String::new()
+        } else {
+            AGENT_TIMEOUT_FIELDS.concat()
+        };
+        let agent_timeout_error = DirectDataSegment::new(offset, timeout_bytes.as_bytes());
+        offset = align_i32(
+            checked_offset_add(offset, agent_timeout_error.data.len())?,
+            16,
+        );
+
+        let agent_deadline_state_error = DirectDataSegment::new(
+            offset,
+            if agent_timeouts.is_empty() {
+                b""
+            } else {
+                br#"{"code":"AGENT_DEADLINE_STATE","message":"Agent deadline checkpoint must contain exactly eight bytes","category":"permanent","severity":"error","retryable":false}"#
+            },
+        );
+        offset = align_i32(
+            checked_offset_add(offset, agent_deadline_state_error.data.len())?,
+            16,
+        );
+
+        let has_embed_timeout = super::manifest::has_embed_timeout(graph, child_workflows);
+        let embed_timeout_error = DirectDataSegment::new(
+            offset,
+            if !has_embed_timeout {
+                b""
+            } else {
+                br#"{"code":"EMBED_TIMEOUT","message":"EmbedWorkflow step exceeded its configured timeout","category":"timeout","severity":"error","retryable":false}"#
+            },
+        );
+        offset = align_i32(
+            checked_offset_add(offset, embed_timeout_error.data.len())?,
+            16,
+        );
+        let embed_deadline_state_error = DirectDataSegment::new(
+            offset,
+            if !has_embed_timeout {
+                b""
+            } else {
+                br#"{"code":"EMBED_DEADLINE_STATE","message":"EmbedWorkflow deadline checkpoint must contain exactly eight bytes","category":"permanent","severity":"error","retryable":false}"#
+            },
+        );
+        offset = align_i32(
+            checked_offset_add(offset, embed_deadline_state_error.data.len())?,
+            16,
+        );
+
         let loop_deadline_state_error =
             DirectDataSegment::new(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR);
         offset = align_i32(
@@ -328,6 +392,10 @@ impl DirectCoreStaticData {
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
+            invocation_sites: super::compile::invocation_manifest::call_sites(
+                graph,
+                child_workflows,
+            )?,
             parallel_enabled: false,
             manifest,
             variables,
@@ -345,6 +413,12 @@ impl DirectCoreStaticData {
             output_null,
             agent_rate_limit_wait,
             loop_deadline_state_error,
+            agent_timeout_error,
+            agent_deadline_state_error,
+            embed_timeout_error,
+            embed_deadline_state_error,
+            agent_timeouts,
+            monotonic_clock: super::manifest::needs_monotonic_clock(graph, child_workflows),
             while_timeout_error,
             split_timeout_error,
             step_ids,
@@ -361,6 +435,18 @@ impl DirectCoreStaticData {
         self.step_ids.get(step_id).ok_or_else(|| {
             DirectCompileError::Component(format!("missing direct static step id '{step_id}'"))
         })
+    }
+
+    pub(super) fn invocation_site(&self, target: u32, caller: u32, domain: u32) -> u32 {
+        self.invocation_sites[&(target, caller, domain)]
+    }
+
+    pub(super) fn needs_monotonic_clock(&self) -> bool {
+        self.monotonic_clock
+    }
+
+    pub(super) fn agent_timeout(&self, agent_id: u32) -> Option<u64> {
+        self.agent_timeouts.get(&agent_id).copied()
     }
 
     pub(super) fn agent_capability_id(
@@ -411,6 +497,10 @@ impl DirectCoreStaticData {
             &self.output_null,
             &self.agent_rate_limit_wait,
             &self.loop_deadline_state_error,
+            &self.agent_timeout_error,
+            &self.agent_deadline_state_error,
+            &self.embed_timeout_error,
+            &self.embed_deadline_state_error,
             &self.while_timeout_error,
             &self.split_timeout_error,
         ];
@@ -438,10 +528,21 @@ fn collect_static_step_ids(
     // Intern edge labels too (string-interning map). An AiAgent tool edge's label
     // is the advertised tool name; WaitForSignal-as-tool builds its per-call
     // signal id `…/{ai_step}.tool.{label}.{call}` and so needs the label segment.
-    for edge in &graph.edges {
-        if let Some(label) = &edge.label
-            && !step_ids.contains_key(label)
-        {
+    // Synthetic MCP tool labels have no matching edge label. Timed calls use
+    // those names in the same replay-stable scope builder as ordinary tools.
+    let labels = graph
+        .edges
+        .iter()
+        .filter_map(|edge| edge.label.as_ref())
+        .chain(
+            graph
+                .agents
+                .iter()
+                .filter(|agent| agent.purpose == "agent.tool.mcp" && agent.timeout.is_some())
+                .filter_map(|agent| agent.name.as_ref()),
+        );
+    for label in labels {
+        if !step_ids.contains_key(label) {
             let segment = DirectDataSegment::new(*offset, label.as_bytes());
             *offset = align_i32(checked_offset_add(*offset, label.len())?, 16);
             step_ids.insert(label.clone(), segment);
@@ -759,6 +860,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            timeout_step_id: None,
         }
     }
 }

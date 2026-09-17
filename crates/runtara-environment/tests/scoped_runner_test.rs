@@ -1,0 +1,892 @@
+//! Actual DSL -> packaged WASM -> EmbeddedWasmRunner -> PostgreSQL.
+//! Requires staged components and an isolated TEST_ENVIRONMENT_DATABASE_URL.
+use runtara_core::{domain::InstanceStatus, persistence::Persistence};
+use runtara_environment::runner::{
+    EmbeddedWasmRunner, LaunchOptions, Runner, ScopedAgentRunnerConfig, WorkflowRunnerConfig,
+};
+use runtara_store_postgres::PostgresPersistence;
+use runtara_workflow_wit::isolation_package::{PackageLimits, artifact_digest};
+use runtara_workflows::direct_wasm::{
+    AgentIsolationPolicy, AgentIsolationReview, DirectCompilationInput, DirectCompilationResult,
+    WorkflowAbi, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
+    compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn components() -> PathBuf {
+    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .expect("scoped-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR")
+}
+fn bounds(agent: &str) -> ScopedAgentRunnerConfig {
+    let bytes = std::fs::read(components().join(format!("runtara_agent_{agent}.wasm"))).unwrap();
+    ScopedAgentRunnerConfig {
+        reviewed_agents: [(agent.into(), artifact_digest(&bytes))].into(),
+        retained_agents: Default::default(),
+        max_child_tasks: 8,
+        max_result_bytes: 8 * 1024 * 1024,
+        max_handles: 32,
+    }
+}
+fn limits() -> PackageLimits {
+    PackageLimits {
+        total_bytes: 64 * 1024 * 1024,
+        manifest_bytes: 1024 * 1024,
+        artifacts: 64,
+        bindings: 64,
+    }
+}
+fn random_graph() -> Value {
+    json!({"durable":true,"entryPoint":"call","steps":{
+        "call":{"id":"call","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{"value":{"valueType":"reference","value":"steps.call.outputs"}}}},
+        "executionPlan":[{"fromStep":"call","toStep":"finish"}]})
+}
+fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompilationResult {
+    if backend == "inventory-v4" {
+        // The guest ABI is unchanged; retain the preceding inventory format
+        // to prove pinned packages still execute with unknown durability.
+        let mut compiled = compile(graph, &dir.join("current"), agent, "scoped");
+        let bytes = std::fs::read(&compiled.wasm_path).unwrap();
+        let package = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+            .unwrap()
+            .unwrap();
+        let mut inventory = package.invocations().unwrap().clone();
+        inventory.version = 4;
+        inventory.call_durability.clear();
+        let legacy = runtara_workflow_wit::isolation_package::append_with_invocations(
+            package.root,
+            &package.artifacts().values().copied().collect::<Vec<_>>(),
+            package.bindings().values().cloned().collect(),
+            inventory.clone(),
+            limits(),
+        )
+        .unwrap();
+        compiled.wasm_path = dir.join("inventory-v4.wasm");
+        compiled.invocation_manifest = Some(inventory);
+        std::fs::write(&compiled.wasm_path, legacy).unwrap();
+        return compiled;
+    }
+    if backend == "no-runtime" {
+        // A valid package envelope around a runtime-less root must not obtain
+        // the scoped execution path merely by carrying reviewed child bytes.
+        let mut packaged = compile(graph, &dir.join("packaged"), agent, "scoped");
+        let pure_input = DirectCompilationInput {
+            workflow_id: "scoped-runner-test".into(), version: 1, source_checksum: None,
+            execution_graph: serde_json::from_value(json!({"durable":false,"entryPoint":"finish","steps":{"finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]})).unwrap(),
+            child_workflows: vec![], output_dir: dir.join("pure"), track_events: false, agent_catalog: None, agent_slug: None,
+        };
+        let mut pure = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+            pure_input,
+            WorkflowAbi::InvokeHostImports,
+            true,
+        )
+        .unwrap();
+        assert!(pure.omit_runtime);
+        compose_direct_workflow(&mut pure, components()).unwrap();
+        let bytes = std::fs::read(&packaged.wasm_path).unwrap();
+        let catalog = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+            .unwrap()
+            .unwrap();
+        let replacement = runtara_workflow_wit::isolation_package::append_with_invocations(
+            &std::fs::read(pure.wasm_path).unwrap(),
+            &catalog.artifacts().values().copied().collect::<Vec<_>>(),
+            catalog.bindings().values().cloned().collect(),
+            catalog.invocations().unwrap().clone(),
+            limits(),
+        )
+        .unwrap();
+        packaged.wasm_path = dir.join("runtime-less.wasm");
+        std::fs::write(&packaged.wasm_path, replacement).unwrap();
+        return packaged;
+    }
+    let input = DirectCompilationInput {
+        workflow_id: "scoped-runner-test".into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: serde_json::from_value(graph).unwrap(),
+        child_workflows: vec![],
+        output_dir: dir.to_owned(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    };
+    if backend == "scoped" {
+        return compile_direct_workflow_composed_with_isolation_policy(
+            input,
+            WorkflowAbi::InvokeHostImports,
+            false,
+            &components(),
+            &[],
+            AgentIsolationPolicy {
+                enabled: true,
+                runtime_supports_inventory_v5: true,
+                reviews: bounds(agent)
+                    .reviewed_agents
+                    .into_iter()
+                    .map(|(id, sha256)| {
+                        (
+                            id,
+                            AgentIsolationReview {
+                                sha256,
+                                reset_safe: true,
+                                compiler_checkpoint_contract: true,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+            limits(),
+        )
+        .unwrap();
+    }
+    assert!(matches!(backend, "legacy" | "live"));
+    let mut result = compile_direct_workflow(input).unwrap();
+    if backend == "legacy" {
+        compose_direct_workflow(&mut result, components()).unwrap();
+    } else {
+        compose_direct_workflow_with_isolated_agents(
+            &mut result,
+            components(),
+            &[],
+            &bounds(agent).reviewed_agents,
+            limits(),
+        )
+        .unwrap();
+    }
+    result
+}
+struct Harness {
+    dir: tempfile::TempDir,
+    persistence: Arc<dyn Persistence>,
+}
+impl Harness {
+    async fn new() -> Self {
+        let url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
+            .expect("isolated test database required");
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        runtara_environment::migrations::run(&pool).await.unwrap();
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+            persistence: Arc::new(PostgresPersistence::new(pool)),
+        }
+    }
+    fn runner(&self, config: Option<ScopedAgentRunnerConfig>) -> EmbeddedWasmRunner {
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: self.dir.path().join("data"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+                connection_service_url: None,
+            },
+            self.persistence.clone(),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests();
+        if let Some(config) = config {
+            runner.with_scoped_agents(config).unwrap()
+        } else {
+            runner
+        }
+    }
+    async fn options(&self, wasm: &Path) -> LaunchOptions {
+        let id = format!("scoped-runner-{}", uuid::Uuid::new_v4());
+        let input = serde_json::to_vec(&json!({"data":{},"variables":{}})).unwrap();
+        assert!(
+            self.persistence
+                .try_register_instance(&id, "scoped-runner-test", Some(&input))
+                .await
+                .unwrap()
+        );
+        LaunchOptions {
+            launch_id: format!("launch-{id}"),
+            instance_id: id,
+            tenant_id: "scoped-runner-test".into(),
+            wasm_path: wasm.to_owned(),
+            requires_lifecycle_invoke: true,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: json!({}),
+            timeout: Duration::from_secs(30),
+            checkpoint_id: None,
+            env: HashMap::new(),
+            prepersisted_input: Some(input),
+            start_gate: None,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped", "inventory-v4"] {
+        let artifact = compile(
+            random_graph(),
+            &h.dir.path().join(backend),
+            "utils",
+            backend,
+        );
+        let runner = h.runner(Some(bounds("utils")));
+        let options = h.options(&artifact.wasm_path).await;
+        let handle = runner.try_launch_detached(&options).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            runner.wait_for_exit(&handle, Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+        assert!(!runner.is_running(&handle).await);
+        assert_eq!(runner.occupancy().unwrap().held, 0);
+        let instance = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.status, InstanceStatus::Completed);
+        let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
+        assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_retains_exact_historical_reviews_for_pinned_artifacts() {
+    let h = Harness::new().await;
+    let artifact = compile(
+        random_graph(),
+        &h.dir.path().join("retained"),
+        "utils",
+        "scoped",
+    );
+    let mut config = bounds("utils");
+    let historical = config
+        .reviewed_agents
+        .insert("utils".into(), "0".repeat(64))
+        .unwrap();
+    let options = h.options(&artifact.wasm_path).await;
+    let error = h
+        .runner(Some(config.clone()))
+        .try_launch_detached(&options)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("no matching runtime review"),
+        "{error}"
+    );
+    // A historical approval belongs to the exact Agent ID as well as its digest.
+    config
+        .retained_agents
+        .insert("datetime".into(), [historical.clone()].into());
+    assert!(
+        h.runner(Some(config.clone()))
+            .try_launch_detached(&options)
+            .await
+            .is_err()
+    );
+    config
+        .retained_agents
+        .insert("utils".into(), [historical].into());
+    let runner = h.runner(Some(config));
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+    let instance = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance.status, InstanceStatus::Completed);
+    let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
+    assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_rejects_unapproved_and_old_packages_before_run_capacity() {
+    let h = Harness::new().await;
+    for case in ["disabled", "unreviewed", "changed", "live", "no-runtime"] {
+        let mut graph = random_graph();
+        if case == "no-runtime" {
+            graph["durable"] = false.into();
+        }
+        let artifact = compile(
+            graph,
+            &h.dir.path().join(case),
+            "utils",
+            if matches!(case, "live" | "no-runtime") {
+                case
+            } else {
+                "scoped"
+            },
+        );
+        let mut config = bounds("utils");
+        if case == "unreviewed" {
+            config.reviewed_agents.clear();
+        }
+        if case == "changed" {
+            config
+                .reviewed_agents
+                .insert("utils".into(), "0".repeat(64));
+        }
+        let runner = h.runner((case != "disabled").then_some(config));
+        let options = h.options(&artifact.wasm_path).await;
+        let error = runner
+            .try_launch_detached(&options)
+            .await
+            .expect_err("must reject before execution");
+        let message = error.to_string();
+        assert!(
+            message.contains(match case {
+                "disabled" => "runtime is disabled",
+                "live" => "unsupported scoped Agent inventory",
+                "no-runtime" => "native lifecycle persistence",
+                _ => "no matching runtime review",
+            }),
+            "{message}"
+        );
+        assert_eq!(runner.occupancy().unwrap().held, 0);
+        assert_eq!(runner.preparation_occupancy().unwrap().held, 0);
+        let instance = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(instance.output.is_none());
+        assert!(instance.started_at.is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_stops_a_hung_http_child_on_cancel_or_root_deadline() {
+    let h = Harness::new().await;
+    for cancel in [true, false] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (entered, pending) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            assert!(stream.read(&mut bytes).await.unwrap() > 0);
+            entered.send(()).unwrap();
+            // The endpoint remains hung until the test confirms workflow teardown.
+            let _ = released.await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await;
+        });
+        let graph = json!({"durable":false,"entryPoint":"call","steps":{
+            "call":{"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request","maxRetries":0,"inputMapping":{
+                "method":{"valueType":"immediate","value":"GET"},"url":{"valueType":"immediate","value":format!("http://{address}/hang")}}},
+            "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[{"fromStep":"call","toStep":"finish"}]});
+        let artifact = compile(
+            graph,
+            &h.dir.path().join(format!("http-{cancel}")),
+            "http",
+            "scoped",
+        );
+        let runner = h.runner(Some(bounds("http")));
+        let mut options = h.options(&artifact.wasm_path).await;
+        options
+            .env
+            .insert("RUNTARA_HTTP_PROXY_URL".into(), format!("http://{address}"));
+        if !cancel {
+            options.timeout = Duration::from_secs(2);
+        }
+        let handle = runner.try_launch_detached(&options).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runner.is_running(&handle).await);
+        if cancel {
+            runner.stop(&handle).await.unwrap();
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            runner.wait_for_exit(&handle, Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+        assert!(!runner.is_running(&handle).await);
+        assert_eq!(runner.occupancy().unwrap().held, 0);
+        let instance = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            instance.output.is_none(),
+            "a cancelled child must not publish root success"
+        );
+        assert_ne!(instance.status, InstanceStatus::Completed);
+        release.send(()).unwrap();
+        server.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            h.persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_rechecks_prepared_policy_and_rejects_foreign_engines() {
+    let h = Harness::new().await;
+    let artifact = compile(random_graph(), h.dir.path(), "utils", "scoped");
+    for foreign_engine in [true, false] {
+        let original = h.runner(Some(bounds("utils")));
+        let options = h.options(&artifact.wasm_path).await;
+        let prepared = original.try_prepare_launch(&options).await.unwrap();
+        assert_eq!(original.preparation_occupancy().unwrap().held, 1);
+        let runner = if foreign_engine {
+            h.runner(Some(bounds("utils")))
+        } else {
+            let mut config = bounds("utils");
+            config.reviewed_agents.clear();
+            original.with_scoped_agents(config).unwrap()
+        };
+        let error = runner
+            .try_launch_prepared_detached(&options, prepared)
+            .await
+            .expect_err("recheck must reject");
+        assert!(error.to_string().contains(if foreign_engine {
+            "native lifecycle persistence"
+        } else {
+            "no matching runtime review"
+        }));
+        assert_eq!(runner.occupancy().unwrap().held, 0);
+        assert_eq!(runner.preparation_occupancy().unwrap().held, 0);
+        assert!(
+            h.persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .started_at
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_parks_and_replays_existing_checkpoints() {
+    let h = Harness::new().await;
+    let mut graph = random_graph();
+    graph["steps"]["sleep"] = json!({"id":"sleep","stepType":"Delay","durationMs":{"valueType":"immediate","value":1000}});
+    graph["executionPlan"] =
+        json!([{"fromStep":"call","toStep":"sleep"},{"fromStep":"sleep","toStep":"finish"}]);
+    let artifact = compile(graph, h.dir.path(), "utils", "scoped");
+    let runner = h.runner(Some(bounds("utils")));
+    let mut options = h.options(&artifact.wasm_path).await;
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    let parked = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parked.status, InstanceStatus::Suspended);
+    assert!(parked.output.is_none());
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+    let checkpoints = h
+        .persistence
+        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap();
+    let agent = checkpoints
+        .iter()
+        .find(|c| c.checkpoint_id.contains("random-double"))
+        .expect("Agent result checkpoint");
+    let expected: f64 = serde_json::from_slice(&agent.state).unwrap();
+    let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+    options.launch_id = format!("resume-{}", options.instance_id);
+    options.prepersisted_input = None;
+    let resumed = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.wait_for_exit(&resumed, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, InstanceStatus::Completed);
+    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+    assert_eq!(output["value"].as_f64().unwrap(), expected);
+    let replayed = h
+        .persistence
+        .load_checkpoint(&options.instance_id, &agent.checkpoint_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replayed.state, agent.state);
+    assert_eq!(replayed.created_at, agent.created_at);
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_gate_open() {
+    use runtara_environment::runner::StartGate;
+    let h = Harness::new().await;
+    let artifact = compile(random_graph(), h.dir.path(), "utils", "scoped");
+    let runner = h.runner(Some(bounds("utils")));
+    let mut options = h.options(&artifact.wasm_path).await;
+    options.timeout = Duration::from_secs(1);
+    // Prepare before the gate exists, exactly as `dispatch_prepared` does. A
+    // gate built around `try_launch_detached` would spend its handoff budget on
+    // artifact reading and precompilation, so a slow host could expire it
+    // during the assertions below and report a start that never happened.
+    let prepared = runner.try_prepare_launch(&options).await.unwrap();
+    let gate = StartGate::new(Duration::from_secs(10));
+    options.start_gate = Some(gate.clone());
+    let handle = runner
+        .try_launch_prepared_detached(&options, prepared)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(runner.is_running(&handle).await);
+    assert!(
+        h.persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        h.persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .output
+            .is_none()
+    );
+    // The dispatcher owns durable promotion for a gated launch.
+    h.persistence
+        .mark_instance_running(&options.instance_id, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert!(gate.open());
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        h.persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        InstanceStatus::Completed
+    );
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+}
+
+/// Stage a workflow-agent child that waits on a signal, and a parent that calls
+/// it. Returns the parent artifact. The child carries `parks:1`, the
+/// marker that says it may park and carries its wake out through the suspend
+/// sentinel.
+fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilationResult {
+    let components = components();
+    let components = components.to_str().unwrap();
+    let mut hold = json!({"id":"hold","stepType":"WaitForSignal","name":"never-arrives",
+        "pollIntervalMs":10});
+    if let Some(timeout_ms) = timeout_ms {
+        hold["timeoutMs"] = json!({"valueType":"immediate","value":timeout_ms});
+    }
+    let child_graph = serde_json::from_value(json!({"durable":true,"entryPoint":"hold","steps":{
+        "hold":hold,
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "payload":{"valueType":"reference","value":"steps.hold.outputs"}}}},
+        "executionPlan":[{"fromStep":"hold","toStep":"finish"}]}))
+    .unwrap();
+    let mut child = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "parking-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph,
+            child_workflows: vec![],
+            output_dir: dir.join("child"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("parking-child".into()),
+        },
+        WorkflowAbi::AgentCapabilities,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut child, components).unwrap();
+
+    let staging = dir.join("staged");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        "parking-child",
+        "parking-child",
+        "fixture",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
+    std::fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_parking_child.wasm"),
+    )
+    .unwrap();
+    std::fs::write(
+        staging.join("runtara_agent_parking_child.meta.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+
+    let parent_graph = serde_json::from_value(json!({"durable":true,"entryPoint":"call","steps":{
+        "call":{"id":"call","stepType":"Agent","agentId":"parking-child","capabilityId":"run",
+            "maxRetries":0},
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "result":{"valueType":"reference","value":"steps.call.outputs"}}}},
+        "executionPlan":[{"fromStep":"call","toStep":"finish"}]}))
+    .unwrap();
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "parking-parent".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent_graph,
+            child_workflows: vec![],
+            output_dir: dir.join("parent"),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]),
+            )),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        components,
+        std::slice::from_ref(&staging),
+    )
+    .unwrap();
+    parent
+}
+
+/// The environment half of a nested park: the runner must record it as a
+/// signal park, and a custom signal must then schedule a wake.
+///
+/// This is the check that a guest-only test cannot make. A nested wait that
+/// parked on a bare `on-resume` still looked correct from inside the guest —
+/// it suspended, and a hand-driven replay resumed and completed — but
+/// `park_invoke_suspend` drops a pure `on-resume` before `park_instance`, so
+/// `termination_reason` never became `waiting_signal`, and
+/// `wake_suspended_on_signal` refuses to relaunch anything else. The signal
+/// row landed and the instance stayed parked forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it() {
+    let h = Harness::new().await;
+    let parent = parking_child_parent(h.dir.path(), None);
+    let runner = h.runner(None);
+    let options = h.options(&parent.wasm_path).await;
+
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runner.wait_for_exit(&handle, Duration::from_millis(20)),
+    )
+    .await
+    .expect("the parked chain must stop holding its runner");
+
+    let parked = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        parked.status,
+        InstanceStatus::Suspended,
+        "a nested wait must park the whole chain"
+    );
+    assert_eq!(
+        parked.termination_reason.as_deref(),
+        Some("waiting_signal"),
+        "the park must be recorded as a SIGNAL park; anything else and the waker ignores it"
+    );
+    assert!(
+        parked.sleep_until.is_none(),
+        "an untimed wait must park with no deadline, got {:?}",
+        parked.sleep_until
+    );
+
+    // The signal arrives. `handle_send_custom_signal` writes it and wakes the
+    // instance; the address is the child's own nested route, but the waker is
+    // keyed on the instance, so scheduling a wake is what has to happen here.
+    runtara_environment::handlers::wake_suspended_on_signal(
+        h.persistence.as_ref(),
+        &options.instance_id,
+    )
+    .await;
+
+    let woken = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        woken.sleep_until.is_some(),
+        "a custom signal must schedule a wake for a parked nested wait"
+    );
+    assert!(
+        woken.sleep_until.unwrap() <= chrono::Utc::now() + chrono::Duration::seconds(5),
+        "the wake must be due now, not at some future deadline: {:?}",
+        woken.sleep_until
+    );
+}
+
+/// The last link: the wake scheduler's own selection must find a parked nested
+/// wait, and the relaunch it performs must resume the child rather than park
+/// again.
+///
+/// The previous test stops at "a wake is scheduled and due", which is what the
+/// scheduler selects on but not proof that it selects it. This drives the real
+/// `claim_sleeping_instances_due` — the statement the scheduler actually runs —
+/// and then launches the claimed instance the way the scheduler does.
+///
+/// A TIMED wait is used deliberately: its deadline is carried in the park, so
+/// the claim needs no knowledge of the child's nested signal route, and the
+/// relaunch resolves through the timeout the child itself owns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
+    let h = Harness::new().await;
+    let parent = parking_child_parent(h.dir.path(), Some(400));
+    let runner = h.runner(None);
+    let mut options = h.options(&parent.wasm_path).await;
+
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runner.wait_for_exit(&handle, Duration::from_millis(20)),
+    )
+    .await
+    .expect("the timed nested wait must park instead of holding its runner");
+
+    let parked = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parked.status, InstanceStatus::Suspended);
+    assert_eq!(
+        parked.termination_reason.as_deref(),
+        Some("waiting_signal"),
+        "a timed wait is still a signal park; its deadline is the timeout, not the wake reason"
+    );
+    let deadline = parked
+        .sleep_until
+        .expect("a timed wait must park with its deadline");
+
+    // Nothing is due yet, so the scheduler must not select it early.
+    //
+    // Selection rather than claiming, deliberately: `claim_sleeping_instances_due`
+    // is a GLOBAL batch that claims whatever is due and leases it forward, so
+    // calling it here would reach into the instances the sibling tests in this
+    // binary have parked, and race them for this one. The scheduler's due-ness
+    // predicate is what this test is about, and `get_sleeping_instances_due`
+    // asks exactly that without mutating anyone.
+    let early = h.persistence.get_sleeping_instances_due(256).await.unwrap();
+    assert!(
+        !early
+            .iter()
+            .any(|record| record.instance_id == options.instance_id),
+        "a parked wait must not come due before its deadline"
+    );
+
+    let remaining = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(remaining + Duration::from_millis(50)).await;
+
+    // The scheduler's own selection now returns it...
+    let due = h.persistence.get_sleeping_instances_due(256).await.unwrap();
+    assert!(
+        due.iter()
+            .any(|record| record.instance_id == options.instance_id),
+        "the wake scheduler must select a due parked nested wait"
+    );
+    // ...and its claim takes ownership of this exact instance.
+    assert!(
+        h.persistence
+            .claim_sleeping_instance(&options.instance_id)
+            .await
+            .unwrap(),
+        "the scheduler must be able to claim the instance it selected"
+    );
+
+    // Launch the claimed instance exactly as the scheduler would.
+    options.launch_id = format!("wake-{}", options.instance_id);
+    options.prepersisted_input = None;
+    let resumed = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        runner.wait_for_exit(&resumed, Duration::from_millis(20)),
+    )
+    .await
+    .expect("the relaunched run must finish");
+
+    let settled = h
+        .persistence
+        .get_instance_meta(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        settled.status,
+        InstanceStatus::Suspended,
+        "the relaunch must resume the child's wait and resolve it, not park again"
+    );
+    assert_ne!(
+        settled.status,
+        InstanceStatus::Running,
+        "the relaunched run must not leave the instance marked live"
+    );
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+}

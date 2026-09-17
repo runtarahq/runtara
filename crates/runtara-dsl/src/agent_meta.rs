@@ -72,6 +72,19 @@ pub mod capability_tags {
     /// capability ABI cannot propagate a durable suspension to its parent, so
     /// staged workflow agents without this proof are never composable.
     pub const WORKFLOW_AGENT_NON_SUSPENDING: &str = "non-suspending:1";
+    /// Marker for a published workflow-agent that CAN park: on a wait, a sleep,
+    /// or a retry backoff. It carries its wake out through the suspend sentinel
+    /// — an absolute deadline in the numeric `retry-after` field, or the signal
+    /// route in the message — so its caller parks and is woken in its place.
+    ///
+    /// This is deliberately an alternative to `non-suspending:1`, never an
+    /// addition. Every composer built before parking existed requires
+    /// `non-suspending:1` on every staged workflow-agent, so a child tagged
+    /// this way is refused outright by an older parent rather than composed by
+    /// one that would re-raise its suspend without the deadline and silently
+    /// drop the timeout. Delays still block, so a child that sleeps is not
+    /// covered by this marker.
+    pub const WORKFLOW_AGENT_PARKS: &str = "parks:1";
 }
 
 /// Error category for capability errors
@@ -1936,6 +1949,50 @@ pub const WORKFLOW_AGENT_CAPABILITY_ID: &str = "run";
 /// schema synthesis cannot establish execution safety. Production publishing
 /// must first inspect the complete workflow/embedded-child closure, then call
 /// this helper immediately before staging the sidecar.
+/// Mark every workflow-agent capability in this sidecar as able to park.
+/// Mutually exclusive with [`certify_workflow_agent_non_suspending`]: carrying
+/// both would let an older composer accept a parking child.
+pub fn certify_workflow_agent_parks(info: &mut AgentInfo) {
+    for capability in &mut info.capabilities {
+        let tags = &mut capability.tags;
+        if tags
+            .iter()
+            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+        {
+            tags.retain(|tag| tag != capability_tags::WORKFLOW_AGENT_NON_SUSPENDING);
+            if !tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_PARKS)
+            {
+                tags.push(capability_tags::WORKFLOW_AGENT_PARKS.to_string());
+            }
+        }
+    }
+}
+
+/// Whether every workflow-agent capability here is marked as able to park.
+/// `false` also covers metadata that is not a workflow-agent at all.
+pub fn is_parking_workflow_agent(info: &AgentInfo) -> bool {
+    let mut has_workflow_capability = false;
+    for capability in &info.capabilities {
+        if capability
+            .tags
+            .iter()
+            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+        {
+            has_workflow_capability = true;
+            if !capability
+                .tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_PARKS)
+            {
+                return false;
+            }
+        }
+    }
+    has_workflow_capability
+}
+
 pub fn certify_workflow_agent_non_suspending(info: &mut AgentInfo) {
     for capability in &mut info.capabilities {
         if capability

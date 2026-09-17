@@ -16,23 +16,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-utils/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
-
 // -----------------------------------------------------------------------------
 // Inputs (with capability macros so meta.json can be derived)
 // -----------------------------------------------------------------------------
@@ -351,8 +334,7 @@ pub fn get_current_unix_timestamp(_input: GetCurrentUnixTimestampInput) -> Resul
     description = "Get the current date/time in ISO format"
 )]
 pub fn get_current_iso_datetime(_input: GetCurrentIsoDatetimeInput) -> Result<String, String> {
-    let ts = current_unix_timestamp() as u64;
-    let (year, month, day, hour, minute, second) = unix_to_datetime(ts);
+    let (year, month, day, hour, minute, second) = unix_to_datetime(current_unix_timestamp());
     Ok(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year, month, day, hour, minute, second
@@ -371,8 +353,7 @@ pub fn get_current_formatted_datetime(
         return Err("Format cannot be null or empty".to_string());
     }
 
-    let timestamp = current_unix_timestamp() as u64;
-    format_timestamp(&timestamp, &input.format)
+    format_timestamp(current_unix_timestamp(), &input.format)
 }
 
 #[capability(
@@ -687,6 +668,48 @@ fn parse_iso_to_unix(iso_date: &str) -> Result<i64, String> {
     ))
 }
 
+/// Days from 1970-01-01 to a proleptic Gregorian date, in constant time.
+///
+/// This is Howard Hinnant's `days_from_civil`. The previous implementation
+/// counted one loop iteration per year since 1970, and nothing bounds the year
+/// a caller can supply: `parse_iso_to_unix` accepts any `i32`, so a date like
+/// `2147483647-01-01T00:00:00Z` spun roughly two billion iterations inside the
+/// guest with no host call and no yield to cancel at. Closed-form arithmetic
+/// removes that cooperation gap instead of trying to interrupt it, and it is
+/// also correct before 1970, where the ascending loop simply never ran.
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146097 + day_of_era - 719468
+}
+
+/// The proleptic Gregorian date a day offset from 1970-01-01 falls on.
+///
+/// Hinnant's `civil_from_days`, the inverse of [`days_from_civil`]. It replaces
+/// a loop that walked forward one year at a time; a `u64` timestamp built from
+/// a negative `i64` made that loop run for hundreds of billions of iterations.
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let days = days + 719468;
+    let era = if days >= 0 { days } else { days - 146096 } / 146097;
+    let day_of_era = days - era * 146097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_position = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
+    let month = month_position + if month_position < 10 { 3 } else { -9 };
+    (
+        (year + i64::from(month <= 2)) as i32,
+        month as u32,
+        day as u32,
+    )
+}
+
 fn calculate_unix_timestamp(
     year: i32,
     month: u32,
@@ -695,79 +718,33 @@ fn calculate_unix_timestamp(
     minute: u32,
     second: u32,
 ) -> i64 {
-    const DAYS_IN_MONTH: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-    let mut days: i64 = 0;
-
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-
-    for m in 1..month {
-        days += DAYS_IN_MONTH[(m - 1) as usize] as i64;
-        if m == 2 && is_leap_year(year) {
-            days += 1;
-        }
-    }
-
-    days += (day - 1) as i64;
-
-    days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64
+    days_from_civil(year, month, day) * 86400
+        + hour as i64 * 3600
+        + minute as i64 * 60
+        + second as i64
 }
 
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
-fn unix_to_datetime(timestamp: u64) -> (i32, u32, u32, u32, u32, u32) {
-    const DAYS_IN_MONTH: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-    let total_seconds = timestamp;
-    let days = total_seconds / 86400;
-    let remaining = total_seconds % 86400;
-
-    let hour = (remaining / 3600) as u32;
-    let minute = ((remaining % 3600) / 60) as u32;
-    let second = (remaining % 60) as u32;
-
-    let mut year: i32 = 1970;
-    let mut remaining_days = days;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 } as u64;
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-
-    let mut month = 1u32;
-    let mut day = remaining_days as u32 + 1;
-
-    for (m, &base_days) in DAYS_IN_MONTH.iter().enumerate() {
-        let mut days_in_month = base_days;
-        if m == 1 && is_leap_year(year) {
-            days_in_month = 29;
-        }
-
-        if day <= days_in_month {
-            month = m as u32 + 1;
-            break;
-        }
-        day -= days_in_month;
-    }
-
-    (year, month, day, hour, minute, second)
+fn unix_to_datetime(timestamp: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = timestamp.div_euclid(86400);
+    let remaining = timestamp.rem_euclid(86400);
+    let (year, month, day) = civil_from_days(days);
+    (
+        year,
+        month,
+        day,
+        (remaining / 3600) as u32,
+        ((remaining % 3600) / 60) as u32,
+        (remaining % 60) as u32,
+    )
 }
 
 fn parse_and_format_datetime(iso_date: &str, format: &str) -> Result<String, String> {
     let timestamp = parse_iso_to_unix(iso_date)?;
-    format_timestamp(&(timestamp as u64), format)
+    format_timestamp(timestamp, format)
 }
 
-fn format_timestamp(timestamp: &u64, format: &str) -> Result<String, String> {
-    let (year, month, day, hour, minute, second) = unix_to_datetime(*timestamp);
+fn format_timestamp(timestamp: i64, format: &str) -> Result<String, String> {
+    let (year, month, day, hour, minute, second) = unix_to_datetime(timestamp);
 
     let mut result = format.to_string();
     result = result.replace("yyyy", &format!("{:04}", year));
@@ -1206,107 +1183,103 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // -----------------------------------------------------------------------------
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_utils::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "utils",
+    capabilities = [
+        random_double,
+        random_array,
+        return_input_string,
+        return_input,
+        do_nothing,
+        delay_in_ms,
+        calculate,
+        format_date_from_iso,
+        iso_to_unix_timestamp,
+        get_current_unix_timestamp,
+        get_current_iso_datetime,
+        get_current_formatted_datetime,
+        country_name_to_iso_code,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-        let executor_result = match capability_id.as_str() {
-            "random-double" => __executor_random_double(value),
-            "random-array" => __executor_random_array(value),
-            "return-input-string" => __executor_return_input_string(value),
-            "return-input" => __executor_return_input(value),
-            "do-nothing" => __executor_do_nothing(value),
-            "delay-in-ms" => __executor_delay_in_ms(value),
-            "calculate" => __executor_calculate(value),
-            "format-date-from-iso" => __executor_format_date_from_iso(value),
-            "iso-to-unix-timestamp" => __executor_iso_to_unix_timestamp(value),
-            "get-current-unix-timestamp" => __executor_get_current_unix_timestamp(value),
-            "get-current-iso-datetime" => __executor_get_current_iso_datetime(value),
-            "get-current-formatted-datetime" => __executor_get_current_formatted_datetime(value),
-            "country-name-to-iso-code" => __executor_country_name_to_iso_code(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("utils agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
+    fn iso(value: &str) -> i64 {
+        parse_iso_to_unix(value).unwrap()
     }
-}
 
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category: value
-                .get("category")
-                .and_then(|v| v.as_str())
-                .unwrap_or("permanent")
-                .into(),
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable: value
-                .get("retryable")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
+    #[test]
+    fn epoch_and_well_known_instants_round_trip() {
+        for (text, seconds) in [
+            ("1970-01-01T00:00:00Z", 0),
+            ("2000-01-01T00:00:00Z", 946_684_800),
+            ("2001-09-09T01:46:40Z", 1_000_000_000),
+            ("2024-02-29T12:34:56Z", 1_709_210_096),
+            ("2038-01-19T03:14:08Z", 2_147_483_648),
+        ] {
+            assert_eq!(iso(text), seconds, "{text}");
+            assert_eq!(
+                format_timestamp(seconds, "yyyy-MM-ddTHH:mm:ss").unwrap(),
+                text.trim_end_matches('Z'),
+                "{text}"
+            );
         }
     }
-}
 
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+    #[test]
+    fn leap_day_and_century_rules_hold_in_both_directions() {
+        // 1900 is not a leap year and 2000 is, which is what separates the
+        // Gregorian rule from a plain four-year cycle.
+        assert_eq!(unix_to_datetime(iso("1900-03-01T00:00:00Z")).1, 3);
+        assert_eq!(
+            unix_to_datetime(iso("2000-02-29T00:00:00Z")),
+            (2000, 2, 29, 0, 0, 0)
+        );
+        assert_eq!(
+            iso("2000-03-01T00:00:00Z") - iso("2000-02-28T00:00:00Z"),
+            2 * 86400
+        );
+        assert_eq!(
+            iso("1900-03-01T00:00:00Z") - iso("1900-02-28T00:00:00Z"),
+            86400
+        );
+    }
+
+    #[test]
+    fn dates_before_the_epoch_are_negative_and_reversible() {
+        // The old ascending year loop never ran for these, so every pre-1970
+        // date reported a positive timestamp.
+        assert_eq!(iso("1969-12-31T23:59:59Z"), -1);
+        assert_eq!(iso("1960-01-01T00:00:00Z"), -315_619_200);
+        assert_eq!(unix_to_datetime(-315_619_200), (1960, 1, 1, 0, 0, 0));
+        assert_eq!(
+            format_timestamp(-1, "yyyy-MM-dd HH:mm:ss").unwrap(),
+            "1969-12-31 23:59:59"
+        );
+    }
+
+    #[test]
+    fn every_day_of_two_leap_cycles_survives_a_round_trip() {
+        let mut day = days_from_civil(1968, 1, 1);
+        let last = days_from_civil(1977, 1, 1);
+        while day < last {
+            let (year, month, date) = civil_from_days(day);
+            assert_eq!(days_from_civil(year, month, date), day);
+            day += 1;
+        }
+    }
+
+    #[test]
+    fn extreme_years_return_immediately_instead_of_looping() {
+        // Both directions used to walk one iteration per year, so these inputs
+        // burned billions of uninterruptible iterations inside the guest.
+        let far = iso("2147483647-01-01T00:00:00Z");
+        assert!(far > 0);
+        assert_eq!(unix_to_datetime(far).0, 2_147_483_647);
+        let ancient = days_from_civil(-2_000_000_000, 6, 15) * 86400;
+        assert_eq!(unix_to_datetime(ancient), (-2_000_000_000, 6, 15, 0, 0, 0));
+        assert!(format_timestamp(far, "yyyy").is_ok());
+    }
+}

@@ -110,6 +110,7 @@ pub(super) fn emit_embed_retry_park(
         DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
         DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
         DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL,
+        None,
     );
 }
 
@@ -217,6 +218,9 @@ fn emit_embed_retry_delay(
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
+    if indices.monotonic_now.is_some() {
+        super::agent_deadline::clamp_wait(body, indices, false, DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL);
+    }
 }
 
 fn emit_embed_retry_sleep(
@@ -257,7 +261,8 @@ fn emit_embed_retry_sleep(
         emit_blocking_sleep(body, indices);
         body.instruction(&Instruction::End);
     } else {
-        emit_blocking_sleep(body, indices);
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
+        super::cooperative_wait::emit_timer_wait(body, indices);
     }
 }
 

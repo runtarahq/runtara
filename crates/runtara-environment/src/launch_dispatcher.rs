@@ -404,6 +404,11 @@ impl LaunchDispatcher {
     /// This is public for narrow integration tests; normal hosts call
     /// [`Self::run`] and wake it through the shared [`Notify`].
     pub async fn dispatch_once(&self) -> anyhow::Result<usize> {
+        // Serve control for already-running executions even during drain and
+        // before queue preparation/reconciliation can consume this pass.
+        ContainerRegistry::new(self.pool.clone())
+            .deliver_abort_requests(&self.owner, self.runner.as_ref(), self.config.batch_size)
+            .await?;
         let repository = LaunchRepository::new(self.pool.clone());
 
         // A monitor can be interrupted after Core persisted a park/terminal
@@ -889,6 +894,11 @@ impl LaunchDispatcher {
                     self.drain.clone(),
                     self.lifecycle_observers.clone(),
                     Some((gate.clone(), running.attempt_count)),
+                    Some(crate::execution_lease::ExecutionLease::new(
+                        self.owner.clone(),
+                        running.attempt_count,
+                        self.handoff_deadline(&running).unwrap_or_else(Instant::now),
+                    )),
                 );
                 if !gate.open() {
                     // Queue expiry, cancellation, or the durable gate

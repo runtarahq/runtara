@@ -30,17 +30,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-teams/agent",
-        async: false,
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim (mirrors runtara-agent-slack / -mailgun)
 // ============================================================================
@@ -143,7 +132,7 @@ struct BotConnectorResponse {
 /// POST an activity to the Bot Connector via the proxy. `path` is a RELATIVE
 /// Bot Connector path — the proxy joins it under the conversation's serviceUrl
 /// (bound by `endpoint_ref`) and injects the bearer token (by connection id).
-fn bot_connector_post(
+async fn bot_connector_post(
     path: &str,
     connection: &RawConnection,
     endpoint_ref: &str,
@@ -165,7 +154,8 @@ fn bot_connector_post(
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .header("X-Runtara-Endpoint-Ref", endpoint_ref)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "TEAMS_NETWORK_ERROR",
@@ -437,7 +427,7 @@ pub struct SendMessageOutput {
     module_integration_ids = "teams_bot",
     module_secure = true
 )]
-pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
+pub async fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
         AgentError::permanent(
             "TEAMS_MISSING_CONNECTION",
@@ -532,8 +522,8 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
             activity["attachments"] = attachments.clone();
         }
 
-        let resp =
-            bot_connector_post(&base_path, connection, &input.target, &activity, timeout_ms)?;
+        let resp = bot_connector_post(&base_path, connection, &input.target, &activity, timeout_ms)
+            .await?;
         if let Some(id) = resp.activity_id {
             activity_ids.push(id);
         }
@@ -698,98 +688,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_teams::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "send-message" => __executor_send_message(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("teams agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(agent = "teams", capabilities = [send_message,],);
 
 #[cfg(test)]
 mod tests {
@@ -819,8 +718,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn send_message_requires_connection() {
+    #[tokio::test]
+    async fn send_message_requires_connection() {
         let err = send_message(SendMessageInput {
             _connection: None,
             target: "ref".into(),
@@ -830,6 +729,7 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("connection required");
         assert_eq!(err.code, "TEAMS_MISSING_CONNECTION");
     }
@@ -844,8 +744,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_message_requires_target_and_conversation() {
+    #[tokio::test]
+    async fn send_message_requires_target_and_conversation() {
         let missing_target = send_message(SendMessageInput {
             _connection: Some(conn()),
             target: "  ".into(),
@@ -855,6 +755,7 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("target required");
         assert_eq!(missing_target.code, "TEAMS_MISSING_TARGET");
 
@@ -867,12 +768,13 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("conversation required");
         assert_eq!(missing_conv.code, "TEAMS_MISSING_CONVERSATION");
     }
 
-    #[test]
-    fn send_message_requires_text_or_card() {
+    #[tokio::test]
+    async fn send_message_requires_text_or_card() {
         let err = send_message(SendMessageInput {
             _connection: Some(conn()),
             target: "ref".into(),
@@ -882,6 +784,7 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("text or card required");
         assert_eq!(err.code, "TEAMS_EMPTY_MESSAGE");
     }

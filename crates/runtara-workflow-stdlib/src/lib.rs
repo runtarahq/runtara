@@ -943,6 +943,18 @@ mod component {
             direct_json::DirectJsonManifest::ai_turn_cache_key(&step_id, iteration, &source)
         }
 
+        fn ai_turn_response_key(
+            step_id: String,
+            iteration: u32,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_turn_response_key(&step_id, iteration, &source)
+        }
+
+        fn ai_turn_response_validate(response: Vec<u8>) -> Result<(), String> {
+            direct_json::DirectJsonManifest::ai_turn_response_validate(&response)
+        }
+
         fn ai_turn_snapshot(
             state: Vec<u8>,
             pending: Vec<u8>,
@@ -1169,6 +1181,30 @@ mod component {
                 &input,
                 &source,
             )
+        }
+
+        fn tool_scope_source(
+            ai_step_id: String,
+            label: String,
+            call_counter: u32,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::tool_scope_source(
+                &ai_step_id,
+                &label,
+                call_counter,
+                &source,
+            )
+        }
+
+        fn agent_aux_scope_source(agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.agent_aux_scope_source(agent_id, &source)
+            })
         }
 
         fn agent_cache_key(agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {

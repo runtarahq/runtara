@@ -47,9 +47,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_return, emit_get_checkpoint_has_value, emit_retptr_error_or_return,
-    load_retptr_list, load_retptr_tag, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
-    push_segment_args,
+    emit_get_checkpoint_has_value, load_retptr_list, load_retptr_tag, push_retptr_arg,
+    push_retptr_i64_load, push_segment_args,
 };
 use std::collections::BTreeMap;
 
@@ -60,15 +59,14 @@ use super::split_parallel::{
 };
 use super::{
     DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET, DIRECT_PSPLIT_LAUNCH_LOCAL,
-    DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL, DIRECT_PSPLIT_SIGNAL_LOCAL,
+    DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
     DIRECT_PSPLIT_SLOT_CURSOR_OFFSET, DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
     DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
     DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE,
     DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET, DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_TIMERS_FIRED_LOCAL,
-    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
-    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan,
-    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends,
-    node_has_breakpoint,
+    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends, node_has_breakpoint,
 };
 
 /// The waitable-set event code for a settled subtask (mirrors
@@ -379,6 +377,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint,
             max_retries,
             retry_delay_ms,
+            timeout_ms,
             child_plan,
             error_plan,
             ..
@@ -389,6 +388,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint: *breakpoint,
             max_retries: *max_retries,
             retry_delay_ms: *retry_delay_ms,
+            timeout_ms: *timeout_ms,
             child_plan: child_plan.clone(),
             next_plan,
             error_plan: error_plan.clone(),
@@ -732,12 +732,6 @@ fn emit_branch_scheduler(
     let ws_new = indices
         .waitable_set_new
         .expect("scheduler imports waitable builtins");
-    let ws_wait = indices
-        .waitable_set_wait
-        .expect("scheduler imports waitable builtins");
-    let ws_drop = indices
-        .waitable_set_drop
-        .expect("scheduler imports waitable builtins");
     let waitable_join = indices
         .waitable_join
         .expect("scheduler imports waitable builtins");
@@ -771,8 +765,21 @@ fn emit_branch_scheduler(
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+    body.instruction(&Instruction::I32Const(slots_bytes));
+    body.instruction(&Instruction::I32Add);
+    super::cooperative_wait::emit_window_open(body);
+    super::cooperative_wait::emit_poll_before_call(body, indices);
+
+    // Capture errors at the window boundary, so branching to an outer handler
+    // cannot bypass peer cancellation and lifecycle-deferral release.
+    let outer_failure_target = failure_target;
+    let failure_target = Some(DirectFailureTarget::StepError { branch_depth: 0 });
+    let handled_target = handled_target.map(|target| target.nested(1));
+    super::step_error::push_step_error_frame(body);
     body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+    body.instruction(&Instruction::LocalSet(super::DIRECT_STEP_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::Block(BlockType::Empty));
 
     // ── SCHEDULER LOOP ────────────────────────────────────────────────────────
     body.instruction(&Instruction::Block(BlockType::Empty)); // $sched_done
@@ -789,6 +796,11 @@ fn emit_branch_scheduler(
 
         body.instruction(&Instruction::Block(BlockType::Empty)); // $drive_done (L0)
         body.instruction(&Instruction::Loop(BlockType::Empty)); // $drive (L1)
+        super::cooperative_wait::emit_window_deadline_boundary(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(4)),
+        );
 
         // if SCHED == NEEDS_LAUNCH: launch node[cursor].
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
@@ -822,6 +834,7 @@ fn emit_branch_scheduler(
                     route_ptr_local,
                     route_len_local,
                     Some(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL),
+                    failure_target.map(|target| target.nested(6)),
                 );
             } else {
                 // Sync step: run it inline (blocking), then fall through the eager
@@ -847,8 +860,8 @@ fn emit_branch_scheduler(
                     route_len_local,
                     workflow_log_kind,
                     workflow_error_kind,
-                    failure_target,
-                    handled_target,
+                    failure_target.map(|target| target.nested(6)),
+                    handled_target.map(|target| target.nested(6)),
                 );
                 body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
                 body.instruction(&Instruction::I32Const(b as i32 * DIRECT_PSPLIT_SLOT_STRIDE));
@@ -930,8 +943,8 @@ fn emit_branch_scheduler(
                 route_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
-                failure_target,
-                handled_target,
+                failure_target.map(|target| target.nested(6)),
+                handled_target.map(|target| target.nested(6)),
             );
             body.instruction(&Instruction::End); // L3
         }
@@ -981,26 +994,12 @@ fn emit_branch_scheduler(
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1)); // -> $sched_done (Br 1: Loop $sched, Block $sched_done)
 
-    // WAIT for ANY settle. Poll pause/cancel at the wakeup (flag into SIGNAL, acted
-    // on at the loop exit — a replay-safe boundary, every subtask resolved).
-    if !indices.omit_runtime {
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            load_retptr_tag(body);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::I32Or);
-            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-            body.instruction(&Instruction::I32Or);
-            body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        }
-    }
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
-    body.instruction(&Instruction::Call(ws_wait));
-    body.instruction(&Instruction::Drop);
+    // Poll without publishing terminal state while peer calls remain active.
+    super::cooperative_wait::emit_scoped_window_wait(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(2)),
+    );
     // Only a settled subtask advances a branch.
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET + 4));
     body.instruction(&Instruction::I32Load(mem32()));
@@ -1053,32 +1052,40 @@ fn emit_branch_scheduler(
         );
         body.instruction(&Instruction::End);
     }
+    super::cooperative_wait::emit_forget_returned(body, indices);
     body.instruction(&Instruction::End); // if SUBTASK_RETURNED
 
     body.instruction(&Instruction::Br(0)); // continue $sched
     body.instruction(&Instruction::End); // Loop $sched
     body.instruction(&Instruction::End); // Block $sched_done
 
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::Call(ws_drop));
+    super::cooperative_wait::emit_window_close(body, indices);
 
-    // Act on a pause/cancel observed during the wait — a replay-safe suspend point.
-    if !indices.omit_runtime {
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            emit_entry_suspend_return(body, indices);
-            body.instruction(&Instruction::End);
-        }
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::End);
+    super::cooperative_wait::emit_window_boundary(body, indices);
+    body.instruction(&Instruction::End); // error capture
+
+    body.instruction(&Instruction::LocalGet(super::DIRECT_STEP_ERROR_FLAG_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_STEP_ERROR_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_ptr_local));
+    body.instruction(&Instruction::LocalGet(super::DIRECT_STEP_ERROR_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(route_len_local));
+    super::step_error::pop_step_error_frame(body);
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_TIMERS_FIRED_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::cooperative_wait::emit_window_unwind(body, indices);
+    if let Some(target) = outer_failure_target {
+        super::split::emit_split_append_error_payload_and_continue(
+            body,
+            indices,
+            target.nested(1),
+            route_ptr_local,
+            route_len_local,
+        );
+    } else {
+        super::emit_runtime_fail_return(body, indices, route_ptr_local, route_len_local);
     }
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1316,12 +1323,6 @@ fn emit_concurrent_branches(
     let ws_new = indices
         .waitable_set_new
         .expect("parallel-branch compiles import the waitable builtins");
-    let ws_wait = indices
-        .waitable_set_wait
-        .expect("parallel-branch compiles import the waitable builtins");
-    let ws_drop = indices
-        .waitable_set_drop
-        .expect("parallel-branch compiles import the waitable builtins");
     let waitable_join = indices
         .waitable_join
         .expect("parallel-branch compiles import the waitable builtins");
@@ -1357,11 +1358,6 @@ fn emit_concurrent_branches(
     body.instruction(&Instruction::I32Const(slots_bytes));
     body.instruction(&Instruction::MemoryFill(0));
 
-    // signal = 0 (accumulated across every depth's drain; the suspend fires once
-    // after the window quiesces).
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-
     // ── DEPTH-WAVEFRONT ──────────────────────────────────────────────────────
     // At each depth, launch → drain → assemble the depth-d step of every branch
     // that still has one. Assemble runs each step with `next = Join` (the next
@@ -1376,6 +1372,11 @@ fn emit_concurrent_branches(
         body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+        body.instruction(&Instruction::I32Const(slots_bytes));
+        body.instruction(&Instruction::I32Add);
+        super::cooperative_wait::emit_window_open(body);
+        super::cooperative_wait::emit_poll_before_call(body, indices);
 
         // LAUNCH depth d — only Agent steps have an async invoke; sync steps
         // (Log/Filter/…) run in assemble with no launch. A BREAKPOINTED agent is
@@ -1403,14 +1404,14 @@ fn emit_concurrent_branches(
                     route_ptr_local,
                     route_len_local,
                     None, // wavefront: drain-all, no per-branch pending flag
+                    failure_target,
                 );
             }
         }
 
         // DRAIN depth d.
-        emit_drain_pending(body, indices, ws_wait, subtask_drop);
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-        body.instruction(&Instruction::Call(ws_drop));
+        emit_drain_pending(body, indices, subtask_drop, failure_target);
+        super::cooperative_wait::emit_window_close(body, indices);
 
         // ASSEMBLE depth d in TWO passes: non-suspending nodes first, then
         // suspending nodes (Wait/durable-Delay) last — so every sibling at this
@@ -1426,6 +1427,11 @@ fn emit_concurrent_branches(
                 if is_suspending_node(node) != suspending_pass {
                     continue;
                 }
+                super::cooperative_wait::emit_window_deadline_boundary(
+                    body,
+                    indices,
+                    failure_target,
+                );
                 if matches!(node, DirectRunPlan::Agent { .. }) {
                     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
                     body.instruction(&Instruction::I32Const(
@@ -1485,26 +1491,7 @@ fn emit_concurrent_branches(
                 }
             }
         }
-    }
-
-    // Act on a pause/cancel flagged during the drain. Every subtask has resolved
-    // and assemble has run, so this is a replay-safe suspend point — mirror the
-    // Split chunk boundary.
-    if !indices.omit_runtime {
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            emit_entry_suspend_return(body, indices);
-            body.instruction(&Instruction::End);
-        }
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::End);
+        super::cooperative_wait::emit_window_boundary(body, indices);
     }
 }
 
@@ -1532,7 +1519,9 @@ fn emit_branch_launch(
     // driver waits for it; an EAGER/skipped launch leaves `flag` at 0 so the driver
     // assembles immediately. `None` = the wavefront's fire-and-drain-all join.
     sched_pending_flag: Option<u32>,
+    failure_target: Option<DirectFailureTarget>,
 ) {
+    super::cooperative_wait::emit_window_deadline_boundary(body, indices, failure_target);
     let component_id = pool_member_component_id(branch.agent_component_id, pool_member);
     let invoke = indices
         .agent_invokes_async
@@ -1576,9 +1565,7 @@ fn emit_branch_launch(
         load_retptr_list(body, route_ptr_local, route_len_local);
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
-        skip_on_error(body);
+        super::checkpoint::emit_get_checkpoint(body, indices);
         emit_get_checkpoint_has_value(body);
         body.instruction(&Instruction::BrIf(0)); // HIT -> skip launch
     }
@@ -1605,6 +1592,27 @@ fn emit_branch_launch(
     body.instruction(&Instruction::LocalGet(route_len_local));
     body.instruction(&Instruction::BrIf(0)); // -> $skip
 
+    let own_deadline = static_data.agent_timeout(branch.agent_id).is_some();
+    super::cooperative_wait::parallel_deadline::begin(
+        body,
+        indices,
+        static_data,
+        branch.agent_id,
+        branch.step_id,
+        (source_ptr_local, source_len_local),
+        branch.durable_checkpoint,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+    );
+    if own_deadline {
+        super::cooperative_wait::parallel_deadline::check_before_io(
+            body,
+            indices,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            0,
+            failure_target.map(|t| t.nested(1)),
+        );
+    }
+
     // connection injection (in-band `_connection`); no-op when connectionless.
     if static_data.agent_has_connection(branch.agent_id) {
         body.instruction(&Instruction::I32Const(branch.agent_id as i32));
@@ -1619,8 +1627,22 @@ fn emit_branch_launch(
         body.instruction(&Instruction::If(BlockType::Empty));
         body.instruction(&Instruction::LocalGet(route_ptr_local));
         body.instruction(&Instruction::LocalGet(route_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.connection_resolver_describe));
+        super::agent_io::emit_connection_description(body, indices, own_deadline);
+        if own_deadline {
+            super::cooperative_wait::parallel_deadline::preparation_done(
+                body,
+                indices,
+                DIRECT_PSPLIT_LAUNCH_LOCAL,
+                1,
+                failure_target.map(|t| t.nested(2)),
+            );
+        } else {
+            super::cooperative_wait::emit_window_preparation_timeout(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(2)),
+            );
+        }
         load_retptr_tag(body);
         body.instruction(&Instruction::BrIf(1)); // -> $skip
         load_retptr_list(body, route_ptr_local, route_len_local);
@@ -1652,6 +1674,29 @@ fn emit_branch_launch(
         DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
     );
 
+    super::cooperative_wait::emit_window_deadline_boundary(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(1)),
+    );
+
+    if own_deadline {
+        super::cooperative_wait::parallel_deadline::check_before_io(
+            body,
+            indices,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            0,
+            failure_target.map(|t| t.nested(1)),
+        );
+    }
+
+    super::cooperative_wait::parallel_deadline::start_call_alarm(
+        body,
+        indices,
+        own_deadline,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+    );
+
     // slot.state = AGENT_READY, then async-invoke into slot+RESULT_OFFSET.
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
     body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
@@ -1660,13 +1705,35 @@ fn emit_branch_launch(
     push_segment_args(body, capability_id);
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
+    if invoke.is_scoped() {
+        super::agent_invoke::emit_agent_context(
+            body,
+            indices,
+            static_data,
+            branch.agent_id,
+            source_ptr_local,
+            source_len_local,
+            super::agent_invoke::AgentInvocationSite::Step(None),
+        );
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_RESULT_OFFSET));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::Call(invoke.function_index));
     body.instruction(&Instruction::LocalSet(route_len_local)); // status
+    super::cooperative_wait::parallel_deadline::close_eager_call_alarm(
+        body,
+        indices,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+        route_len_local,
+    );
     match sched_pending_flag {
-        None => emit_join_if_pending(body, route_len_local, waitable_join),
+        None => emit_join_if_pending(
+            body,
+            route_len_local,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            waitable_join,
+        ),
         Some(flag) => {
             // Pending (low nibble != SUBTASK_RETURNED): store the subtask handle in
             // slot.SUBTASK, join it, bump PENDING, and flag the branch as waiting.

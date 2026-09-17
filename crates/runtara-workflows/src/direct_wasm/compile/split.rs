@@ -59,6 +59,8 @@ use super::{
 
 fn push_split_frame(body: &mut WasmFunction) {
     super::loop_deadline::push_frame(body);
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
@@ -91,7 +93,7 @@ fn push_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
 }
 
-fn pop_split_frame(body: &mut WasmFunction) {
+fn pop_split_frame(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_HEAP_BASE_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(
@@ -122,7 +124,9 @@ fn pop_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
-    super::loop_deadline::pop_frame(body);
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_STEPS_PTR_LOCAL));
+    super::loop_deadline::pop_frame(body, indices);
 }
 
 /// Compact a loop's surviving buffer (`buf_ptr`/`buf_len`) down to the captured
@@ -188,6 +192,7 @@ pub(super) fn emit_value_store_retain(
 }
 
 fn push_split_failure_frame(body: &mut WasmFunction) {
+    super::deadline_scope::push_failure_frame(body);
     body.instruction(&Instruction::LocalGet(
         super::DIRECT_FAILURE_LOOP_COMPLETED_LOCAL,
     ));
@@ -259,9 +264,11 @@ fn pop_split_failure_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(
         super::DIRECT_FAILURE_LOOP_COMPLETED_LOCAL,
     ));
+    super::deadline_scope::pop_failure_frame(body);
 }
 
 fn sync_split_failure_frame(body: &mut WasmFunction) {
+    super::deadline_scope::save_failure_frame(body);
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
@@ -318,7 +325,11 @@ fn sync_split_failure_frame(body: &mut WasmFunction) {
     ));
 }
 
-fn restore_split_frame_from_failure_frame(body: &mut WasmFunction) {
+fn restore_split_frame_from_failure_frame(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    super::deadline_scope::restore_failure_frame(body, indices);
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_COUNT_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
@@ -409,7 +420,7 @@ pub(super) fn emit_split_plan(
     outer_failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
-    let has_error_plan = error_plan.is_some();
+    let has_error_plan = error_plan.is_some() || indices.monotonic_now.is_some();
     // Concurrent window (Phase 3): Some only when
     // the requested `parallelism` may actually run concurrently. Ineligible
     // shapes silently keep the sequential lowering (advisory W073 covers the
@@ -419,7 +430,6 @@ pub(super) fn emit_split_plan(
         parallel_window,
         durable,
         max_retries,
-        timeout_ms,
         nested_plan,
     );
     // When the Split has an onError route, redirect every fatal failure (a
@@ -527,22 +537,17 @@ pub(super) fn emit_split_plan(
             ),
             timeout_ms,
             DIRECT_SPLIT_DEADLINE_MS_LOCAL,
+            super::deadline_scope::owner(split_id, true),
+            &static_data.split_timeout_error,
         );
     }
 
-    // Cached failed attempts can bypass the item loop. Check the restored
-    // budget before retry dispatch so replay cannot park beyond its expiry.
-    if timeout_ms.is_some() {
-        super::loop_deadline::check(
-            body,
-            indices,
-            DIRECT_SPLIT_DEADLINE_MS_LOCAL,
-            &static_data.split_timeout_error,
-            None,
-            (output_ptr_local, output_len_local),
-            (route_ptr_local, route_len_local),
-        );
-    }
+    // Cached failures must not bypass an enclosing or own live deadline.
+    super::loop_deadline::check(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(u32::from(durable))),
+    );
 
     let retry_enabled = max_retries > 0;
     // A lifecycle invocation can release its runner while a retry is due. The
@@ -550,11 +555,12 @@ pub(super) fn emit_split_plan(
     // schedules that wake, so a restart replays the error decision rather than
     // the items that already ran.
     let lifecycle_retry_park =
-        durable && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+        durable && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp;
     let fresh_failure_target = if retry_enabled {
         Some(DirectFailureTarget::SplitRetry { branch_depth: 0 })
     } else {
-        failure_target
+        // The result-cache miss arm remains open throughout a durable body.
+        failure_target.map(|target| target.nested(u32::from(durable)))
     };
     if retry_enabled {
         body.instruction(&Instruction::I32Const(1));
@@ -736,27 +742,18 @@ pub(super) fn emit_split_plan(
             DIRECT_SPLIT_RESULTS_LEN_LOCAL,
         );
 
-        // Enforce the wall-clock timeout before each item. A Split that exceeds its
-        // deadline is a hard failure (not aggregated or retried): it fails the
-        // workflow with the static SPLIT_TIMEOUT payload via runtime.fail, which is
-        // depth-independent and therefore correct under retry, durable, and
-        // dontStopOnFailed nesting alike.
-        if timeout_ms.is_some() {
-            super::loop_deadline::check(
-                body,
-                indices,
-                DIRECT_SPLIT_DEADLINE_MS_LOCAL,
-                &static_data.split_timeout_error,
-                None,
-                (output_ptr_local, output_len_local),
-                (route_ptr_local, route_len_local),
-            );
-        }
+        super::loop_deadline::check(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(2)),
+        );
 
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
         body.instruction(&Instruction::I32GeU);
         body.instruction(&Instruction::BrIf(1));
+
+        super::cooperative_wait::emit_iteration_boundary(body, indices);
 
         body.instruction(&Instruction::I32Const(split_id as i32));
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
@@ -893,7 +890,7 @@ pub(super) fn emit_split_plan(
         if has_error_plan {
             pop_step_error_frame(body);
         }
-        pop_split_frame(body);
+        pop_split_frame(body, indices);
 
         if dont_stop_on_failed {
             sync_split_failure_frame(body);
@@ -951,6 +948,7 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::End);
         body.instruction(&Instruction::End);
     } // end sequential item loop (parallel windows emitted above)
+    super::deadline_scope::propagate(body, indices, fresh_failure_target);
 
     if durable {
         body.instruction(&Instruction::I32Const(split_id as i32));
@@ -1102,12 +1100,12 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::End);
     }
 
-    pop_split_frame(body);
+    pop_split_frame(body, indices);
     if dont_stop_on_failed {
         pop_split_failure_frame(body);
     }
 
-    if let Some(error_plan) = error_plan {
+    if has_error_plan {
         // A fatal split failure was captured: restore the parent steps context and
         // route the captured error through the shared onError machinery. On a
         // normal split completion the flag is unset and this is skipped.
@@ -1117,6 +1115,7 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::LocalSet(steps_ptr_local));
         body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_STEPS_LEN_LOCAL));
         body.instruction(&Instruction::LocalSet(steps_len_local));
+        super::deadline_scope::claim(body, super::deadline_scope::owner(split_id, true));
         emit_agent_error_route_or_fail(
             body,
             indices,
@@ -1134,7 +1133,7 @@ pub(super) fn emit_split_plan(
             output_len_local,
             route_ptr_local,
             route_len_local,
-            Some(error_plan),
+            error_plan,
             data_ptr_local,
             data_len_local,
             workflow_log_kind,
@@ -1211,6 +1210,9 @@ pub(super) fn emit_split_retry_error_and_continue(
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
+    // A consumed nested capture is no longer a fatal Split error.
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::Br(branch_depth));
 }
 
@@ -1253,6 +1255,11 @@ fn emit_split_retry_after_attempt(
     failure_target: Option<DirectFailureTarget>,
     failure_extra_depth: u32,
 ) {
+    super::deadline_scope::propagate(
+        body,
+        indices,
+        failure_target.map(|target| target.nested(failure_extra_depth)),
+    );
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
     if retry_park.is_some() {
@@ -1381,6 +1388,18 @@ pub(super) fn emit_split_append_error_payload_and_continue(
         }
         return;
     };
+    if indices.monotonic_now.is_some() {
+        body.instruction(&Instruction::LocalGet(super::deadline_scope::SELECTED));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::I32Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // Unwind the item loop without aggregating a cancelled child's output.
+        body.instruction(&Instruction::Br(branch_depth + 2));
+        body.instruction(&Instruction::End);
+    }
+    // Aggregation consumes an ordinary item failure, including a nested capture.
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::I32Const(split_id as i32));
     body.instruction(&Instruction::LocalGet(
         DIRECT_SPLIT_FAILURE_RESULTS_PTR_LOCAL,
@@ -1403,7 +1422,7 @@ pub(super) fn emit_split_append_error_payload_and_continue(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_FAILURE_INDEX_LOCAL));
-    restore_split_frame_from_failure_frame(body);
+    restore_split_frame_from_failure_frame(body, indices);
     body.instruction(&Instruction::Br(branch_depth));
 }
 
@@ -1565,7 +1584,7 @@ pub(super) fn emit_split_item_pipeline(
     if has_error_plan {
         pop_step_error_frame(body);
     }
-    pop_split_frame(body);
+    pop_split_frame(body, indices);
 
     if dont_stop_on_failed {
         sync_split_failure_frame(body);

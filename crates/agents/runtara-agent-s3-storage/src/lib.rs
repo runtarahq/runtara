@@ -26,23 +26,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-s3-storage/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -169,7 +152,7 @@ fn url_encode_s3_key(s: &str) -> String {
 }
 
 /// Fire an HTTP request via the runtara proxy (SigV4 is done server-side).
-fn s3_request(
+async fn s3_request(
     method: &str,
     path: &str,
     connection_id: &str,
@@ -189,7 +172,7 @@ fn s3_request(
         req = req.body_bytes(data);
     }
 
-    req.call_agent().map_err(|e| {
+    req.call_agent_async().await.map_err(|e| {
         AgentError::transient(
             "S3_NETWORK_ERROR",
             format!("S3 request {method} {path} failed: {e}"),
@@ -320,10 +303,12 @@ pub struct CreateBucketOutput {
     module_integration_ids = "s3_compatible",
     module_secure = true
 )]
-pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, AgentError> {
+pub async fn storage_create_bucket(
+    input: CreateBucketInput,
+) -> Result<CreateBucketOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = bucket_path(&input.bucket);
-    let resp = s3_request("PUT", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("PUT", &path, &connection.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         200 | 201 | 409 => CreateBucketOutput {
@@ -377,9 +362,11 @@ pub struct ListBucketsOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, AgentError> {
+pub async fn storage_list_buckets(
+    input: ListBucketsInput,
+) -> Result<ListBucketsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
-    let resp = s3_request("GET", "/", &connection.connection_id, &[], None)?;
+    let resp = s3_request("GET", "/", &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -436,10 +423,12 @@ pub struct DeleteBucketOutput {
     side_effects = true,
     idempotent = true
 )]
-pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, AgentError> {
+pub async fn storage_delete_bucket(
+    input: DeleteBucketInput,
+) -> Result<DeleteBucketOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = bucket_path(&input.bucket);
-    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         200 | 204 | 404 => DeleteBucketOutput {
@@ -539,7 +528,7 @@ pub struct UploadFileOutput {
     side_effects = true,
     idempotent = false
 )]
-pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+pub async fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let is_base64 = input.is_base64.unwrap_or(true);
@@ -579,7 +568,8 @@ pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, A
         &connection.connection_id,
         &[("Content-Type", ct)],
         Some(&data),
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200 | 201 => UploadFileOutput {
@@ -668,13 +658,16 @@ pub struct DownloadFileOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
+pub async fn storage_download_file(
+    input: DownloadFileInput,
+) -> Result<DownloadFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     // HEAD first to pull content_type without re-streaming the body. Mirrors
     // the legacy behaviour; failure of HEAD doesn't abort the GET.
     let head_path = object_path(&input.bucket, &input.key);
     let content_type = s3_request("HEAD", &head_path, &connection.connection_id, &[], None)
+        .await
         .ok()
         .and_then(|r| {
             if r.status == 200 {
@@ -688,7 +681,7 @@ pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOut
         });
 
     let get_path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("GET", &get_path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("GET", &get_path, &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let size = resp.body.len() as u64;
@@ -795,7 +788,7 @@ pub struct ListFilesOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
+pub async fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let mut query_parts = vec!["list-type=2".to_string()];
@@ -810,7 +803,7 @@ pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, Agen
     }
 
     let path = format!("/{}?{}", input.bucket, query_parts.join("&"));
-    let resp = s3_request("GET", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("GET", &path, &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -888,10 +881,12 @@ pub struct GetFileInfoOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
+pub async fn storage_get_file_info(
+    input: GetFileInfoInput,
+) -> Result<GetFileInfoOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("HEAD", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("HEAD", &path, &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let content_type = resp
@@ -962,10 +957,10 @@ pub struct DeleteFileOutput {
     side_effects = true,
     idempotent = true
 )]
-pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
+pub async fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         200 | 204 | 404 => DeleteFileOutput {
@@ -1025,7 +1020,7 @@ pub struct CopyFileOutput {
     side_effects = true,
     idempotent = true
 )]
-pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
+pub async fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let dst_path = object_path(&input.destination_bucket, &input.destination_key);
@@ -1036,7 +1031,8 @@ pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentEr
         &connection.connection_id,
         &[("x-amz-copy-source", &copy_source)],
         None,
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200 | 201 => CopyFileOutput {
@@ -1125,7 +1121,7 @@ pub struct GeneratePresignedUrlOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_generate_presigned_url(
+pub async fn storage_generate_presigned_url(
     input: GeneratePresignedUrlInput,
 ) -> Result<GeneratePresignedUrlOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1159,7 +1155,9 @@ pub fn storage_generate_presigned_url(
             &path,
             expires,
             input.content_type.as_deref(),
-        ) {
+        )
+        .await
+        {
             Ok(result) => GeneratePresignedUrlOutput {
                 success: true,
                 url: Some(result.url),
@@ -1322,107 +1320,18 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_s3_storage::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "storage-create-bucket" => __executor_storage_create_bucket(value),
-            "storage-list-buckets" => __executor_storage_list_buckets(value),
-            "storage-delete-bucket" => __executor_storage_delete_bucket(value),
-            "storage-upload-file" => __executor_storage_upload_file(value),
-            "storage-download-file" => __executor_storage_download_file(value),
-            "storage-list-files" => __executor_storage_list_files(value),
-            "storage-get-file-info" => __executor_storage_get_file_info(value),
-            "storage-delete-file" => __executor_storage_delete_file(value),
-            "storage-copy-file" => __executor_storage_copy_file(value),
-            "storage-generate-presigned-url" => __executor_storage_generate_presigned_url(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("s3-storage agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "s3-storage",
+    capabilities = [
+        storage_create_bucket,
+        storage_list_buckets,
+        storage_delete_bucket,
+        storage_upload_file,
+        storage_download_file,
+        storage_list_files,
+        storage_get_file_info,
+        storage_delete_file,
+        storage_copy_file,
+        storage_generate_presigned_url,
+    ],
+);

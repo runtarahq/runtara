@@ -256,15 +256,6 @@ impl ValidationErrorDto {
                 Some("maxRetries".to_string()),
                 None,
             ),
-            ValidationError::UnsupportedStepTimeout { step_id, step_type } => (
-                format!(
-                    "Step '{}': 'timeout' is unsupported for {} steps because a running invocation cannot be interrupted",
-                    step_id, step_type
-                ),
-                Some(step_id.clone()),
-                Some("timeout".to_string()),
-                None,
-            ),
             ValidationError::InvalidChildVersion {
                 step_id,
                 child_workflow_id,
@@ -1480,22 +1471,6 @@ mod tests {
         assert_eq!(dto.field_name.as_deref(), Some("maxRetries"));
         assert!(dto.message.contains("4294967294"));
         assert!(dto.message.contains("4294967295"));
-    }
-
-    #[test]
-    fn unsupported_step_timeout_maps_to_a_stable_save_error() {
-        for (step_id, step_type) in [("call", "Agent"), ("child", "EmbedWorkflow")] {
-            let dto =
-                ValidationErrorDto::from_runtara_error(&ValidationError::UnsupportedStepTimeout {
-                    step_id: step_id.to_string(),
-                    step_type: step_type.to_string(),
-                });
-
-            assert_eq!(dto.code, "E128");
-            assert_eq!(dto.step_id.as_deref(), Some(step_id));
-            assert_eq!(dto.field_name.as_deref(), Some("timeout"));
-            assert!(dto.message.contains("unsupported"), "{}", dto.message);
-        }
     }
 
     #[test]

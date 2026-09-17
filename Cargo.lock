@@ -4226,6 +4226,7 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "tokio",
  "wit-bindgen 0.58.0",
 ]
 
@@ -4252,6 +4253,7 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "tokio",
  "wit-bindgen 0.58.0",
 ]
 
@@ -4396,6 +4398,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "runtara-dsl",
+ "serde",
  "serde_json",
  "syn 2.0.117",
 ]
@@ -4511,6 +4514,7 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "tokio",
  "wit-bindgen 0.58.0",
 ]
 
@@ -4547,6 +4551,7 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "tokio",
  "wit-bindgen 0.58.0",
 ]
 
@@ -4678,6 +4683,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wac-graph",
  "wasmparser 0.247.0",
  "wasmtime",
  "wasmtime-wasi",
@@ -4761,7 +4767,10 @@ dependencies = [
  "opentelemetry",
  "runtara-component-host",
  "runtara-core",
+ "runtara-dsl",
  "runtara-store-postgres",
+ "runtara-workflow-wit",
+ "runtara-workflows",
  "serde",
  "serde_json",
  "sqlx",
@@ -4905,6 +4914,7 @@ dependencies = [
  "runtara-report-dsl",
  "runtara-store-postgres",
  "runtara-text-parser",
+ "runtara-workflow-wit",
  "runtara-workflows",
  "rust-embed",
  "schemars 1.2.1",
@@ -4992,6 +5002,9 @@ dependencies = [
 name = "runtara-workflow-wit"
 version = "8.9.10"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "wit-parser 0.246.2",
 ]
 
@@ -4999,9 +5012,12 @@ dependencies = [
 name = "runtara-workflows"
 version = "8.9.10"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "getrandom 0.3.4",
  "minijinja",
+ "runtara-agent-wit",
  "runtara-component-host",
  "runtara-dsl",
  "runtara-workflow-stdlib",
@@ -5019,6 +5035,7 @@ dependencies = [
  "wasm-encoder 0.247.0",
  "wasmparser 0.247.0",
  "wasmtime",
+ "wat",
  "wit-component 0.247.0",
  "wit-parser 0.247.0",
 ]

@@ -42,13 +42,14 @@ pub struct GetMessageOutput {
     side_effects = false,
     rate_limited = true
 )]
-pub fn get_message(input: GetMessageInput) -> Result<GetMessageOutput, AgentError> {
+pub async fn get_message(input: GetMessageInput) -> Result<GetMessageOutput, AgentError> {
     let response = fetch(
         input._connection.as_ref(),
         &input.url,
         "application/json",
         input.max_bytes,
-    )?;
+    )
+    .await?;
     parse_message(&response.body)
 }
 
@@ -126,7 +127,7 @@ pub struct DownloadAttachmentOutput {
     side_effects = false,
     rate_limited = true
 )]
-pub fn download_attachment(
+pub async fn download_attachment(
     input: DownloadAttachmentInput,
 ) -> Result<DownloadAttachmentOutput, AgentError> {
     let response = fetch(
@@ -134,7 +135,8 @@ pub fn download_attachment(
         &input.url,
         "application/octet-stream",
         input.max_bytes,
-    )?;
+    )
+    .await?;
     Ok(DownloadAttachmentOutput {
         filename: input.filename.unwrap_or_else(|| "attachment".into()),
         content_type: response
@@ -146,7 +148,7 @@ pub fn download_attachment(
     })
 }
 
-fn fetch(
+async fn fetch(
     connection: Option<&RawConnection>,
     url: &str,
     accept: &str,
@@ -164,6 +166,7 @@ fn fetch(
         accept,
         limit,
     )
+    .await
     .map_err(download_error)
 }
 
@@ -234,14 +237,4 @@ mod tests {
             assert!(storage_endpoint(url).is_err());
         }
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn execute_get_message(input: Value) -> Result<Value, String> {
-    __executor_get_message(input)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn execute_download_attachment(input: Value) -> Result<Value, String> {
-    __executor_download_attachment(input)
 }

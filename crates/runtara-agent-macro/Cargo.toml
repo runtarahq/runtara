@@ -21,3 +21,4 @@ darling = "0.20"
 [dev-dependencies]
 runtara-dsl = { path = "../runtara-dsl", default-features = false }
 serde_json.workspace = true
+serde.workspace = true

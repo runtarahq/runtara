@@ -33,6 +33,24 @@ fn push_slot_i64(body: &mut WasmFunction, slot_ptr_local: u32, offset: i32) {
     }));
 }
 
+/// Whether this compilation emits step debug events at all.
+///
+/// A published workflow-agent emits none, for the same reason it carries no
+/// breakpoint: the events would land on the CALLER's instance, since a composed
+/// child has no instance of its own. Unlike a checkpoint they carry a bare step
+/// id rather than a namespaced route, so an agent's internal `call` step would be
+/// indistinguishable from its caller's own `call` step — the exact collision
+/// `composed_durable_child_checkpoints_are_namespaced_per_invocation_site` exists
+/// to prevent for checkpoints.
+///
+/// Nothing renders an agent's internals as a nested waterfall, so the events have
+/// no consumer to justify that ambiguity. The publish path already passes
+/// `track_events: false`; this makes it structural rather than a policy the
+/// library path can bypass.
+fn events_enabled(indices: &DirectCoreFunctionIndices, track_events: bool) -> bool {
+    track_events && indices.abi != crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_step_debug_event(
     body: &mut WasmFunction,
@@ -46,7 +64,7 @@ pub(super) fn emit_step_debug_event(
     output_ptr_local: u32,
     output_len_local: u32,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
     if start {
@@ -94,7 +112,7 @@ pub(super) fn emit_step_debug_end_timed(
     output_len_local: u32,
     interval_slot_ptr_local: u32,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
     emit_step_debug_end(
@@ -225,7 +243,7 @@ pub(super) fn emit_ai_tool_debug_event(
     scratch_ptr_local: u32,
     scratch_len_local: u32,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
 
@@ -290,7 +308,7 @@ pub(super) fn emit_ai_memory_debug_event(
     scratch_ptr_local: u32,
     scratch_len_local: u32,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
 
@@ -358,7 +376,7 @@ pub(super) fn emit_wait_debug_start_event(
     output_len_local: u32,
     failure_target: Option<DirectFailureTarget>,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
 
@@ -414,6 +432,19 @@ pub(super) fn emit_step_breakpoint(
     if !breakpoint {
         return;
     }
+    // A published workflow-agent has no breakpoints. Pausing is an
+    // instance-level action and the instance belongs to the CALLER — the same
+    // reason a composed child never fires `runtime.complete` or `runtime.fail`.
+    // A breakpoint baked into a reusable agent would halt whichever workflow
+    // invoked it, for every caller and every run, over a debugging aid its
+    // author never asked for.
+    //
+    // Stripped at compile time rather than ignored at runtime: the artifact
+    // then carries no breakpoint import at all, so it cannot pause, and that is
+    // provable from the artifact instead of resting on a flag.
+    if indices.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+        return;
+    }
 
     let step_id = static_data
         .step_id(step_id)
@@ -438,12 +469,15 @@ pub(super) fn emit_step_breakpoint(
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));
     push_segment_args(body, &static_data.breakpoint_hit_state);
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_checkpoint));
+    super::checkpoint::emit_checkpoint(body, indices);
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
+    // A lifecycle receipt owns this boundary even on a checkpoint hit. Keep
+    // found on the operand stack: rejecting a stale Pause writes a new result
+    // into retptr, but must not make an existing marker look newly inserted.
     push_retptr_u8_load(body, DIRECT_CHECKPOINT_FOUND_OFFSET);
+    super::cooperative_wait::emit_checkpoint_signal(body, indices);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
 
@@ -486,7 +520,7 @@ pub(super) fn emit_agent_debug_error(
     debug_ptr_local: u32,
     debug_len_local: u32,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
 
@@ -531,7 +565,7 @@ pub(super) fn emit_step_debug_error(
     debug_ptr_local: u32,
     debug_len_local: u32,
 ) {
-    if !track_events {
+    if !events_enabled(indices, track_events) {
         return;
     }
 

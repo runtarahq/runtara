@@ -488,14 +488,11 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Legacy per-step timeout in milliseconds.
-    ///
-    /// This field remains parseable so saved legacy definitions receive a
-    /// structured validation error, but new workflows must not use it: a
-    /// running capability invocation cannot be interrupted by the synchronous
-    /// component host. Use a capability's documented input (for example,
-    /// `timeout_ms`) only when that capability itself owns the timeout. Split,
-    /// While, and WaitForSignal have enforced workflow-level step deadlines.
+    /// Cooperative guest deadline in milliseconds, including preparation,
+    /// retries and durable suspension. Zero prevents invocation; absence leaves
+    /// this step without its own deadline. Enclosing deadlines still apply.
+    /// Cleanup can extend beyond the budget; uncooperative code may require
+    /// emergency whole-workflow abort. External effects are not rolled back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -649,12 +646,10 @@ pub struct EmbedWorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Legacy per-step timeout in milliseconds.
-    ///
-    /// This field remains parseable so saved legacy definitions receive a
-    /// structured validation error, but new workflows must not use it: an
-    /// inline child invocation cannot be interrupted. Split, While, and
-    /// WaitForSignal have enforced workflow-level step deadlines.
+    /// Cooperative guest deadline for the inline child, in milliseconds,
+    /// including retries and durable suspension. Zero prevents child execution;
+    /// absence leaves only enclosing deadlines. Cleanup can extend beyond the
+    /// budget, and uncooperative code may require whole-workflow abort.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -1344,10 +1339,9 @@ pub struct AiAgentConfig {
     /// `maxIterations` (which bounds the *number* of turns). Enforced at the
     /// outbound-HTTP layer: the emitter injects it into the LLM invoke and the
     /// server proxy honors it, so it bounds the model call rather than
-    /// preempting in-guest compute. It does not apply to Agent tools: their
-    /// per-step `timeout` field is unsupported because a running tool invoke
-    /// cannot be interrupted. A tool capability may instead expose its own
-    /// documented timeout input.
+    /// preempting in-guest compute. Agent tools use their own cooperative
+    /// per-step `timeout` budget. A capability's documented transport timeout
+    /// input remains separate from that guest deadline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_timeout: Option<u64>,
 
@@ -2128,7 +2122,7 @@ pub struct SplitConfig {
     /// per-agent instance pool).
     ///
     /// When > 1 and the Split body is an eligible single-Agent subgraph (no
-    /// breakpoints, no split-level retries/timeout, not a workflow-agent
+    /// breakpoints, no split-level retries, not a workflow-agent
     /// child), iterations run as CONCURRENT windows: agent calls are launched
     /// as component-model-async subtasks and their I/O overlaps. Ineligible
     /// shapes keep the strictly sequential execution (advisory W073).

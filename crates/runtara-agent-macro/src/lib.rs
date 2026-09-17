@@ -19,6 +19,15 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, ItemFn, Type, parse_macro_input};
 
+mod component;
+
+/// Generate a built-in Agent's callback bindings, dispatch, and error envelope.
+/// Capability IDs come from existing `#[capability]` annotations.
+#[proc_macro]
+pub fn agent_component(input: TokenStream) -> TokenStream {
+    component::expand(input)
+}
+
 /// A known error specification for a capability
 #[derive(Debug, Clone)]
 struct KnownErrorSpec {
@@ -261,7 +270,12 @@ struct OutputContainerArgs {
     description: Option<String>,
 }
 
-/// Attribute macro for marking agent capability functions
+/// Attribute macro for marking agent capability functions.
+///
+/// An authored `async fn` generates an async dispatcher with the same coercion
+/// and error contract as a synchronous capability. Its descriptor stores a
+/// standard Rust future; the macro does not spawn work or own an executor.
+/// Guest bindings can await the dispatcher directly without boxing it.
 ///
 /// # Example
 /// ```ignore
@@ -293,6 +307,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Derive capability_id from function name if not provided (snake_case -> kebab-case)
     let capability_id = args.id.unwrap_or_else(|| fn_name_str.replace('_', "-"));
+    let capability_id_ident = format_ident!("__CAPABILITY_ID_{}", fn_name_str.to_uppercase());
 
     // Extract input type from first parameter
     let input_type = input_fn
@@ -382,10 +397,22 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // This follows the naming convention: __INPUT_META_{StructName}
     let input_meta_ident = format_ident!("__INPUT_META_{}", input_type);
 
-    // Generate synchronous executor wrapper
+    // Preserve the authored function's asyncness. Both wrappers share exactly
+    // the same coercion and error envelope; guest dispatch awaits directly.
+    let asyncness = input_fn.sig.asyncness;
+    let await_result = asyncness.map(|_| quote! { .await });
+    let invoke_fn_ident = format_ident!("__invoke_{}", fn_name);
     let executor_wrapper = quote! {
+        // A uniform, directly awaited adapter for component dispatch. Crate
+        // visible so `agent_component!` can dispatch a capability declared in
+        // a child module.
         #[doc(hidden)]
-        fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+        pub(crate) async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+            #executor_fn_ident(input)#await_result
+        }
+
+        #[doc(hidden)]
+        #asyncness fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
             // Helper to create JSON-structured errors matching AgentError format.
             // All capability errors must be parseable JSON so the #[resilient] macro
             // can check error category for retry decisions.
@@ -403,7 +430,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
                 .map_err(|e| __to_json_error("INPUT_DESERIALIZATION_ERROR",
                     format!("Invalid input for {}: {}", #capability_id, e)))?;
-            let result = #fn_name(typed_input).map_err(|e| {
+            let result = #fn_name(typed_input)#await_result.map_err(|e| {
                 let s: String = e.into();
                 // Pass through existing JSON errors (from AgentError), wrap plain strings
                 if s.starts_with('{') { s } else {
@@ -475,11 +502,14 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #known_errors_static
 
+        #[doc(hidden)]
+        pub const #capability_id_ident: &str = #capability_id;
+
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         pub static #meta_ident: runtara_dsl::agent_meta::CapabilityMeta = runtara_dsl::agent_meta::CapabilityMeta {
             module: #module_token,
-            capability_id: #capability_id,
+            capability_id: #capability_id_ident,
             function_name: #fn_name_str,
             input_type: #input_type,
             output_type: #output_type,

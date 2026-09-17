@@ -1,0 +1,209 @@
+{
+  "format": "research-only WASM custom-section container; no workflow code or executable loader",
+  "deduplication": "whole artifact SHA-256; no extraction of shared internals",
+  "assets": [
+    {
+      "name": "runtara_agent_ai_tools.wasm",
+      "bytes": 970652,
+      "sha256": "f18f50146b9fed4b645c169abaea5935f723f47daf271c44e037e48b98e249cc"
+    },
+    {
+      "name": "runtara_agent_azure_blob_storage.wasm",
+      "bytes": 528115,
+      "sha256": "d0836a793fd5e02588f3f02c43a5632356420e88d99c7401ba0f04362a441d6d"
+    },
+    {
+      "name": "runtara_agent_bedrock.wasm",
+      "bytes": 559499,
+      "sha256": "e2d7f4dee2acb6243cc3171d41f5f0e3963aea6b984209e622a5ccb601201b20"
+    },
+    {
+      "name": "runtara_agent_compression.wasm",
+      "bytes": 762084,
+      "sha256": "ebef35005e64c486642a1ae77293dcf768f72cfd1b9546c2348ee8a1510852b1"
+    },
+    {
+      "name": "runtara_agent_crypto.wasm",
+      "bytes": 380004,
+      "sha256": "d568a3fa5aa4224fffa88317228635683213da1290ed7926eeb1f1707f945aeb"
+    },
+    {
+      "name": "runtara_agent_csv.wasm",
+      "bytes": 684313,
+      "sha256": "0fa271642996479acc676c889fbe29638e4451389bf6659678fed4024ee2734e"
+    },
+    {
+      "name": "runtara_agent_datetime.wasm",
+      "bytes": 1392698,
+      "sha256": "8de1d04fa50064c7c60ca5b2e88187013a0880b53e8ed9e0af6c94dac0660278"
+    },
+    {
+      "name": "runtara_agent_http.wasm",
+      "bytes": 470923,
+      "sha256": "0356ebbc54c28c3b27ff95c3605914ebc692be387fa5c948a66905d499a2ac59"
+    },
+    {
+      "name": "runtara_agent_hubspot.wasm",
+      "bytes": 800406,
+      "sha256": "585676310863c7cdcada07ff5fbef27ac1bb24fc61309a2bb4dfb049b546143e"
+    },
+    {
+      "name": "runtara_agent_mailgun.wasm",
+      "bytes": 437365,
+      "sha256": "3f236bee08819098ce49171e10fb91e570d3c1e450409dd97c08ac3c7eb853c6"
+    },
+    {
+      "name": "runtara_agent_mcp.wasm",
+      "bytes": 546103,
+      "sha256": "f45bebf0f0c23134174948ce1c5d617697c0aa2560e89b7336dfbc85d203617c"
+    },
+    {
+      "name": "runtara_agent_object_model.wasm",
+      "bytes": 745177,
+      "sha256": "b0214342b362d8055ce916fadc79aab94e335564fe0ea84377383c7c9a1e2e85"
+    },
+    {
+      "name": "runtara_agent_openai.wasm",
+      "bytes": 579165,
+      "sha256": "2cf6bc97df49a8cc92f071879c8533c7fabcedd2c0984c1081890e611435d6ec"
+    },
+    {
+      "name": "runtara_agent_quickbooks.wasm",
+      "bytes": 532300,
+      "sha256": "fa2f112b5d5b437ab74f6d9650dfb444e4717c89db8826129345a286f331f1f0"
+    },
+    {
+      "name": "runtara_agent_s3_storage.wasm",
+      "bytes": 525775,
+      "sha256": "3cb8a1504dab4d12cfbb175329ff82573a815303c4ea0e490972db7caafddd9d"
+    },
+    {
+      "name": "runtara_agent_sftp.wasm",
+      "bytes": 443741,
+      "sha256": "727fb100e9d0c374c70388d4a2466a92a85d9b9b6905cbd34536d397803707e8"
+    },
+    {
+      "name": "runtara_agent_sharepoint.wasm",
+      "bytes": 631939,
+      "sha256": "2f7c48649acc931c77ed3ae74a0da7fe38247412e1989281876770290ee554ea"
+    },
+    {
+      "name": "runtara_agent_shopify.wasm",
+      "bytes": 1290159,
+      "sha256": "bc018efe29034ab174ed5e4d3ebb460818b531b9b7496504edba45dd8daf8fc5"
+    },
+    {
+      "name": "runtara_agent_slack.wasm",
+      "bytes": 488882,
+      "sha256": "c7c52e5e3cd3e36ab562ccb26ab5e5ccc33f1238f3ae68b297f3cb8839d4945a"
+    },
+    {
+      "name": "runtara_agent_sqs.wasm",
+      "bytes": 663423,
+      "sha256": "2f5dad7fde6261fe8adf54e5d1f13c039cc9062960691c8489da5ddaed682ac8"
+    },
+    {
+      "name": "runtara_agent_stripe.wasm",
+      "bytes": 678753,
+      "sha256": "94b1ddc41aeef7907f9d2427c9ef5a3abab8e523a01457b674b114e7a7e15c4c"
+    },
+    {
+      "name": "runtara_agent_teams.wasm",
+      "bytes": 467864,
+      "sha256": "e9ba3d1a985f47b9e899775d958f8f5003ceabd6886b24462d11f6f1a5e0eca2"
+    },
+    {
+      "name": "runtara_agent_text.wasm",
+      "bytes": 3520212,
+      "sha256": "e6352438932f24400e15f4446fed1d58c836112611b2f4991e59f0011ac575a5"
+    },
+    {
+      "name": "runtara_agent_transform.wasm",
+      "bytes": 489811,
+      "sha256": "c3577f71a5c07a81526e426aec0a67ac5fae524c1f2bce92ab7946d9965967f3"
+    },
+    {
+      "name": "runtara_agent_utils.wasm",
+      "bytes": 498513,
+      "sha256": "0b55a575dafff47dec1b512f569578508af280534eb879c14cc9ade87834a854"
+    },
+    {
+      "name": "runtara_agent_xlsx.wasm",
+      "bytes": 1069293,
+      "sha256": "f1286b125bc6507c5bf5a66a7dbb81026fc7a9ad352b2573e1a1bb1a729b3c02"
+    },
+    {
+      "name": "runtara_agent_xml.wasm",
+      "bytes": 698922,
+      "sha256": "5201626d9539090c2e7006cab3bb649e84e40107c9c8b343692a0b2787cc89f3"
+    },
+    {
+      "name": "runtara_workflow_runtime.wasm",
+      "bytes": 395535,
+      "sha256": "f636555784b630a406951a5350986cd8a15ae8acc8e598c8e3c5a613065512f1"
+    },
+    {
+      "name": "runtara_workflow_stdlib.wasm",
+      "bytes": 2744013,
+      "sha256": "8105b5124bf633b2ae576ccc4ee98a2eb72e6d5c40347a05565060a4d4aa17f0"
+    }
+  ],
+  "cases": [
+    {
+      "name": "http_1_calls",
+      "call_sites": 1,
+      "flat_deduplicated": {
+        "raw_bytes": 471108,
+        "gzip_bytes": 151928,
+        "embedded_artifacts": 1
+      },
+      "naive_per_call_copy": {
+        "raw_bytes": 471108,
+        "gzip_bytes": 151928,
+        "embedded_artifacts": 1
+      }
+    },
+    {
+      "name": "http_10_calls",
+      "call_sites": 10,
+      "flat_deduplicated": {
+        "raw_bytes": 471126,
+        "gzip_bytes": 151931,
+        "embedded_artifacts": 1
+      },
+      "naive_per_call_copy": {
+        "raw_bytes": 4710431,
+        "gzip_bytes": 1520021,
+        "embedded_artifacts": 10
+      }
+    },
+    {
+      "name": "http_100_calls",
+      "call_sites": 100,
+      "flat_deduplicated": {
+        "raw_bytes": 471306,
+        "gzip_bytes": 151933,
+        "embedded_artifacts": 1
+      },
+      "naive_per_call_copy": {
+        "raw_bytes": 47103839,
+        "gzip_bytes": 15183879,
+        "embedded_artifacts": 100
+      }
+    },
+    {
+      "name": "all_staged_components_once",
+      "call_sites": 29,
+      "flat_deduplicated": {
+        "raw_bytes": 23999025,
+        "gzip_bytes": 7140521,
+        "embedded_artifacts": 29
+      },
+      "naive_per_call_copy": {
+        "raw_bytes": 23999025,
+        "gzip_bytes": 7140521,
+        "embedded_artifacts": 29
+      }
+    }
+  ]
+}

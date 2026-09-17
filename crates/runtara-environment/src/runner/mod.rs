@@ -12,7 +12,7 @@ mod traits;
 use crate::config::Vars;
 
 pub use common::WorkflowRunnerConfig;
-pub use embedded::EmbeddedWasmRunner;
+pub use embedded::{EmbeddedWasmRunner, ScopedAgentRunnerConfig};
 pub use mock::MockRunner;
 pub use traits::*;
 
@@ -43,6 +43,19 @@ pub fn build_runner_with_core_http_url(
     >,
     core_http_url: Option<String>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
+    build_runner_configured(persistence, event_observer, core_http_url, None)
+}
+
+/// Build the runner with an explicit shared operator isolation policy.
+/// Keeping this separate preserves defaults for existing embeddings.
+pub fn build_runner_configured(
+    persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+    event_observer: Option<
+        std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
+    >,
+    core_http_url: Option<String>,
+    scoped_agents: Option<ScopedAgentRunnerConfig>,
+) -> Result<std::sync::Arc<dyn Runner>> {
     if let Some(requested) = crate::config::ProcessEnv.get("RUNTARA_RUNNER")
         && !requested.is_empty()
     {
@@ -52,6 +65,9 @@ pub fn build_runner_with_core_http_url(
         );
     }
     let mut runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
+    if let Some(config) = scoped_agents {
+        runner = runner.with_scoped_agents(config)?;
+    }
     if let Some(core_http_url) = core_http_url {
         runner = runner.with_core_http_url(core_http_url);
     }

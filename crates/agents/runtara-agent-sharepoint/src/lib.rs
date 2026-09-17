@@ -27,23 +27,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-sharepoint/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -174,7 +157,7 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
     })
 }
 
-fn graph_get(
+async fn graph_get(
     connection: &RawConnection,
     path: &str,
     query: HashMap<String, String>,
@@ -187,14 +170,18 @@ fn graph_get(
     for (k, v) in &query {
         req = req.query(k, v);
     }
-    let resp = req.call_agent().map_err(|e| {
+    let resp = req.call_agent_async().await.map_err(|e| {
         AgentError::transient("NETWORK_ERROR", format!("Graph GET {path} failed: {e}"))
             .with_attr("integration", PREFIX)
     })?;
     parse_graph_response(resp, path)
 }
 
-fn graph_post(connection: &RawConnection, path: &str, body: &Value) -> Result<Value, AgentError> {
+async fn graph_post(
+    connection: &RawConnection,
+    path: &str,
+    body: &Value,
+) -> Result<Value, AgentError> {
     let url = graph_url(path);
     let body_bytes = serde_json::to_vec(body).map_err(|e| {
         AgentError::permanent("SERIALIZATION_ERROR", e.to_string()).with_attr("integration", PREFIX)
@@ -205,7 +192,8 @@ fn graph_post(connection: &RawConnection, path: &str, body: &Value) -> Result<Va
         .header("Content-Type", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient("NETWORK_ERROR", format!("Graph POST {path} failed: {e}"))
                 .with_attr("integration", PREFIX)
@@ -213,7 +201,11 @@ fn graph_post(connection: &RawConnection, path: &str, body: &Value) -> Result<Va
     parse_graph_response(resp, path)
 }
 
-fn graph_patch(connection: &RawConnection, path: &str, body: &Value) -> Result<Value, AgentError> {
+async fn graph_patch(
+    connection: &RawConnection,
+    path: &str,
+    body: &Value,
+) -> Result<Value, AgentError> {
     let url = graph_url(path);
     let body_bytes = serde_json::to_vec(body).map_err(|e| {
         AgentError::permanent("SERIALIZATION_ERROR", e.to_string()).with_attr("integration", PREFIX)
@@ -224,7 +216,8 @@ fn graph_patch(connection: &RawConnection, path: &str, body: &Value) -> Result<V
         .header("Content-Type", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient("NETWORK_ERROR", format!("Graph PATCH {path} failed: {e}"))
                 .with_attr("integration", PREFIX)
@@ -232,13 +225,14 @@ fn graph_patch(connection: &RawConnection, path: &str, body: &Value) -> Result<V
     parse_graph_response(resp, path)
 }
 
-fn graph_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError> {
+async fn graph_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError> {
     let url = graph_url(path);
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let resp = client
         .request("DELETE", &url)
         .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient("NETWORK_ERROR", format!("Graph DELETE {path} failed: {e}"))
                 .with_attr("integration", PREFIX)
@@ -251,7 +245,7 @@ fn graph_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError
     Err(graph_http_error(status, &body_text, path, &resp.headers))
 }
 
-fn graph_put_bytes(
+async fn graph_put_bytes(
     connection: &RawConnection,
     path: &str,
     bytes: &[u8],
@@ -268,7 +262,7 @@ fn graph_put_bytes(
     for (k, v) in &query {
         req = req.query(k, v);
     }
-    let resp = req.call_agent().map_err(|e| {
+    let resp = req.call_agent_async().await.map_err(|e| {
         AgentError::transient("NETWORK_ERROR", format!("Graph PUT {path} failed: {e}"))
             .with_attr("integration", PREFIX)
     })?;
@@ -278,7 +272,7 @@ fn graph_put_bytes(
 /// POST to an arbitrary URL with the connection header (used for `/copy`
 /// which is a Graph endpoint but we need the raw response to read the
 /// Location header).
-fn graph_post_raw(
+async fn graph_post_raw(
     connection: &RawConnection,
     absolute_url: &str,
     body: &Value,
@@ -292,7 +286,8 @@ fn graph_post_raw(
         .header("Content-Type", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient("NETWORK_ERROR", format!("POST {absolute_url} failed: {e}"))
                 .with_attr("integration", PREFIX)
@@ -301,16 +296,20 @@ fn graph_post_raw(
 
 /// GET against a pre-signed absolute URL — NO connection header (the URL
 /// carries its own auth, and the proxy would otherwise overwrite it).
-fn get_absolute_url(url: &str) -> Result<runtara_http::HttpResponse, AgentError> {
+async fn get_absolute_url(url: &str) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
-    client.request("GET", url).call_agent().map_err(|e| {
-        AgentError::transient("NETWORK_ERROR", format!("GET {url} failed: {e}"))
-            .with_attr("integration", PREFIX)
-    })
+    client
+        .request("GET", url)
+        .call_agent_async()
+        .await
+        .map_err(|e| {
+            AgentError::transient("NETWORK_ERROR", format!("GET {url} failed: {e}"))
+                .with_attr("integration", PREFIX)
+        })
 }
 
 /// PUT against a pre-signed absolute Azure Blob URL — NO connection header.
-fn put_absolute_url(
+async fn put_absolute_url(
     url: &str,
     bytes: &[u8],
     content_type: &str,
@@ -322,7 +321,8 @@ fn put_absolute_url(
         .header("Content-Type", content_type)
         .header("Content-Range", content_range)
         .body_bytes(bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient("NETWORK_ERROR", format!("PUT chunk to {url} failed: {e}"))
                 .with_attr("integration", PREFIX)
@@ -614,10 +614,12 @@ pub struct ListDrivesOutput {
     module_integration_ids = "microsoft_entra_client_credentials",
     module_secure = true
 )]
-pub fn sharepoint_list_drives(input: ListDrivesInput) -> Result<ListDrivesOutput, AgentError> {
+pub async fn sharepoint_list_drives(
+    input: ListDrivesInput,
+) -> Result<ListDrivesOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let path = format!("/sites/{}/drives", input.site_id);
-    let result = graph_get(conn, &path, HashMap::new())?;
+    let result = graph_get(conn, &path, HashMap::new()).await?;
     let drives: Vec<Value> = result
         .get("value")
         .and_then(|v| v.as_array())
@@ -685,7 +687,7 @@ pub struct ListChildrenOutput {
     display_name = "List Children",
     description = "List files and folders under a SharePoint folder (or drive root)"
 )]
-pub fn sharepoint_list_children(
+pub async fn sharepoint_list_children(
     input: ListChildrenInput,
 ) -> Result<ListChildrenOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -704,7 +706,7 @@ pub fn sharepoint_list_children(
         (p, q)
     };
 
-    let result = graph_get(conn, &path, query)?;
+    let result = graph_get(conn, &path, query).await?;
     let items: Vec<Value> = result
         .get("value")
         .and_then(|v| v.as_array())
@@ -750,10 +752,10 @@ pub struct GetItemOutput {
     display_name = "Get Item",
     description = "Get metadata for a file or folder by drive and item ID"
 )]
-pub fn sharepoint_get_item(input: GetItemInput) -> Result<GetItemOutput, AgentError> {
+pub async fn sharepoint_get_item(input: GetItemInput) -> Result<GetItemOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let path = item_path(&input.drive_id, &input.item_id);
-    let result = graph_get(conn, &path, HashMap::new())?;
+    let result = graph_get(conn, &path, HashMap::new()).await?;
     Ok(GetItemOutput {
         item: parse_drive_item(&result),
     })
@@ -786,12 +788,14 @@ pub struct GetItemByPathInput {
     display_name = "Get Item By Path",
     description = "Resolve a path within a drive to a driveItem and return its metadata"
 )]
-pub fn sharepoint_get_item_by_path(input: GetItemByPathInput) -> Result<GetItemOutput, AgentError> {
+pub async fn sharepoint_get_item_by_path(
+    input: GetItemByPathInput,
+) -> Result<GetItemOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let trimmed = input.path.trim_start_matches('/');
     let encoded = encode_graph_path(trimmed);
     let path = format!("/drives/{}/root:/{}", input.drive_id, encoded);
-    let result = graph_get(conn, &path, HashMap::new())?;
+    let result = graph_get(conn, &path, HashMap::new()).await?;
     Ok(GetItemOutput {
         item: parse_drive_item(&result),
     })
@@ -847,7 +851,7 @@ pub struct DownloadFileOutput {
     display_name = "Download File",
     description = "Download a file's contents. Returns base64 by default; pass as_text=true for UTF-8 text."
 )]
-pub fn sharepoint_download_file(
+pub async fn sharepoint_download_file(
     input: DownloadFileInput,
 ) -> Result<DownloadFileOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -855,7 +859,7 @@ pub fn sharepoint_download_file(
     // Fetch metadata first so we can populate filename / content_type even if
     // the proxy returns the body without echoing the upstream Content-Type.
     let meta_path = item_path(&input.drive_id, &input.item_id);
-    let meta = graph_get(conn, &meta_path, HashMap::new()).ok();
+    let meta = graph_get(conn, &meta_path, HashMap::new()).await.ok();
     let parsed_meta = meta.as_ref().map(parse_drive_item);
 
     // Download the content bytes.
@@ -865,7 +869,8 @@ pub fn sharepoint_download_file(
     let resp = client
         .request("GET", &content_url)
         .header("X-Runtara-Connection-Id", &conn.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -980,7 +985,9 @@ pub struct UploadFileOutput {
     description = "Upload a file (≤ 4 MB) to a folder in SharePoint. Use Upload File (Large) for bigger files.",
     side_effects = true
 )]
-pub fn sharepoint_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+pub async fn sharepoint_upload_file(
+    input: UploadFileInput,
+) -> Result<UploadFileOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let bytes = decode_content(&input.content, input.is_base64.unwrap_or(true))?;
     if bytes.len() > SIMPLE_UPLOAD_MAX_BYTES {
@@ -1013,7 +1020,7 @@ pub fn sharepoint_upload_file(input: UploadFileInput) -> Result<UploadFileOutput
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let query = conflict_query(input.conflict_behavior.as_deref());
 
-    let result = graph_put_bytes(conn, &path, &bytes, &content_type, query)?;
+    let result = graph_put_bytes(conn, &path, &bytes, &content_type, query).await?;
 
     Ok(UploadFileOutput {
         item: parse_drive_item(&result),
@@ -1073,7 +1080,7 @@ pub struct UploadFileLargeInput {
     description = "Upload a file via a chunked upload session (4 MB chunks, up to 250 MB total)",
     side_effects = true
 )]
-pub fn sharepoint_upload_file_large(
+pub async fn sharepoint_upload_file_large(
     input: UploadFileLargeInput,
 ) -> Result<UploadFileOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -1104,7 +1111,7 @@ pub fn sharepoint_upload_file_large(
         body["item"]["@microsoft.graph.conflictBehavior"] = json!(cb);
     }
 
-    let session_resp = graph_post(conn, &session_path, &body)?;
+    let session_resp = graph_post(conn, &session_path, &body).await?;
 
     // Parse upload URL and do chunked PUTs against the absolute Azure Blob URL.
     let upload_url = session_resp
@@ -1119,13 +1126,13 @@ pub fn sharepoint_upload_file_large(
         })?
         .to_string();
 
-    let item = upload_chunks(&upload_url, &bytes)?;
+    let item = upload_chunks(&upload_url, &bytes).await?;
 
     Ok(UploadFileOutput { item })
 }
 
 /// Drive chunked upload against an absolute Azure Blob URL (no connection header).
-fn upload_chunks(upload_url: &str, bytes: &[u8]) -> Result<Value, AgentError> {
+async fn upload_chunks(upload_url: &str, bytes: &[u8]) -> Result<Value, AgentError> {
     if bytes.is_empty() {
         return Err(AgentError::permanent(
             format!("{}_EMPTY_UPLOAD", PREFIX),
@@ -1149,7 +1156,8 @@ fn upload_chunks(upload_url: &str, bytes: &[u8]) -> Result<Value, AgentError> {
             chunk,
             "application/octet-stream",
             &content_range,
-        )?;
+        )
+        .await?;
 
         let status = resp.status;
         // Intermediate chunks return 202; final chunk returns 200/201 with driveItem JSON.
@@ -1223,7 +1231,7 @@ pub struct CreateFolderOutput {
     description = "Create a folder in a SharePoint document library",
     side_effects = true
 )]
-pub fn sharepoint_create_folder(
+pub async fn sharepoint_create_folder(
     input: CreateFolderInput,
 ) -> Result<CreateFolderOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -1236,7 +1244,7 @@ pub fn sharepoint_create_folder(
             .as_deref()
             .unwrap_or("rename"),
     });
-    let result = graph_post(conn, &path, &body)?;
+    let result = graph_post(conn, &path, &body).await?;
     Ok(CreateFolderOutput {
         item: parse_drive_item(&result),
     })
@@ -1273,10 +1281,12 @@ pub struct DeleteItemOutput {
     description = "Delete a file or folder by driveItem ID",
     side_effects = true
 )]
-pub fn sharepoint_delete_item(input: DeleteItemInput) -> Result<DeleteItemOutput, AgentError> {
+pub async fn sharepoint_delete_item(
+    input: DeleteItemInput,
+) -> Result<DeleteItemOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let path = item_path(&input.drive_id, &input.item_id);
-    graph_delete(conn, &path)?;
+    graph_delete(conn, &path).await?;
     Ok(DeleteItemOutput { success: true })
 }
 
@@ -1318,7 +1328,7 @@ pub struct MoveItemInput {
     description = "Move and/or rename a file or folder. At least one of new_parent_id or new_name is required.",
     side_effects = true
 )]
-pub fn sharepoint_move_item(input: MoveItemInput) -> Result<GetItemOutput, AgentError> {
+pub async fn sharepoint_move_item(input: MoveItemInput) -> Result<GetItemOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
 
     let parent_set = input.new_parent_id.as_ref().is_some_and(|s| !s.is_empty());
@@ -1340,7 +1350,7 @@ pub fn sharepoint_move_item(input: MoveItemInput) -> Result<GetItemOutput, Agent
     }
 
     let path = item_path(&input.drive_id, &input.item_id);
-    let result = graph_patch(conn, &path, &body)?;
+    let result = graph_patch(conn, &path, &body).await?;
     Ok(GetItemOutput {
         item: parse_drive_item(&result),
     })
@@ -1400,7 +1410,7 @@ pub struct CopyItemOutput {
     description = "Start an async copy of a file/folder. Returns a monitor URL — poll with Get Copy Status.",
     side_effects = true
 )]
-pub fn sharepoint_copy_item(input: CopyItemInput) -> Result<CopyItemOutput, AgentError> {
+pub async fn sharepoint_copy_item(input: CopyItemInput) -> Result<CopyItemOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
     let copy_path = format!("{}/copy", item_path(&input.drive_id, &input.item_id));
     let copy_url = graph_url(&copy_path);
@@ -1419,7 +1429,7 @@ pub fn sharepoint_copy_item(input: CopyItemInput) -> Result<CopyItemOutput, Agen
     }
 
     // Graph returns 202 Accepted with a Location header pointing at the monitor URL.
-    let resp = graph_post_raw(conn, &copy_url, &body)?;
+    let resp = graph_post_raw(conn, &copy_url, &body).await?;
     let monitor_url = resp
         .headers
         .iter()
@@ -1477,7 +1487,7 @@ pub struct GetCopyStatusOutput {
     display_name = "Get Copy Status",
     description = "Poll a copy operation's monitor URL. The monitor URL is absolute and skips connection auth."
 )]
-pub fn sharepoint_get_copy_status(
+pub async fn sharepoint_get_copy_status(
     input: GetCopyStatusInput,
 ) -> Result<GetCopyStatusOutput, AgentError> {
     if input.monitor_url.is_empty() {
@@ -1488,7 +1498,7 @@ pub fn sharepoint_get_copy_status(
         .with_attr("integration", PREFIX));
     }
 
-    let resp = get_absolute_url(&input.monitor_url)?;
+    let resp = get_absolute_url(&input.monitor_url).await?;
 
     // Graph returns 202 + JSON body while in progress; 303 on completion
     // (proxy follows redirects, so we typically see 200 + driveItem JSON).
@@ -1564,7 +1574,7 @@ pub struct SearchInput {
     display_name = "Search",
     description = "Search for files and folders within a drive"
 )]
-pub fn sharepoint_search(input: SearchInput) -> Result<ListChildrenOutput, AgentError> {
+pub async fn sharepoint_search(input: SearchInput) -> Result<ListChildrenOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
 
     let (path, query) = if let Some(token) = input.page_token.as_ref().filter(|t| !t.is_empty()) {
@@ -1590,7 +1600,7 @@ pub fn sharepoint_search(input: SearchInput) -> Result<ListChildrenOutput, Agent
         (p, q)
     };
 
-    let result = graph_get(conn, &path, query)?;
+    let result = graph_get(conn, &path, query).await?;
     let items: Vec<Value> = result
         .get("value")
         .and_then(|v| v.as_array())
@@ -1694,7 +1704,7 @@ pub struct SearchGlobalOutput {
     display_name = "Search (Global)",
     description = "Cross-tenant search via the Microsoft Search API. Use this when per-drive Search returns 403 under app-only auth. Region is required under app-only."
 )]
-pub fn sharepoint_search_global(
+pub async fn sharepoint_search_global(
     input: SearchGlobalInput,
 ) -> Result<SearchGlobalOutput, AgentError> {
     let conn = require_connection(input._connection.as_ref())?;
@@ -1733,7 +1743,7 @@ pub fn sharepoint_search_global(
     }
     let body = json!({ "requests": [request_obj] });
 
-    let result = graph_post(conn, "/search/query", &body)?;
+    let result = graph_post(conn, "/search/query", &body).await?;
 
     // Response shape:
     // { "value": [ { "hitsContainers": [ { "hits": [ { "resource": {...} } ], "total": N, "moreResultsAvailable": bool } ] } ] }
@@ -1875,114 +1885,26 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_sharepoint::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "sharepoint",
+    capabilities = [
+        sharepoint_list_drives,
+        sharepoint_list_children,
+        sharepoint_get_item,
+        sharepoint_get_item_by_path,
+        sharepoint_download_file,
+        sharepoint_upload_file,
+        sharepoint_upload_file_large,
+        sharepoint_create_folder,
+        sharepoint_delete_item,
+        sharepoint_move_item,
+        sharepoint_copy_item,
+        sharepoint_get_copy_status,
+        sharepoint_search,
+        sharepoint_search_global,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "sharepoint-list-drives" => __executor_sharepoint_list_drives(value),
-            "sharepoint-list-children" => __executor_sharepoint_list_children(value),
-            "sharepoint-get-item" => __executor_sharepoint_get_item(value),
-            "sharepoint-get-item-by-path" => __executor_sharepoint_get_item_by_path(value),
-            "sharepoint-download-file" => __executor_sharepoint_download_file(value),
-            "sharepoint-upload-file" => __executor_sharepoint_upload_file(value),
-            "sharepoint-upload-file-large" => __executor_sharepoint_upload_file_large(value),
-            "sharepoint-create-folder" => __executor_sharepoint_create_folder(value),
-            "sharepoint-delete-item" => __executor_sharepoint_delete_item(value),
-            "sharepoint-move-item" => __executor_sharepoint_move_item(value),
-            "sharepoint-copy-item" => __executor_sharepoint_copy_item(value),
-            "sharepoint-get-copy-status" => __executor_sharepoint_get_copy_status(value),
-            "sharepoint-search" => __executor_sharepoint_search(value),
-            "sharepoint-search-global" => __executor_sharepoint_search_global(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("sharepoint agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2171,10 +2093,18 @@ mod tests_sharepoint_client {
 
     #[test]
     fn upload_chunks_rejects_empty_input() {
-        // Component's upload_chunks takes `&str` directly (the upload URL),
-        // not a `&UploadSession`; the session type was dropped when the
-        // helper was inlined into sharepoint_upload_file_large.
-        let err = upload_chunks("https://upload.example/abc", &[]).unwrap_err();
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let mut future = std::pin::pin!(upload_chunks("https://upload.example/abc", &[]));
+        let Poll::Ready(Err(err)) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("empty upload must fail before awaiting I/O");
+        };
         assert_eq!(err.code, "SHAREPOINT_EMPTY_UPLOAD");
     }
 }

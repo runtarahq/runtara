@@ -1,9 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Synchronous completion model abstraction.
+//! Completion model abstraction.
 //!
 //! Provides a `CompletionModel` trait and request builder that mirror
-//! the rig API surface but are fully synchronous (no async, no tokio).
+//! the rig API surface. WASM Agents await standard component I/O; legacy
+//! callers can continue using the synchronous entry point.
 
 use crate::message::AssistantContent;
 use crate::message::Message;
@@ -42,7 +43,7 @@ pub enum CompletionError {
 // Trait
 // ================================================================
 
-/// A synchronous completion model.
+/// A completion model with synchronous and cooperative async entry points.
 ///
 /// Generated workflow code calls:
 /// ```ignore
@@ -57,6 +58,19 @@ pub trait CompletionModel {
     /// Execute a completion request synchronously.
     fn completion(&self, request: CompletionRequest)
     -> Result<CompletionResponse, CompletionError>;
+
+    /// Execute using awaitable I/O in WASM. Dropping the future releases its
+    /// pending request without turning cancellation into a provider error.
+    /// Native HTTP retains its existing blocking transport.
+    ///
+    /// Required for each provider: a synchronous fallback would prevent WASM
+    /// cancellation from reaching an outstanding request.
+    fn completion_async(
+        &self,
+        request: CompletionRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + '_>,
+    >;
 
     /// Set the per-request outbound-HTTP timeout, in milliseconds, applied to
     /// the provider's completion call.

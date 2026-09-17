@@ -1,0 +1,214 @@
+//! Compiler-owned call-site inventory; contains no inputs, credentials or graph
+//! scheduling rules. Package v2 and the native worker envelope bind it to code.
+use super::{Binding, CheckpointContract, InvocationScopePattern, PackageError};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Current compiler inventory contract, including per-call durability.
+pub const INVOCATION_MANIFEST_VERSION: u32 = 5;
+
+/// One Agent identity emitted by a scoped logical Agent bridge. Namespace and
+/// loop ancestry remain in the invocation path, separate from these static parts.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCallSite {
+    pub binding: String,
+    pub agent_id: String,
+    pub capability: String,
+    pub step_id: String,
+    /// Allowed bridge domains: step, memory-load, AI turn/tool, summarize/save.
+    pub domains: Vec<u32>,
+}
+
+/// Immutable inventory produced from the same normalized compiler manifest as
+/// the workflow code. It supplies static invocation authority, not execution
+/// order, live attempt fencing or checkpoint IO grants.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationManifest {
+    pub version: u32,
+    pub workflow_id: String,
+    pub agent_calls: Vec<AgentCallSite>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_sites: Vec<InvocationCallSite>,
+    /// Version 3 maps every token to sorted unique relative scopes. An empty
+    /// list denies execution of an unreachable definition. Earlier versions
+    /// omit this field and retain their original external scope policy.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scope_paths: BTreeMap<u32, Vec<InvocationScopePattern>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checkpoint_contracts: BTreeMap<u32, CheckpointContract>,
+    /// Version 5 records the effective durability of each emitted caller.
+    /// Empty on older inventories means unknown, never implicitly false.
+    /// This controls attempt fencing; it does not authorize result memoization.
+    #[serde(
+        default,
+        deserialize_with = "unique_durability",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub call_durability: BTreeMap<u32, bool>,
+}
+
+/// A compiler definition and caller, independent of authored step IDs. `token`
+/// addresses this row in a v3 invocation; `identity` addresses `agent_calls`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationCallSite {
+    pub token: u32,
+    pub identity: u32,
+    pub agent_reference: u32,
+    pub caller_reference: u32,
+    pub domain: u32,
+}
+
+impl InvocationManifest {
+    /// Validate references and deterministic, unambiguous encoding before
+    /// admission. Byte/allocation bounds come from the enclosing package limit.
+    pub fn validate(&self, bindings: &BTreeMap<String, Binding>) -> Result<(), PackageError> {
+        if !matches!(self.version, 1..=INVOCATION_MANIFEST_VERSION) {
+            return Err(PackageError::UnsupportedVersion);
+        }
+        let mut used = BTreeSet::new();
+        let mut previous = None;
+        for site in &self.agent_calls {
+            let identity = (
+                &site.binding,
+                &site.agent_id,
+                &site.capability,
+                &site.step_id,
+            );
+            if !bindings.contains_key(&site.binding)
+                || site.binding != format!("agent:{}", site.agent_id)
+                || site.domains.is_empty()
+                || site.domains.iter().any(|&domain| domain > 5)
+                || site.domains.windows(2).any(|pair| pair[0] >= pair[1])
+                || previous.is_some_and(|previous| previous >= identity)
+            {
+                return Err(PackageError::InvalidManifest);
+            }
+            previous = Some(identity);
+            used.insert(&site.binding);
+        }
+        if used.len() != bindings.len() {
+            return Err(PackageError::MissingArtifact);
+        }
+        if self.version == 1 {
+            if !self.call_sites.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else {
+            let mut tokens = None;
+            let mut origins = BTreeSet::new();
+            let mut covered = BTreeSet::new();
+            let mut definitions = BTreeMap::new();
+            for site in &self.call_sites {
+                let identity = self
+                    .agent_calls
+                    .get(site.identity as usize)
+                    .ok_or(PackageError::InvalidManifest)?;
+                if tokens.is_some_and(|previous| previous >= site.token)
+                    || !identity.domains.contains(&site.domain)
+                    || !origins.insert((site.agent_reference, site.caller_reference, site.domain))
+                    || (site.domain != 3 && site.agent_reference != site.caller_reference)
+                    || definitions
+                        .insert(site.agent_reference, site.identity)
+                        .is_some_and(|identity| identity != site.identity)
+                {
+                    return Err(PackageError::InvalidManifest);
+                }
+                tokens = Some(site.token);
+                covered.insert((site.identity as usize, site.domain));
+            }
+            for (index, identity) in self.agent_calls.iter().enumerate() {
+                if identity
+                    .domains
+                    .iter()
+                    .any(|domain| !covered.contains(&(index, *domain)))
+                {
+                    return Err(PackageError::MissingArtifact);
+                }
+            }
+        }
+        if self.version < 3 {
+            if !self.scope_paths.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else if self.scope_paths.len() != self.call_sites.len()
+            || self
+                .call_sites
+                .iter()
+                .any(|site| !self.scope_paths.contains_key(&site.token))
+            || self
+                .scope_paths
+                .values()
+                .any(|patterns| patterns.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(PackageError::InvalidManifest);
+        }
+        if self.version < 4 {
+            if !self.checkpoint_contracts.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else {
+            if self.checkpoint_contracts.len() != self.call_sites.len() {
+                return Err(PackageError::InvalidManifest);
+            }
+            for site in &self.call_sites {
+                let contract = self
+                    .checkpoint_contracts
+                    .get(&site.token)
+                    .ok_or(PackageError::InvalidManifest)?;
+                match contract {
+                    CheckpointContract::None => {}
+                    CheckpointContract::Child if site.domain == 0 => {}
+                    CheckpointContract::Tool { labels, .. }
+                        if site.domain == 3
+                            && !labels.is_empty()
+                            && !labels.windows(2).any(|pair| pair[0] >= pair[1]) => {}
+                    _ => return Err(PackageError::InvalidManifest),
+                }
+            }
+        }
+        if self.version < 5 {
+            if !self.call_durability.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else if self.call_durability.len() != self.call_sites.len()
+            || self
+                .call_sites
+                .iter()
+                .any(|site| !self.call_durability.contains_key(&site.token))
+        {
+            return Err(PackageError::InvalidManifest);
+        }
+        Ok(())
+    }
+}
+
+// Do not let duplicate JSON keys choose a durability policy by parser order.
+fn unique_durability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<u32, bool>, D::Error> {
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = BTreeMap<u32, bool>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("one durability flag per call token")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
+            let mut flags = BTreeMap::new();
+            while let Some((token, value)) = map.next_entry::<u32, bool>()? {
+                if flags.insert(token, value).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate invocation durability token",
+                    ));
+                }
+            }
+            Ok(flags)
+        }
+    }
+    deserializer.deserialize_map(Unique)
+}

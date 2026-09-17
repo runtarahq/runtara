@@ -20,9 +20,9 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_at, emit_fail_if_retptr_error_inplace, emit_retptr_error_or_step_fail,
-    load_retptr_list, push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load,
-    push_segment_args, return_if_retptr_error, store_local_i64_at,
+    emit_fail_if_retptr_error_inplace, emit_retptr_error_or_step_fail, load_retptr_list,
+    push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load, push_segment_args,
+    return_if_retptr_error, store_local_i64_at,
 };
 use super::checkpoint::{
     emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
@@ -151,7 +151,7 @@ fn emit_park_until_deadline(
     // Woken early — re-park on the SAME absolute deadline. The wait is not
     // shortened by having been relaunched, and nothing is re-saved: the
     // deadline is already durable.
-    emit_entry_suspend_at(body, DIRECT_WAIT_DEADLINE_MS_LOCAL);
+    super::abi::emit_suspend_at_return(body, indices, DIRECT_WAIT_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     // The wait is over. Poll before falling through — the same reasoning as the
@@ -198,7 +198,7 @@ fn emit_park_fresh(
         output_ptr_local,
         output_len_local,
     );
-    emit_entry_suspend_at(body, DIRECT_WAIT_DEADLINE_MS_LOCAL);
+    super::abi::emit_suspend_at_return(body, indices, DIRECT_WAIT_DEADLINE_MS_LOCAL);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -301,17 +301,27 @@ pub(super) fn emit_delay_plan(
             DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
         );
 
-        // Only the top-level lifecycle invoke ABI can return a durable wake to
-        // its caller. It must park every durable delay, not merely long ones:
-        // short waits are still unbounded in aggregate and must never retain a
-        // runner slot. The legacy reference ABI and the agent capability ABI
-        // have no suspension result, so their lower-level test/migration paths
-        // retain the blocking lowering; workflow-agent publication rejects
-        // Delay before an agent artifact can be staged.
-        if indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports {
-            emit_park_until_deadline(body, indices, output_ptr_local, output_len_local);
-        } else {
+        // Park every durable delay, not merely long ones: short sleeps are still
+        // unbounded in aggregate and must never retain a runner slot. That holds
+        // wherever a delay runs — an inline Embed child, a Split body and a
+        // While body all park already, because the emitter lowers them into the
+        // root artifact and they inherit its ABI.
+        //
+        // A published agent is the one place that crosses a component boundary,
+        // and it no longer lacks a way back: the suspend sentinel carries an
+        // absolute deadline in the error's numeric `retry-after` field, and each
+        // caller re-raises it until the chain reaches the real instance owner.
+        // The checkpoint discipline in `emit_park_until_deadline` is what makes
+        // that safe to reuse — the deadline is durable before the first park, so
+        // a relaunch resumes the ORIGINAL wait instead of starting a fresh one —
+        // and only the park's return shape differs, which
+        // `emit_suspend_at_return` owns.
+        //
+        // `wasi:cli/run` has no wake channel at all, so it keeps blocking.
+        if indices.abi == crate::direct_wasm::component::WorkflowAbi::CliRunHttp {
             emit_blocking_durable_sleep(body, indices);
+        } else {
+            emit_park_until_deadline(body, indices, output_ptr_local, output_len_local);
         }
     } else {
         body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
