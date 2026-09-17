@@ -19,7 +19,6 @@ type ServiceIconProps = {
 };
 
 const SERVICE_ICONS: Record<string, { icon: LucideIcon; gradient: string }> = {
-  sftp: { icon: Server, gradient: 'from-emerald-500 to-teal-600' },
   ftp: { icon: Server, gradient: 'from-emerald-500 to-teal-600' },
   mysql: { icon: Database, gradient: 'from-blue-500 to-indigo-600' },
   postgres: { icon: Database, gradient: 'from-blue-500 to-indigo-600' },
