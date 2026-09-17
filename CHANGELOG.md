@@ -142,6 +142,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GET /workflows/{id}/instances/{instanceId}/checkpoints` now honors
+  `page`.** The handler normalized the page number and then dropped it, asking
+  the store for a limit and no offset — so every page re-read the first `size`
+  rows and `?page=1` returned page 0 again, however large the instance's
+  checkpoint history. The page now also keeps the store's documented order —
+  `(created_at, checkpoint_id)` descending, newest first — instead of being
+  re-sorted by checkpoint id under a comment calling that chronological: ids
+  are step-derived (with `::retry::{n}` / `::attempt::{n}` suffixes), so that
+  sort was neither a time order nor one the pages themselves followed.
+  **`seq` changes meaning**: it now numbers the row within the full
+  ordered list (page 2 of size 20 starts at 40) rather than restarting at 0 on
+  every page — and it is no longer stamped before a re-sort that then scrambled
+  it against the order the rows it was attached to came back in.
+
 - `*_CLEANUP_ENABLED` env-var parsing across all four cleanup workers
   previously treated **any** value other than `"true"` or `"1"` as
   disabled — including misconfigurations like `"yes"`, `"on"`, `"True"`,

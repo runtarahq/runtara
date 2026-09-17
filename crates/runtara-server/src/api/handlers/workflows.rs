@@ -2161,6 +2161,11 @@ pub async fn list_instances_handler(
 // ============================================================================
 
 /// List checkpoints for a workflow instance via runtara management SDK
+///
+/// Checkpoints come back in the store's order — `(created_at, checkpoint_id)`
+/// descending, so newest first — and `page` walks that one order rather than
+/// re-ordering the rows on the way out. Each row's `seq` is its position in
+/// that full ordered list, not in the page it happened to arrive on.
 #[utoipa::path(
     get,
     path = "/api/runtime/workflows/{workflow_id}/instances/{instance_id}/checkpoints",
@@ -2209,34 +2214,45 @@ pub async fn list_instance_checkpoints_handler(
         }
     };
 
-    // Normalize pagination
+    // Normalize pagination. The offset is what makes `page` mean anything:
+    // a limit on its own re-reads rows `0..size` for every page asked for.
+    // Saturating because `page` is bounded only by `i32::MAX`, and `size` by
+    // 100 — the product does not fit a `u32` at the top of that range.
     let page = crate::api::utils::pagination::normalize_page(query.page);
     let size = query.size.unwrap_or(20).clamp(1, 100) as u32;
+    let offset = (page as u32).saturating_mul(size);
 
     // Fetch checkpoints via runtara management SDK
-    match client.list_checkpoints(&instance_id, Some(size)).await {
+    match client
+        .list_checkpoints(&instance_id, Some(size), Some(offset))
+        .await
+    {
         Ok(result) => {
-            // Convert to DTOs and sort chronologically (oldest first)
-            let mut checkpoints: Vec<CheckpointMetadataDto> = result
+            // The page arrives in the store's order, and that is the order
+            // `offset` pages over. Re-sorting here would reorder rows inside a
+            // page while the pages themselves stayed in the store's order, so
+            // the sequence read across pages would follow neither — which is
+            // what sorting by checkpoint id used to do. `seq` numbers the row
+            // within the whole ordered list rather than within its page, so it
+            // keeps counting where the previous page left off.
+            let checkpoints: Vec<CheckpointMetadataDto> = result
                 .checkpoints
                 .into_iter()
                 .enumerate()
                 .map(|(idx, cp)| CheckpointMetadataDto {
-                    seq: idx as u64,
-                    step_id: Some(cp.checkpoint_id.clone()),
+                    seq: u64::from(offset) + idx as u64,
+                    step_id: Some(cp.checkpoint_id),
                     operation: "checkpoint".to_string(),
                     result_type: "Inline".to_string(),
                     result_size: cp.data_size_bytes,
                 })
                 .collect();
 
-            // Sort chronologically (by created_at via checkpoint_id)
-            checkpoints.sort_by(|a, b| a.step_id.cmp(&b.step_id));
-
             let total_count = result.total_count as usize;
             let total_pages = ((total_count as f64) / (size as f64)).ceil() as i32;
 
-            // Apply pagination (SDK already handles limit, but we track page for response)
+            // The store applied `size`/`offset`; echo back the page that was
+            // asked for so a caller can walk to the next one.
             let response = ListCheckpointsResponse {
                 success: true,
                 instance_id: instance_id.clone(),
@@ -3264,5 +3280,200 @@ mod create_request_wire_tests {
             serde_json::from_str(r#"{"name": "wf", "description": "", "path": "/Sales/Q3/"}"#)
                 .expect("deserialize");
         assert_eq!(request.path.as_deref(), Some("/Sales/Q3/"));
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_pagination_tests {
+    use super::*;
+    use crate::middleware::tenant_auth::OrgId;
+    use crate::runtime_client::RuntimeClientConfig;
+    use runtara_core::persistence::{Persistence, memory::InMemoryPersistence};
+    use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
+    use runtara_environment::handlers::EnvironmentHandlerState;
+    use runtara_environment::runner::MockRunner;
+
+    const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// Written in an order that is a scramble of the ids' byte order and stays
+    /// one when reversed, so the store's order matches sorting by id in
+    /// neither direction. A fixture in id order would let a handler-side
+    /// re-sort pass unnoticed; `a_page_keeps_the_order_the_store_returned_it_in`
+    /// asserts the property rather than trusting this comment.
+    const WRITE_ORDER: [&str; 5] = ["cp-b", "cp-d", "cp-a", "cp-e", "cp-c"];
+
+    /// Enough of a gap for the store's clock to resolve two saves apart.
+    ///
+    /// The backend stamps `created_at` per save, and five saves back to back
+    /// land inside one tick of that clock: measured over 200 runs, all five
+    /// stamps were equal in 9% of them and some pair tied in all but one, which
+    /// left the order decided by the id tie-break and varying run to run.
+    /// Sleeping makes the stamps distinct and in write order, which is what
+    /// keeps the fixture's order both deterministic and unlike either id order.
+    ///
+    /// A millisecond assumes the clock resolves finer than that, which holds on
+    /// Linux and macOS. Nothing relies on it holding silently: a clock too
+    /// coarse to separate the saves ties every stamp, the order collapses onto
+    /// `checkpoint_id` descending, and the descending half of the assertion in
+    /// `a_page_keeps_the_order_the_store_returned_it_in` fails.
+    const SAVE_GAP: std::time::Duration = std::time::Duration::from_millis(1);
+
+    fn lazy_pool() -> PgPool {
+        // Nothing on the checkpoint path touches the pool — reads go through
+        // the injected persistence — so it never has to connect.
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap()
+    }
+
+    /// A client over [`WRITE_ORDER`], plus the store behind it.
+    async fn client_and_store() -> (Arc<RuntimeClient>, Arc<InMemoryPersistence>) {
+        let persistence = Arc::new(InMemoryPersistence::new());
+        for id in WRITE_ORDER {
+            persistence
+                .save_checkpoint(INSTANCE, id, b"{}")
+                .await
+                .expect("save checkpoint");
+            tokio::time::sleep(SAVE_GAP).await;
+        }
+        let client = Arc::new(RuntimeClient::new(
+            Arc::new(EnvironmentHandlerState::new(
+                lazy_pool(),
+                Arc::clone(&persistence) as Arc<dyn Persistence>,
+                Arc::new(MockRunner::new()),
+                std::env::temp_dir(),
+            )),
+            RuntimeClientConfig::new(ExecutionTimeoutPolicy::default()),
+        ));
+        (client, persistence)
+    }
+
+    /// The order the store itself reads in — the one the endpoint has to page
+    /// over. Asserted against rather than hard-coded, so these tests pin the
+    /// handler's behavior and not a particular backend's choice of order.
+    async fn store_order(persistence: &Arc<InMemoryPersistence>) -> Vec<String> {
+        persistence
+            .list_checkpoints(INSTANCE, None, 1000, 0, None, None)
+            .await
+            .expect("list checkpoints")
+            .into_iter()
+            .map(|cp| cp.checkpoint_id)
+            .collect()
+    }
+
+    async fn checkpoints_page(client: &Arc<RuntimeClient>, page: i32, size: i32) -> Value {
+        let (status, Json(body)) = list_instance_checkpoints_handler(
+            OrgId("tenant-1".to_string()),
+            State(lazy_pool()),
+            State(Some(Arc::clone(client))),
+            Path(("wf-1".to_string(), INSTANCE.to_string())),
+            Query(ListCheckpointsQuery {
+                page: Some(page),
+                size: Some(size),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    fn ids(body: &Value) -> Vec<String> {
+        body["checkpoints"]
+            .as_array()
+            .expect("checkpoints array")
+            .iter()
+            .map(|cp| cp["stepId"].as_str().expect("stepId").to_string())
+            .collect()
+    }
+
+    fn seqs(body: &Value) -> Vec<u64> {
+        body["checkpoints"]
+            .as_array()
+            .expect("checkpoints array")
+            .iter()
+            .map(|cp| cp["seq"].as_u64().expect("seq"))
+            .collect()
+    }
+
+    /// The handler used to re-sort each page by checkpoint id, under a comment
+    /// calling that chronological. Ids are step-derived — with `::retry::{n}`
+    /// and `::attempt::{n}` suffixes — so their byte order is not a time order,
+    /// and sorting a single page by them leaves the pages themselves in the
+    /// store's order: the sequence read across pages follows neither.
+    #[tokio::test]
+    async fn a_page_keeps_the_order_the_store_returned_it_in() {
+        let (client, persistence) = client_and_store().await;
+        let expected = store_order(&persistence).await;
+
+        // Both directions: ruling out only ascending would let a handler that
+        // sorted descending by id pass a test whose subject is order at all.
+        let mut ascending = expected.clone();
+        ascending.sort();
+        let descending: Vec<String> = ascending.iter().rev().cloned().collect();
+        assert_ne!(
+            expected, ascending,
+            "the fixture must not already be in ascending id order"
+        );
+        assert_ne!(
+            expected, descending,
+            "the fixture must not already be in descending id order"
+        );
+
+        assert_eq!(ids(&checkpoints_page(&client, 0, 100).await), expected);
+    }
+
+    /// `page` was computed and then dropped: the handler asked the store for a
+    /// limit and no offset, so every page re-read rows `0..size` and `?page=1`
+    /// returned page 0 again, however long the instance's history.
+    #[tokio::test]
+    async fn successive_pages_tile_the_store_order_without_repeating_a_row() {
+        let (client, persistence) = client_and_store().await;
+        let expected = store_order(&persistence).await;
+
+        let pages = [
+            checkpoints_page(&client, 0, 2).await,
+            checkpoints_page(&client, 1, 2).await,
+            checkpoints_page(&client, 2, 2).await,
+        ];
+        let walked: Vec<String> = pages.iter().flat_map(ids).collect();
+
+        assert_eq!(
+            walked, expected,
+            "the pages must tile the list exactly once"
+        );
+        assert_eq!(ids(&pages[2]).len(), 1, "the last page is the short one");
+
+        for (page, body) in pages.iter().enumerate() {
+            assert_eq!(body["page"], page);
+            assert_eq!(body["size"], 2);
+            assert_eq!(body["totalCount"], expected.len());
+            assert_eq!(body["totalPages"], 3);
+        }
+    }
+
+    /// `seq` indexes the whole ordered list, so a row keeps its number
+    /// whichever page it is read on. It used to restart at 0 every page — and
+    /// was stamped before the re-sort, so it did not even match the order the
+    /// rows it was attached to came back in.
+    #[tokio::test]
+    async fn seq_counts_across_pages_rather_than_restarting_on_each() {
+        let (client, _persistence) = client_and_store().await;
+
+        assert_eq!(seqs(&checkpoints_page(&client, 0, 2).await), [0, 1]);
+        assert_eq!(seqs(&checkpoints_page(&client, 1, 2).await), [2, 3]);
+        assert_eq!(seqs(&checkpoints_page(&client, 2, 2).await), [4]);
+    }
+
+    /// `page` is bounded only by `i32::MAX`, and `page * size` overflows a
+    /// `u32` well before that — an overflow that panics the handler in a debug
+    /// build. Saturating yields an empty page instead.
+    #[tokio::test]
+    async fn a_page_number_past_the_end_yields_an_empty_page_rather_than_overflowing() {
+        let (client, _persistence) = client_and_store().await;
+
+        let body = checkpoints_page(&client, i32::MAX, 100).await;
+
+        assert!(ids(&body).is_empty());
+        assert_eq!(body["totalCount"], WRITE_ORDER.len());
     }
 }
