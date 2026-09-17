@@ -66,6 +66,12 @@ pub struct WorkflowAgentSafetyReport {
     pub may_suspend_or_sleep: bool,
     /// Deterministic reasons that the graph cannot be published as an agent.
     pub violations: Vec<WorkflowAgentSafetyViolation>,
+    /// Every site that parks when published: the path and step behind
+    /// `may_suspend_or_sleep`. These publish under `parks:1`, so they are
+    /// findings rather than refusals, and kept so a caller can say exactly where
+    /// an agent may park instead of only that it might.
+    #[serde(default)]
+    pub parking_sites: Vec<WorkflowAgentSafetyViolation>,
 }
 
 /// One stable path that prevents a workflow from being published as an agent.
@@ -122,10 +128,41 @@ pub fn analyze_workflow_agent_safety(
             ))
     });
 
+    // A path that PARKS is not a publication hazard any more. Waits, sleeps and
+    // durable retry backoff all park under the capability ABI: the suspend
+    // sentinel carries the wake out to the caller, which parks in the child's
+    // place, so a published agent never holds a runner slot for them. They set
+    // `may_suspend_or_sleep`, which selects the `parks:1` certificate, and stay
+    // out of `violations`.
+    //
+    // What remains a violation is what is unverified or genuinely unsound: an
+    // AiAgent's model-call retry has not been shown to park, and a child closure
+    // the compiler cannot see can hide anything.
+    let (parking, violations): (Vec<_>, Vec<_>) =
+        violations.into_iter().partition(parks_under_capability_abi);
+
     WorkflowAgentSafetyReport {
-        may_suspend_or_sleep: !violations.is_empty(),
+        may_suspend_or_sleep: !parking.is_empty(),
         violations,
+        parking_sites: parking,
     }
+}
+
+/// Whether a recorded site is a wait-shaped construct that now parks in a
+/// published agent rather than one that must still refuse publication.
+///
+/// Classified by step type as well as feature, because `AiAgent` and `Agent`
+/// share the `retry-or-rate-limit-backoff` feature: the plain Agent retry is
+/// proven to park, the AiAgent model-call retry is not.
+fn parks_under_capability_abi(violation: &WorkflowAgentSafetyViolation) -> bool {
+    matches!(
+        (violation.step_type.as_str(), violation.feature.as_str()),
+        ("Delay", "delay")
+            | ("WaitForSignal", "wait-for-signal")
+            | ("Agent", "retry-or-rate-limit-backoff")
+            | ("EmbedWorkflow", "retry-backoff")
+            | ("Split", "retry-backoff")
+    )
 }
 
 /// Embed children execute inline. Inspect the same complete supplied closure
@@ -219,7 +256,7 @@ fn collect_workflow_agent_step_safety(
             path,
             step,
             "delay",
-            "Delay can sleep; run this workflow as a top-level workflow or remove the delay before publishing it as an agent",
+            "Delay sleeps; published as an agent it parks in its caller's place rather than holding a runner",
         ),
         Step::WaitForSignal(wait) => {
             push_workflow_agent_safety_violation(
@@ -227,7 +264,7 @@ fn collect_workflow_agent_step_safety(
                 path,
                 step,
                 "wait-for-signal",
-                "WaitForSignal can suspend; run this workflow as a top-level workflow or remove the wait before publishing it as an agent",
+                "WaitForSignal suspends; published as an agent it parks in its caller's place until the signal or its timeout",
             );
             if let Some(on_wait) = &wait.on_wait {
                 collect_workflow_agent_safety(
@@ -248,7 +285,7 @@ fn collect_workflow_agent_step_safety(
             path,
             step,
             "retry-or-rate-limit-backoff",
-            "Agent backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, loop/signal timeout and breakpoint paths before publishing",
+            "Agent retry backoff in a runtime-owning workflow parks in its caller's place rather than holding a runner",
         ),
         // AiAgent uses the same outbound retry/rate-limit machinery as Agent
         // for its model call and may dispatch any declared tool path.
@@ -273,7 +310,7 @@ fn collect_workflow_agent_step_safety(
                     path,
                     step,
                     "retry-backoff",
-                    "Split backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, loop/signal timeout and breakpoint paths before publishing",
+                    "Split retry backoff in a runtime-owning workflow parks in its caller's place rather than holding a runner",
                 );
             }
             collect_workflow_agent_safety(
@@ -300,7 +337,7 @@ fn collect_workflow_agent_step_safety(
                     path,
                     step,
                     "retry-backoff",
-                    "EmbedWorkflow backoff is callable only when the complete child closure is non-durable and has no root runtime operations; remove durable, logging, suspension, loop/signal timeout and breakpoint paths before publishing",
+                    "EmbedWorkflow retry backoff across a runtime-owning closure parks in its caller's place rather than holding a runner",
                 );
             }
 
@@ -2232,9 +2269,12 @@ mod tests {
                 "{case}: {features:?}"
             );
             let report = analyze_workflow_agent_safety(&graph, &[]);
+            // Split backoff in a runtime-owning workflow parks now, so it is a
+            // parking site rather than a refusal — found at the same path.
+            assert!(report.violations.is_empty(), "{case}: {report:?}");
             assert!(
                 report
-                    .violations
+                    .parking_sites
                     .iter()
                     .any(|violation| violation.path == "root/steps/scope"
                         && violation.feature == "retry-backoff"),
@@ -2332,9 +2372,15 @@ mod tests {
                     "{location}/{case}"
                 );
                 let safety = analyze_workflow_agent_safety(&parent, &children);
+                // Embed backoff across a runtime-owning closure parks now: the
+                // site is still found at the same path, as a parking site.
+                assert!(
+                    safety.violations.is_empty(),
+                    "{location}/{case}: {safety:?}"
+                );
                 assert!(
                     safety
-                        .violations
+                        .parking_sites
                         .iter()
                         .any(|violation| violation.path == "root/steps/embed"
                             && violation.feature == "retry-backoff"),
@@ -2391,8 +2437,9 @@ mod tests {
         );
 
         assert!(report.may_suspend_or_sleep);
+        assert!(report.violations.is_empty(), "a wait publishes: {report:?}");
         assert!(
-            report.violations.iter().any(|violation| {
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/call_child/embedded/steps/wait"
                     && violation.feature == "wait-for-signal"
             }),
@@ -2458,21 +2505,25 @@ mod tests {
         let report = analyze_workflow_agent_safety(&graph, &[]);
 
         assert!(
-            report.violations.iter().any(|violation| {
+            report.violations.is_empty(),
+            "waits and sleeps publish: {report:?}"
+        );
+        assert!(
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/approval/on-wait/steps/short_delay"
                     && violation.feature == "delay"
             }),
             "{report:?}"
         );
         assert!(
-            report.violations.iter().any(|violation| {
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/parallel/split/steps/retrying_agent"
                     && violation.feature == "retry-or-rate-limit-backoff"
             }),
             "{report:?}"
         );
         assert!(
-            report.violations.iter().any(|violation| {
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/parallel" && violation.feature == "retry-backoff"
             }),
             "{report:?}"
