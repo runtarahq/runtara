@@ -635,3 +635,76 @@ async fn checkpoints_sharing_a_timestamp_break_the_tie_bytewise() {
 
     backend.delete_instances_batch(&[id]).await.unwrap();
 }
+
+/// Instances sharing a `created_at` fall back to the id, compared bytewise.
+///
+/// The tie is forced with a raw `UPDATE` because it cannot be produced through
+/// the trait against this backend: `register_instance` stamps `NOW()`
+/// server-side, and each call is its own autocommit transaction a round trip
+/// apart, so two registrations never share a microsecond. The shared
+/// conformance sequence therefore cannot pin this on Postgres, however
+/// reliably a coarser in-process clock ties for the in-memory backend.
+///
+/// The ids are chosen to order differently under the two candidate rules.
+/// Under a bare `ORDER BY instance_id DESC` on an `en_US.utf8` database,
+/// punctuation and case are weak, giving `Step-A, stepA, step_a, step-a`.
+/// Bytewise — what `COLLATE "C"` asks for, and what every backend comparing
+/// raw bytes produces — `_` (0x5F) outranks `A` (0x41) outranks `-` (0x2D),
+/// and a leading lowercase `s` (0x73) outranks `S` (0x53). A regression that
+/// drops the collation fails here rather than silently paging two backends
+/// apart on ids carrying `-`, `_` or mixed case, which real ones do.
+#[tokio::test]
+async fn instances_sharing_a_timestamp_break_the_tie_bytewise() {
+    use runtara_core::persistence::Persistence;
+
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    // Tenant and ids are unique per run: the assertions are about the exact
+    // contents of a listing, and this database outlives the test.
+    let run = uuid::Uuid::new_v4().to_string();
+    let tenant = format!("instance-tie-{run}");
+    let ids: Vec<String> = ["Step-A", "step-a", "stepA", "step_a"]
+        .iter()
+        .map(|suffix| format!("{run}-{suffix}"))
+        .collect();
+    for id in &ids {
+        backend.register_instance(id, &tenant).await.unwrap();
+    }
+
+    // One timestamp for every row: the tie-break alone decides the order.
+    sqlx::query("UPDATE instances SET created_at = $1 WHERE tenant_id = $2")
+        .bind(chrono::Utc::now())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let listed = backend
+        .list_instances(Some(&tenant), None, 50, 0)
+        .await
+        .unwrap();
+    let order: Vec<String> = listed.iter().map(|i| i.instance_id.clone()).collect();
+    let expected: Vec<String> = ["step_a", "stepA", "step-a", "Step-A"]
+        .iter()
+        .map(|suffix| format!("{run}-{suffix}"))
+        .collect();
+    assert_eq!(
+        order, expected,
+        "tied instances must break the tie on the id compared bytewise, not \
+         under the database collation"
+    );
+
+    // The same order has to survive paging, which is the reason it is pinned:
+    // an OFFSET over a partial order skips and repeats rows.
+    let mut paged = Vec::new();
+    for offset in 0..4 {
+        let page = backend
+            .list_instances(Some(&tenant), None, 1, offset)
+            .await
+            .unwrap();
+        paged.push(page[0].instance_id.clone());
+    }
+    assert_eq!(paged, order, "paging must tile the tie-broken order");
+
+    backend.delete_instances_batch(&ids).await.unwrap();
+}

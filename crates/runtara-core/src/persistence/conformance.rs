@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::persistence::{
     CheckpointRecord, CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec,
-    ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, Persistence,
+    InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, Persistence,
 };
 
 /// Assert a page of checkpoints descends by `(created_at, checkpoint_id)`,
@@ -42,6 +42,34 @@ fn assert_checkpoints_ordered(page: &[CheckpointRecord]) {
             "checkpoints must descend by (created_at, checkpoint_id), but {} precedes {}",
             newer.checkpoint_id,
             older.checkpoint_id
+        );
+    }
+}
+
+/// Assert a page of instances descends by `(created_at, instance_id)`,
+/// comparing the id bytewise.
+///
+/// The ids are unique, so the order is total and each neighbouring pair must
+/// be strictly decreasing.
+///
+/// Unlike [`assert_checkpoints_ordered`], the id clause here is reachable
+/// through the trait: `register_instance` takes no timestamp, and a store
+/// stamping from a microsecond-resolution wall clock ties two of four
+/// back-to-back registrations about one run in five (measured on macOS).
+/// Reachable is not the same as reliable, though, so what actually pins the
+/// tie-break is a forced tie in each backend's own tests —
+/// `in_memory_instances_sharing_a_timestamp_break_the_tie_bytewise` here and
+/// `instances_sharing_a_timestamp_break_the_tie_bytewise` in
+/// `runtara-store-postgres`, where the database collation makes the byte
+/// order a real requirement rather than an obvious one.
+fn assert_instances_ordered(page: &[InstanceRecord]) {
+    for pair in page.windows(2) {
+        let (newer, older) = (&pair[0], &pair[1]);
+        assert!(
+            (newer.created_at, &newer.instance_id) > (older.created_at, &older.instance_id),
+            "instances must descend by (created_at, instance_id), but {} precedes {}",
+            newer.instance_id,
+            older.instance_id
         );
     }
 }
@@ -970,6 +998,112 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("list_instances failed");
     assert!(listed.iter().any(|r| r.instance_id == instance_id));
+
+    // --- instance listing order ---------------------------------------------
+    // `list_instances` pages with limit/offset, so it needs a *total* order or
+    // `offset` walks a set the store is free to re-shuffle between calls. The
+    // contract is `(created_at, instance_id)` descending, the id compared
+    // bytewise.
+    //
+    // Its own tenant, unique per run: these assertions are about the exact
+    // contents of a listing, and `tenant_id` above is a fixed string that
+    // gains a row on every run against a persistent database.
+    let order_run = Uuid::new_v4().to_string();
+    let order_tenant = format!("conformance-order-{order_run}");
+    // Registered in ascending *byte* order, so the expected listing is the
+    // exact reverse either way: with distinct timestamps it is creation order
+    // reversed, and under a tie it is the byte order the contract falls back
+    // to. It has to work both ways, because whether these four tie is a
+    // property of the store's clock rather than of this fixture — a
+    // microsecond-resolution one ties about one run in five.
+    //
+    // That also means this block cannot be what pins the tie-break; a forced
+    // tie in each backend's own tests does (see `assert_instances_ordered`).
+    // The suffixes are still the collation-sensitive ones those tests use:
+    // under `en_US.utf8` punctuation and case are weak, ranking them
+    // `Step-A, stepA, step_a, step-a` where the bytes rank them
+    // `step_a, stepA, step-a, Step-A` — `_` (0x5F) over `A` (0x41) over `-`
+    // (0x2D), and lowercase `s` (0x73) over capital `S` (0x53). So on the
+    // runs that do tie, a backend sorting under its collation disagrees with
+    // this expectation rather than matching it by luck.
+    let ordered_ids: Vec<String> = ["Step-A", "step-a", "stepA", "step_a"]
+        .iter()
+        .map(|suffix| format!("{order_run}-{suffix}"))
+        .collect();
+    for id in &ordered_ids {
+        backend
+            .register_instance(id, &order_tenant)
+            .await
+            .expect("register_instance failed (ordering fixture)");
+    }
+
+    let listed_order = backend
+        .list_instances(Some(&order_tenant), None, 50, 0)
+        .await
+        .expect("list_instances for ordering failed");
+    let listed_order_ids: Vec<String> =
+        listed_order.iter().map(|i| i.instance_id.clone()).collect();
+    let newest_first: Vec<String> = ordered_ids.iter().rev().cloned().collect();
+    assert_eq!(
+        listed_order_ids, newest_first,
+        "list_instances must return newest first, ties broken on the id compared bytewise"
+    );
+    assert_instances_ordered(&listed_order);
+
+    // Offset pagination must tile that same order. This is the symptom an
+    // unstated order produces: matching totals, mismatched pages.
+    let mut one_at_a_time = Vec::new();
+    for offset in 0..4 {
+        let page = backend
+            .list_instances(Some(&order_tenant), None, 1, offset)
+            .await
+            .expect("single-row page of list_instances failed");
+        assert_eq!(
+            page.len(),
+            1,
+            "offset {offset} over four instances must yield a row"
+        );
+        one_at_a_time.push(page[0].instance_id.clone());
+    }
+    assert_eq!(
+        one_at_a_time, listed_order_ids,
+        "paging one row at a time must tile the unpaged order, not a second one"
+    );
+
+    let first_page = backend
+        .list_instances(Some(&order_tenant), None, 2, 0)
+        .await
+        .expect("first page of list_instances failed");
+    let second_page = backend
+        .list_instances(Some(&order_tenant), None, 2, 2)
+        .await
+        .expect("second page of list_instances failed");
+    let tiled: Vec<String> = first_page
+        .iter()
+        .chain(second_page.iter())
+        .map(|i| i.instance_id.clone())
+        .collect();
+    assert_eq!(
+        tiled, listed_order_ids,
+        "two-row pages must tile the unpaged order without skipping or repeating a row"
+    );
+
+    // The status filter narrows the set; it does not get to reorder it. All
+    // four are still `pending`, so this must return the same sequence.
+    let filtered = backend
+        .list_instances(
+            Some(&order_tenant),
+            Some(CoreInstanceStatus::Pending),
+            50,
+            0,
+        )
+        .await
+        .expect("status-filtered list_instances failed");
+    let filtered_ids: Vec<String> = filtered.iter().map(|i| i.instance_id.clone()).collect();
+    assert_eq!(
+        filtered_ids, listed_order_ids,
+        "narrowing by status must preserve the order, not substitute another one"
+    );
 
     // --- retry attempt ------------------------------------------------------
     backend

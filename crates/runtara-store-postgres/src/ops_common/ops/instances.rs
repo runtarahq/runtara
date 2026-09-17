@@ -441,7 +441,12 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
-            /// SELECT instances with optional tenant/status filters.
+            /// SELECT instances with optional tenant/status filters,
+            /// ordered by `(created_at, instance_id)` descending with the id
+            /// compared bytewise — the total order `Persistence::list_instances`
+            /// documents, without which `OFFSET` pages a set the planner is
+            /// free to re-shuffle between calls.
+            ///
             /// Output excludes the `input` BLOB for efficiency; `input`
             /// falls back to `None` on `InstanceRecord` via
             /// `#[sqlx(default)]`.
@@ -463,6 +468,11 @@ macro_rules! impl_instance_ops {
                 let status_col = <$Dialect>::select_status_col();
                 let termination_col = <$Dialect>::select_termination_col();
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                // `instance_id` breaks ties on `created_at`, and the byte
+                // order is what the trait specifies: a bare `ORDER BY
+                // instance_id` would sort under the database collation and
+                // page differently from the in-memory backend.
+                let id_tiebreak = <$Dialect>::text_byte_order("instance_id");
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
@@ -471,7 +481,7 @@ macro_rules! impl_instance_ops {
                      FROM instances \
                      WHERE ({p1} IS NULL OR tenant_id = {p1}) \
                        AND ({p2} IS NULL OR status = {p2}{status_cast}) \
-                     ORDER BY created_at DESC \
+                     ORDER BY created_at DESC, {id_tiebreak} DESC \
                      LIMIT {p3} OFFSET {p4}"
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)

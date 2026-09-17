@@ -819,6 +819,22 @@ pub trait Persistence: Send + Sync {
     /// Page through instances, newest first, optionally narrowed to one
     /// tenant and/or one status.
     ///
+    /// Ordered by `(created_at, instance_id)` descending, comparing the id
+    /// **bytewise**. Without a total order, `offset` walks a set the store is
+    /// free to re-shuffle between pages, and a paginating caller silently
+    /// skips and repeats rows.
+    ///
+    /// The id is a tie-break and nothing more: its order carries no meaning
+    /// of its own, it just has to be the same order every time and on every
+    /// backend. Bytewise is what makes that last part true — a SQL backend
+    /// sorting text under its database collation orders `-`, `_` and case
+    /// differently from every backend that compares the raw bytes, so it must
+    /// ask for the byte order explicitly.
+    ///
+    /// Ties are not exotic here: a bulk launch registers instances as fast as
+    /// the store will take them, and whether two land inside one tick of its
+    /// clock is a property of the clock rather than of the workload.
+    ///
     /// The returned records carry no `input`, like
     /// [`Self::get_instance_meta`] — a listing that loaded every launch
     /// payload would pay for the one field none of its callers want.
