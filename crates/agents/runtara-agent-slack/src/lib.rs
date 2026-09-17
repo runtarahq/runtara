@@ -18,6 +18,9 @@
 //!   3. `files.completeUploadExternal` — finalize and share to channel (via proxy + auth).
 #![allow(clippy::result_large_err)]
 
+mod downloads;
+pub use downloads::*;
+
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -788,6 +791,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         &__CAPABILITY_META_SEND_MESSAGE,
         &__CAPABILITY_META_ADD_REACTION,
         &__CAPABILITY_META_UPLOAD_FILE,
+        &__CAPABILITY_META_GET_FILE_INFO,
+        &__CAPABILITY_META_DOWNLOAD_FILE,
     ];
     let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
         (
@@ -796,6 +801,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ),
         ("AddReactionInput", &__INPUT_META_AddReactionInput),
         ("UploadFileInput", &__INPUT_META_UploadFileInput),
+        ("GetFileInfoInput", &__INPUT_META_GetFileInfoInput),
+        ("DownloadFileInput", &__INPUT_META_DownloadFileInput),
     ]
     .into_iter()
     .collect();
@@ -806,6 +813,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ),
         ("AddReactionOutput", &__OUTPUT_META_AddReactionOutput),
         ("UploadFileOutput", &__OUTPUT_META_UploadFileOutput),
+        ("GetFileInfoOutput", &__OUTPUT_META_GetFileInfoOutput),
+        ("DownloadFileOutput", &__OUTPUT_META_DownloadFileOutput),
     ]
     .into_iter()
     .collect();
@@ -849,6 +858,8 @@ impl Guest for Component {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
+            "download-file" => downloads::execute_download_file(value),
+            "get-file-info" => downloads::execute_get_file_info(value),
             "send-message" => __executor_send_message(value),
             "add-reaction" => __executor_add_reaction(value),
             "upload-file" => __executor_upload_file(value),
@@ -948,7 +959,7 @@ mod tests {
             .find(|capability| capability.id == "add-reaction")
             .expect("add-reaction capability should be registered");
 
-        assert_eq!(info.capabilities.len(), 3);
+        assert_eq!(info.capabilities.len(), 5);
         assert_eq!(
             capability
                 .inputs

@@ -37,6 +37,11 @@ name = "sqs_agent"
 path = "tests/sqs_agent.rs"
 required-features = ["component-integration-tests"]
 
+[[test]]
+name = "attachment_downloads"
+path = "tests/attachment_downloads.rs"
+required-features = ["component-integration-tests"]
+
 [dependencies]
 runtara-agent-wit = { path = "../runtara-agent-wit" }
 # Used as the canonical AgentInfo shape for sidecar meta.json files. The host
@@ -95,6 +100,7 @@ wasmparser = "0.247"
 tokio = { version = "1", features = ["macros", "rt", "time", "sync", "io-util"] }
 
 [dev-dependencies]
+axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
 getrandom = "0.3"

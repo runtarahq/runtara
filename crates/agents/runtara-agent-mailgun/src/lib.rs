@@ -19,6 +19,9 @@
 //! the request path and the default sender address.
 #![allow(clippy::result_large_err)]
 
+mod downloads;
+pub use downloads::*;
+
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -418,17 +421,35 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     };
     use std::collections::HashMap;
 
-    let caps: &[&'static CapabilityMeta] = &[&__CAPABILITY_META_SEND_EMAIL];
-    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [(
-        "SendEmailInput",
-        &__INPUT_META_SendEmailInput as &InputTypeMeta,
-    )]
+    let caps: &[&'static CapabilityMeta] = &[
+        &__CAPABILITY_META_SEND_EMAIL,
+        &__CAPABILITY_META_GET_MESSAGE,
+        &__CAPABILITY_META_DOWNLOAD_ATTACHMENT,
+    ];
+    let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
+        (
+            "SendEmailInput",
+            &__INPUT_META_SendEmailInput as &InputTypeMeta,
+        ),
+        ("GetMessageInput", &__INPUT_META_GetMessageInput),
+        (
+            "DownloadAttachmentInput",
+            &__INPUT_META_DownloadAttachmentInput,
+        ),
+    ]
     .into_iter()
     .collect();
-    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [(
-        "SendEmailOutput",
-        &__OUTPUT_META_SendEmailOutput as &OutputTypeMeta,
-    )]
+    let output_types: HashMap<&'static str, &'static OutputTypeMeta> = [
+        (
+            "SendEmailOutput",
+            &__OUTPUT_META_SendEmailOutput as &OutputTypeMeta,
+        ),
+        ("GetMessageOutput", &__OUTPUT_META_GetMessageOutput),
+        (
+            "DownloadAttachmentOutput",
+            &__OUTPUT_META_DownloadAttachmentOutput,
+        ),
+    ]
     .into_iter()
     .collect();
 
@@ -471,6 +492,8 @@ impl Guest for Component {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
+            "download-attachment" => downloads::execute_download_attachment(value),
+            "get-message" => downloads::execute_get_message(value),
             "send-email" => __executor_send_email(value),
             other => {
                 return Err(ErrorInfo {
