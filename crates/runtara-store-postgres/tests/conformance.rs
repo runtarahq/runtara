@@ -38,6 +38,28 @@ async fn postgres_backend_passes_conformance_sequence() {
     runtara_core::persistence::conformance::run_wake_reason_sequence(&backend).await;
 }
 
+/// Parallel wakers racing for one instance must produce a single winner.
+///
+/// Multi-threaded on purpose: a current-thread runtime serializes the
+/// contenders and the race never happens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_backend_claims_a_sleeping_instance_atomically() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = std::sync::Arc::new(PostgresPersistence::new(pool));
+    runtara_core::persistence::conformance::run_concurrent_claim_sequence(backend).await;
+}
+
+/// A batch claim must never expose a row without a wake deadline.
+///
+/// Multi-threaded on purpose: the reader has to be schedulable while the claim
+/// is mid-flight, or it cannot see the window it is watching for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_backend_leases_a_batch_without_stranding_it() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = std::sync::Arc::new(PostgresPersistence::new(pool));
+    runtara_core::persistence::conformance::run_batch_claim_never_strands_sequence(backend).await;
+}
+
 /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
 /// local setups that already have a database running), then falls back to a
 /// fresh testcontainers-managed container. Infrastructure failures are test
@@ -1061,4 +1083,147 @@ async fn invocation_retry_preserves_audit_metadata_and_rejects_late_overwrite() 
             .checkpoint_id
             .is_none()
     );
+}
+
+/// Checkpoints sharing a `created_at` fall back to the id, compared bytewise.
+///
+/// The tie is forced with raw SQL because it cannot be produced through the
+/// trait: `save_checkpoint` stamps `NOW()` server-side and each call is its own
+/// autocommit statement, so two saves never share a microsecond. That is also
+/// why the shared conformance sequence cannot cover this.
+///
+/// The ids are chosen to order differently under the two candidate rules. Under
+/// a bare `ORDER BY checkpoint_id DESC` on an `en_US.utf8` database, punctuation
+/// and case are weak, giving `Fetch-Order, fetchOrder, fetch_order, fetch-order`.
+/// Bytewise — what `COLLATE "C"` asks for, and what every backend comparing raw
+/// bytes produces — `_` (0x5F) outranks `O` (0x4F) outranks `-` (0x2D), and the
+/// capital `F` (0x46) sorts below every lowercase `f` (0x66). A regression that
+/// drops the collation fails here rather than silently paging two backends
+/// apart on ids that carry `-`, `_` or mixed case, which real ones do.
+#[tokio::test]
+async fn checkpoints_sharing_a_timestamp_break_the_tie_bytewise() {
+    use runtara_core::persistence::Persistence;
+
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "checkpoint-tie")
+        .await
+        .unwrap();
+
+    // One timestamp for every row: the tie-break alone decides the order.
+    let shared_at = chrono::Utc::now();
+    for checkpoint_id in ["fetch_order", "fetch-order", "fetchOrder", "Fetch-Order"] {
+        sqlx::query(
+            "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&id)
+        .bind(checkpoint_id)
+        .bind(checkpoint_id.as_bytes())
+        .bind(shared_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let listed = backend
+        .list_checkpoints(&id, None, 50, 0, None, None)
+        .await
+        .unwrap();
+    let order: Vec<&str> = listed.iter().map(|c| c.checkpoint_id.as_str()).collect();
+    assert_eq!(
+        order,
+        ["fetch_order", "fetchOrder", "fetch-order", "Fetch-Order"],
+        "tied checkpoints must break the tie on the id compared bytewise, not \
+         under the database collation"
+    );
+
+    // The same order has to survive paging, which is the reason it is pinned:
+    // an OFFSET over a partial order skips and repeats rows.
+    let mut paged = Vec::new();
+    for offset in 0..4 {
+        let page = backend
+            .list_checkpoints(&id, None, 1, offset, None, None)
+            .await
+            .unwrap();
+        paged.push(page[0].checkpoint_id.clone());
+    }
+    assert_eq!(paged, order, "paging must tile the tie-broken order");
+
+    backend.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// Instances sharing a `created_at` fall back to the id, compared bytewise.
+///
+/// The tie is forced with a raw `UPDATE` because it cannot be produced through
+/// the trait against this backend: `register_instance` stamps `NOW()`
+/// server-side, and each call is its own autocommit transaction a round trip
+/// apart, so two registrations never share a microsecond. The shared
+/// conformance sequence therefore cannot pin this on Postgres, however
+/// reliably a coarser in-process clock ties for the in-memory backend.
+///
+/// The ids are chosen to order differently under the two candidate rules.
+/// Under a bare `ORDER BY instance_id DESC` on an `en_US.utf8` database,
+/// punctuation and case are weak, giving `Step-A, stepA, step_a, step-a`.
+/// Bytewise — what `COLLATE "C"` asks for, and what every backend comparing
+/// raw bytes produces — `_` (0x5F) outranks `A` (0x41) outranks `-` (0x2D),
+/// and a leading lowercase `s` (0x73) outranks `S` (0x53). A regression that
+/// drops the collation fails here rather than silently paging two backends
+/// apart on ids carrying `-`, `_` or mixed case, which real ones do.
+#[tokio::test]
+async fn instances_sharing_a_timestamp_break_the_tie_bytewise() {
+    use runtara_core::persistence::Persistence;
+
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    // Tenant and ids are unique per run: the assertions are about the exact
+    // contents of a listing, and this database outlives the test.
+    let run = uuid::Uuid::new_v4().to_string();
+    let tenant = format!("instance-tie-{run}");
+    let ids: Vec<String> = ["Step-A", "step-a", "stepA", "step_a"]
+        .iter()
+        .map(|suffix| format!("{run}-{suffix}"))
+        .collect();
+    for id in &ids {
+        backend.register_instance(id, &tenant).await.unwrap();
+    }
+
+    // One timestamp for every row: the tie-break alone decides the order.
+    sqlx::query("UPDATE instances SET created_at = $1 WHERE tenant_id = $2")
+        .bind(chrono::Utc::now())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let listed = backend
+        .list_instances(Some(&tenant), None, 50, 0)
+        .await
+        .unwrap();
+    let order: Vec<String> = listed.iter().map(|i| i.instance_id.clone()).collect();
+    let expected: Vec<String> = ["step_a", "stepA", "step-a", "Step-A"]
+        .iter()
+        .map(|suffix| format!("{run}-{suffix}"))
+        .collect();
+    assert_eq!(
+        order, expected,
+        "tied instances must break the tie on the id compared bytewise, not \
+         under the database collation"
+    );
+
+    // The same order has to survive paging, which is the reason it is pinned:
+    // an OFFSET over a partial order skips and repeats rows.
+    let mut paged = Vec::new();
+    for offset in 0..4 {
+        let page = backend
+            .list_instances(Some(&tenant), None, 1, offset)
+            .await
+            .unwrap();
+        paged.push(page[0].instance_id.clone());
+    }
+    assert_eq!(paged, order, "paging must tile the tie-broken order");
+
+    backend.delete_instances_batch(&ids).await.unwrap();
 }

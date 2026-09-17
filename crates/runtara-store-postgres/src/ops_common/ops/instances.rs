@@ -169,30 +169,6 @@ macro_rules! impl_instance_ops {
                 Ok(record.map(|r| r.0))
             }
 
-            /// UPDATE status (and optionally `started_at`). Errors with
-            /// `InstanceNotFound` if no row matched.
-            ///
-            /// When `started_at` is supplied the instance is (re)entering
-            /// `running` — on relaunch/resume the guest re-registers here. A
-            /// row that ran before may still carry a `finished_at` (and
-            /// `termination_reason`) stamped by a prior suspend/force-stop;
-            /// those describe a run that is no longer over, so they are
-            /// cleared to restore the "running rows have no `finished_at`"
-            /// invariant. Leaving them would make `finished_at < started_at`
-            /// and render a negative duration for any resumed run.
-            /// Promote an instance to `running` **only while it has not already
-            /// moved on**, returning whether the update applied.
-            ///
-            /// A detached launch spawns the run and returns, so for a workflow
-            /// that parks immediately the run task can reach `suspended` before
-            /// the launching caller gets to stamp `running`. An unguarded write
-            /// then resurrects a parked instance as `running` with no live
-            /// process behind it, and the container monitor fails it as a crash
-            /// a poll later. Restricting the promotion to the pre-run states
-            /// makes that write a no-op once the run has advanced.
-            ///
-            /// `started_at` is only filled in when it is not already set, for
-            /// the same reason `mark_running` re-uses it: a run that suspends
             /// Promote an instance to `running` on a relaunch, keeping the
             /// original `started_at`.
             ///
@@ -230,6 +206,19 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
+            /// Promote an instance to `running` **only while it has not already
+            /// moved on**, returning whether the update applied.
+            ///
+            /// A detached launch spawns the run and returns, so for a workflow
+            /// that parks immediately the run task can reach `suspended` before
+            /// the launching caller gets to stamp `running`. An unguarded write
+            /// then resurrects a parked instance as `running` with no live
+            /// process behind it, and the container monitor fails it as a crash
+            /// a poll later. Restricting the promotion to the pre-run states
+            /// makes that write a no-op once the run has advanced.
+            ///
+            /// `started_at` is only filled in when it is not already set, for
+            /// the same reason `mark_running` re-uses it: a run that suspends
             /// and wakes should still report when it first began.
             pub(crate) async fn op_mark_instance_started(
                 pool: &$Pool,
@@ -260,6 +249,17 @@ macro_rules! impl_instance_ops {
                 Ok(result.rows_affected() == 1)
             }
 
+            /// UPDATE status (and optionally `started_at`). Errors with
+            /// `InstanceNotFound` if no row matched.
+            ///
+            /// When `started_at` is supplied the instance is (re)entering
+            /// `running` — on relaunch/resume the guest re-registers here. A
+            /// row that ran before may still carry a `finished_at` (and
+            /// `termination_reason`) stamped by a prior suspend/force-stop;
+            /// those describe a run that is no longer over, so they are
+            /// cleared to restore the "running rows have no `finished_at`"
+            /// invariant. Leaving them would make `finished_at < started_at`
+            /// and render a negative duration for any resumed run.
             pub(crate) async fn op_update_instance_status(
                 pool: &$Pool,
                 instance_id: &str,
@@ -441,7 +441,12 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
-            /// SELECT instances with optional tenant/status filters.
+            /// SELECT instances with optional tenant/status filters,
+            /// ordered by `(created_at, instance_id)` descending with the id
+            /// compared bytewise — the total order `Persistence::list_instances`
+            /// documents, without which `OFFSET` pages a set the planner is
+            /// free to re-shuffle between calls.
+            ///
             /// Output excludes the `input` BLOB for efficiency; `input`
             /// falls back to `None` on `InstanceRecord` via
             /// `#[sqlx(default)]`.
@@ -463,6 +468,11 @@ macro_rules! impl_instance_ops {
                 let status_col = <$Dialect>::select_status_col();
                 let termination_col = <$Dialect>::select_termination_col();
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                // `instance_id` breaks ties on `created_at`, and the byte
+                // order is what the trait specifies: a bare `ORDER BY
+                // instance_id` would sort under the database collation and
+                // page differently from the in-memory backend.
+                let id_tiebreak = <$Dialect>::text_byte_order("instance_id");
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
@@ -471,7 +481,7 @@ macro_rules! impl_instance_ops {
                      FROM instances \
                      WHERE ({p1} IS NULL OR tenant_id = {p1}) \
                        AND ({p2} IS NULL OR status = {p2}{status_cast}) \
-                     ORDER BY created_at DESC \
+                     ORDER BY created_at DESC, {id_tiebreak} DESC \
                      LIMIT {p3} OFFSET {p4}"
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)

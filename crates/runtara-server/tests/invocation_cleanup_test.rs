@@ -158,9 +158,10 @@ async fn test_run_loop_exits_on_coordinator_shutdown() {
 
     // Use the coordinator to get a signal we can actually flip from a test —
     // `ShutdownSignal::new()` creates its own atomic and exposes no setter.
-    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::from_env(
+    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::new(
         std::sync::Arc::new(dashmap::DashMap::new()),
         None,
+        runtara_server::config::ShutdownGrace::default(),
     ));
     let signal = coord.signal();
 
@@ -216,9 +217,10 @@ async fn test_run_performs_eager_cleanup_on_startup() {
         "seed precondition: expired oauth_state exists before worker starts"
     );
 
-    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::from_env(
+    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::new(
         std::sync::Arc::new(dashmap::DashMap::new()),
         None,
+        runtara_server::config::ShutdownGrace::default(),
     ));
     let signal = coord.signal();
 

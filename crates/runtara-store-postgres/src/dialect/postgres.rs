@@ -77,6 +77,13 @@ impl Dialect for PostgresDialect {
         expr.to_string()
     }
 
+    fn text_byte_order(expr: &str) -> String {
+        // `"C"` is the one collation Postgres guarantees exists and defines as
+        // a plain bytewise comparison — the same order `String::cmp` gives on
+        // the core side. The quotes are part of the collation name.
+        format!("{expr} COLLATE \"C\"")
+    }
+
     fn sql_get_custom_signal() -> &'static str {
         // Non-destructive read: SELECT and leave the row in place so a
         // replayed WaitForSignal re-reads the same signal (see the trait doc).
@@ -92,15 +99,18 @@ impl Dialect for PostgresDialect {
          SET state = EXCLUDED.state, created_at = NOW()"
     }
 
-    fn sql_list_checkpoints() -> &'static str {
-        "SELECT instance_id, checkpoint_id, state, created_at \
-         FROM checkpoints \
-         WHERE instance_id = $1 \
-           AND ($2::TEXT IS NULL OR checkpoint_id = $2) \
-           AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3) \
-           AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4) \
-         ORDER BY created_at DESC \
-         LIMIT $5 OFFSET $6"
+    fn sql_list_checkpoints() -> String {
+        let id_tiebreak = Self::text_byte_order("checkpoint_id");
+        format!(
+            "SELECT instance_id, checkpoint_id, state, created_at \
+             FROM checkpoints \
+             WHERE instance_id = $1 \
+               AND ($2::TEXT IS NULL OR checkpoint_id = $2) \
+               AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3) \
+               AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4) \
+             ORDER BY created_at DESC, {id_tiebreak} DESC \
+             LIMIT $5 OFFSET $6"
+        )
     }
 
     fn sql_count_checkpoints() -> &'static str {

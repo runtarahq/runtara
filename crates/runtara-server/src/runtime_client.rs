@@ -778,19 +778,25 @@ impl RuntimeClient {
         result
     }
 
-    /// List checkpoints for an instance
+    /// List one page of an instance's checkpoints.
     ///
-    /// Returns checkpoint summaries for the specified instance, ordered by creation time.
+    /// `offset` walks the order the store keeps them in. Passing `limit` alone
+    /// yields a prefix rather than a page: every call re-reads rows `0..limit`,
+    /// so a paginating caller reads the first page forever.
     pub async fn list_checkpoints(
         &self,
         instance_id: &str,
         limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<crate::runtime_types::ListCheckpointsResult, RuntimeError> {
         let sdk = &self.client;
 
         let mut options = crate::runtime_types::ListCheckpointsOptions::new();
         if let Some(l) = limit {
             options = options.with_limit(l);
+        }
+        if let Some(o) = offset {
+            options = options.with_offset(o);
         }
 
         sdk.list_checkpoints(instance_id, options)

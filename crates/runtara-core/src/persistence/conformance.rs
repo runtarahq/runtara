@@ -16,9 +16,63 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::persistence::{
-    CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec, ListEventsFilter,
-    ListPairedRecordsFilter, PairedRecordStatus, Persistence,
+    CheckpointRecord, CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec,
+    InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, Persistence,
 };
+
+/// Assert a page of checkpoints descends by `(created_at, checkpoint_id)`,
+/// comparing the id bytewise.
+///
+/// The ids are unique within an instance, so the order is total and each
+/// neighbouring pair must be strictly decreasing.
+///
+/// This checks the primary key of the sort, not the tie-break. `save_checkpoint`
+/// takes no timestamp — the backend supplies its own — so no fixture written
+/// against this trait can make two rows share a `created_at`, which leaves the
+/// id clause here permanently unreached. Pinning the tie-break means forcing a
+/// tie through a backend's own storage, so it belongs in that backend's tests:
+/// see `checkpoints_sharing_a_timestamp_break_the_tie_bytewise` in
+/// `runtara-store-postgres`, where the database collation makes the byte order
+/// a real requirement rather than an obvious one.
+fn assert_checkpoints_ordered(page: &[CheckpointRecord]) {
+    for pair in page.windows(2) {
+        let (newer, older) = (&pair[0], &pair[1]);
+        assert!(
+            (newer.created_at, &newer.checkpoint_id) > (older.created_at, &older.checkpoint_id),
+            "checkpoints must descend by (created_at, checkpoint_id), but {} precedes {}",
+            newer.checkpoint_id,
+            older.checkpoint_id
+        );
+    }
+}
+
+/// Assert a page of instances descends by `(created_at, instance_id)`,
+/// comparing the id bytewise.
+///
+/// The ids are unique, so the order is total and each neighbouring pair must
+/// be strictly decreasing.
+///
+/// Unlike [`assert_checkpoints_ordered`], the id clause here is reachable
+/// through the trait: `register_instance` takes no timestamp, and a store
+/// stamping from a microsecond-resolution wall clock ties two of four
+/// back-to-back registrations about one run in five (measured on macOS).
+/// Reachable is not the same as reliable, though, so what actually pins the
+/// tie-break is a forced tie in each backend's own tests —
+/// `in_memory_instances_sharing_a_timestamp_break_the_tie_bytewise` here and
+/// `instances_sharing_a_timestamp_break_the_tie_bytewise` in
+/// `runtara-store-postgres`, where the database collation makes the byte
+/// order a real requirement rather than an obvious one.
+fn assert_instances_ordered(page: &[InstanceRecord]) {
+    for pair in page.windows(2) {
+        let (newer, older) = (&pair[0], &pair[1]);
+        assert!(
+            (newer.created_at, &newer.instance_id) > (older.created_at, &older.instance_id),
+            "instances must descend by (created_at, instance_id), but {} precedes {}",
+            newer.instance_id,
+            older.instance_id
+        );
+    }
+}
 
 /// Run the full conformance sequence against `backend`.
 ///
@@ -285,8 +339,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         )
         .await
         .expect("seed running failed");
+    // Park it the way a drain force-stop does, through `complete_instance`,
+    // which is what stamps the terminal fields. A bare status write to
+    // `suspended` leaves them unset, and then the promotion assertions below
+    // only prove that a field nothing ever wrote is still empty.
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
+                .with_termination("sleeping", None),
+        )
         .await
         .expect("suspend failed");
     let before = backend
@@ -295,6 +356,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("get_instance failed")
         .expect("instance should exist");
     assert_eq!(before.status, CoreInstanceStatus::Suspended);
+    assert!(
+        before.finished_at.is_some(),
+        "precondition: parking an instance must stamp finished_at"
+    );
+    assert!(
+        before.termination_reason.is_some(),
+        "precondition: parking an instance must stamp termination_reason"
+    );
 
     backend
         .mark_instance_running(&instance_id, Utc::now())
@@ -314,9 +383,29 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         promoted.started_at, before.started_at,
         "mark_instance_running must keep the original started_at"
     );
-    assert!(promoted.finished_at.is_none());
+    // The stamps above describe a run that is no longer over. Carrying them
+    // into `running` puts `finished_at` before `started_at`, which renders as
+    // a negative duration.
+    assert!(
+        promoted.finished_at.is_none(),
+        "promoting a parked instance must clear the stale finished_at"
+    );
+    assert!(
+        promoted.termination_reason.is_none(),
+        "promoting a parked instance must clear the stale termination_reason"
+    );
 
     // --- update status → running -------------------------------------------
+    // Same clear, asserted on the raw write rather than through
+    // `mark_instance_running`, so a backend that overrides the promotion
+    // helpers is still pinned here.
+    backend
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
+                .with_termination("sleeping", None),
+        )
+        .await
+        .expect("re-park before the raw status write failed");
     backend
         .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
@@ -328,6 +417,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("instance must still exist");
     assert_eq!(record.status, CoreInstanceStatus::Running);
     assert!(record.started_at.is_some());
+    assert!(
+        record.finished_at.is_none(),
+        "a status write that stamps started_at must clear the stale finished_at"
+    );
+    assert!(
+        record.termination_reason.is_none(),
+        "a status write that stamps started_at must clear the stale termination_reason"
+    );
 
     // --- checkpoints --------------------------------------------------------
     let checkpoint_id = "ckpt-1";
@@ -412,6 +509,97 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         total_after_resave, 1,
         "only one checkpoint has been saved for this instance"
     );
+
+    // --- checkpoint ordering ------------------------------------------------
+    // `list_checkpoints` pages with limit/offset, so it needs a *total* order or
+    // `offset` walks a set the store is free to re-shuffle between calls. The
+    // contract is `(created_at, checkpoint_id)` descending. These ids sort
+    // lexicographically in write order, so the expected sequence holds whether
+    // or not two writes land in the same clock tick.
+    for id in ["ckpt-2", "ckpt-3"] {
+        backend
+            .save_checkpoint(&instance_id, id, id.as_bytes())
+            .await
+            .expect("save_checkpoint failed (ordering fixture)");
+    }
+
+    let ordered = backend
+        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .await
+        .expect("list_checkpoints for ordering failed");
+    let ids: Vec<String> = ordered.iter().map(|c| c.checkpoint_id.clone()).collect();
+    assert_eq!(
+        ids,
+        ["ckpt-3", "ckpt-2", "ckpt-1"],
+        "list_checkpoints must return newest first"
+    );
+    assert_checkpoints_ordered(&ordered);
+
+    // Offset pagination must tile that same order. This is the symptom an
+    // unstated order produces: matching totals, mismatched pages.
+    let mut one_at_a_time = Vec::new();
+    for offset in 0..3 {
+        let page = backend
+            .list_checkpoints(&instance_id, None, 1, offset, None, None)
+            .await
+            .expect("single-row page of list_checkpoints failed");
+        assert_eq!(
+            page.len(),
+            1,
+            "offset {offset} over three checkpoints must yield a row"
+        );
+        one_at_a_time.push(page[0].checkpoint_id.clone());
+    }
+    assert_eq!(
+        one_at_a_time, ids,
+        "paging one row at a time must tile the unpaged order, not a second one"
+    );
+
+    let first_page = backend
+        .list_checkpoints(&instance_id, None, 2, 0, None, None)
+        .await
+        .expect("first page of list_checkpoints failed");
+    let second_page = backend
+        .list_checkpoints(&instance_id, None, 2, 2, None, None)
+        .await
+        .expect("second page of list_checkpoints failed");
+    let tiled: Vec<String> = first_page
+        .iter()
+        .chain(second_page.iter())
+        .map(|c| c.checkpoint_id.clone())
+        .collect();
+    assert_eq!(
+        tiled, ids,
+        "two-row pages must tile the unpaged order without skipping or repeating a row"
+    );
+
+    // A re-save restamps `created_at`. Replay re-saves every key it already
+    // wrote, so a backend that keeps the original stamp pages a resumed instance
+    // in a different order than one that does not — with the sort above still in
+    // place, which is what makes this worth pinning here. Compared against the
+    // newest existing stamp rather than by position: a backend that fails to
+    // restamp leaves this checkpoint strictly older, while a tie between two
+    // same-tick writes is conformant.
+    let newest_before_resave = ordered[0].created_at;
+    backend
+        .save_checkpoint(&instance_id, checkpoint_id, &refreshed_state)
+        .await
+        .expect("re-saving for the restamp check failed");
+    let restamped = backend
+        .list_checkpoints(&instance_id, Some(checkpoint_id), 50, 0, None, None)
+        .await
+        .expect("list_checkpoints after re-save failed");
+    assert_eq!(restamped.len(), 1, "a re-save must not add a second row");
+    assert!(
+        restamped[0].created_at >= newest_before_resave,
+        "a re-save must restamp created_at: {checkpoint_id} still dates from before \
+         the checkpoints written after it, so it pages as the oldest"
+    );
+    let reordered = backend
+        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .await
+        .expect("list_checkpoints after re-save failed");
+    assert_checkpoints_ordered(&reordered);
 
     // --- update instance checkpoint pointer --------------------------------
     backend
@@ -670,6 +858,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "second claim of an already-claimed instance must lose"
     );
 
+    // Sequential claims only prove the *second* caller sees the first one's
+    // write. Overlapping callers are a separate question, and
+    // `run_concurrent_claim_sequence` is where it is asked.
+
     backend
         .clear_instance_sleep(&instance_id)
         .await
@@ -806,6 +998,112 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("list_instances failed");
     assert!(listed.iter().any(|r| r.instance_id == instance_id));
+
+    // --- instance listing order ---------------------------------------------
+    // `list_instances` pages with limit/offset, so it needs a *total* order or
+    // `offset` walks a set the store is free to re-shuffle between calls. The
+    // contract is `(created_at, instance_id)` descending, the id compared
+    // bytewise.
+    //
+    // Its own tenant, unique per run: these assertions are about the exact
+    // contents of a listing, and `tenant_id` above is a fixed string that
+    // gains a row on every run against a persistent database.
+    let order_run = Uuid::new_v4().to_string();
+    let order_tenant = format!("conformance-order-{order_run}");
+    // Registered in ascending *byte* order, so the expected listing is the
+    // exact reverse either way: with distinct timestamps it is creation order
+    // reversed, and under a tie it is the byte order the contract falls back
+    // to. It has to work both ways, because whether these four tie is a
+    // property of the store's clock rather than of this fixture — a
+    // microsecond-resolution one ties about one run in five.
+    //
+    // That also means this block cannot be what pins the tie-break; a forced
+    // tie in each backend's own tests does (see `assert_instances_ordered`).
+    // The suffixes are still the collation-sensitive ones those tests use:
+    // under `en_US.utf8` punctuation and case are weak, ranking them
+    // `Step-A, stepA, step_a, step-a` where the bytes rank them
+    // `step_a, stepA, step-a, Step-A` — `_` (0x5F) over `A` (0x41) over `-`
+    // (0x2D), and lowercase `s` (0x73) over capital `S` (0x53). So on the
+    // runs that do tie, a backend sorting under its collation disagrees with
+    // this expectation rather than matching it by luck.
+    let ordered_ids: Vec<String> = ["Step-A", "step-a", "stepA", "step_a"]
+        .iter()
+        .map(|suffix| format!("{order_run}-{suffix}"))
+        .collect();
+    for id in &ordered_ids {
+        backend
+            .register_instance(id, &order_tenant)
+            .await
+            .expect("register_instance failed (ordering fixture)");
+    }
+
+    let listed_order = backend
+        .list_instances(Some(&order_tenant), None, 50, 0)
+        .await
+        .expect("list_instances for ordering failed");
+    let listed_order_ids: Vec<String> =
+        listed_order.iter().map(|i| i.instance_id.clone()).collect();
+    let newest_first: Vec<String> = ordered_ids.iter().rev().cloned().collect();
+    assert_eq!(
+        listed_order_ids, newest_first,
+        "list_instances must return newest first, ties broken on the id compared bytewise"
+    );
+    assert_instances_ordered(&listed_order);
+
+    // Offset pagination must tile that same order. This is the symptom an
+    // unstated order produces: matching totals, mismatched pages.
+    let mut one_at_a_time = Vec::new();
+    for offset in 0..4 {
+        let page = backend
+            .list_instances(Some(&order_tenant), None, 1, offset)
+            .await
+            .expect("single-row page of list_instances failed");
+        assert_eq!(
+            page.len(),
+            1,
+            "offset {offset} over four instances must yield a row"
+        );
+        one_at_a_time.push(page[0].instance_id.clone());
+    }
+    assert_eq!(
+        one_at_a_time, listed_order_ids,
+        "paging one row at a time must tile the unpaged order, not a second one"
+    );
+
+    let first_page = backend
+        .list_instances(Some(&order_tenant), None, 2, 0)
+        .await
+        .expect("first page of list_instances failed");
+    let second_page = backend
+        .list_instances(Some(&order_tenant), None, 2, 2)
+        .await
+        .expect("second page of list_instances failed");
+    let tiled: Vec<String> = first_page
+        .iter()
+        .chain(second_page.iter())
+        .map(|i| i.instance_id.clone())
+        .collect();
+    assert_eq!(
+        tiled, listed_order_ids,
+        "two-row pages must tile the unpaged order without skipping or repeating a row"
+    );
+
+    // The status filter narrows the set; it does not get to reorder it. All
+    // four are still `pending`, so this must return the same sequence.
+    let filtered = backend
+        .list_instances(
+            Some(&order_tenant),
+            Some(CoreInstanceStatus::Pending),
+            50,
+            0,
+        )
+        .await
+        .expect("status-filtered list_instances failed");
+    let filtered_ids: Vec<String> = filtered.iter().map(|i| i.instance_id.clone()).collect();
+    assert_eq!(
+        filtered_ids, listed_order_ids,
+        "narrowing by status must preserve the order, not substitute another one"
+    );
 
     // --- retry attempt ------------------------------------------------------
     backend
@@ -1587,4 +1885,350 @@ async fn terminal_cancel_races<P: Persistence>(backend: &P) {
             cancelled
         );
     }
+}
+
+/// Race real, parallel wakers for one due instance and require a single winner.
+///
+/// [`run_conformance_sequence`] claims twice in a row, which only proves the
+/// second caller observes the first one's write. It says nothing about two
+/// callers *overlapping*, and overlapping is the case
+/// [`Persistence::claim_sleeping_instance`] exists for: a claim that reads a
+/// claimable row and then clears it in a separate step lets every concurrent
+/// caller read before any of them writes, and they all win. Each extra winner
+/// is another launch of the same instance.
+///
+/// Takes an `Arc` and spawns, rather than polling futures concurrently on one
+/// task: a claim whose steps never yield to the executor completes before the
+/// next future is polled, and no amount of `join!` interleaves it. Run this on
+/// a multi-threaded runtime — `#[tokio::test(flavor = "multi_thread")]` —
+/// since a single-threaded one reintroduces exactly the serialization this is
+/// trying to avoid.
+pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: std::sync::Arc<P>) {
+    /// Enough contenders that a lost race is overwhelmingly likely to show up,
+    /// while staying inside a small connection pool.
+    const CONTENDERS: usize = 8;
+    /// Repeats, because a race that only sometimes interleaves is still a race.
+    const ROUNDS: usize = 20;
+
+    let tenant_id = "conformance-tenant-concurrent";
+    let mut rounds_won = 0usize;
+    let mut claimed_instances: Vec<String> = Vec::with_capacity(ROUNDS);
+
+    for round in 0..ROUNDS {
+        let instance_id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&instance_id, tenant_id)
+            .await
+            .expect("register_instance failed (concurrent claim)");
+        backend
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("update_instance_status suspended failed (concurrent claim)");
+        backend
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(30))
+            .await
+            .expect("set_instance_sleep failed (concurrent claim)");
+
+        // Release every contender at once, so they reach the claim together
+        // instead of in spawn order.
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(CONTENDERS));
+        let mut contenders = Vec::with_capacity(CONTENDERS);
+        for _ in 0..CONTENDERS {
+            let backend = std::sync::Arc::clone(&backend);
+            let gate = std::sync::Arc::clone(&gate);
+            let instance_id = instance_id.clone();
+            contenders.push(tokio::spawn(async move {
+                gate.wait().await;
+                backend.claim_sleeping_instance(&instance_id).await
+            }));
+        }
+
+        let mut winners = 0;
+        for contender in contenders {
+            let claimed = contender
+                .await
+                .expect("claim task panicked")
+                .expect("claim_sleeping_instance (concurrent) failed");
+            if claimed {
+                winners += 1;
+            }
+        }
+
+        // Safety, asserted per round: never more than one winner. Each extra
+        // winner is another launch of this instance.
+        assert!(
+            winners <= 1,
+            "at most one of {CONTENDERS} concurrent claims may win (round {round}); \
+             {winners} winners is {winners} launches of the same instance"
+        );
+        rounds_won += winners;
+        claimed_instances.push(instance_id);
+    }
+
+    // Liveness, asserted once over the whole run: zero winners in a round is
+    // legal — `claim_sleeping_instances_due` is a global claim with no tenant
+    // filter, so a rival test sharing this database can take the row first —
+    // but a backend whose claim *never* succeeds would satisfy the safety
+    // assertion above in every round while waking nothing. This is what
+    // separates the two.
+    assert!(
+        rounds_won > 0,
+        "no round of {ROUNDS} produced a winner: this claim never succeeds, \
+         so nothing would ever wake"
+    );
+
+    // Leave nothing behind: a claimed instance is `suspended` with no
+    // `sleep_until`, which neither the retention sweep (terminal only) nor the
+    // wake scan (`sleep_until` present) will ever collect.
+    for instance_id in &claimed_instances {
+        backend
+            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .await
+            .expect("update_instance_status failed (concurrent claim cleanup)");
+    }
+    backend
+        .delete_instances_batch(&claimed_instances)
+        .await
+        .expect("delete_instances_batch failed (concurrent claim cleanup)");
+}
+
+/// A batch claim must never expose a row without a wake deadline.
+///
+/// [`Persistence::claim_sleeping_instances_due`] leases rather than clears, and
+/// the point of the lease is recovery: a row whose claimer dies becomes due
+/// again on its own. That only holds if the row carries a deadline at *every*
+/// instant. A claim assembled from a clear and a later re-stamp satisfies every
+/// before-and-after assertion -- the deadline is there when you look afterwards
+/// -- while still leaving a window in which the row is `suspended` with
+/// `sleep_until = NULL`. That is the shape of a signal waiter, which no sweep
+/// collects: the wake scan skips it for having no deadline, the retention sweep
+/// for not being terminal. A process that dies inside that window strands its
+/// whole batch permanently.
+///
+/// So this watches *during* the claim instead of after it. A reader samples the
+/// rows continuously while the batch is claimed, and the claim is only correct
+/// if the deadline-less state is never observable.
+///
+/// Takes an `Arc` and spawns for the same reason as
+/// [`run_concurrent_claim_sequence`], and must likewise run on a multi-threaded
+/// runtime: on a current-thread runtime the reader cannot be scheduled while
+/// the claim is between its own steps, and the window closes for the wrong
+/// reason.
+pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
+    backend: std::sync::Arc<P>,
+) {
+    /// Enough rows that a per-row claim has to loop, widening the window a
+    /// reader can land in, while staying inside a small connection pool.
+    const SLEEPERS: usize = 12;
+    /// Bounded so a genuine strand fails the test rather than hanging it.
+    const CLAIM_ROUNDS: usize = 10;
+    /// Backdated far enough that these rows are the *oldest* due ones in the
+    /// store. The claim is global and orders by `sleep_until` ascending, so
+    /// rows seeded a few seconds back would sort behind any older backlog a
+    /// shared database happens to hold -- and a bounded loop would then never
+    /// reach them, failing the liveness assertion below against a backend that
+    /// is working correctly, after leasing that entire backlog forward.
+    const BACKDATE: i64 = 86_400;
+
+    let tenant_id = "conformance-tenant-batch-lease";
+    let mut sleepers = Vec::with_capacity(SLEEPERS);
+    for _ in 0..SLEEPERS {
+        let instance_id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&instance_id, tenant_id)
+            .await
+            .expect("register_instance failed (batch lease)");
+        backend
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("update_instance_status suspended failed (batch lease)");
+        backend
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(BACKDATE))
+            .await
+            .expect("set_instance_sleep failed (batch lease)");
+        sleepers.push(instance_id);
+    }
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stranded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    // Counted because the reader swallows read errors to stay out of the
+    // claim's way. Without this, a run where every read failed would leave
+    // `stranded` empty and pass the headline assertion having observed nothing.
+    let samples = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Holds the claim back until the reader has completed a full pass.
+    //
+    // `tokio::spawn` only queues a task, and an in-memory backend's `await`
+    // points resolve inline without ever yielding to the executor — so on a
+    // busy machine the whole claim can finish before the reader is scheduled
+    // even once. Sequencing it here makes the observer's participation a fact
+    // rather than a hope; without this the sample assertion below is itself a
+    // race, and fails on whichever runner happens to schedule least eagerly.
+    let observing = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let reader = {
+        let backend = std::sync::Arc::clone(&backend);
+        let stop = std::sync::Arc::clone(&stop);
+        let stranded = std::sync::Arc::clone(&stranded);
+        let samples = std::sync::Arc::clone(&samples);
+        let observing = std::sync::Arc::clone(&observing);
+        let watched = sleepers.clone();
+        tokio::spawn(async move {
+            // One sighting already fails the assertion; the rest are only
+            // there to make the message concrete. Stop early rather than
+            // keep sampling a backend that has already been caught.
+            const ENOUGH: usize = 16;
+            // Released after the first pass, never again.
+            let mut gate = Some(observing);
+            loop {
+                for instance_id in &watched {
+                    let Ok(Some(record)) = backend.get_instance(instance_id).await else {
+                        continue;
+                    };
+                    samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if record.status == CoreInstanceStatus::Suspended
+                        && record.sleep_until.is_none()
+                    {
+                        // Scoped so the guard is provably released before the
+                        // await below; holding it across one makes this future
+                        // non-`Send` and it cannot be spawned.
+                        let seen_enough = {
+                            let mut seen = stranded.lock().unwrap();
+                            seen.push(instance_id.clone());
+                            seen.len() >= ENOUGH
+                        };
+                        if seen_enough {
+                            // Still release the claim, or it waits forever.
+                            if let Some(gate) = gate.take() {
+                                gate.wait().await;
+                            }
+                            return;
+                        }
+                    }
+                }
+                // Every row carries a past deadline at this point, so this
+                // first pass can see no sighting — it only proves the reader
+                // is live and reading before the claim begins.
+                if let Some(gate) = gate.take() {
+                    gate.wait().await;
+                }
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                // Yield rather than sleep: the window this is hunting for is as
+                // short as two adjacent statements.
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    // Reached only once the reader has sampled every row at least once, so it
+    // is provably watching before anything is claimed.
+    //
+    // Bounded so a reader that somehow never arrives fails this sequence
+    // instead of hanging it: a test that never finishes is worse than one that
+    // reports what went wrong. Expiring here leaves `samples` at zero, which
+    // the assertion after the claim reports.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        std::sync::Arc::clone(&observing).wait(),
+    )
+    .await;
+
+    let ours: std::collections::HashSet<_> = sleepers.iter().cloned().collect();
+    let mut claimed_by_us = Vec::new();
+    for _ in 0..CLAIM_ROUNDS {
+        // Sized to this sequence's own rows rather than a big round number: the
+        // claim is global, so a larger limit would lease an unrelated backlog
+        // 120s into the future on a shared store and delay real wakes.
+        let batch = backend
+            .claim_sleeping_instances_due(SLEEPERS as i64, Utc::now() + Duration::seconds(120))
+            .await
+            .expect("claim_sleeping_instances_due failed (batch lease)");
+        if batch.is_empty() {
+            break;
+        }
+        // Asserted over every record, not just ours: a returned row the caller
+        // is told to launch must carry the lease it was claimed under, or a
+        // failed launch has no deadline to fall back to.
+        for record in &batch {
+            assert!(
+                record
+                    .sleep_until
+                    .is_some_and(|deadline| deadline > Utc::now()),
+                "a claimed record must carry its lease deadline, but {} came back with {:?}",
+                record.instance_id,
+                record.sleep_until
+            );
+        }
+        claimed_by_us.extend(
+            batch
+                .into_iter()
+                .map(|r| r.instance_id)
+                .filter(|id| ours.contains(id)),
+        );
+        if claimed_by_us.len() >= SLEEPERS {
+            break;
+        }
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.await.expect("lease reader task panicked");
+
+    // An empty sighting list only means something if the reader could read at
+    // all. This keeps "never observed the window" from reading as "the window
+    // does not exist".
+    assert!(
+        samples.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the reader never sampled an instance successfully, so it proves \
+         nothing about whether the claim leaves rows without a deadline"
+    );
+
+    // The assertion this sequence exists for.
+    let sightings = stranded.lock().unwrap().clone();
+    assert!(
+        sightings.is_empty(),
+        "a batch claim left {} row(s) `suspended` with no wake deadline, e.g. {:?}; \
+         nothing sweeps that state, so a claimer that died here would strand them \
+         permanently",
+        sightings.len(),
+        &sightings[..sightings.len().min(3)]
+    );
+
+    // Liveness. A backend that never claims would satisfy the assertion above
+    // while waking nothing, and that is the other half of this method's
+    // contract. But the claim is global with no tenant filter, so a rival test
+    // sharing this store may legitimately take these rows first -- and losing
+    // that race is not a defect. What must hold either way is that every row
+    // ended up leased by *somebody*: still suspended, still carrying a future
+    // deadline. Only a store where nothing was claimed at all fails here.
+    let mut leased_by_someone = 0usize;
+    for instance_id in &sleepers {
+        let record = backend
+            .get_instance(instance_id)
+            .await
+            .expect("get_instance failed (batch lease liveness)")
+            .expect("sleeper should exist");
+        if record.status == CoreInstanceStatus::Suspended
+            && record.sleep_until.is_some_and(|d| d > Utc::now())
+        {
+            leased_by_someone += 1;
+        }
+    }
+    assert!(
+        !claimed_by_us.is_empty() || leased_by_someone > 0,
+        "none of {SLEEPERS} due instances was claimed by this caller or leased \
+         by any other in {CLAIM_ROUNDS} rounds: this claim never succeeds, so \
+         nothing would ever wake"
+    );
+
+    for instance_id in &sleepers {
+        backend
+            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .await
+            .expect("update_instance_status failed (batch lease cleanup)");
+    }
+    backend
+        .delete_instances_batch(&sleepers)
+        .await
+        .expect("delete_instances_batch failed (batch lease cleanup)");
 }

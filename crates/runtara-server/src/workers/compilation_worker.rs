@@ -57,7 +57,17 @@ impl CompilationWorkerConfig {
 
         Self {
             redis_url,
-            dequeue_timeout_secs: 5,
+            // Must stay comfortably under `DEFAULT_INTAKE_GRACE_MS` (5s): the
+            // worker only checks the shutdown flag between dequeues, so this is
+            // how long it can take to notice one. At the same 5s as the grace it
+            // was a coin flip whether an idle worker stopped in time.
+            //
+            // Shortening it is the fix rather than racing the dequeue against
+            // the signal, because `dequeue` is a `BLPOP` — destructive, with no
+            // consumer group and no redelivery. Abandoning one mid-flight would
+            // drop a compilation request on the floor. An idle worker just makes
+            // a few more round trips.
+            dequeue_timeout_secs: 2,
             connection_service_url,
         }
     }
@@ -505,8 +515,25 @@ mod tests {
         let config = CompilationWorkerConfig::from_env("redis://localhost:6379".to_string());
 
         assert_eq!(config.redis_url, "redis://localhost:6379");
-        assert_eq!(config.dequeue_timeout_secs, 5);
+        assert_eq!(config.dequeue_timeout_secs, 2);
         // connection_service_url depends on env var - just check it's loaded
+    }
+
+    /// The dequeue block is how long the worker can take to notice shutdown,
+    /// and the `BLPOP` behind it must never be cancelled to cut that short —
+    /// it is destructive, so an abandoned one loses the compilation request.
+    /// Raising this past the intake grace would make the worker a straggler on
+    /// every shutdown, which is the regression this guards.
+    #[test]
+    fn dequeue_block_fits_inside_the_intake_grace() {
+        let config = CompilationWorkerConfig::from_env("redis://localhost:6379".to_string());
+        let dequeue = Duration::from_secs(config.dequeue_timeout_secs);
+        let grace = Duration::from_millis(crate::shutdown::DEFAULT_INTAKE_GRACE_MS);
+
+        assert!(
+            dequeue < grace,
+            "dequeue block {dequeue:?} must be shorter than the intake grace {grace:?}"
+        );
     }
 
     #[test]

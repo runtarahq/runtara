@@ -265,7 +265,15 @@ pub async fn run_reconciler(pool: PgPool, shutdown: crate::shutdown::ShutdownSig
     );
 
     loop {
-        tokio::time::sleep(interval).await;
+        // Wake on the shutdown signal rather than only at the end of the
+        // sleep. The interval is 30 s by default and the intake grace is 5 s,
+        // so a worker that noticed shutdown only on the next tick could never
+        // stop inside the grace — it would be reported as a straggler and
+        // aborted on every single shutdown.
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = shutdown.clone().wait() => {}
+        }
         if shutdown.is_shutting_down() {
             info!("Valkey admission counter reconciler stopping on shutdown");
             return;

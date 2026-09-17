@@ -87,6 +87,22 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     /// implementation may not use it.
     fn duration_ms(a: &str, b: &str) -> String;
 
+    /// Wrap a text expression so it sorts by byte order rather than under the
+    /// database's collation: `{expr} COLLATE "C"` on Postgres.
+    ///
+    /// Required wherever generated SQL orders on text that a `Persistence`
+    /// contract defines as ordered bytewise. A bare `ORDER BY <text>` sorts
+    /// under the database collation, which ranks punctuation and case
+    /// differently from the raw bytes every non-SQL backend compares: under
+    /// `en_US.utf8`, `stepA` leads `step_a`, and bytewise it trails it. Ids
+    /// carry `-`, `_` and mixed case, so the two disagree on real input.
+    ///
+    /// Byte order is also the only stable choice. A collated sort follows the
+    /// deployment's locale and libc/ICU version, so an operating-system
+    /// upgrade re-shuffles pages underneath a paginating caller without any
+    /// change to the query.
+    fn text_byte_order(expr: &str) -> String;
+
     // --- Whole-SQL (for queries where fragment composition loses value) ----
 
     /// SQL for reading a pending custom signal by `(instance_id, checkpoint_id)`.
@@ -111,7 +127,18 @@ pub(crate) trait Dialect: Send + Sync + 'static {
 
     /// SQL for `list_checkpoints` (binds: instance_id, checkpoint_id_filter,
     /// created_after, created_before, limit, offset).
-    fn sql_list_checkpoints() -> &'static str;
+    ///
+    /// Must order by `created_at DESC`, then by `checkpoint_id` through
+    /// [`Self::text_byte_order`], descending. The id keeps the order total, so
+    /// an `OFFSET` never pages a set the planner is free to re-shuffle between
+    /// calls, and the byte order is what keeps that total order the same one
+    /// the core contract states — `Fetch-Order` leads `fetch_order` under
+    /// `en_US.utf8` and trails it under `C`, and checkpoint ids carry `-`, `_`
+    /// and mixed case, so the two disagree on real input.
+    ///
+    /// Returns `String` rather than `&'static str` for that reason: the
+    /// collation is the dialect's to spell, not this query's.
+    fn sql_list_checkpoints() -> String;
 
     /// SQL for `count_checkpoints` (binds: instance_id,
     /// checkpoint_id_filter, created_after, created_before).

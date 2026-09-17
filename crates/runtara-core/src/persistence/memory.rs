@@ -213,6 +213,12 @@ impl Persistence for InMemoryPersistence {
         inst.status = status;
         if let Some(at) = started_at {
             inst.started_at = Some(at);
+            // Stamping `started_at` means the row is entering a run, so the
+            // terminal fields left by the previous one no longer describe it.
+            // Keeping them would put `finished_at` before `started_at` and
+            // render a resumed run as a negative duration.
+            inst.finished_at = None;
+            inst.termination_reason = None;
         }
         Ok(())
     }
@@ -291,6 +297,9 @@ impl Persistence for InMemoryPersistence {
             .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
         {
             existing.state = state.to_vec();
+            // A refresh restamps: the trait dates a checkpoint by when its
+            // state was written, and `list_checkpoints` pages on that field.
+            existing.created_at = Utc::now();
             return Ok(());
         }
         store.checkpoints.push(CheckpointRecord {
@@ -327,13 +336,26 @@ impl Persistence for InMemoryPersistence {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
         let store = self.store.lock().unwrap();
-        Ok(store
+        let mut found: Vec<&CheckpointRecord> = store
             .checkpoints
             .iter()
             .filter(|c| c.instance_id == instance_id)
             .filter(|c| checkpoint_id.is_none_or(|id| c.checkpoint_id == id))
             .filter(|c| created_after.is_none_or(|t| c.created_at >= t))
             .filter(|c| created_before.is_none_or(|t| c.created_at < t))
+            .collect();
+        // Ordered by `(created_at, checkpoint_id)`: the id breaks ties so
+        // checkpoints written inside one clock tick still page deterministically.
+        // Sorting has to precede the skip/take, or `offset` pages the raw
+        // insertion order and only the page contents come out sorted.
+        found.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.checkpoint_id.cmp(&b.checkpoint_id))
+        });
+        found.reverse();
+        Ok(found
+            .into_iter()
             .skip(offset.max(0) as usize)
             .take(limit.max(0) as usize)
             .cloned()
@@ -553,8 +575,19 @@ impl Persistence for InMemoryPersistence {
             .filter(|i| status.is_none_or(|s| i.status == s))
             .cloned()
             .collect();
-        // Return newest instances first.
-        found.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        // Newest first, ordered by `(created_at, instance_id)`: the id breaks
+        // ties so instances registered inside one clock tick still page
+        // deterministically. `sort_by_key(Reverse(created_at))` alone left
+        // tied rows in `HashMap` iteration order, which is arbitrary and
+        // re-shuffles as the map rehashes — so `offset` walked a different
+        // set on every call. `String::cmp` is bytewise, which is the order
+        // the trait specifies.
+        found.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.instance_id.cmp(&b.instance_id))
+        });
+        found.reverse();
         Ok(found
             .into_iter()
             .skip(offset.max(0) as usize)
@@ -773,6 +806,45 @@ impl Persistence for InMemoryPersistence {
         due.sort_by_key(|i| i.sleep_until);
         Ok(due.into_iter().take(limit.max(0) as usize).collect())
     }
+
+    /// Selects and leases in a single critical section.
+    ///
+    /// Holding the store lock across both halves is what makes this a claim
+    /// rather than a scan: no other caller can observe -- or claim -- a row
+    /// between its selection and its new deadline. Selecting and then leasing
+    /// under two separate locks would leave rows briefly unclaimed and, worse,
+    /// briefly deadline-less.
+    async fn claim_sleeping_instances_due(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        let now = Utc::now();
+        let mut store = self.store.lock().unwrap();
+
+        // Same candidate set and ordering as `get_sleeping_instances_due`:
+        // earliest deadline first, so a backlog drains in the order it fell due.
+        let mut candidates: Vec<_> = store
+            .instances
+            .values()
+            .filter(|i| i.status == CoreInstanceStatus::Suspended)
+            .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
+            .map(|i| (i.instance_id.clone(), i.sleep_until))
+            .collect();
+        candidates.sort_by_key(|(_, sleep_until)| *sleep_until);
+
+        let mut claimed = Vec::new();
+        for (instance_id, _) in candidates.into_iter().take(limit.max(0) as usize) {
+            let Some(instance) = store.instances.get_mut(&instance_id) else {
+                continue;
+            };
+            instance.sleep_until = Some(retry_at);
+            // Cloned after the stamp, so the record carries the lease it was
+            // claimed under rather than the deadline it was selected on.
+            claimed.push(instance.clone());
+        }
+        Ok(claimed)
+    }
 }
 
 /// Events for one instance that satisfy `filter`.
@@ -941,6 +1013,60 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    /// Instances sharing a `created_at` fall back to the id, compared bytewise.
+    ///
+    /// The tie is forced by stamping the store directly. Registrations *do*
+    /// tie through the trait — `Utc::now()` resolves to a microsecond on
+    /// macOS, and four back-to-back registrations land inside one tick
+    /// roughly one run in five — but "roughly" is not a test. Reaching into
+    /// `Store` makes it every run, which is the only way this pins anything.
+    ///
+    /// The ids are the ones the shared conformance sequence uses, and they
+    /// order differently bytewise than under a text collation. That matters
+    /// for the other backend rather than this one: `String::cmp` is bytewise
+    /// and has no alternative, while a SQL backend has to ask for the byte
+    /// order explicitly. Pinning the same expectation on both sides is what
+    /// makes them comparable.
+    #[tokio::test]
+    async fn in_memory_instances_sharing_a_timestamp_break_the_tie_bytewise() {
+        let backend = InMemoryPersistence::new();
+        let tenant = "instance-tie";
+        for suffix in ["Step-A", "step-a", "stepA", "step_a"] {
+            backend.register_instance(suffix, tenant).await.unwrap();
+        }
+        // One timestamp for every row: the tie-break alone decides the order.
+        let shared_at = Utc::now();
+        {
+            let mut store = backend.store.lock().unwrap();
+            for instance in store.instances.values_mut() {
+                instance.created_at = shared_at;
+            }
+        }
+
+        let listed = backend
+            .list_instances(Some(tenant), None, 50, 0)
+            .await
+            .unwrap();
+        let order: Vec<&str> = listed.iter().map(|i| i.instance_id.as_str()).collect();
+        assert_eq!(
+            order,
+            ["step_a", "stepA", "step-a", "Step-A"],
+            "tied instances must break the tie on the id compared bytewise"
+        );
+
+        // The same order has to survive paging, which is the reason it is
+        // pinned: an OFFSET over a partial order skips and repeats rows.
+        let mut paged = Vec::new();
+        for offset in 0..4 {
+            let page = backend
+                .list_instances(Some(tenant), None, 1, offset)
+                .await
+                .unwrap();
+            paged.push(page[0].instance_id.clone());
+        }
+        assert_eq!(paged, order, "paging must tile the tie-broken order");
+    }
+
     /// Run the backend contract against the in-memory implementation.
     #[tokio::test]
     async fn in_memory_backend_satisfies_the_conformance_sequence() {
@@ -950,6 +1076,26 @@ mod tests {
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    }
+
+    /// Parallel wakers racing for one instance must produce a single winner.
+    ///
+    /// Multi-threaded on purpose: a current-thread runtime serializes the
+    /// contenders and the race never happens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_backend_claims_a_sleeping_instance_atomically() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::run_concurrent_claim_sequence(backend).await;
+    }
+
+    /// A batch claim must never expose a row without a wake deadline.
+    ///
+    /// Multi-threaded on purpose: the reader has to be schedulable while the
+    /// claim is mid-flight, or it cannot see the window it is watching for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_backend_leases_a_batch_without_stranding_it() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::run_batch_claim_never_strands_sequence(backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

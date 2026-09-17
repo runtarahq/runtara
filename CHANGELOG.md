@@ -142,6 +142,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GET /workflows/{id}/instances/{instanceId}/checkpoints` now honors
+  `page`.** The handler normalized the page number and then dropped it, asking
+  the store for a limit and no offset — so every page re-read the first `size`
+  rows and `?page=1` returned page 0 again, however large the instance's
+  checkpoint history. The page now also keeps the store's documented order —
+  `(created_at, checkpoint_id)` descending, newest first — instead of being
+  re-sorted by checkpoint id under a comment calling that chronological: ids
+  are step-derived (with `::retry::{n}` / `::attempt::{n}` suffixes), so that
+  sort was neither a time order nor one the pages themselves followed.
+  **`seq` changes meaning**: it now numbers the row within the full
+  ordered list (page 2 of size 20 starts at 40) rather than restarting at 0 on
+  every page — and it is no longer stamped before a re-sort that then scrambled
+  it against the order the rows it was attached to came back in.
+
 - `*_CLEANUP_ENABLED` env-var parsing across all four cleanup workers
   previously treated **any** value other than `"true"` or `"1"` as
   disabled — including misconfigurations like `"yes"`, `"on"`, `"True"`,
@@ -182,6 +196,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SCENARIO_ID=...` for OTel, switch to `WORKFLOW_ID`.
 - Historical rows in `error_history.error_code = 'CHILD_SCENARIO_FAILED'`
   are left as-is; only new errors use the new code.
+  **Correction:** `error_history` was dropped in
+  `crates/runtara-store-postgres/migrations/postgresql/017_drop_structured_errors_and_schedules.sql`.
+  Nothing ever wrote to the table, so there were no historical rows to leave
+  as-is and nothing to migrate. Comments elsewhere that plan a rewrite of
+  those rows — including one in
+  `crates/runtara-server/migrations/20260419000000_rename_scenarios_to_workflows.sql`,
+  which is applied and checksummed and so cannot be corrected in place —
+  describe work that does not exist.
 
 ## [1.8.0] - 2026-04-13
 

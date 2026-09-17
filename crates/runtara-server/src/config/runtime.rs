@@ -8,6 +8,10 @@ use super::ConfigError;
 
 const MAX_CONCURRENT_INSTANCES: &str = "RUNTARA_MAX_CONCURRENT_INSTANCES";
 const SHUTDOWN_GRACE_MS: &str = "RUNTARA_CORE_SHUTDOWN_GRACE_MS";
+const RUNTIME_MAX_CONNECTIONS: &str = "RUNTARA_RUNTIME_MAX_CONNECTIONS";
+const POOL_ACQUIRE_TIMEOUT_SECS: &str = "RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS";
+const POOL_IDLE_TIMEOUT_SECS: &str = "RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS";
+const POOL_MAX_LIFETIME_SECS: &str = "RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS";
 
 /// Optional settings applied by the host to its instance runtime.
 ///
@@ -56,6 +60,205 @@ impl RuntimeOverrides {
             max_concurrent_instances,
             shutdown_grace,
         })
+    }
+}
+
+/// Default maximum connections for the runtime pool. Every instance launch and
+/// every wake does several round trips on it, so this is a direct cap on how
+/// fast instances start and resume.
+pub const DEFAULT_RUNTIME_MAX_CONNECTIONS: u32 = 32;
+/// Default wait for a free connection, in seconds. Matches sqlx's own default.
+pub const DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+/// Default idle recycle, in seconds. Matches sqlx's own default.
+pub const DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 600;
+/// Default connection lifetime, in seconds. Matches sqlx's own default.
+pub const DEFAULT_POOL_MAX_LIFETIME_SECS: u64 = 1800;
+
+/// Connection-pool tuning for the runtime database the embedded runtime owns.
+///
+/// These map directly onto sqlx's `PgPoolOptions`, and the timeout defaults are
+/// sqlx's own values made explicit — an unconfigured deployment keeps the
+/// behaviour it already had. A `None` `idle_timeout`/`max_lifetime` disables
+/// that timeout, which is what a configured `0` means.
+///
+/// The knobs apply only where this process owns the pool. Nothing here reaches
+/// a pool constructed elsewhere and handed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimePoolConfig {
+    /// Maximum connections in the pool.
+    pub max_connections: u32,
+    /// How long to wait for a free connection before erroring.
+    pub acquire_timeout: Duration,
+    /// Close a connection after it has been idle this long (`None` = never).
+    pub idle_timeout: Option<Duration>,
+    /// Close a connection after it has lived this long (`None` = never).
+    pub max_lifetime: Option<Duration>,
+}
+
+impl Default for RuntimePoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_RUNTIME_MAX_CONNECTIONS,
+            acquire_timeout: Duration::from_secs(DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS),
+            idle_timeout: Some(Duration::from_secs(DEFAULT_POOL_IDLE_TIMEOUT_SECS)),
+            max_lifetime: Some(Duration::from_secs(DEFAULT_POOL_MAX_LIFETIME_SECS)),
+        }
+    }
+}
+
+impl RuntimePoolConfig {
+    /// Load the runtime pool's tuning from the process environment.
+    ///
+    /// Reads `RUNTARA_RUNTIME_MAX_CONNECTIONS`,
+    /// `RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS`,
+    /// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS` and
+    /// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`. Unset variables keep the
+    /// defaults; malformed values fail embedded startup before storage opens,
+    /// rather than reverting to a default the operator never asked for.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_raw(
+            std::env::var(RUNTIME_MAX_CONNECTIONS).ok().as_deref(),
+            std::env::var(POOL_ACQUIRE_TIMEOUT_SECS).ok().as_deref(),
+            std::env::var(POOL_IDLE_TIMEOUT_SECS).ok().as_deref(),
+            std::env::var(POOL_MAX_LIFETIME_SECS).ok().as_deref(),
+        )
+    }
+
+    fn from_raw(
+        max_connections: Option<&str>,
+        acquire_secs: Option<&str>,
+        idle_secs: Option<&str>,
+        lifetime_secs: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let max_connections = match max_connections {
+            Some(raw) => raw.parse::<u32>().map_err(|_| {
+                ConfigError::Invalid(RUNTIME_MAX_CONNECTIONS, "must be a positive integer")
+            })?,
+            None => DEFAULT_RUNTIME_MAX_CONNECTIONS,
+        };
+        // A pool of zero can never hand out a connection, so it is a
+        // misconfiguration and not a way to spell "use the default".
+        if max_connections == 0 {
+            return Err(ConfigError::Invalid(
+                RUNTIME_MAX_CONNECTIONS,
+                "must be a positive integer",
+            ));
+        }
+        // Unlike the other two timeouts, zero does not disable this one: sqlx
+        // deadlines the opening connection against it, so a zero acquire
+        // timeout fails the pool before it is built, reported as an opaque
+        // `PoolTimedOut` that names no variable.
+        let acquire_secs = parse_secs(
+            POOL_ACQUIRE_TIMEOUT_SECS,
+            acquire_secs,
+            DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS,
+        )?;
+        if acquire_secs == 0 {
+            return Err(ConfigError::Invalid(
+                POOL_ACQUIRE_TIMEOUT_SECS,
+                "must be a positive number of seconds (0 does not disable it)",
+            ));
+        }
+        Ok(Self {
+            max_connections,
+            acquire_timeout: Duration::from_secs(acquire_secs),
+            idle_timeout: super::secs_to_opt_duration(parse_secs(
+                POOL_IDLE_TIMEOUT_SECS,
+                idle_secs,
+                DEFAULT_POOL_IDLE_TIMEOUT_SECS,
+            )?),
+            max_lifetime: super::secs_to_opt_duration(parse_secs(
+                POOL_MAX_LIFETIME_SECS,
+                lifetime_secs,
+                DEFAULT_POOL_MAX_LIFETIME_SECS,
+            )?),
+        })
+    }
+}
+
+const SERVER_SHUTDOWN_GRACE_MS: &str = "RUNTARA_SHUTDOWN_GRACE_MS";
+const SERVER_INTAKE_GRACE_MS: &str = "RUNTARA_SHUTDOWN_INTAKE_GRACE_MS";
+
+/// How long the server's shutdown drain waits, in its two stages.
+///
+/// Parsed with the rest of the configuration at startup rather than where the
+/// coordinator is built: by that point the pool is open, migrations have run,
+/// and the embedded environment has already relaunched recovered instances, so
+/// a mistyped value would crash-loop through recovery instead of failing before
+/// anything happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownGrace {
+    /// How long in-flight executions get to reach a checkpoint and suspend.
+    pub executions: Duration,
+    /// How long intake workers get to finish their current unit of work.
+    pub intake: Duration,
+}
+
+impl Default for ShutdownGrace {
+    fn default() -> Self {
+        Self {
+            executions: Duration::from_millis(crate::shutdown::DEFAULT_SHUTDOWN_GRACE_MS),
+            intake: Duration::from_millis(crate::shutdown::DEFAULT_INTAKE_GRACE_MS),
+        }
+    }
+}
+
+impl ShutdownGrace {
+    /// Load both grace periods from the process environment.
+    ///
+    /// Reads `RUNTARA_SHUTDOWN_GRACE_MS` and `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS`.
+    /// A malformed value fails startup. Reverting to the default instead would
+    /// hide the misconfiguration until the one event it governs — a deploy —
+    /// and then cut the drain short by exactly the margin the operator thought
+    /// they had bought.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_raw(
+            std::env::var(SERVER_SHUTDOWN_GRACE_MS).ok().as_deref(),
+            std::env::var(SERVER_INTAKE_GRACE_MS).ok().as_deref(),
+        )
+    }
+
+    fn from_raw(executions: Option<&str>, intake: Option<&str>) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            executions: parse_grace_ms(SERVER_SHUTDOWN_GRACE_MS, executions, defaults.executions)?,
+            intake: parse_grace_ms(SERVER_INTAKE_GRACE_MS, intake, defaults.intake)?,
+        })
+    }
+}
+
+fn parse_grace_ms(
+    name: &'static str,
+    raw: Option<&str>,
+    default: Duration,
+) -> Result<Duration, ConfigError> {
+    match raw {
+        Some(raw) => raw
+            .parse::<u32>()
+            .map(|ms| Duration::from_millis(u64::from(ms)))
+            .map_err(|_| {
+                ConfigError::Invalid(
+                    name,
+                    "must be a whole number of milliseconds, at most 4294967295",
+                )
+            }),
+        None => Ok(default),
+    }
+}
+
+/// Parse a seconds value, bounded to `u32` like the execution-timeout parser
+/// next door. The bound is load-bearing rather than cosmetic: sqlx deadlines
+/// the pool with `Instant::now() + acquire_timeout`, and an unbounded `u64`
+/// number of seconds overflows that and panics instead of naming the variable.
+fn parse_secs(name: &'static str, raw: Option<&str>, default: u64) -> Result<u64, ConfigError> {
+    match raw {
+        Some(raw) => raw.parse::<u32>().map(u64::from).map_err(|_| {
+            ConfigError::Invalid(
+                name,
+                "must be a whole number of seconds, at most 4294967295",
+            )
+        }),
+        None => Ok(default),
     }
 }
 
@@ -168,6 +371,207 @@ mod tests {
                     Err(ConfigError::Invalid(SHUTDOWN_GRACE_MS, _))
                 ),
                 "grace {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unset_pool_variables_keep_the_sqlx_defaults() {
+        assert_eq!(
+            RuntimePoolConfig::from_raw(None, None, None, None).unwrap(),
+            RuntimePoolConfig::default()
+        );
+        let defaults = RuntimePoolConfig::default();
+        assert_eq!(defaults.max_connections, DEFAULT_RUNTIME_MAX_CONNECTIONS);
+        assert_eq!(defaults.acquire_timeout, Duration::from_secs(30));
+        assert_eq!(defaults.idle_timeout, Some(Duration::from_secs(600)));
+        assert_eq!(defaults.max_lifetime, Some(Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn parses_each_pool_knob_independently() {
+        assert_eq!(
+            RuntimePoolConfig::from_raw(Some("64"), Some("5"), Some("120"), Some("900")).unwrap(),
+            RuntimePoolConfig {
+                max_connections: 64,
+                acquire_timeout: Duration::from_secs(5),
+                idle_timeout: Some(Duration::from_secs(120)),
+                max_lifetime: Some(Duration::from_secs(900)),
+            }
+        );
+        assert_eq!(
+            RuntimePoolConfig::from_raw(Some("8"), None, None, None).unwrap(),
+            RuntimePoolConfig {
+                max_connections: 8,
+                ..RuntimePoolConfig::default()
+            }
+        );
+    }
+
+    #[test]
+    fn zero_seconds_disables_idle_timeout_and_max_lifetime() {
+        let config = RuntimePoolConfig::from_raw(None, None, Some("0"), Some("0")).unwrap();
+        assert_eq!(config.idle_timeout, None);
+        assert_eq!(config.max_lifetime, None);
+        assert_eq!(
+            config.acquire_timeout,
+            Duration::from_secs(DEFAULT_POOL_ACQUIRE_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn zero_does_not_disable_the_acquire_timeout_it_is_rejected() {
+        // sqlx deadlines the opening connection against this one, so zero would
+        // fail the pool with an opaque `PoolTimedOut` naming no variable.
+        assert!(matches!(
+            RuntimePoolConfig::from_raw(None, Some("0"), None, None),
+            Err(ConfigError::Invalid(POOL_ACQUIRE_TIMEOUT_SECS, _))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_pool_that_can_never_hand_out_a_connection() {
+        assert!(matches!(
+            RuntimePoolConfig::from_raw(Some("0"), None, None, None),
+            Err(ConfigError::Invalid(RUNTIME_MAX_CONNECTIONS, _))
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_pool_values_instead_of_reverting_to_a_default() {
+        for raw in ["", "lots", "-1", "4294967296"] {
+            assert!(
+                matches!(
+                    RuntimePoolConfig::from_raw(Some(raw), None, None, None),
+                    Err(ConfigError::Invalid(RUNTIME_MAX_CONNECTIONS, _))
+                ),
+                "max_connections {raw:?}"
+            );
+        }
+        for (position, name) in [
+            (1, POOL_ACQUIRE_TIMEOUT_SECS),
+            (2, POOL_IDLE_TIMEOUT_SECS),
+            (3, POOL_MAX_LIFETIME_SECS),
+        ] {
+            for raw in ["", "30s", "-1", "4294967296", "18446744073709551616"] {
+                let mut args: [Option<&str>; 3] = [None, None, None];
+                args[position - 1] = Some(raw);
+                assert!(
+                    matches!(
+                        RuntimePoolConfig::from_raw(None, args[0], args[1], args[2]),
+                        Err(ConfigError::Invalid(reported, _)) if reported == name
+                    ),
+                    "{name}={raw:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unset_grace_keeps_the_defaults() {
+        assert_eq!(
+            ShutdownGrace::from_raw(None, None).unwrap(),
+            ShutdownGrace::default()
+        );
+        assert_eq!(
+            ShutdownGrace::default().executions,
+            Duration::from_millis(crate::shutdown::DEFAULT_SHUTDOWN_GRACE_MS)
+        );
+        assert_eq!(
+            ShutdownGrace::default().intake,
+            Duration::from_millis(crate::shutdown::DEFAULT_INTAKE_GRACE_MS)
+        );
+    }
+
+    #[test]
+    fn parses_each_grace_independently_including_zero() {
+        assert_eq!(
+            ShutdownGrace::from_raw(Some("30000"), Some("0")).unwrap(),
+            ShutdownGrace {
+                executions: Duration::from_millis(30_000),
+                intake: Duration::ZERO,
+            }
+        );
+        assert_eq!(
+            ShutdownGrace::from_raw(Some("1500"), None).unwrap().intake,
+            ShutdownGrace::default().intake
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_grace_instead_of_reverting_to_the_default() {
+        for raw in ["", "30s", "-1", "30_000", "4294967296"] {
+            assert!(
+                matches!(
+                    ShutdownGrace::from_raw(Some(raw), None),
+                    Err(ConfigError::Invalid(SERVER_SHUTDOWN_GRACE_MS, _))
+                ),
+                "executions {raw:?}"
+            );
+            assert!(
+                matches!(
+                    ShutdownGrace::from_raw(None, Some(raw)),
+                    Err(ConfigError::Invalid(SERVER_INTAKE_GRACE_MS, _))
+                ),
+                "intake {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loads_pool_config_from_process_environment() {
+        const CASE: &str = "RUNTARA_TEST_RUNTIME_POOL_CASE";
+        if let Ok(case) = std::env::var(CASE) {
+            let actual = RuntimePoolConfig::from_env();
+            match case.as_str() {
+                "unset" => assert_eq!(actual.unwrap(), RuntimePoolConfig::default()),
+                "set" => assert_eq!(
+                    actual.unwrap(),
+                    RuntimePoolConfig {
+                        max_connections: 64,
+                        acquire_timeout: Duration::from_secs(5),
+                        idle_timeout: Some(Duration::from_secs(120)),
+                        max_lifetime: None,
+                    }
+                ),
+                "invalid" => assert!(matches!(
+                    actual,
+                    Err(ConfigError::Invalid(POOL_IDLE_TIMEOUT_SECS, _))
+                )),
+                _ => panic!("unknown test case"),
+            }
+            return;
+        }
+
+        for case in ["unset", "set", "invalid"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "config::runtime::tests::loads_pool_config_from_process_environment",
+                    "--nocapture",
+                ])
+                .env(CASE, case)
+                .env_remove(RUNTIME_MAX_CONNECTIONS)
+                .env_remove(POOL_ACQUIRE_TIMEOUT_SECS)
+                .env_remove(POOL_IDLE_TIMEOUT_SECS)
+                .env_remove(POOL_MAX_LIFETIME_SECS);
+            if case == "set" {
+                child
+                    .env(RUNTIME_MAX_CONNECTIONS, "64")
+                    .env(POOL_ACQUIRE_TIMEOUT_SECS, "5")
+                    .env(POOL_IDLE_TIMEOUT_SECS, "120")
+                    .env(POOL_MAX_LIFETIME_SECS, "0");
+            } else if case == "invalid" {
+                child.env(POOL_IDLE_TIMEOUT_SECS, "ten minutes");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
         }
     }

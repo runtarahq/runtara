@@ -198,7 +198,7 @@ url = "2"
 urlencoding = "2"
 
 # MCP (Model Context Protocol) server
-rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "2.2.0", features = ["server", "transport-streamable-http-server"] }
 schemars = "1"
 reqwest = { version = "0.12", features = ["json"] }
 

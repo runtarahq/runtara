@@ -97,7 +97,7 @@ macro_rules! impl_checkpoint_ops {
             > {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_list_checkpoints();
-                let rows = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(sql)
+                let rows = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(&sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .bind(created_after)

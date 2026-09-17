@@ -473,7 +473,6 @@ impl<'a> CompleteInstanceParams<'a> {
 }
 
 /// Persistence interface used by core handlers.
-#[allow(missing_docs)]
 #[async_trait]
 pub trait Persistence: Send + Sync {
     /// Optional atomic invocation fencing. Callers requiring durable fences must
@@ -483,6 +482,13 @@ pub trait Persistence: Send + Sync {
         None
     }
 
+    /// Insert a new instance row for `instance_id`, owned by `tenant_id`, in
+    /// its initial pending state.
+    ///
+    /// The id is the primary key, so a second call for the same id is an
+    /// error, not an update. A caller that treats the id as an idempotency key
+    /// and needs to know which way the race went should use
+    /// [`Self::try_register_instance`], which reports it.
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError>;
 
     /// Register an instance, reporting whether this call created the row.
@@ -514,6 +520,12 @@ pub trait Persistence: Send + Sync {
         Ok(true)
     }
 
+    /// Read an instance's full row, launch input included.
+    ///
+    /// `Ok(None)` for an id that was never registered — an unknown instance is
+    /// an answer here, not an error. Use [`Self::get_instance_meta`] instead
+    /// whenever the input is not what the caller came for; that blob is the
+    /// expensive part of this row.
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError>;
 
     /// Like [`Self::get_instance`] but without the `input` blob, for callers
@@ -539,6 +551,34 @@ pub trait Persistence: Send + Sync {
         }))
     }
 
+    /// Set an instance's status, stamping `started_at` when one is supplied
+    /// and leaving it untouched when it is not.
+    ///
+    /// Supplying `started_at` says the row is entering a run, and carries one
+    /// required guarantee with it: `finished_at` and `termination_reason` are
+    /// cleared in the same write. A row that ran before may still hold both
+    /// from an earlier suspend or drain force-stop; those describe a run that
+    /// is no longer over, and leaving them puts `finished_at` before
+    /// `started_at`, which renders a resumed run as a negative duration.
+    /// `exit_code` is deliberately not part of the clear. Omitting
+    /// `started_at` writes the status alone and touches nothing else.
+    ///
+    /// The clear is not optional for a backend to implement, and it is not
+    /// only this method's concern: the default
+    /// [`Self::mark_instance_running`] and [`Self::mark_instance_started`]
+    /// both route here with a `started_at`, so they inherit it, and a backend
+    /// overriding either owes the same clear there.
+    ///
+    /// Past that, the raw write: it applies the status it is given and guards
+    /// the transition not at all. A caller stamping `running` after a launch
+    /// wants [`Self::mark_instance_started`], which refuses once the run has
+    /// moved past the pre-run states; a wake or resume wants
+    /// [`Self::mark_instance_running`], which is deliberately unguarded
+    /// because it promotes from `suspended` — the state the other one refuses.
+    /// A terminal transition wants [`Self::complete_instance`], which is what
+    /// stamps `finished_at`.
+    ///
+    /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_status(
         &self,
         instance_id: &str,
@@ -546,6 +586,10 @@ pub trait Persistence: Send + Sync {
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError>;
 
+    /// Point an instance at the checkpoint it most recently wrote, so a
+    /// relaunch knows where to resume from.
+    ///
+    /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_checkpoint(
         &self,
         instance_id: &str,
@@ -558,8 +602,18 @@ pub trait Persistence: Send + Sync {
     /// overlapping `complete_instance*` variants. The behavior is
     /// controlled entirely by the [`CompleteInstanceParams`] struct —
     /// see its documentation for the per-field semantics (which fields are
-    /// replaced and which are merged, terminal-only `finished_at`, guard
-    /// against races).
+    /// replaced and which are merged, guard against races).
+    ///
+    /// `finished_at` is stamped for `completed`, `failed`, `cancelled` **and**
+    /// `suspended`. Parking counts: it ends the attempt that was in flight,
+    /// even though the instance will run again. A `running` transition carries
+    /// metadata without finalizing anything and stamps nothing. A supplied
+    /// `termination_reason` is written on the same transition.
+    ///
+    /// Those two fields are what [`Self::update_instance_status`] clears when a
+    /// later call supplies a `started_at`. The pairing is the whole reason a
+    /// resumed run does not report a negative duration, so a backend that
+    /// declines to stamp here silently weakens the clear over there.
     ///
     /// Return value:
     /// - `Ok(true)` — the update matched a row.
@@ -587,6 +641,18 @@ pub trait Persistence: Send + Sync {
         Ok(())
     }
 
+    /// Write the serialized `state` for `(instance_id, checkpoint_id)`.
+    ///
+    /// Saving the same pair again **refreshes** it rather than failing.
+    /// Replay is ordinary here: a relaunched instance re-runs the durable
+    /// steps it already checkpointed, and a save that rejected the repeat
+    /// would turn every recovery into an error.
+    ///
+    /// A refresh restamps `created_at` to the time of the rewrite, so the
+    /// timestamp is when this state was written and not when the key was
+    /// first used. [`Self::list_checkpoints`] pages on that field, so a
+    /// backend that keeps the original stamp pages a replayed instance in a
+    /// different order than one that does not.
     async fn save_checkpoint(
         &self,
         instance_id: &str,
@@ -594,12 +660,39 @@ pub trait Persistence: Send + Sync {
         state: &[u8],
     ) -> Result<(), CoreError>;
 
+    /// Read back one checkpoint by `(instance_id, checkpoint_id)`.
+    ///
+    /// `Ok(None)` for a pair that was never saved — a step that has not run
+    /// yet, which is what a replaying instance is asking about.
     async fn load_checkpoint(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError>;
 
+    /// Page through an instance's checkpoints, newest first.
+    ///
+    /// Ordered by `(created_at, checkpoint_id)` descending, comparing the id
+    /// **bytewise**. Without a total order, `offset` walks a set the store is
+    /// free to re-shuffle between pages, and a paginating caller silently
+    /// skips and repeats rows.
+    ///
+    /// The id is a tie-break and nothing more: its order carries no meaning of
+    /// its own, it just has to be the same order every time and on every
+    /// backend. Bytewise is what makes that last part true — a SQL backend
+    /// sorting text under its database collation orders `-`, `_` and case
+    /// differently from every backend that compares the raw bytes, so it must
+    /// ask for the byte order explicitly.
+    ///
+    /// Ties are rare rather than routine: a backend that stamps `created_at`
+    /// per write has to land two writes inside one tick of its clock to
+    /// produce one. The tie-break is here so that the order is defined when
+    /// that happens, not because it happens often.
+    ///
+    /// Every filter is optional and narrows the set: `checkpoint_id` to a
+    /// single id, `created_after` inclusive, `created_before` exclusive — a
+    /// half-open window, so back-to-back pages tile a time range without
+    /// double-counting the boundary.
     async fn list_checkpoints(
         &self,
         instance_id: &str,
@@ -610,6 +703,11 @@ pub trait Persistence: Send + Sync {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError>;
 
+    /// Count what [`Self::list_checkpoints`] would return for the same
+    /// filters, ignoring `limit`/`offset`.
+    ///
+    /// The total a paginating caller reports, not the size of the page it
+    /// just read.
     async fn count_checkpoints(
         &self,
         instance_id: &str,
@@ -638,6 +736,13 @@ pub trait Persistence: Send + Sync {
         payload: &[u8],
     ) -> Result<(), CoreError>;
 
+    /// Read the lifecycle command waiting for an instance, if one is.
+    ///
+    /// Only *unacknowledged* commands: once
+    /// [`Self::acknowledge_signal`] accepts one it must never be handed back.
+    /// A guest acknowledges on read precisely so the command is consumed once,
+    /// and redelivering a cancel or shutdown would re-suspend a relaunched
+    /// instance on a command it already handled.
     async fn get_pending_signal(
         &self,
         instance_id: &str,
@@ -708,6 +813,11 @@ pub trait Persistence: Send + Sync {
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError>;
 
+    /// Record that a durable step failed and is being retried.
+    ///
+    /// An audit trail: nothing in this crate reads it back, and no execution
+    /// decision depends on it. Re-saving the same `(checkpoint_id, attempt)`
+    /// updates that record in place rather than appending a duplicate.
     async fn save_retry_attempt(
         &self,
         instance_id: &str,
@@ -716,6 +826,28 @@ pub trait Persistence: Send + Sync {
         error_message: Option<&str>,
     ) -> Result<(), CoreError>;
 
+    /// Page through instances, newest first, optionally narrowed to one
+    /// tenant and/or one status.
+    ///
+    /// Ordered by `(created_at, instance_id)` descending, comparing the id
+    /// **bytewise**. Without a total order, `offset` walks a set the store is
+    /// free to re-shuffle between pages, and a paginating caller silently
+    /// skips and repeats rows.
+    ///
+    /// The id is a tie-break and nothing more: its order carries no meaning
+    /// of its own, it just has to be the same order every time and on every
+    /// backend. Bytewise is what makes that last part true — a SQL backend
+    /// sorting text under its database collation orders `-`, `_` and case
+    /// differently from every backend that compares the raw bytes, so it must
+    /// ask for the byte order explicitly.
+    ///
+    /// Ties are not exotic here: a bulk launch registers instances as fast as
+    /// the store will take them, and whether two land inside one tick of its
+    /// clock is a property of the clock rather than of the workload.
+    ///
+    /// The returned records carry no `input`, like
+    /// [`Self::get_instance_meta`] — a listing that loaded every launch
+    /// payload would pay for the one field none of its callers want.
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
@@ -727,6 +859,19 @@ pub trait Persistence: Send + Sync {
     /// Whether the store is reachable and answering.
     async fn health_check(&self) -> Result<bool, CoreError>;
 
+    /// Count the instances currently occupying a concurrency slot, meaning
+    /// those that are `running`.
+    ///
+    /// `suspended` is deliberately excluded. Durable sleep and a signal-wait
+    /// both park an instance there, parking is a steady state rather than a
+    /// transient one, and a workflow can sit suspended for days while running
+    /// no code and holding no host resource. Counting those rows would let a
+    /// handful of long-parked workflows hold a concurrency cap closed
+    /// indefinitely.
+    ///
+    /// A row left `running` by a crashed host still counts, and nothing in
+    /// this crate reaps one — the heartbeat monitor that does lives in the
+    /// embedding host.
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
 
     /// Promote an instance to `running` on a relaunch, preserving its
@@ -816,61 +961,78 @@ pub trait Persistence: Send + Sync {
     /// Clear the sleep_until timestamp for an instance.
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;
 
-    /// Atomically claim a due sleeping instance before waking it.
+    /// Atomically claim one due sleeping instance before waking it.
     ///
-    /// Conditionally clears `sleep_until` only while the instance is still
-    /// suspended with a present `sleep_until` that is **already
-    /// due** (`sleep_until <= now`), and reports whether
-    /// this caller won the claim. Returns `true` if it did, `false` if another
-    /// waker (or another scheduler sharing this store) already took it.
-    /// Callers MUST launch only when this returns `true` — this is what
+    /// The per-row form, for a caller that already holds a single instance id.
+    /// The scheduler's wake path claims a whole batch at once — see
+    /// [`Persistence::claim_sleeping_instances_due`], which is what it calls.
+    ///
+    /// Clear `sleep_until` only while the instance is still suspended with a
+    /// present `sleep_until` that is **already due** (`sleep_until <= now`),
+    /// and report whether this caller won the claim: `true` if it did, `false`
+    /// if another waker (or another scheduler sharing this store) already took
+    /// it. Callers MUST launch only when this returns `true` — this is what
     /// prevents concurrent double-launch of the same instance. On a launch
     /// failure after a successful claim, re-stamp `sleep_until` via
-    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    /// [`Persistence::schedule_wake`], carrying the instance's existing
+    /// `wake_reason` over, so it is retried without losing why it was parked.
     ///
-    /// The default reads the instance and then clears it, so it reports a
-    /// loss against an instance that is no longer claimable but can still let
-    /// two concurrent callers both win: each may read a claimable row before
-    /// either clears it. **A backend serving more than one waker must override
-    /// this** with an operation whose atomicity it can vouch for -- an indivisible
-    /// conditional mutation, such as a claim taken under the store's own lock.
-    /// Taking the default and running two wakers double-launches instances.
-    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
-        match self.get_instance(instance_id).await? {
-            // The due-ness check is what makes a lease a lease: a batch claim
-            // pushes `sleep_until` into the future rather than clearing it, and
-            // an instance leased that way must lose a later claim until the
-            // lease expires.
-            Some(instance)
-                if instance.status == crate::domain::InstanceStatus::Suspended
-                    && instance.sleep_until.is_some_and(|t| t <= Utc::now()) =>
-            {
-                self.clear_instance_sleep(instance_id).await?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
+    /// The due-ness check is what makes a lease a lease: a batch claim pushes
+    /// `sleep_until` into the future rather than clearing it, and an instance
+    /// leased that way must lose a later claim until the lease expires.
+    ///
+    /// The test and the mutation must be **one indivisible operation** — a
+    /// conditional statement whose own report of what it changed is the claim,
+    /// or a claim taken under the store's own lock. Read-then-clear does not
+    /// qualify: two callers can each read a claimable row before either clears
+    /// it, and both win.
+    ///
+    /// There is deliberately no default. Double-launch protection is the whole
+    /// reason this method exists, and a backend cannot inherit it from a
+    /// composition of the other methods on this trait — only from a statement
+    /// its own store executes indivisibly. A backend that genuinely cannot do
+    /// that must say so by never claiming (`Ok(false)`), which parks instances
+    /// rather than running them twice.
+    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError>;
 
     /// Get instances that are due to wake (sleep_until <= now).
+    ///
+    /// Selects without claiming, so two callers see the same rows. The wake
+    /// path claims as it selects instead — see
+    /// [`Persistence::claim_sleeping_instances_due`].
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
-    /// Claim due sleeping instances for waking, leasing them until `retry_at`.
+    /// Select **and claim** up to `limit` due sleeping instances in one step,
+    /// leasing them until `retry_at`.
     ///
-    /// The claim moves `sleep_until` forward rather than clearing it, so a
+    /// This is the wake path: the scheduler relaunches exactly what this
+    /// returns, and calls nothing else to decide what is due.
+    ///
+    /// `retry_at` must be strictly in the future. A lease already in the past
+    /// leaves every claimed row immediately re-claimable, which is the
+    /// double-launch this method exists to prevent; backends stamp what they
+    /// are given and cannot repair it.
+    ///
+    /// Move `sleep_until` forward to `retry_at` rather than clearing it, so a
     /// caller that dies between claiming and launching does not strand its
     /// batch: the rows simply become due again when the lease expires. Clearing
     /// leaves a row `suspended` with no deadline, which is exactly what a
-    /// signal waiter looks like, so no sweep can tell them apart.
-    /// Select **and claim** up to `limit` due sleeping instances in one step.
+    /// signal waiter looks like, so no sweep can tell them apart — the wake
+    /// scan skips it for having no deadline and the retention sweep skips it
+    /// for not being terminal, and the instance is parked for good.
     ///
     /// Every returned record is already claimed — the caller owns it and must
     /// launch it, exactly as if [`Persistence::claim_sleeping_instance`] had
-    /// returned `true`. On a launch failure, re-stamp `sleep_until` via
-    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    /// returned `true` — and carries its new `retry_at` deadline, not the one
+    /// it was selected on. On a launch failure, re-stamp `sleep_until` via
+    /// [`Persistence::schedule_wake`], passing the record's own existing
+    /// `wake_reason`, so the instance is retried sooner than the lease would.
+    /// Not [`Persistence::set_instance_sleep`]: that one hardcodes
+    /// [`crate::domain::WakeReason::Timer`], so re-stamping through it would
+    /// rewrite why the instance was parked in the first place.
     ///
     /// Separate from `get_sleeping_instances_due` + `claim_sleeping_instance`
     /// because a scheduler that polls back-to-back (rather than sleeping a
@@ -879,25 +1041,27 @@ pub trait Persistence: Send + Sync {
     /// that window entirely, and costs one round trip per batch instead of one
     /// per instance.
     ///
-    /// The default composes the two existing operations and is correct but
-    /// non-atomic. A backend that can select and claim in one operation should
-    /// override it.
+    /// The selection and the lease must be **one indivisible operation** — a
+    /// single statement that returns the rows it just stamped, or a claim taken
+    /// under the store's own lock.
+    ///
+    /// There is deliberately no default. Composing the two operations above
+    /// cannot produce this contract: the per-row claim clears `sleep_until` and
+    /// the re-stamp is a second statement, so a caller that dies between them
+    /// strands that row in precisely the undetectable state described above. A
+    /// backend inherits the batch shape but not the guarantee, which is the
+    /// failure this signature exists to prevent.
+    ///
+    /// A backend that cannot select and lease indivisibly must refuse at
+    /// startup. It must **not** quietly return an empty `Vec` forever: nothing
+    /// distinguishes that from a store with nothing due, so the scheduler logs
+    /// an ordinary idle poll while every durable sleep silently never wakes —
+    /// no error, no metric, no failed instance.
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,
         retry_at: DateTime<Utc>,
-    ) -> Result<Vec<InstanceRecord>, CoreError> {
-        let due = self.get_sleeping_instances_due(limit).await?;
-        let mut claimed = Vec::with_capacity(due.len());
-        for record in due {
-            if self.claim_sleeping_instance(&record.instance_id).await? {
-                self.set_instance_sleep(&record.instance_id, retry_at)
-                    .await?;
-                claimed.push(record);
-            }
-        }
-        Ok(claimed)
-    }
+    ) -> Result<Vec<InstanceRecord>, CoreError>;
 
     /// List events for an instance with filtering and pagination.
     ///

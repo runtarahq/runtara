@@ -498,13 +498,48 @@ impl Persistence for MockPersistence {
         Ok(())
     }
 
-    async fn clear_instance_sleep(&self, _instance_id: &str) -> std::result::Result<(), CoreError> {
+    /// Clears the map, matching `schedule_wake` above. A no-op here would let
+    /// a test assert sleep state against a mock that never cleared anything.
+    async fn clear_instance_sleep(&self, instance_id: &str) -> std::result::Result<(), CoreError> {
+        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+            inst.sleep_until = None;
+        }
         Ok(())
+    }
+
+    /// Claimed under the instance map's lock, so two concurrent callers cannot
+    /// both win.
+    async fn claim_sleeping_instance(
+        &self,
+        instance_id: &str,
+    ) -> std::result::Result<bool, CoreError> {
+        let mut instances = self.instances.lock().unwrap();
+        let Some(instance) = instances.get_mut(instance_id) else {
+            return Ok(false);
+        };
+        if instance.status != CoreInstanceStatus::Suspended
+            || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
+        {
+            return Ok(false);
+        }
+        instance.sleep_until = None;
+        Ok(true)
     }
 
     async fn get_sleeping_instances_due(
         &self,
         _limit: i64,
+    ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Empty, because the due scan above is. These tests drive the instance
+    /// handlers, not the wake path; a batch claim that selected rows the scan
+    /// never offers would be an invention, not a mock.
+    async fn claim_sleeping_instances_due(
+        &self,
+        _limit: i64,
+        _retry_at: DateTime<Utc>,
     ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
         Ok(Vec::new())
     }

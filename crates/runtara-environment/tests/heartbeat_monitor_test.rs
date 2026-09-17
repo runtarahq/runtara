@@ -472,9 +472,39 @@ impl Persistence for MockPersistence {
         Ok(())
     }
 
+    /// Nothing here ever sleeps — `schedule_wake` above is a no-op and every
+    /// seeded instance carries `sleep_until: None` — so the due-ness guard
+    /// always fails and this only ever loses. Kept faithful anyway, so it
+    /// starts working if a test later seeds a sleeping instance.
+    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
+        let mut instances = self.instances.lock().unwrap();
+        let Some(instance) = instances.get_mut(instance_id) else {
+            return Ok(false);
+        };
+        if instance.status != CoreInstanceStatus::Suspended
+            || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
+        {
+            return Ok(false);
+        }
+        instance.sleep_until = None;
+        Ok(true)
+    }
+
     async fn get_sleeping_instances_due(
         &self,
         _limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        Ok(vec![])
+    }
+
+    /// Empty, because the due scan above is. Nothing here ever sleeps --
+    /// `schedule_wake` is a no-op and every seeded instance carries
+    /// `sleep_until: None` -- so there is no batch to claim. These tests drive
+    /// the heartbeat monitor, not the wake path.
+    async fn claim_sleeping_instances_due(
+        &self,
+        _limit: i64,
+        _retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
         Ok(vec![])
     }
