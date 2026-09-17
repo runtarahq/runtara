@@ -36,8 +36,8 @@ Most downstream code should just depend on `runtara-agents`, which already pulls
 
 ## Inside Runtara
 
-- Primary consumer: `runtara-agents` — every built-in agent module (`http`, `sftp`, `xlsx`, `csv`, `crypto`, `datetime`, `transform`, `text`, `file`, `compression`, `xml`, `utils`) is written with `#[capability]` plus the input/output derives.
-- `runtara-agents/src/agents/extractors/*` uses `#[derive(ConnectionParams)]` for the built-in connection types (`http_bearer`, `http_api_key`, `sftp`).
+- Primary consumers: `crates/agents/runtara-agent-*` — every built-in agent module (`http`, `xlsx`, `csv`, `crypto`, `datetime`, `transform`, `text`, `file`, `compression`, `xml`, `utils`) is written with `#[capability]` plus the input/output derives.
+- `runtara-agents/src/agents/extractors/*` uses `#[derive(ConnectionParams)]` for the built-in connection types (`http_bearer`, `http_api_key`, `mcp`).
 - Generated metadata targets types in `runtara-dsl::agent_meta` and is indexed by the static registry in `runtara-agents`.
 - Deps: `syn` 2 (full/parsing/extra-traits), `quote`, `proc-macro2`, `darling` 0.20.
 - The `#[capability]` executor wrapper normalizes errors into JSON envelopes (`code` / `message` / `category` / `severity`) so the `#[resilient]` layer can make retry decisions.
