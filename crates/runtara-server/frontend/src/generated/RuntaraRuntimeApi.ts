@@ -1536,7 +1536,7 @@ export interface ConnectionDto {
   grantState?: null | ConnectionGrantState;
   id: string;
   integrationId?: string | null;
-  /** When true, this connection is the default S3 storage for webhook attachments */
+  /** Legacy alias for the object_storage default; does not persist webhook attachments. */
   isDefaultFileStorage: boolean;
   rateLimitConfig?: null | RateLimitConfigDto;
   /** Rate limit statistics for the requested time period (only included when requested) */

@@ -4629,7 +4629,6 @@ dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
  "runtara-dsl",
- "runtara-http",
  "serde",
  "serde_json",
  "serial_test",

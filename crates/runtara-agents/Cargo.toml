@@ -14,15 +14,6 @@ name = "runtara_agents"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
-[features]
-default = ["native"]
-
-# Native HTTP transport for the server's standalone S3 client.
-native = ["runtara-http/native"]
-
-# WASI HTTP transport for shared support consumers.
-wasi = ["runtara-http/wasi"]
-
 [dependencies]
 runtara-dsl = { path = "../runtara-dsl", version = "8.9" }
 runtara-agent-macro = { path = "../runtara-agent-macro", version = "8.9" }
@@ -31,8 +22,6 @@ serde_json = "1.0"
 tracing = "0.1"
 base64 = "0.22"
 strum = { version = "0.26", features = ["derive"] }
-# HTTP abstraction used by the standalone S3 client (s3_client.rs)
-runtara-http = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
