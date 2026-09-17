@@ -1,13 +1,7 @@
 //! Compression agent — WebAssembly component.
 //!
 //! ZIP archive create / extract / list, executed entirely inside the wasm
-//! sandbox. This agent used to be a thin forwarder to a native host handler at
-//! `$RUNTARA_AGENT_SERVICE_URL/compression/<capability>`; that hop is gone.
-//! The `zip` crate's C-backed compression backends (bzip2, zstd, lzma) were the
-//! only thing blocking a wasm32-wasip2 build, they are optional features, and
-//! these capabilities never used them — only `Stored` and `Deflated`. With
-//! `default-features = false, features = ["deflate"]` the dependency tree is
-//! pure Rust (flate2 -> miniz_oxide) and builds for wasip2 directly.
+//! sandbox. Only the pure Rust `Stored` and `Deflated` ZIP backends are enabled.
 //!
 //! Capability metadata travels through the same `#[capability_input]` /
 //! `#[capability]` / `#[capability_output]` annotations used by every other

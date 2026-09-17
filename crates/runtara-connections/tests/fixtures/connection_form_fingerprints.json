@@ -96,12 +96,6 @@
     "fnv1a64": "e14014babfd945a5"
   },
   {
-    "integrationId": "sftp",
-    "fieldCount": 7,
-    "serializedBytes": 4835,
-    "fnv1a64": "300a46aba6ccd63b"
-  },
-  {
     "integrationId": "shopify_access_token",
     "fieldCount": 3,
     "serializedBytes": 1129,

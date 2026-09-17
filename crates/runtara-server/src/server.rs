@@ -807,7 +807,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // which is now vestigial; the check is removed.
     println!("✓ Configured for tenant: {}", server_config.tenant_id);
     println!("✓ Object model URL: {}", server_config.object_model_url);
-    println!("✓ Agent service URL: {}", server_config.agent_service_url);
     println!("✓ Direct workflow compiler: direct-only");
     println!(
         "Max concurrent executions: {} (CPU cores: {})",
@@ -1007,7 +1006,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
             let env = DispatcherEnv {
                 proxy_url: cfg.http_proxy_url.clone(),
-                agent_service_url: cfg.agent_service_url.clone(),
                 object_model_url: cfg.object_model_url.clone(),
                 core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
             };
@@ -2456,7 +2454,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // extractor rejects the body with a plain-text 413 before any handler
         // runs, and the object-model agent — which parses the response without
         // checking status — surfaces it as a misleading OBJECT_MODEL_PARSE_ERROR
-        // (SYN-491). Mirrors internal_proxy_routes / internal_agent_routes below.
+        // (SYN-491). Mirrors internal_proxy_routes below.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_object_model_state)
         // Apply the `database` entitlement gate. Disabling the feature
@@ -2485,17 +2483,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_proxy_state);
-
-    // Internal Agent Service routes (called by WASM workflows for native-only capabilities)
-    // NO authentication — only accessible from localhost.
-    // Body limit raised to 64 MB: WASM workflows POST base64-encoded archives
-    // (e.g. 4.5 MB ZIP → ~6 MB JSON) which exceed Axum's default 2 MB limit.
-    let internal_agent_routes = Router::new()
-        .route(
-            "/api/internal/agents/{module}/{capability_id}",
-            post(api::handlers::internal_agents::execute_agent_capability),
-        )
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
@@ -2761,7 +2748,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .nest("/api/internal/connections-admin", connections_admin_routes)
         .merge(internal_object_model_routes)
         .merge(internal_proxy_routes)
-        .merge(internal_agent_routes)
         .merge(public_routes)
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));

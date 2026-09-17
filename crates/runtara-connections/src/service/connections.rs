@@ -287,24 +287,6 @@ fn build_edit_projection(
         }
     }
 
-    // `auth_mode` was added after SFTP connections already existed. Preserve
-    // old key-only records by projecting the mode their stored credentials
-    // imply; new saves persist the explicit field normally.
-    if integration_id == "sftp" && params.is_none_or(|params| !params.contains_key("auth_mode")) {
-        let inferred = if params
-            .and_then(|params| params.get("private_key"))
-            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(|s| !s.is_empty()))
-        {
-            "private_key"
-        } else {
-            "password"
-        };
-        values.insert(
-            "auth_mode".to_string(),
-            serde_json::Value::String(inferred.to_string()),
-        );
-    }
-
     ConnectionEditProjection {
         values: serde_json::Value::Object(values),
         secret_state,
@@ -1238,27 +1220,23 @@ mod tests {
     }
 
     #[test]
-    fn sftp_legacy_projection_infers_auth_mode() {
-        let private_key = build_edit_projection(
-            "sftp",
-            Some(&json!({
-                "host": "files.example.com",
-                "private_key": "-----BEGIN PRIVATE KEY-----"
-            })),
-            "v1".to_string(),
+    fn removed_sftp_connections_cannot_be_created_or_patched() {
+        assert!(runtara_agents::registry::find_connection_type("sftp").is_none());
+        let error = validate_create_connection_parameters("sftp", Some(&json!({})))
+            .expect_err("removed connection type must reject creation");
+        assert!(
+            matches!(error, ServiceError::ValidationError(message) if message.contains("Unknown connection type"))
         );
-        assert_eq!(private_key.values["auth_mode"], "private_key");
-        assert!(private_key.secret_state["private_key"].clearable);
-
-        let password = build_edit_projection(
-            "sftp",
-            Some(&json!({
-                "host": "files.example.com",
-                "password": "stored-secret"
-            })),
-            "v1".to_string(),
+        let projection =
+            build_edit_projection("sftp", Some(&json!({"password": "legacy"})), "v1".into());
+        assert_eq!(projection.values, json!({}));
+        assert!(projection.secret_state.is_empty());
+        let patch = serde_json::from_value(json!({"set": {"host": "example.com"}})).unwrap();
+        let error = apply_connection_parameter_patch("sftp", &json!({}), &patch)
+            .expect_err("removed type must reject parameter patches");
+        assert!(
+            matches!(error, ServiceError::ValidationError(message) if message.contains("Unknown connection type"))
         );
-        assert_eq!(password.values["auth_mode"], "password");
     }
 
     #[test]
@@ -1278,13 +1256,6 @@ mod tests {
         assert!(
             quickbooks_form.fields["client_id"].schema.order
                 < quickbooks_form.fields["client_secret"].schema.order
-        );
-
-        let sftp = runtara_agents::registry::find_connection_type("sftp").expect("SFTP descriptor");
-        let sftp_form = runtara_dsl::form::connection_form_definition(sftp);
-        assert!(sftp_form.fields["host"].schema.order < sftp_form.fields["port"].schema.order);
-        assert!(
-            sftp_form.fields["username"].schema.order < sftp_form.fields["auth_mode"].schema.order
         );
 
         let mcp = runtara_agents::registry::find_connection_type("mcp").expect("MCP descriptor");

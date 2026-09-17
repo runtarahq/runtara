@@ -1,27 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Agents Library - Reusable agent implementations for workflows
-//!
-//! This library provides pre-compiled agent implementations that can be
-//! linked against workflow-specific code to speed up compilation.
-//!
-//! This file is compiled once at startup into `libagents.rlib` and then
-//! reused across all workflow compilations.
+//! Host support for connection schemas, shared types, and server file storage.
+//! Workflow capabilities execute in standalone WASM components.
 
-// Re-export all agent modules from agents/ subdirectory.
-//
-// Only SFTP is left: libssh2 is a C library with no wasm32-wasip2 target, so
-// its WASM shell still calls back to the host via /api/internal/agents. Every
-// other agent runs entirely in the sandbox as a standalone WASM component under
-// crates/agents/runtara-agent-*. Compression and XLSX were the last two to
-// move — their C dependencies turned out to be optional (`zip`'s bzip2/zstd/
-// lzma backends, which those capabilities never used) or absent (`calamine` is
-// pure Rust).
 #[path = "agents/extractors/mod.rs"]
 pub mod extractors;
-#[cfg(feature = "native")]
-#[path = "agents/sftp.rs"]
-pub mod sftp;
 
 // Shared types
 pub mod types;

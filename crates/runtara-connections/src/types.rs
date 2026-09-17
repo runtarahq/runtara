@@ -479,7 +479,7 @@ pub struct CreateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "connectionParameters")]
     pub connection_parameters: Option<serde_json::Value>,
-    /// Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp)
+    /// Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, mcp)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "integrationId")]
     pub integration_id: Option<String>,
@@ -772,7 +772,7 @@ pub enum ConnectionAuthType {
     Oauth2ClientCredentials,
     /// Credential pair authentication (login + password)
     UsernamePassword,
-    /// Private key authentication (e.g. SSH, SFTP)
+    /// SSH private key authentication
     SshKey,
     /// IAM-style key pair (key ID + secret key)
     AccessKey,
@@ -990,7 +990,7 @@ pub struct RuntimeRateLimitState {
 pub struct RuntimeConnectionResponse {
     /// Connection credentials/configuration (decrypted)
     pub parameters: serde_json::Value,
-    /// Connection type identifier (e.g., "sftp", "bearer", "api_key")
+    /// Connection type identifier (e.g., "mcp", "bearer", "api_key")
     pub integration_id: String,
     /// Optional subtype for connections with variants
     #[serde(skip_serializing_if = "Option::is_none")]

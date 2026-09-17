@@ -152,7 +152,7 @@ pub(crate) fn build_env(
     }
 
     // RUNTARA_HTTP_PROXY_URL, RUNTARA_OBJECT_MODEL_URL,
-    // RUNTARA_AGENT_SERVICE_URL and RUNTARA_TENANT_ID overrides arrive via
+    // and RUNTARA_TENANT_ID overrides arrive via
     // LaunchOptions.env (populated by the caller from its typed config) and
     // are merged into `env` by the caller of build_env.
 

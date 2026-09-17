@@ -450,7 +450,7 @@ pub struct AgentStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Agent name (e.g., "utils", "transform", "http", "sftp")
+    /// Agent name (e.g., "utils", "transform", "http", "mcp")
     pub agent_id: String,
 
     /// Capability name (e.g., "random-double", "group-by", "http-request")

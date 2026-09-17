@@ -16,31 +16,6 @@ pub trait EnumVariants {
 /// Function pointer type for getting enum variant names
 pub type EnumVariantsFn = fn() -> &'static [&'static str];
 
-/// Synchronous executor function type for agent capabilities.
-pub type CapabilityExecutorFn = fn(serde_json::Value) -> Result<serde_json::Value, String>;
-
-/// Executor for an agent capability.
-pub struct CapabilityExecutor {
-    /// The agent module name (e.g., "utils", "transform")
-    pub module: &'static str,
-    /// Capability ID in kebab-case (e.g., "random-double")
-    pub capability_id: &'static str,
-    /// The executor function
-    pub execute: CapabilityExecutorFn,
-}
-
-/// Execute a capability by module and capability_id.
-///
-/// Agent execution is provided by `runtara-agents::registry`. This fallback
-/// remains for older callers that still compile against `runtara-dsl` directly.
-pub fn execute_capability(
-    module: &str,
-    capability_id: &str,
-    _input: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    Err(format!("Unknown capability: {}:{}", module, capability_id))
-}
-
 /// Metadata for an agent capability
 #[derive(Debug, Clone)]
 pub struct CapabilityMeta {
@@ -121,7 +96,7 @@ impl ErrorKind {
 /// Used for compile-time introspection and tooling.
 #[derive(Debug, Clone)]
 pub struct KnownError {
-    /// Machine-readable error code (e.g., "HTTP_TIMEOUT", "SFTP_AUTH_ERROR")
+    /// Machine-readable error code (e.g., "HTTP_TIMEOUT", "HTTP_AUTH_ERROR")
     pub code: &'static str,
     /// Human-readable description of when this error occurs
     pub description: &'static str,
@@ -421,7 +396,7 @@ pub struct AgentModuleConfig {
     pub supports_connections: bool,
     pub integration_ids: &'static [&'static str],
     /// Whether this agent can receive sensitive connection data from Connection steps.
-    /// Only secure agents (http, sftp) should have this set to true.
+    /// Only secure agents (http) should have this set to true.
     /// This prevents connection credentials from leaking through non-secure agents.
     pub secure: bool,
 }
@@ -505,15 +480,6 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: true,
     },
     AgentModuleConfig {
-        id: "sftp",
-        name: "Sftp",
-        description: "SFTP capabilities for secure file transfer operations - list, download, upload, and delete files on remote servers (has side effects)",
-        has_side_effects: true,
-        supports_connections: true,
-        integration_ids: &["sftp"],
-        secure: true,
-    },
-    AgentModuleConfig {
         id: "compression",
         name: "Compression",
         description: "Archive capabilities for creating and extracting ZIP archives, listing contents, and extracting individual files",
@@ -535,7 +501,7 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
 
 /// Get built-in agent modules.
 ///
-/// Full agent registries are provided by `runtara-agents::registry`.
+/// Full agent catalogs are loaded from WASM component metadata.
 pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
     BUILTIN_AGENT_MODULES.iter().collect()
 }
@@ -726,7 +692,7 @@ pub enum ConnectionAuthType {
     Oauth2ClientCredentials,
     /// Credential pair authentication (login + password)
     UsernamePassword,
-    /// Private key authentication (e.g. SSH, SFTP)
+    /// SSH private key authentication
     SshKey,
     /// IAM-style key pair (key ID + secret key)
     AccessKey,
@@ -1022,9 +988,9 @@ pub struct NamedEndpoint {
 /// Metadata for a connection type.
 #[derive(Debug, Clone)]
 pub struct ConnectionTypeMeta {
-    /// Unique identifier for this connection type (e.g., "bearer", "sftp")
+    /// Unique identifier for this connection type (e.g., "bearer", "mcp")
     pub integration_id: &'static str,
-    /// Display name for UI (e.g., "Bearer Token", "SFTP")
+    /// Display name for UI (e.g., "Bearer Token", "MCP Server")
     pub display_name: &'static str,
     /// Description of this connection type
     pub description: Option<&'static str>,
@@ -2997,8 +2963,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            11,
-            "Expected 11 built-in agent modules"
+            10,
+            "Expected 10 built-in agent modules"
         );
     }
 
@@ -3014,7 +2980,10 @@ mod tests {
         assert!(ids.contains(&"datetime"), "Missing datetime module");
         assert!(ids.contains(&"http"), "Missing http module");
         assert!(ids.contains(&"compression"), "Missing compression module");
-        assert!(ids.contains(&"sftp"), "Missing sftp module");
+        assert!(
+            !ids.contains(&"sftp"),
+            "Removed SFTP module must not be advertised"
+        );
         assert!(ids.contains(&"object-model"), "Missing object-model module");
     }
 
@@ -3089,10 +3058,10 @@ mod tests {
 
     #[test]
     fn test_secure_modules() {
-        // Only http and sftp should be secure
+        // Only http should be secure
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" => {
+                "http" => {
                     assert!(module.secure, "{} module should be secure", module.id);
                 }
                 _ => {
@@ -3113,10 +3082,10 @@ mod tests {
 
     #[test]
     fn test_side_effects_modules() {
-        // http, sftp, and object-model have side effects
+        // http and object-model have side effects
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object-model" => {
+                "http" | "object-model" => {
                     assert!(
                         module.has_side_effects,
                         "{} module should have side effects",
@@ -3136,10 +3105,10 @@ mod tests {
 
     #[test]
     fn test_connection_supporting_modules() {
-        // http, sftp, and object-model support connections
+        // http and object-model support connections
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object-model" => {
+                "http" | "object-model" => {
                     assert!(
                         module.supports_connections,
                         "{} module should support connections",
@@ -3178,14 +3147,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sftp_integration_ids() {
-        let sftp_module = find_agent_module("sftp").unwrap();
-        let integration_ids = sftp_module.integration_ids;
-
-        assert!(
-            integration_ids.contains(&"sftp"),
-            "sftp should support sftp integration"
-        );
+    fn removed_sftp_module_is_not_resolvable() {
+        assert!(find_agent_module("sftp").is_none());
     }
 
     // ========================================================================

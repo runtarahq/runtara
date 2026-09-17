@@ -67,12 +67,11 @@ pub struct TestError {
     pub retryable: bool,
 }
 
-/// Routing context shared across calls — proxy URL, agent-service URL, etc.
+/// Routing context shared across calls — HTTP proxy, object-model, and core URLs.
 /// Per-tenant fields go into `TestCapabilityRequest`.
 #[derive(Debug, Clone)]
 pub struct DispatcherEnv {
     pub proxy_url: String,
-    pub agent_service_url: String,
     pub object_model_url: String,
     pub core_http_url: String,
 }
@@ -275,7 +274,6 @@ impl ComponentDispatcherService {
         let ctx = Arc::new(CallContext::for_test(
             &req.tenant_id,
             &self.env.proxy_url,
-            &self.env.agent_service_url,
             &self.env.object_model_url,
             &self.env.core_http_url,
         ));
@@ -507,7 +505,6 @@ mod tests {
         Arc::new(CallContext::for_test(
             "tenant-test",
             "http://localhost:1",
-            "http://localhost:2",
             "http://localhost:3",
             "http://localhost:4",
         ))

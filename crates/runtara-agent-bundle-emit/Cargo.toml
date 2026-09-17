@@ -31,7 +31,6 @@ runtara-agent-object-model = { path = "../agents/runtara-agent-object-model" }
 runtara-agent-openai = { path = "../agents/runtara-agent-openai" }
 runtara-agent-s3-storage = { path = "../agents/runtara-agent-s3-storage" }
 runtara-agent-sqs = { path = "../agents/runtara-agent-sqs" }
-runtara-agent-sftp = { path = "../agents/runtara-agent-sftp" }
 runtara-agent-sharepoint = { path = "../agents/runtara-agent-sharepoint" }
 runtara-agent-shopify = { path = "../agents/runtara-agent-shopify" }
 runtara-agent-slack = { path = "../agents/runtara-agent-slack" }

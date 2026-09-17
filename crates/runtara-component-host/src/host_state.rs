@@ -32,7 +32,6 @@ pub struct CallContext {
     pub proxy_url: String,
     pub proxy_host: String,
     pub core_http_url: String,
-    pub agent_service_url: String,
     pub object_model_url: String,
     pub connection_service_url: Option<String>,
 }
@@ -43,7 +42,6 @@ impl CallContext {
     pub fn for_test(
         tenant_id: impl Into<String>,
         proxy_url: impl Into<String>,
-        agent_service_url: impl Into<String>,
         object_model_url: impl Into<String>,
         core_http_url: impl Into<String>,
     ) -> Self {
@@ -55,7 +53,6 @@ impl CallContext {
             proxy_url,
             proxy_host,
             core_http_url: core_http_url.into(),
-            agent_service_url: agent_service_url.into(),
             object_model_url: object_model_url.into(),
             connection_service_url: None,
         }
@@ -71,7 +68,6 @@ impl CallContext {
             proxy_url: String::new(),
             proxy_host: String::new(),
             core_http_url: String::new(),
-            agent_service_url: String::new(),
             object_model_url: String::new(),
             connection_service_url: None,
         }
@@ -228,9 +224,6 @@ impl HostState {
         if !ctx.core_http_url.is_empty() {
             builder.env("RUNTARA_HTTP_URL", &ctx.core_http_url);
         }
-        if !ctx.agent_service_url.is_empty() {
-            builder.env("RUNTARA_AGENT_SERVICE_URL", &ctx.agent_service_url);
-        }
         if !ctx.object_model_url.is_empty() {
             builder.env("RUNTARA_OBJECT_MODEL_URL", &ctx.object_model_url);
         }
@@ -307,7 +300,6 @@ mod tests {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
-            "http://agent.local:7002",
             "http://obj.local:7003",
             "http://core.local:7004",
         ));
@@ -324,7 +316,6 @@ mod tests {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
-            "http://agent.local:7002",
             "http://obj.local:7003",
             "http://core.local:7004",
         ));
@@ -381,7 +372,6 @@ mod tests {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
-            "http://agent.local:7002",
             "http://obj.local:7003",
             "http://core.local:7004",
         ));
