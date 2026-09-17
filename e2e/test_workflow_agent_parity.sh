@@ -15,9 +15,10 @@
 #      published child through the catalog overlay, composition finds its
 #      .wasm through the extra search dir, and execution returns the child's
 #      output through standard agent-output shaping.
-#   4. SAFETY GATE — a workflow that can wait, sleep, retry, or pause is
-#      refused before an agent artifact is staged. The workflow-agent ABI is
-#      synchronous; durable work stays a top-level or embedded workflow.
+#   4. PARKING AGENTS — a workflow that sleeps or waits publishes under
+#      parks:1 and parks its caller rather than holding a runner: a sleep
+#      completes through the wake scheduler, and a wait is discoverable
+#      through pending-input and resumes on its signal.
 #
 # Prerequisites: Postgres + docker (isolated Valkey) and the agent / shared
 # workflow components in target/wasm32-wasip2/release
@@ -308,7 +309,11 @@ execute_and_assert "${PARENT_ID}" '{"data":{"msg":"hello-live"}}' \
     '{"childEcho":"hello-live","childMarker":"from-child"}' "parent→child"
 
 #-------------------------------------------------------------------------
-print_step "4. Safety gate: a sleeping workflow is refused as an agent..."
+print_step "4. A sleeping workflow publishes as a parking agent and completes through a parent..."
+# The capability ABI parks a Delay: the suspend sentinel carries the deadline
+# out, the parent parks in the child's place, and the wake scheduler relaunches
+# it. Publication therefore succeeds, stamped parks:1 rather than
+# non-suspending:1, and the parent completes after the sleep.
 RESP=$(api_post /workflows/create '{"name":"Durable Delay Echo","description":"parity e2e","slug":"durable-delay-echo"}')
 DURABLE_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${DURABLE_ID}" ] || { print_error "durable child create failed: ${RESP}"; exit 1; }
@@ -336,17 +341,39 @@ RESP=$(api_post "/workflows/${DURABLE_ID}/update" "{\"executionGraph\": ${DURABL
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "durable child update failed: ${RESP}"; exit 1; }
 RESP=$(api_post "/workflows/${DURABLE_ID}/publish-agent" "" 900)
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] \
-    || { print_error "a durable workflow must not publish as an agent: ${RESP}"; exit 1; }
-PUBLISH_ERROR=$(echo "${RESP}" | jq -r '[.. | strings] | join(" ")')
-echo "${PUBLISH_ERROR}" | grep -q "may suspend or sleep" \
-    || { print_error "rejection must explain the synchronous agent boundary: ${RESP}"; exit 1; }
-echo "${PUBLISH_ERROR}" | grep -q "Delay/delay" \
-    || { print_error "rejection must identify the Delay path: ${RESP}"; exit 1; }
-echo "  sleeping workflow refused before agent publication ✓"
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "a sleeping workflow must publish as a parking agent: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+META="${TEST_DATA_DIR}/workflow-agents/${TENANT}/runtara_agent_durable_delay_echo.meta.json"
+[ -f "${META}" ] || META=$(find "${TEST_DATA_DIR}" -name 'runtara_agent_durable_delay_echo.meta.json' | head -1)
+[ -n "${META}" ] && [ -f "${META}" ] || { print_error "published sidecar not staged"; exit 1; }
+jq -e '[.capabilities[].tags[]] | index("parks:1")' "${META}" >/dev/null \
+    || { print_error "a sleeping agent must be certified parks:1: $(cat "${META}")"; exit 1; }
+! jq -e '[.capabilities[].tags[]] | index("non-suspending:1")' "${META}" >/dev/null \
+    || { print_error "parks:1 and non-suspending:1 must never be stamped together"; exit 1; }
+echo "  sleeping workflow published, certified parks:1 ✓"
+
+SLEEP_PARENT_GRAPH='{
+  "name": "Parent Of Delay Echo",
+  "steps": {
+    "call": { "stepType": "Agent", "id": "call", "agentId": "durable-delay-echo", "capabilityId": "run",
+      "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } } },
+    "finish": { "stepType": "Finish", "id": "finish",
+      "inputMapping": { "childEcho": { "valueType": "reference", "value": "steps.call.outputs.echo" } } }
+  },
+  "entryPoint": "call",
+  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": { "msg": { "type": "string", "required": true } },
+  "outputSchema": {}
+}'
+SLEEP_PARENT_ID=$(create_and_compile "Parent Of Delay Echo" "${SLEEP_PARENT_GRAPH}")
+execute_and_assert "${SLEEP_PARENT_ID}" '{"data":{"msg":"slept-through"}}' \
+    '{"childEcho":"slept-through"}' "parent→parking sleep agent"
 
 #-------------------------------------------------------------------------
-print_step "5. Safety gate: a waiting workflow is refused as an agent..."
+print_step "5. A waiting workflow publishes as a parking agent and resumes on its signal..."
+# The nested wait parks on-signal carrying its full route, so the caller's
+# instance is recorded as a signal park and a signal to that route wakes it.
 RESP=$(api_post /workflows/create '{"name":"Waiting Approval","description":"parity e2e","slug":"waiting-approval"}')
 WAITING_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${WAITING_ID}" ] || { print_error "waiting workflow create failed: ${RESP}"; exit 1; }
@@ -360,7 +387,8 @@ WAITING_GRAPH='{
     },
     "finish": {
       "stepType": "Finish",
-      "id": "finish"
+      "id": "finish",
+      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" } }
     }
   },
   "entryPoint": "approve",
@@ -370,25 +398,76 @@ WAITING_GRAPH='{
   "outputSchema": {}
 }'
 RESP=$(api_post "/workflows/${WAITING_ID}/update" "{\"executionGraph\": ${WAITING_GRAPH}}")
-if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
-    print_error "waiting workflow update failed: ${RESP}"
-    exit 1
-fi
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "waiting workflow update failed: ${RESP}"; exit 1; }
 RESP=$(api_post "/workflows/${WAITING_ID}/publish-agent" "" 900)
-if [ "$(echo "${RESP}" | jq -r '.success // false')" != "false" ]; then
-    print_error "a waiting workflow must not publish as an agent: ${RESP}"
-    exit 1
-fi
-PUBLISH_ERROR=$(echo "${RESP}" | jq -r '[.. | strings] | join(" ")')
-echo "${PUBLISH_ERROR}" | grep -q "may suspend or sleep" || {
-    print_error "waiting rejection must explain the synchronous agent boundary: ${RESP}"
-    exit 1
-}
-echo "${PUBLISH_ERROR}" | grep -q "WaitForSignal/wait-for-signal" || {
-    print_error "rejection must identify the WaitForSignal path: ${RESP}"
-    exit 1
-}
-echo "  waiting workflow refused before agent publication ✓"
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "a waiting workflow must publish as a parking agent: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  waiting workflow published ✓"
+
+WAIT_PARENT_GRAPH='{
+  "name": "Parent Of Waiting Approval",
+  "steps": {
+    "call": { "stepType": "Agent", "id": "call", "agentId": "waiting-approval", "capabilityId": "run",
+      "inputMapping": {} },
+    "finish": { "stepType": "Finish", "id": "finish",
+      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.call.outputs.decision" } } }
+  },
+  "entryPoint": "call",
+  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+WAIT_PARENT_ID=$(create_and_compile "Parent Of Waiting Approval" "${WAIT_PARENT_GRAPH}")
+RESP=$(api_post "/workflows/${WAIT_PARENT_ID}/execute" '{"inputs": {"data":{}}}')
+WAIT_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${WAIT_INSTANCE}" ] || { print_error "waiting parent execute failed: ${RESP}"; exit 1; }
+
+# The chain must park rather than hold a runner while it waits.
+PARKED=""
+for _ in {1..60}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${WAIT_INSTANCE}")
+    PARKED=$(echo "${RESP}" | jq -r '.data.status // empty')
+    case "${PARKED}" in suspended|paused) break ;; completed|failed|crashed|stopped) break ;; esac
+    sleep 1
+done
+[ "${PARKED}" = "suspended" ] || [ "${PARKED}" = "paused" ] \
+    || { print_error "a waiting agent must park its caller, instance is '${PARKED}'"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  caller parked while the nested agent waits (${PARKED}) ✓"
+
+# The wait advertises itself through pending-input with its full nested route.
+WAIT_SIGNAL=""
+for _ in {1..30}; do
+    RESP=$(curl -sS "${API}/workflows/${WAIT_PARENT_ID}/instances/${WAIT_INSTANCE}/pending-input")
+    WAIT_SIGNAL=$(echo "${RESP}" | jq -r '.data.pendingInputs[]?.signalId // empty' | head -1)
+    [ -n "${WAIT_SIGNAL}" ] && break
+    sleep 1
+done
+[ -n "${WAIT_SIGNAL}" ] \
+    || { print_error "pending-input never surfaced the nested wait: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  nested wait discoverable through pending-input ✓"
+
+# A nested route carries JSON punctuation of its own — runtara:v2:["wait",...] —
+# so it must be escaped into the body, never interpolated into a string.
+SIGNAL_BODY=$(jq -nc --arg signal "${WAIT_SIGNAL}" '{signalId: $signal, payload: {decision: "approved-nested"}}')
+RESP=$(api_post "/signals/${WAIT_INSTANCE}" "${SIGNAL_BODY}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "nested signal submit failed: ${RESP}"; exit 1; }
+
+STATUS=""
+for _ in {1..60}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${WAIT_INSTANCE}")
+    STATUS=$(echo "${RESP}" | jq -r '.data.status // empty')
+    case "${STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 1
+done
+[ "${STATUS}" = "completed" ] \
+    || { print_error "a signalled nested wait must complete, instance is '${STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
+DECISION=$(echo "${RESP}" | jq -r '.data.outputs.decision // empty')
+[ "${DECISION}" = "approved-nested" ] \
+    || { print_error "the signal payload must reach the parent: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
+echo "  signal woke the parked chain and its payload reached the parent ✓"
 #-------------------------------------------------------------------------
 print_step "6. Embedded waits: second wait on the same step id stays discoverable..."
 # Two EMBEDS of one wait-child (events ON). After site 1's wait completes, a
@@ -463,31 +542,41 @@ RESP=$(api_post "/workflows/${EMB_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
 EMB_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
 [ -n "${EMB_INSTANCE}" ] || { print_error "embed parent execute failed: ${RESP}"; exit 1; }
 
-# Discover a site's open signal id (by site marker) via pending-input.
+# Build a signal submit body; route ids carry quotes, so let jq escape them.
+signal_body() {
+    jq -nc --arg signal "$1" --arg decision "$2" '{signalId: $signal, payload: {decision: $decision}}'
+}
+
+# Discover a site's open signal id via pending-input. Signal ids are
+# runtara:v2 routes; the embed site appears as its own ["<embed>"] frame and
+# the waiting step id closes the route.
 discover_signal() {
     local instance="$1" marker="$2" found=""
     for _ in {1..45}; do
         local resp
         resp=$(curl -sS "${API}/workflows/${EMB_PARENT_ID}/instances/${instance}/pending-input")
         found=$(echo "${resp}" | jq -r --arg m "${marker}" \
-            '.data.pendingInputs[]?.signalId // empty | select(contains($m))' | head -1)
+            '.data.pendingInputs[]?.signalId // empty
+             | select(contains("[\"" + $m + "\"]") and endswith("\"approve\"]]"))' | head -1)
         [ -n "${found}" ] && { echo "${found}"; return 0; }
         sleep 2
     done
-    print_error "pending-input never surfaced a signal id containing '${marker}'"
+    print_error "pending-input never surfaced a signal id for embed site '${marker}'"
+    curl -sS "${API}/workflows/${EMB_PARENT_ID}/instances/${instance}/pending-input" \
+        | jq -c '[.data.pendingInputs[]?.signalId]' >&2 || true
     return 1
 }
 
-SIG1=$(discover_signal "${EMB_INSTANCE}" "::embed1::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
-RESP=$(api_post "/signals/${EMB_INSTANCE}" "{\"signalId\": \"${SIG1}\", \"payload\": {\"decision\": \"first-ok\"}}")
+SIG1=$(discover_signal "${EMB_INSTANCE}" "embed1") || { tail -40 "${TEST_LOG}"; exit 1; }
+RESP=$(api_post "/signals/${EMB_INSTANCE}" "$(signal_body "${SIG1}" "first-ok")")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "site-1 signal submit failed: ${RESP}"; exit 1; }
 echo "  site 1 discovered + signaled (${SIG1}) ✓"
 
 # THE regression: after site 1 completed (its step_debug_end recorded under
 # the bare step id "approve"), site 2's open wait must STILL be listed.
-SIG2=$(discover_signal "${EMB_INSTANCE}" "::embed2::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
-RESP=$(api_post "/signals/${EMB_INSTANCE}" "{\"signalId\": \"${SIG2}\", \"payload\": {\"decision\": \"second-ok\"}}")
+SIG2=$(discover_signal "${EMB_INSTANCE}" "embed2") || { tail -40 "${TEST_LOG}"; exit 1; }
+RESP=$(api_post "/signals/${EMB_INSTANCE}" "$(signal_body "${SIG2}" "second-ok")")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "site-2 signal submit failed: ${RESP}"; exit 1; }
 echo "  site 2 still discoverable after site 1 completed (${SIG2}) ✓"
@@ -514,7 +603,7 @@ RESP=$(api_post "/workflows/${EMB_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
 PAUSE_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
 [ -n "${PAUSE_INSTANCE}" ] || { print_error "pause-target execute failed: ${RESP}"; exit 1; }
 
-PAUSE_SIG=$(discover_signal "${PAUSE_INSTANCE}" "::embed1::approve") || {
+PAUSE_SIG=$(discover_signal "${PAUSE_INSTANCE}" "embed1") || {
     tail -40 "${TEST_LOG}"
     exit 1
 }
@@ -547,16 +636,16 @@ if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
     print_error "resume request failed: ${RESP}"
     exit 1
 fi
-RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "{\"signalId\": \"${PAUSE_SIG}\", \"payload\": {\"decision\": \"resumed-live\"}}")
+RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "$(signal_body "${PAUSE_SIG}" "resumed-live")")
 if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
     print_error "post-resume first signal submit failed: ${RESP}"
     exit 1
 fi
-PAUSE_SIG2=$(discover_signal "${PAUSE_INSTANCE}" "::embed2::approve") || {
+PAUSE_SIG2=$(discover_signal "${PAUSE_INSTANCE}" "embed2") || {
     tail -40 "${TEST_LOG}"
     exit 1
 }
-RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "{\"signalId\": \"${PAUSE_SIG2}\", \"payload\": {\"decision\": \"second-after-resume\"}}")
+RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "$(signal_body "${PAUSE_SIG2}" "second-after-resume")")
 if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
     print_error "post-resume second signal submit failed: ${RESP}"
     exit 1
@@ -581,4 +670,4 @@ OUT=$(echo "${RESP}" | jq -cS '.data.outputs')
 }
 echo "  resumed, signaled twice, and completed with both embedded outputs ✓"
 
-print_success "workflow<>agent parity: slug + synchronous publish + parent invoke + suspend-capable-agent rejection + embedded signal discovery + pause/resume, all green"
+print_success "workflow<>agent parity: slug + synchronous publish + parent invoke + parking agents (sleep + wait) + embedded signal discovery + pause/resume, all green"
