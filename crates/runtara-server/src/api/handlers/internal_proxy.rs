@@ -251,6 +251,10 @@ pub struct ProxyRequest {
     /// Request timeout in milliseconds (default: 30 000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Bound upstream bytes before buffering. Explicit limits return only the
+    /// raw body to avoid duplicating JSON in the component transport envelope.
+    #[serde(default)]
+    pub max_response_bytes: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -514,6 +518,7 @@ pub async fn execute_proxy_request(
     request: ProxyRequest,
 ) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
     // Mutable copies we'll enrich with connection data
+    let response_limit = proxy_response_limit(request.max_response_bytes)?;
     let mut final_headers = request.headers.clone();
     let mut final_url = request.url.clone();
     let mut aws_signing: Option<AwsSigningParams> = None;
@@ -859,12 +864,7 @@ pub async fn execute_proxy_request(
     }
 
     // Read response body
-    let resp_body_bytes = response.bytes().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("Failed to read upstream response body: {}", e)})),
-        )
-    })?;
+    let resp_body_bytes = read_bounded_response(response, response_limit).await?;
 
     // Track upstream 429 responses for analytics
     if status == 429
@@ -895,7 +895,11 @@ pub async fn execute_proxy_request(
     }
 
     // Try to parse as JSON; always provide base64 raw body too
-    let json_body = serde_json::from_slice::<Value>(&resp_body_bytes).ok();
+    let json_body = if request.max_response_bytes.is_some() {
+        None
+    } else {
+        serde_json::from_slice::<Value>(&resp_body_bytes).ok()
+    };
     let raw_body = BASE64.encode(&resp_body_bytes);
 
     Ok((
@@ -912,6 +916,52 @@ pub async fn execute_proxy_request(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+const MAX_PROXY_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+fn proxy_response_limit(requested: Option<usize>) -> Result<usize, (StatusCode, Json<Value>)> {
+    match requested {
+        Some(0) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Response byte limit must be positive"})),
+        )),
+        Some(limit) => Ok(limit.min(MAX_PROXY_RESPONSE_BYTES)),
+        None => Ok(MAX_PROXY_RESPONSE_BYTES),
+    }
+}
+
+async fn read_bounded_response(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, (StatusCode, Json<Value>)> {
+    let too_large = || {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": "Upstream response exceeds byte limit", "code": "RESPONSE_TOO_LARGE", "limit": limit
+            })),
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": format!("Failed to read upstream response body: {e}")})),
+        )
+    })? {
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
 
 fn ensure_ai_provider_connection_compatible(
     provider: Option<&str>,
@@ -1065,6 +1115,113 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_endpoints_pin_host_and_mailgun_domain() {
+        let params = json!({"domain": "inbound.example"});
+        for (integration, endpoint, expected) in [
+            ("slack_bot", "files", "https://files.slack.com/files-pri"),
+            (
+                "mailgun",
+                "storage-us-west1",
+                "https://storage-us-west1.api.mailgun.net/v3/domains/inbound.example/messages",
+            ),
+            (
+                "mailgun",
+                "storage-us-east4",
+                "https://storage-us-east4.api.mailgun.net/v3/domains/inbound.example/messages",
+            ),
+            (
+                "mailgun",
+                "storage-europe-west1",
+                "https://storage-europe-west1.api.mailgun.net/v3/domains/inbound.example/messages",
+            ),
+        ] {
+            let mut resolved = qbo_resolved();
+            let mut headers = HashMap::new();
+            apply_named_endpoint_override(
+                Some(endpoint),
+                "connection",
+                integration,
+                &params,
+                &mut headers,
+                &mut resolved,
+            )
+            .unwrap();
+            assert_eq!(resolved.base_url.as_deref(), Some(expected));
+            let url = proxy_url::pin_url_to_base(
+                "/object",
+                resolved.base_url.as_deref(),
+                true,
+                &proxy_url::PinOptions::strict(),
+            )
+            .unwrap();
+            assert_eq!(url, format!("{expected}/object"));
+            assert!(
+                proxy_url::pin_url_to_base(
+                    "https://evil.example/unrelated",
+                    resolved.base_url.as_deref(),
+                    true,
+                    &proxy_url::PinOptions::strict()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            runtara_connections::auth::provider_auth::resolve_named_endpoint_for(
+                "mailgun", "files", &params
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn response_limit_is_positive_and_capped() {
+        assert!(proxy_response_limit(Some(0)).is_err());
+        assert_eq!(proxy_response_limit(Some(42)).unwrap(), 42);
+        assert_eq!(
+            proxy_response_limit(Some(usize::MAX)).unwrap(),
+            MAX_PROXY_RESPONSE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_response_limit_covers_known_and_chunked_lengths() {
+        use axum::{Router, body::Body, routing::get};
+        let app = Router::new()
+            .route("/known", get(|| async { "123456" }))
+            .route(
+                "/chunked",
+                get(|| async {
+                    Body::from_stream(futures::stream::iter([
+                        Ok::<_, std::io::Error>("123"),
+                        Ok("456"),
+                    ]))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        for path in ["known", "chunked"] {
+            for limit in [5, 6] {
+                let response = client
+                    .get(format!("http://{address}/{path}"))
+                    .send()
+                    .await
+                    .unwrap();
+                let result = read_bounded_response(response, limit).await;
+                if limit == 5 {
+                    let (status, body) = result.unwrap_err();
+                    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(body.0["code"], "RESPONSE_TOO_LARGE");
+                } else {
+                    assert_eq!(result.unwrap(), b"123456");
+                }
+            }
+        }
+        server.abort();
+    }
 
     #[test]
     fn ai_provider_connection_mismatch_is_rejected_before_proxying() {

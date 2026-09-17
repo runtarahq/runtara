@@ -267,6 +267,7 @@ async fn proxy_uses_persisted_http_mtls_identity_and_private_server_ca() {
             endpoint_ref: None,
             endpoint: None,
             timeout_ms: Some(5_000),
+            max_response_bytes: None,
         },
     )
     .await
