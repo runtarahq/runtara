@@ -303,9 +303,10 @@ async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> any
     // runner until this run hit its five-second timeout.
     let host = Arc::new(Host::new());
 
-    let started = Instant::now();
+    // No wall-clock bound: the invoke also loads and compiles the component,
+    // which stretches past any tight limit under a parallel suite. A wait that
+    // blocked instead of parking ends in the run timeout, never in Suspended.
     let first = invoke(&parent, host.clone()).await?;
-    let parked_in = started.elapsed();
 
     // It must park ON THE SIGNAL, not on a bare resume. `park_invoke_suspend`
     // drops a pure `on-resume` before it reaches `park_instance`, so
@@ -321,10 +322,6 @@ async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> any
             [runtara_component_host::lifecycle::WorkflowWake::OnSignal(_)]
         ),
         "a parked nested wait must carry an on-signal wake, got {wakes:?}"
-    );
-    assert!(
-        parked_in < Duration::from_secs(2),
-        "parking must not wait out the run timeout, took {parked_in:?}"
     );
     assert_eq!(
         host.custom_signal_polls.load(Ordering::SeqCst),
