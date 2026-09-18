@@ -1181,7 +1181,30 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         Ok::<_, anyhow::Error>(())
     });
     let result = async {
-        let executor = embedded_executor();
+        // Storage components carry the trusted ABI even when this workflow uses
+        // only download. Approve their exact bundle bytes as production does,
+        // without installing a credential provider: ordinary HTTP cancellation
+        // must not resolve any trusted credentials.
+        let storage_executor = if let Scenario::StorageDownload(agent, _) = scenario {
+            let bundle = tempfile::tempdir()?;
+            let components = shared_components_dir();
+            for suffix in ["wasm", "meta.json"] {
+                let file = format!("runtara_agent_{}.{suffix}", agent.replace('-', "_"));
+                fs::copy(components.join(&file), bundle.path().join(file))?;
+            }
+            let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
+                bundle.path(),
+                runtara_component_host::DispatcherEnv {
+                    proxy_url: url.clone(), object_model_url: url.clone(), core_http_url: url.clone(),
+                },
+            ).await?;
+            let executor = runtara_component_host::WorkflowExecutor::new(
+                Arc::clone(embedded_executor().engine()),
+            )?;
+            executor.set_trusted_executor(dispatcher.trusted_executor())?;
+            Some(executor)
+        } else { None };
+        let executor = storage_executor.as_ref().unwrap_or_else(|| embedded_executor());
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
