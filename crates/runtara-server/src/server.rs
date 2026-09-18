@@ -2485,10 +2485,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/proxy",
             post(api::handlers::internal_proxy::proxy_handler),
         )
-        .route(
-            "/api/internal/presign",
-            post(api::handlers::internal_presign::presign_handler),
-        )
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_proxy_state);
 

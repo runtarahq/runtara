@@ -49,7 +49,7 @@ automatically be deleted.
 | Connections | `resolver@0.1.0` host import, implemented by `HttpConnectionResolverHost` | Inject a native implementation using `ConnectionsFacade`; migrate the synchronous WIT surface to a new async version |
 | Outbound HTTP | `runtara-http` wraps requests for the internal proxy, then uses `host-io/http@0.1.0` to make that HTTP hop | Introduce a policy-aware host request interface calling an extracted native egress service |
 | Object Model | WASM agent calls internal Object Model routes through `runtara-http.call()` | Add domain host operations using the existing schema/instance services and ObjectStore |
-| Presigning | S3/Azure agents call `runtara_http::presign`, which POSTs to the internal presign route | Authorize on the host and invoke the approved built-in provider's `trusted` capability in a restricted instance |
+| Presigning | S3/Azure trusted capabilities execute their agent-owned signers in restricted WASM; the legacy HTTP endpoint is removed | Authorize on the host and invoke the approved built-in provider's `trusted` capability in a restricted instance |
 
 Source anchors:
 
@@ -65,7 +65,7 @@ Source anchors:
 - [Object Model agent](../crates/agents/runtara-agent-object-model/src/lib.rs),
   [internal handlers](../crates/runtara-server/src/api/handlers/internal_object_model.rs),
   and [services](../crates/runtara-server/src/api/services/object_model.rs).
-- [Presign handler](../crates/runtara-server/src/api/handlers/internal_presign.rs)
+- [Trusted credential adapter](../crates/runtara-server/src/api/services/trusted.rs)
   and [signing implementations](../crates/runtara-connections/src/auth/mod.rs).
 
 Important existing behavior to carry across:
@@ -331,7 +331,8 @@ claiming the entire internal listener can be removed.
 
 Exit: no supported new artifact imports the legacy transport for these surfaces;
 the five-interface integration suite runs with the internal listener disabled.
-Delete compatibility routes/bindings only once their supported-consumer inventory
+The presign endpoint is already removed; workflows using it require recompilation.
+For the remaining migrations, delete compatibility routes/bindings once their supported-consumer inventory
 is empty. Public HTTP and MCP APIs continue to call shared services.
 
 ## Verification and acceptance

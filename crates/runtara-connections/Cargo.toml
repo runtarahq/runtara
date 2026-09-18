@@ -15,7 +15,6 @@ default = []
 utoipa = ["dep:utoipa"]
 
 [dependencies]
-runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "uuid", "chrono", "json"] }
 

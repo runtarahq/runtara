@@ -21,6 +21,9 @@
 //! cap is 50 MB (matches the legacy `s3_storage` agent).
 #![allow(clippy::result_large_err)]
 
+mod aws_presign;
+mod presign;
+
 use base64::Engine as _;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
@@ -1151,7 +1154,7 @@ pub async fn storage_generate_presigned_url(
         .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
 
     Ok(
-        match runtara_agent_trusted::presign(
+        match presign::presign(
             context,
             method,
             &path,

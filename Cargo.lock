@@ -4235,12 +4235,16 @@ name = "runtara-agent-azure-blob-storage"
 version = "8.9.10"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
+ "hmac 0.12.1",
  "runtara-agent-macro",
  "runtara-agent-trusted",
  "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "urlencoding",
  "wit-bindgen 0.58.0",
 ]
 
@@ -4472,12 +4476,18 @@ name = "runtara-agent-s3-storage"
 version = "8.9.10"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
  "runtara-agent-macro",
  "runtara-agent-trusted",
  "runtara-dsl",
  "runtara-http",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "url",
+ "urlencoding",
  "wit-bindgen 0.58.0",
 ]
 
@@ -4590,13 +4600,8 @@ dependencies = [
 name = "runtara-agent-trusted"
 version = "8.9.10"
 dependencies = [
- "base64 0.22.1",
- "chrono",
- "hex",
- "hmac 0.12.1",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "url",
  "urlencoding",
  "wit-bindgen 0.58.0",
@@ -4684,6 +4689,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "getrandom 0.3.4",
  "http",
  "http-body-util",
@@ -4695,14 +4701,17 @@ dependencies = [
  "runtara-agent-trusted",
  "runtara-agent-wit",
  "runtara-agent-xlsx",
+ "runtara-connections",
  "runtara-dsl",
  "runtara-workflow-wit",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "testcontainers",
  "tokio",
  "tracing",
+ "url",
  "wac-graph",
  "wasmparser 0.247.0",
  "wasmtime",
@@ -4728,7 +4737,6 @@ dependencies = [
  "rand 0.9.4",
  "redis",
  "reqwest 0.12.28",
- "runtara-agent-trusted",
  "runtara-agents",
  "runtara-dsl",
  "runtara-http",

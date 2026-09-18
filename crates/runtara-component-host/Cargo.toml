@@ -108,6 +108,10 @@ wasmparser = "0.247"
 tokio = { version = "1", features = ["macros", "rt", "time", "sync", "io-util"] }
 
 [dev-dependencies]
+testcontainers = "0.27"
+runtara-connections = { path = "../runtara-connections" }
+chrono.workspace = true
+url = "2"
 axum = "0.8"
 # Standard composition in cancellation integration fixtures.
 wac-graph = "0.10"

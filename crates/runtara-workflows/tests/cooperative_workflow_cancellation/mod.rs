@@ -215,7 +215,6 @@ enum Scenario {
     ObjectQuery,
     ObjectExecute,
     StorageDownload(&'static str, bool),
-    StoragePresign(&'static str),
     SharepointDownload,
     SharepointDownloadBody,
     SharepointContentAfterMetadata,
@@ -306,7 +305,7 @@ impl Scenario {
         )
     }
     fn is_storage(self) -> bool {
-        matches!(self, Self::StorageDownload(..) | Self::StoragePresign(_))
+        matches!(self, Self::StorageDownload(..))
     }
     fn is_object(self) -> bool {
         matches!(self, Self::ObjectQuery | Self::ObjectExecute)
@@ -704,7 +703,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
     if scenario.is_storage() {
         let (agent, capability) = match scenario {
             Scenario::StorageDownload(agent, _) => (agent, "storage-download-file"),
-            Scenario::StoragePresign(agent) => (agent, "storage-generate-presigned-url"),
             _ => unreachable!(),
         };
         let integration = match agent {
@@ -924,13 +922,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                 let body: Value = serde_json::from_slice(&request[end..end + length])?;
                                 assert_eq!(body["connectionId"], "fixture-connection");
                                 assert_eq!(body["sql"], "SELECT 1");
-                            }
-                            if matches!(scenario, Scenario::StoragePresign(_)) {
-                                let body: Value = serde_json::from_slice(&request[end..end + length])?;
-                                assert!(request.starts_with(b"POST /presign "));
-                                assert_eq!(body["connection_id"], "fixture-connection");
-                                assert_eq!(body["method"], "GET");
-                                assert_eq!(body["path"], "/bucket/file.txt");
                             }
                         }
                         if scenario.is_ai() {
@@ -1384,14 +1375,6 @@ async fn emitted_storage_download_cancel_stops_head_and_get_without_recovery() -
         for after_head in [false, true] {
             run(Scenario::StorageDownload(agent, after_head)).await?;
         }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn emitted_storage_presign_cancel_bypasses_soft_failure_and_recovery() -> anyhow::Result<()> {
-    for agent in ["s3-storage", "azure-blob-storage"] {
-        run(Scenario::StoragePresign(agent)).await?;
     }
     Ok(())
 }

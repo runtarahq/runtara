@@ -18,8 +18,8 @@
 //!   F3 (base-path scope escape) and F4 (fail-open re-root).
 //! * [`is_private_ip`] — SSRF address classifier, normalizing IPv4-mapped /
 //!   IPv4-compatible IPv6 before the v6 ranges (F5).
-//! * [`path_is_under`] — segment-wise path containment used by both the proxy
-//!   and the presign path builder.
+//! * [`path_is_under`] — segment-wise path containment for proxy destination
+//!   validation.
 //!
 //! Design rule: **everything here is pure** — no I/O, no env reads, no axum
 //! types. Policy inputs (the http-base allowlist, whether path enforcement
@@ -176,7 +176,7 @@ pub fn pin_url_to_base(
 /// True if `final_path` is contained under `base_path` after percent-decoding
 /// (once, matching one upstream decode) and dot-segment normalization. Prefer
 /// this over [`path_is_under`] when either path may carry percent-encoding or
-/// `..` segments. Shared by the proxy pin and the presign path builder.
+/// `..` segments. Used by the proxy destination pin.
 pub fn path_within_base(final_path: &str, base_path: &str) -> bool {
     let child = normalize_segments(&percent_decode(final_path));
     let base = normalize_segments(&percent_decode(base_path));

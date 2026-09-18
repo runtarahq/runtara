@@ -944,6 +944,11 @@ was run in this stage.
 
 ## S3, Azure Blob Storage and SFTP I/O
 
+Historical stage notes below: presigning has since moved to restricted trusted
+WASM execution. Its HTTP helper and endpoint are removed; HTTP-stub presign
+fixtures are replaced by the trusted executor cancellation tests and real WASM
+provider acceptance tests. See [trusted capabilities](trusted-capabilities-plan.md).
+
 The existing S3 and Azure Blob Storage components now use callback exports and
 await their normal proxy requests across all ten capabilities each. The shared
 `runtara_http::presign` helper is now async; both in-repository callers await it.

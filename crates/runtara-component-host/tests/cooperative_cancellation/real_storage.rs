@@ -39,24 +39,6 @@ async fn request(socket: &mut tokio::net::TcpStream) -> anyhow::Result<(String, 
     ))
 }
 
-async fn raw_response(
-    socket: &mut tokio::net::TcpStream,
-    status: u16,
-    body: &[u8],
-) -> anyhow::Result<()> {
-    socket
-        .write_all(
-            format!(
-                "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .as_bytes(),
-        )
-        .await?;
-    socket.write_all(body).await?;
-    Ok(())
-}
-
 async fn wait_closed(
     socket: &mut tokio::net::TcpStream,
     started: &Notify,
@@ -109,45 +91,30 @@ async fn cloud_cancel(
                 let (mut socket, _) = listener.accept().await?;
                 let (line, body) = request(&mut socket).await?;
                 assert_eq!(body["connection_id"], "fixture-connection");
-                if capability == "storage-generate-presigned-url" {
+                assert_eq!(line, format!("POST {root} HTTP/1.1"));
+                assert_eq!(body["url"], "/bucket/dir/file%20name.txt");
+                let method = match capability {
+                    "storage-download-file" if stage == 1 => "HEAD",
+                    "storage-download-file" => "GET",
+                    "storage-delete-file" => "DELETE",
+                    _ => "PUT",
+                };
+                assert_eq!(body["method"], method);
+                if capability == "storage-upload-file" {
+                    assert_eq!(body["body_raw"], "aGVsbG8=");
+                    if agent == "azure-blob-storage" {
+                        assert_eq!(body["headers"]["x-ms-blob-type"], "BlockBlob");
+                    }
+                }
+                if capability == "storage-copy-file" {
                     assert_eq!(
-                        line,
-                        if canonical_proxy {
-                            "POST /api/internal/presign HTTP/1.1"
+                        body["headers"][if agent == "s3-storage" {
+                            "x-amz-copy-source"
                         } else {
-                            "POST /proxy/presign HTTP/1.1"
-                        }
+                            "x-ms-copy-source"
+                        }],
+                        "/source/source.txt"
                     );
-                    assert_eq!(body["method"], "GET");
-                    assert_eq!(body["path"], "/bucket/dir/file name.txt");
-                    assert_eq!(body["expires_in_seconds"], 123);
-                    assert_eq!(body["content_type"], "text/plain");
-                } else {
-                    assert_eq!(line, format!("POST {root} HTTP/1.1"));
-                    assert_eq!(body["url"], "/bucket/dir/file%20name.txt");
-                    let method = match capability {
-                        "storage-download-file" if stage == 1 => "HEAD",
-                        "storage-download-file" => "GET",
-                        "storage-delete-file" => "DELETE",
-                        _ => "PUT",
-                    };
-                    assert_eq!(body["method"], method);
-                    if capability == "storage-upload-file" {
-                        assert_eq!(body["body_raw"], "aGVsbG8=");
-                        if agent == "azure-blob-storage" {
-                            assert_eq!(body["headers"]["x-ms-blob-type"], "BlockBlob");
-                        }
-                    }
-                    if capability == "storage-copy-file" {
-                        assert_eq!(
-                            body["headers"][if agent == "s3-storage" {
-                                "x-amz-copy-source"
-                            } else {
-                                "x-ms-copy-source"
-                            }],
-                            "/source/source.txt"
-                        );
-                    }
                 }
                 if stage < blocked {
                     respond(
@@ -225,78 +192,6 @@ async fn object_storage_cancel_stops_both_download_requests_without_fallback() -
     }
     Ok(())
 }
-#[tokio::test]
-async fn presign_cancel_stops_headers_and_body_for_both_proxy_url_shapes() -> anyhow::Result<()> {
-    for agent in ["s3-storage", "azure-blob-storage"] {
-        for canonical in [false, true] {
-            for partial in [false, true] {
-                cloud_cancel(
-                    agent,
-                    "storage-generate-presigned-url",
-                    1,
-                    partial,
-                    canonical,
-                )
-                .await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn presign_preserves_success_and_soft_failure_shapes() -> anyhow::Result<()> {
-    for agent in ["s3-storage", "azure-blob-storage"] {
-        for (status, response) in [
-            (
-                200,
-                json!({"url":"https://storage.invalid/fixture","expires_in_seconds":123}),
-            ),
-            (403, json!({"error":"fixture"})),
-            (200, json!({"expires_in_seconds":123})),
-        ] {
-            let expected_success = status == 200 && response.get("url").is_some();
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let proxy = format!("http://{}/api/internal/proxy", listener.local_addr()?);
-            let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await?;
-                let (line, body) = request(&mut socket).await?;
-                assert_eq!(line, "POST /api/internal/presign HTTP/1.1");
-                assert_eq!(body["connection_id"], "fixture-connection");
-                raw_response(&mut socket, status, &serde_json::to_vec(&response)?).await
-            });
-            let result = tokio::time::timeout(
-                Duration::from_secs(10),
-                invoke_named_agent(
-                    agent,
-                    CallContext::for_test("fixture-tenant", proxy, "", ""),
-                    "storage-generate-presigned-url",
-                    serde_json::to_vec(&input(agent))?,
-                ),
-            )
-            .await;
-            let output = match result {
-                Ok(Ok(Ok(output))) => serde_json::from_slice::<Value>(&output)?,
-                other => {
-                    server.abort();
-                    let _ = server.await;
-                    anyhow::bail!("expected presign output: {other:?}");
-                }
-            };
-            server.await??;
-            assert_eq!(output["success"], expected_success);
-            if expected_success {
-                assert_eq!(output["url"], "https://storage.invalid/fixture");
-                assert_eq!(output["expires_in_seconds"], 123);
-            } else {
-                assert!(output["error"].as_str().is_some());
-                assert!(output["url"].is_null());
-            }
-        }
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn object_storage_preserves_delete_statuses_and_download_head_fallback() -> anyhow::Result<()>
 {

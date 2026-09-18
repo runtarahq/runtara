@@ -21,6 +21,9 @@
 //! and "key" maps to a blob name.
 #![allow(clippy::result_large_err)]
 
+mod azure_sas;
+mod presign;
+
 use base64::Engine as _;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
@@ -1201,7 +1204,7 @@ pub async fn storage_generate_presigned_url(
         .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
 
     Ok(
-        match runtara_agent_trusted::presign(
+        match presign::presign(
             context,
             method,
             &path,

@@ -56,6 +56,16 @@ async fn dispatcher() -> anyhow::Result<(
     ComponentDispatcherService,
     Arc<Credentials>,
 )> {
+    let credentials = Arc::new(Credentials {
+        calls: AtomicUsize::new(0),
+    });
+    let (bundle, dispatcher) = dispatcher_with_credentials(credentials.clone()).await?;
+    Ok((bundle, dispatcher, credentials))
+}
+
+async fn dispatcher_with_credentials(
+    credentials: Arc<dyn TrustedCredentials>,
+) -> anyhow::Result<(tempfile::TempDir, ComponentDispatcherService)> {
     let source =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release");
     let bundle = tempfile::tempdir()?;
@@ -71,13 +81,10 @@ async fn dispatcher() -> anyhow::Result<(
         core_http_url: "http://127.0.0.1:1".into(),
     };
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env).await?;
-    let credentials = Arc::new(Credentials {
-        calls: AtomicUsize::new(0),
-    });
     dispatcher
         .trusted_executor()
         .set_credentials(credentials.clone())?;
-    Ok((bundle, dispatcher, credentials))
+    Ok((bundle, dispatcher))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -177,26 +184,13 @@ async fn tenant_and_type_are_authoritative_and_guest_context_is_ignored() -> any
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wasm_and_native_signatures_match_for_operations_encoding_and_expiry() -> anyhow::Result<()>
-{
-    let (_bundle, dispatcher, credentials) = dispatcher().await?;
-    for (agent, connection, integration) in [
+async fn wasm_signatures_cover_operations_encoding_and_expiry() -> anyhow::Result<()> {
+    let (_bundle, dispatcher, _) = dispatcher().await?;
+    for (agent, connection, _integration) in [
         ("s3-storage", "s3", "s3_compatible"),
         ("azure-blob-storage", "azure", "azure_blob_storage"),
     ] {
-        for (operation, method) in [("download", "GET"), ("upload", "PUT"), ("delete", "DELETE")] {
-            let context = credentials
-                .resolve("tenant-a", agent, connection, &[integration.into()])
-                .await
-                .unwrap();
-            let expected = runtara_agent_trusted::presign(
-                &context,
-                method,
-                "/uploads/folder/my file.csv",
-                u64::MAX,
-                Some("text/csv"),
-            )
-            .unwrap();
+        for (operation, permission) in [("download", "r"), ("upload", "cw"), ("delete", "d")] {
             let result = dispatcher.test_capability(TestCapabilityRequest {
                 tenant_id: "tenant-a".into(), agent_id: agent.into(), capability_id: CAP.into(), connection: None,
                 input: json!({"bucket":"uploads", "key":"folder/my file.csv", "operation":operation,
@@ -204,7 +198,19 @@ async fn wasm_and_native_signatures_match_for_operations_encoding_and_expiry() -
             }).await?;
             assert!(result.success, "{:?}", result.error);
             let output = result.output.unwrap();
-            assert_eq!(output["url"], expected.url);
+            let url = url::Url::parse(output["url"].as_str().unwrap())?;
+            assert_eq!(url.path(), "/uploads/folder/my%20file.csv");
+            let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            if agent == "s3-storage" {
+                assert_eq!(query["X-Amz-Expires"], "604800");
+                assert_eq!(query["X-Amz-Date"], "20231114T221320Z");
+                assert_eq!(query["X-Amz-Signature"].len(), 64);
+            } else {
+                assert_eq!(query["sp"], permission);
+                assert_eq!(query["se"], "2023-11-21T22:13:20Z");
+                assert_eq!(query["rsct"], "text/csv");
+                assert!(!query["sig"].is_empty());
+            }
             assert_eq!(output["expires_in_seconds"], 604800);
         }
     }
@@ -330,5 +336,85 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
     assert_eq!(credentials.calls.load(Ordering::SeqCst), 1);
     tasks.release(id).await.unwrap();
     tasks.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[path = "trusted/emulators.rs"]
+mod emulators;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_during_credential_resolution_drops_work_and_allows_reuse()
+-> anyhow::Result<()> {
+    struct BlockingCredentials {
+        started: tokio::sync::Notify,
+        dropped: Arc<AtomicUsize>,
+        calls: AtomicUsize,
+    }
+    struct Pending(Arc<AtomicUsize>);
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl TrustedCredentials for BlockingCredentials {
+        async fn resolve(
+            &self,
+            tenant: &str,
+            agent: &str,
+            connection: &str,
+            allowed: &[String],
+        ) -> Result<TrustedContext, String> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _pending = Pending(self.dropped.clone());
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Credentials {
+                calls: AtomicUsize::new(0),
+            }
+            .resolve(tenant, agent, connection, allowed)
+            .await
+        }
+    }
+    let credentials = Arc::new(BlockingCredentials {
+        started: tokio::sync::Notify::new(),
+        dropped: Arc::new(AtomicUsize::new(0)),
+        calls: AtomicUsize::new(0),
+    });
+    let (_bundle, dispatcher) = dispatcher_with_credentials(credentials.clone()).await?;
+    let executor = dispatcher.trusted_executor();
+    let first = executor.clone();
+    let input =
+        serde_json::to_vec(&json!({"bucket":"uploads", "key":"file.txt", "operation":"download"}))?;
+    let first_input = input.clone();
+    let task = tokio::spawn(async move {
+        first
+            .invoke(
+                "tenant-a",
+                "s3-storage",
+                CAP,
+                "s3",
+                first_input,
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), credentials.started.notified()).await?;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(credentials.dropped.load(Ordering::SeqCst), 1);
+    let output = executor
+        .invoke(
+            "tenant-a",
+            "s3-storage",
+            CAP,
+            "s3",
+            input,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(String::from_utf8_lossy(&output).contains("X-Amz-Signature="));
     Ok(())
 }

@@ -5,16 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Trusted capability contract and pure provider signing primitives"
+description = "Trusted capability contract and guest forwarding"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
-base64.workspace = true
-sha2.workspace = true
-hmac = "0.12"
-hex = "0.4"
 url = "2"
 urlencoding = "2"
 zeroize = "1"

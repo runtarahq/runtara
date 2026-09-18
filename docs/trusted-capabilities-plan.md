@@ -216,16 +216,15 @@ fields remains a separate existing behavior.
 Mark only the two presigning capabilities `trusted: true` initially. Ordinary
 storage operations stay unchanged and receive no credentials.
 
-Move or factor AWS SigV4 URL and Azure SAS signing into WASM-compatible provider
-code owned by the respective agents. Reuse pure algorithm code from native
-compatibility paths where necessary; avoid two diverging signer implementations
-and avoid importing host-only `runtara-connections` into WASM.
+AWS SigV4 URL and Azure SAS signing live in the respective WASM agent crates.
+The generic trusted contract has no provider algorithms. The native connections
+crate retains ordinary outbound request authentication, but no URL presigning.
 
 The host validates connection access and destination/path policy. The trusted
 provider implementation performs provider-specific validation and signing.
 Preserve operation mappings, expiry caps, URL encoding, session-token handling,
-and actual content-type semantics. New capabilities stop POSTing to the internal
-presign route; old artifacts may retain it during migration.
+and actual content-type semantics. Remove the internal presign route and its
+HTTP client helper. Recompile artifacts that used the removed endpoint.
 
 The presigning host facade in the broader plan can select an approved trusted
 S3/Azure capability from the authoritative connection type and delegate to this
@@ -249,11 +248,11 @@ route can select an unapproved implementation.
    workflow-agent callers share the approved path without receiving credentials.
 5. **Provider migration.** Move S3/Azure presigning into trusted execution with
    unchanged public capability schemas. Gate: compatible providers/emulators
-   accept outputs; no internal presign listener is needed for new artifacts.
-6. **Compatibility and rollout.** Regenerate bundles, clients, and fixtures;
-   deploy supporting hosts before new components. Retire legacy routes only
-   after supported artifacts no longer use them. Gate: resume/replay and mixed
-   versions have explicit tested behavior.
+   accept outputs produced by the actual WASM components.
+6. **Rollout.** Regenerate bundles, clients, and fixtures; deploy supporting hosts
+   and recompiled workflows together. The legacy presign endpoint is removed
+   without a compatibility route. Gate: resume/replay and artifact mismatches
+   have explicit tested behavior.
 
 Pin trusted built-in dependencies in generated dependency metadata bound to the
 registered workflow artifact. Validate every selected digest against the host's
@@ -302,8 +301,8 @@ with unchanged workflow results and tested denial/cleanup paths.
 ## Implementation notes
 
 The host executor is `crates/runtara-component-host/src/trusted.rs`; the shared
-contract and pure signing code live in `crates/runtara-agent-trusted`. The two
-storage agents forward ordinary invocations to the host and implement a separate
+contract lives in `crates/runtara-agent-trusted`. Provider signing code lives in
+the two storage agent crates, which forward ordinary invocations to the host and implement a separate
 privileged export. The server credential adapter checks entitlement and fetches
 one tenant-owned, exact-type connection before decrypting it.
 
@@ -326,10 +325,10 @@ supply either authority. Scoped child calls inherit the runner's tenant separate
 from the guest environment. Both ordinary and privileged exports use the current
 async component dispatch convention.
 
-S3 and Azure use the same pure signing implementations from native compatibility
-routes and restricted WASM. The old internal presign HTTP route remains available
-for existing artifacts. OAuth acquisition, refresh, token storage, and controlled
-outbound HTTP remain native; they are not migrated by this change.
+S3 and Azure presigning executes in restricted WASM. `/api/internal/presign`,
+its HTTP client helper, and native presigning exports are removed. Existing
+artifacts using that endpoint must be recompiled. OAuth acquisition, refresh,
+token storage, and controlled outbound HTTP remain native.
 
 Verification includes real component execution, direct workflows, parallel Split,
 AI tools, published workflow-agent wrappers, and durable replay. Replay preserves

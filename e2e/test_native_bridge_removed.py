@@ -78,7 +78,9 @@ def main():
 
     # Retained internal routes must still dispatch: invalid input produces a
     # typed client error instead of the removed bridge's 404.
-    for path in ["/api/internal/proxy", "/api/internal/presign", "/api/internal/object-model/sql/query"]:
+    status, _ = request(INTERNAL, "/api/internal/presign", "POST", {})
+    assert status == 404, f"legacy presign route still available: {status}"
+    for path in ["/api/internal/proxy", "/api/internal/object-model/sql/query"]:
         status, _ = request(INTERNAL, path, "POST", {})
         assert status in (400, 422), f"retained route {path}: {status}"
     print("PASS: SFTP absent, native dispatch removed, SFTP workflow rejected, retained routes present")

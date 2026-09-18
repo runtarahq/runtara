@@ -18,8 +18,9 @@ pub const MAX_SAS_EXPIRES_SECONDS: u32 = 604_800;
 ///
 /// `permissions` follows the Service SAS Blob permission alphabet:
 /// `r` (read), `w` (write/create), `d` (delete), `c` (create), `a` (add), `t` (tags).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub fn generate_blob_sas_url(
+fn generate_blob_sas_url(
     base_url: &str,
     account_name: &str,
     account_key: &str,
@@ -62,12 +63,13 @@ pub fn generate_blob_sas_url_at(
         now + chrono::Duration::seconds(expires_in_seconds.min(MAX_SAS_EXPIRES_SECONDS) as i64);
     let signed_expiry = format_iso8601(&expiry_ts);
 
-    // Canonical resource: `/blob/{account}/{container}/{blob}` per the docs.
+    // The canonical resource uses the unescaped blob name. Only the returned
+    // URL path is percent-encoded.
     let canonical_resource = format!(
         "/blob/{}/{}/{}",
         account_name,
         container.trim_matches('/'),
-        encode_path(blob.trim_start_matches('/'))
+        blob.trim_start_matches('/')
     );
 
     let signed_resource = "b";
@@ -130,16 +132,6 @@ pub fn generate_blob_sas_url_at(
         encode_path(blob.trim_start_matches('/'))
     );
     Ok(format!("{}{}?{}", cleaned_base, blob_path, sas))
-}
-
-/// Map a friendly operation name to Azure SAS permission characters.
-pub fn permissions_for(operation: &str) -> Option<&'static str> {
-    match operation.to_lowercase().as_str() {
-        "download" | "get" | "read" => Some("r"),
-        "upload" | "put" | "write" | "create" => Some("cw"),
-        "delete" => Some("d"),
-        _ => None,
-    }
 }
 
 fn format_iso8601(ts: &DateTime<Utc>) -> String {
@@ -219,14 +211,6 @@ mod tests {
         .unwrap();
         assert!(url.starts_with("http://127.0.0.1:10000/devstoreaccount1/uploads/x.txt?"));
         assert!(url.contains("sp=rw"));
-    }
-
-    #[test]
-    fn permissions_for_maps_friendly_names() {
-        assert_eq!(permissions_for("download"), Some("r"));
-        assert_eq!(permissions_for("UPLOAD"), Some("cw"));
-        assert_eq!(permissions_for("delete"), Some("d"));
-        assert_eq!(permissions_for("nope"), None);
     }
 
     #[test]

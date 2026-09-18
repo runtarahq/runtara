@@ -20,8 +20,9 @@ pub const MAX_PRESIGN_EXPIRES_SECONDS: u32 = 604_800;
 ///
 /// The signature only covers the `host` header; the caller can send any payload
 /// when consuming the URL.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub fn presign_url_v4(
+fn presign_url_v4(
     method: &str,
     url: &url::Url,
     expires_in_seconds: u32,
@@ -145,7 +146,10 @@ fn canonical_uri(url: &url::Url) -> String {
         return "/".to_string();
     }
     path.split('/')
-        .map(|segment| urlencoding::encode(segment).into_owned())
+        .map(|segment| {
+            let decoded = urlencoding::decode(segment).unwrap_or_else(|_| segment.into());
+            urlencoding::encode(&decoded).into_owned()
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -159,6 +163,23 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_path_encodes_each_segment_once() {
+        for (input, expected) in [
+            (
+                "https://storage.test/bucket/my file.txt",
+                "/bucket/my%20file.txt",
+            ),
+            ("https://storage.test/bucket/a%2Fb.txt", "/bucket/a%2Fb.txt"),
+            (
+                "https://storage.test/bucket/100%25.txt",
+                "/bucket/100%25.txt",
+            ),
+        ] {
+            assert_eq!(canonical_uri(&url::Url::parse(input).unwrap()), expected);
+        }
+    }
 
     #[test]
     fn presigned_url_contains_required_query_params() {
