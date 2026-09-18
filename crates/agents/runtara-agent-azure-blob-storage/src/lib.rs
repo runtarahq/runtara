@@ -11,11 +11,10 @@
 //! forwards every request through the proxy as a JSON envelope. The
 //! `X-Runtara-Connection-Id` header causes the proxy to resolve the storage
 //! account, compute Azure Shared Key HMAC signatures, and forward to
-//! `https://{account}.blob.core.windows.net`. The component never sees storage
-//! account keys and performs no signing.
-//!
-//! Presigned SAS URLs are obtained via `runtara_http::presign(...).await` — same
-//! mechanism as the s3_storage agent, fully server-side.
+//! `https://{account}.blob.core.windows.net`. The ordinary instance receives
+//! only the connection ID. SAS generation forwards to the host, which invokes
+//! the trusted export in a fresh restricted instance with the account key.
+//! That instance performs no network I/O.
 //!
 //! The capability surface mirrors the s3_storage agent so workflows can be
 //! ported between providers with minimal rewiring. "bucket" maps to a container
@@ -328,7 +327,7 @@ pub struct CreateBucketOutput {
     display_name = "Create Container",
     description = "Create a new container in Azure Blob Storage",
     module_display_name = "Azure Blob Storage",
-    module_description = "Azure Blob Storage: container and blob management, plus SAS URL generation. Credentials are injected server-side by the runtara HTTP proxy — the component never handles Shared Key material.",
+    module_description = "Azure Blob Storage: container and blob management, plus SAS URL generation. Requests use host-managed connections; SAS generation runs in an isolated trusted capability.",
     module_has_side_effects = true,
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage",
@@ -1167,6 +1166,7 @@ pub struct GeneratePresignedUrlOutput {
 }
 
 #[capability(
+    trusted = true,
     module = "azure_blob_storage",
     display_name = "Generate Presigned URL",
     description = "Generate a time-limited Shared Access Signature URL for downloading, uploading, or deleting a blob. Callers consume the URL directly without going through runtara.",
@@ -1176,9 +1176,8 @@ pub struct GeneratePresignedUrlOutput {
 )]
 pub async fn storage_generate_presigned_url(
     input: GeneratePresignedUrlInput,
+    context: &runtara_agent_trusted::TrustedContext,
 ) -> Result<GeneratePresignedUrlOutput, AgentError> {
-    let conn = require_connection(&input._connection)?;
-
     let method = match input.operation.to_lowercase().as_str() {
         "download" | "get" | "read" => "GET",
         "upload" | "put" | "write" | "create" => "PUT",
@@ -1202,15 +1201,13 @@ pub async fn storage_generate_presigned_url(
         .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
 
     Ok(
-        match runtara_http::presign(
-            &conn.connection_id,
+        match runtara_agent_trusted::presign(
+            context,
             method,
             &path,
             expires,
             input.content_type.as_deref(),
-        )
-        .await
-        {
+        ) {
             Ok(result) => GeneratePresignedUrlOutput {
                 success: true,
                 url: Some(result.url),
@@ -1314,8 +1311,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         id: "azure_blob_storage".into(),
         name: "Azure Blob Storage".into(),
         description: "Azure Blob Storage: container and blob management, plus SAS URL generation. \
-                      Credentials are injected server-side by the runtara HTTP proxy — the \
-                      component never handles Shared Key material."
+                      Requests use host-managed connections; SAS generation runs in an isolated trusted capability."
             .into(),
         has_side_effects: true,
         supports_connections: true,
@@ -1330,6 +1326,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
 runtara_agent_macro::agent_component!(
     agent = "azure-blob-storage",
+    trusted = true,
     capabilities = [
         storage_create_bucket,
         storage_list_buckets,
@@ -1404,5 +1401,32 @@ mod tests {
             parse_azure_error(body),
             "ContainerNotFound: The specified container does not exist."
         );
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl bindings::exports::runtara::trusted::execution::Guest for Component {
+    async fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        context: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        if capability_id != "storage-generate-presigned-url" {
+            return Err(runtara_agent_trusted::error(
+                "TRUSTED_CAPABILITY_DENIED",
+                "Capability is not trusted",
+            ));
+        }
+        let input = serde_json::from_slice(&input).map_err(|_| {
+            runtara_agent_trusted::error("INVALID_INPUT", "Invalid capability input")
+        })?;
+        let context: runtara_agent_trusted::TrustedContext = serde_json::from_slice(&context)
+            .map_err(|_| {
+                runtara_agent_trusted::error("INVALID_CONTEXT", "Invalid trusted context")
+            })?;
+        let result = __trusted_executor_storage_generate_presigned_url(input, &context).await?;
+        serde_json::to_vec(&result).map_err(|_| {
+            runtara_agent_trusted::error("INVALID_OUTPUT", "Invalid capability output")
+        })
     }
 }

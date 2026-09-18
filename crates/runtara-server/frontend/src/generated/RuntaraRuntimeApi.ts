@@ -1207,6 +1207,8 @@ export interface CapabilityInfo {
    * Well-known tags: "memory:read", "memory:write".
    */
   tags?: string[];
+  /** Host-enforced execution mode; never a workflow-controlled permission. */
+  trusted?: boolean;
 }
 
 /** Request body for starting a chat session with an initial message */

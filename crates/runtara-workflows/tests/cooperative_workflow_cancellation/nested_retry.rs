@@ -260,6 +260,7 @@ async fn run_retry_in_scope(
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: if rate_limited {
                         HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url)])
                     } else {
@@ -671,6 +672,7 @@ async fn published_embed_pure_child_preserves_output_without_runtime_or_agent_io
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(5),

@@ -153,6 +153,7 @@ async fn run_loop_with_scenario(
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(5),

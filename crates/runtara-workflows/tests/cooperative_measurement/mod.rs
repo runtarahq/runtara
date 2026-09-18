@@ -204,6 +204,7 @@ async fn run(
         .execute_invoke(
             pre,
             WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(30),

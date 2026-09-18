@@ -36,6 +36,7 @@ fn request(capability: &str) -> StartRequest {
 }
 fn settings(deadline: Instant, cancel: Arc<AtomicBool>) -> Arc<ScopedRunSettings> {
     Arc::new(ScopedRunSettings {
+        trusted_tenant: None,
         env: std::collections::HashMap::from([("TEST_SCOPE".into(), "root-approved".into())]),
         deadline,
         root_cancel: Some(cancel),

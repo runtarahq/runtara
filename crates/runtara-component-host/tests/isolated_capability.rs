@@ -40,6 +40,7 @@ use tokio::{io::AsyncReadExt, net::TcpListener};
 
 fn spec() -> WorkflowRunSpec {
     WorkflowRunSpec {
+        trusted_tenant: None,
         env: HashMap::new(),
         stderr: None,
         timeout: Duration::from_secs(30),

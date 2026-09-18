@@ -53,6 +53,7 @@ async fn aborts(shape: Shape, cpu_body: bool, inherited: bool) -> anyhow::Result
         executor.execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(10),
@@ -183,6 +184,7 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
     let run = executor.execute_invoke(
         &pre,
         runtara_component_host::WorkflowRunSpec {
+            trusted_tenant: None,
             env: if preparation {
                 HashMap::from([
                     ("CONNECTION_SERVICE_URL".into(), base),

@@ -45,6 +45,7 @@ impl InvocationScopeFactory for LiveScopes {
             make_spec: Box::new(move |_| {
                 Ok(ChildInvocationSpec {
                     spec: WorkflowRunSpec {
+                        trusted_tenant: None,
                         cancel: Some(cancel),
                         ..spec()
                     },
@@ -234,6 +235,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
             .execute_invoke_with_context(
                 prepared.instance_pre(),
                 WorkflowRunSpec {
+                    trusted_tenant: None,
                     runtime: Some(host),
                     cancel: Some(run_cancel),
                     ..spec()

@@ -871,6 +871,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach the approved built-in trusted capability executor.
+    pub fn with_trusted_executor(
+        self,
+        executor: Arc<runtara_component_host::trusted::TrustedExecutor>,
+    ) -> Result<Self> {
+        self.executor
+            .set_trusted_executor(executor)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach an observer that counts guest events as they cross the host.
     ///
     /// Rebuilds the handler state rather than mutating it, because the state is
@@ -967,6 +978,7 @@ impl EmbeddedWasmRunner {
         let runtime = Arc::new(host);
         (
             WorkflowRunSpec {
+                trusted_tenant: Some(options.tenant_id.clone()),
                 env,
                 stderr,
                 timeout,

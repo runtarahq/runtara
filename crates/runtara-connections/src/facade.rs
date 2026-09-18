@@ -214,6 +214,20 @@ impl ConnectionsFacade {
             .map_err(ConnectionsError::Database)
     }
 
+    /// Trusted execution: verify the integration on the stored row before
+    /// decrypting credentials, without a metadata/decrypt check-use race.
+    pub async fn get_with_parameters_for_types(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        allowed: &[String],
+    ) -> Result<Option<ConnectionWithParameters>, ConnectionsError> {
+        self.repo()
+            .get_with_parameters_for_types(id, tenant_id, allowed)
+            .await
+            .map_err(ConnectionsError::Database)
+    }
+
     /// Get the default connection for an agent/operator, including secret parameters.
     ///
     /// SECURITY: Only use for internal runtime credential resolution.

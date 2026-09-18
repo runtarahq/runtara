@@ -129,6 +129,7 @@ pub(super) async fn execute(
             owner,
             authority,
             Arc::new(ScopedRunSettings {
+                trusted_tenant: spec.trusted_tenant.clone(),
                 env: spec.env.clone(),
                 deadline,
                 root_cancel: spec.cancel.clone(),

@@ -1196,6 +1196,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: if scenario.uses_proxy() || scenario.is_object() || scenario.is_storage() {
                         HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent")), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
                     } else { HashMap::new() },
@@ -1251,6 +1252,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         }
         if scenario.drains_normally() {
             let resumed = executor.execute_invoke(&pre, runtara_component_host::WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(), stderr: None, timeout: Duration::from_secs(10), cancel: None,
                 limits: Default::default(), runtime: Some(host.clone()),
             }, b"{}".to_vec()).await;

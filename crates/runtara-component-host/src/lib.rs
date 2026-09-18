@@ -29,6 +29,7 @@ pub mod lifecycle;
 pub mod precompile;
 pub mod registry;
 pub mod runtime_host;
+pub mod trusted;
 pub mod workflow;
 
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;

@@ -34,6 +34,7 @@ impl InvocationLauncher for RealLauncher {
                     .execute_isolated_capability(
                         &pre,
                         WorkflowRunSpec {
+                            trusted_tenant: None,
                             env: Default::default(),
                             stderr: None,
                             timeout: Duration::from_secs(30),

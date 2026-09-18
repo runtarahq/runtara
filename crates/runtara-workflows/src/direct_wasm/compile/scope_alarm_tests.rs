@@ -100,6 +100,7 @@ async fn aborts_on_completion(
         executor.execute_invoke(
             &pre,
             WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(10),
@@ -213,6 +214,7 @@ async fn scope_alarms_dispose_before_untimed_success_and_error_continuations() -
         let run = executor.execute_invoke(
             &pre,
             WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(10),

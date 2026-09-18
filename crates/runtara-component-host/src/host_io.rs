@@ -46,6 +46,9 @@ pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// host-io. `None` is used by short-lived test/metadata stores; the per-call
 /// HTTP policy still supplies its bounded default in that case.
 pub(crate) trait HostIoContext {
+    fn http_allowed(&self) -> bool {
+        true
+    }
     fn http_deadline(&self) -> Option<tokio::time::Instant>;
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
         None
@@ -57,9 +60,14 @@ pub(crate) fn add_host_io_to_linker<T: HostIoContext + Send + 'static>(
 ) -> Result<()> {
     let mut instance = linker.instance("runtara:host-io/http@0.1.0")?;
     instance.func_wrap_concurrent("request", |accessor, (input,): (Vec<u8>,)| {
+        let allowed = accessor.with(|mut access| access.get().http_allowed());
         let active_deadline = accessor.with(|mut access| access.get().http_deadline());
         Box::pin(async move {
-            let response: Result<Vec<u8>, String> = execute(input, active_deadline).await;
+            let response: Result<Vec<u8>, String> = if allowed {
+                execute(input, active_deadline).await
+            } else {
+                Err("HTTP is disabled in trusted execution".into())
+            };
             Ok((response,))
         })
     })?;
@@ -67,8 +75,10 @@ pub(crate) fn add_host_io_to_linker<T: HostIoContext + Send + 'static>(
     // another waitable in the window's set, so item backoffs overlap
     // instead of serializing through assembly.
     let mut timers = linker.instance("runtara:host-io/timers@0.1.0")?;
-    timers.func_wrap_concurrent("sleep", |_accessor, (ms,): (u64,)| {
+    timers.func_wrap_concurrent("sleep", |accessor, (ms,): (u64,)| {
+        let allowed = accessor.with(|mut access| access.get().http_allowed());
         Box::pin(async move {
+            wasmtime::ensure!(allowed, "Timers are disabled in trusted execution");
             tokio::time::sleep(Duration::from_millis(ms)).await;
             Ok(())
         })

@@ -4236,6 +4236,7 @@ version = "8.9.10"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
+ "runtara-agent-trusted",
  "runtara-dsl",
  "runtara-http",
  "serde",
@@ -4472,6 +4473,7 @@ version = "8.9.10"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
+ "runtara-agent-trusted",
  "runtara-dsl",
  "runtara-http",
  "serde",
@@ -4585,6 +4587,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-trusted"
+version = "8.9.10"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "url",
+ "urlencoding",
+ "wit-bindgen 0.58.0",
+ "zeroize",
+]
+
+[[package]]
 name = "runtara-agent-utils"
 version = "8.9.10"
 dependencies = [
@@ -4673,6 +4692,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtara-agent-compression",
  "runtara-agent-crypto",
+ "runtara-agent-trusted",
  "runtara-agent-wit",
  "runtara-agent-xlsx",
  "runtara-dsl",
@@ -4689,6 +4709,7 @@ dependencies = [
  "wasmtime-wasi",
  "wasmtime-wasi-http",
  "wat",
+ "zeroize",
 ]
 
 [[package]]
@@ -4707,6 +4728,7 @@ dependencies = [
  "rand 0.9.4",
  "redis",
  "reqwest 0.12.28",
+ "runtara-agent-trusted",
  "runtara-agents",
  "runtara-dsl",
  "runtara-http",
@@ -4903,6 +4925,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmcp",
  "rsa",
+ "runtara-agent-trusted",
  "runtara-agents",
  "runtara-ai",
  "runtara-component-host",
@@ -5017,6 +5040,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
  "minijinja",
+ "runtara-agent-trusted",
  "runtara-agent-wit",
  "runtara-component-host",
  "runtara-dsl",

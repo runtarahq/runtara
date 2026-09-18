@@ -95,6 +95,7 @@ async fn run_result_control(durable: bool, fail: bool) -> anyhow::Result<()> {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_tenant: None,
                         env: HashMap::new(),
                         stderr: None,
                         timeout: Duration::from_secs(10),

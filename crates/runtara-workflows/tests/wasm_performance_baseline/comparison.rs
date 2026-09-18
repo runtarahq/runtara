@@ -40,6 +40,7 @@ fn limits() -> PackageLimits {
 }
 fn spec() -> WorkflowRunSpec {
     WorkflowRunSpec {
+        trusted_tenant: None,
         env: HashMap::new(),
         stderr: None,
         timeout: Duration::from_secs(30),
@@ -107,6 +108,7 @@ async fn execute(
             .execute_invoke_with_context(
                 pre.instance_pre(),
                 WorkflowRunSpec {
+                    trusted_tenant: None,
                     runtime: Some(host),
                     ..spec()
                 },
@@ -120,6 +122,7 @@ async fn execute(
             .execute_invoke(
                 pre.instance_pre(),
                 WorkflowRunSpec {
+                    trusted_tenant: None,
                     runtime: Some(host),
                     ..spec()
                 },

@@ -64,6 +64,7 @@ wasmparser = { version = "0.247", optional = true }
 [dev-dependencies]
 wat = "1.253"
 anyhow = "1"
+runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Execute emitted retry predicates at u32 boundaries without billions of invocations.
 wasmtime = { version = "46", default-features = false, features = ["std", "runtime", "cranelift"] }
 async-trait = "0.1"

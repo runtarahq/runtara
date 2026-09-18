@@ -192,6 +192,7 @@ async fn run(shape: Shape, deadline: bool, partial: bool) -> anyhow::Result<()> 
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: HashMap::from([
                         ("CONNECTION_SERVICE_URL".into(), url),
                         ("RUNTARA_TENANT_ID".into(), "fixture".into()),

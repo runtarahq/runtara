@@ -208,3 +208,56 @@ async fn unmatched_integration_ids_return_nothing() {
 
     assert!(found.is_empty(), "got: {:?}", ids(&found));
 }
+
+/// Decryption is deliberately counted independently of the selected output:
+/// returning None after decrypting would still violate the trusted boundary.
+#[tokio::test]
+async fn trusted_resolution_checks_tenant_and_exact_type_before_decryption() {
+    use runtara_connections::crypto::{CipherError, CredentialCipher};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingCipher(AtomicUsize);
+    impl CredentialCipher for CountingCipher {
+        fn encrypt(&self, value: &serde_json::Value) -> Result<serde_json::Value, CipherError> {
+            Ok(value.clone())
+        }
+        fn decrypt(&self, value: &serde_json::Value) -> Result<serde_json::Value, CipherError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(value.clone())
+        }
+        fn key_id(&self) -> &str {
+            "test"
+        }
+        fn is_encrypting(&self) -> bool {
+            true
+        }
+    }
+    let fixture = PgFixture::start().await;
+    sqlx::query("INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, status, connection_parameters) VALUES ($1, $2, $1, $3, 'ACTIVE', '{}'::jsonb)")
+        .bind("trusted-s3").bind(TENANT).bind("s3_compatible")
+        .execute(&fixture.pool).await.unwrap();
+    let cipher = Arc::new(CountingCipher(AtomicUsize::new(0)));
+    let repo = ConnectionRepository::new(fixture.pool.clone(), cipher.clone());
+    for (tenant, types) in [
+        ("other-tenant", vec!["s3_compatible".to_owned()]),
+        (TENANT, vec!["azure_blob_storage".to_owned()]),
+        (TENANT, vec!["aws_credentials".to_owned()]),
+        (TENANT, vec!["object_storage".to_owned()]),
+        (TENANT, vec!["*".to_owned()]),
+        (TENANT, vec![]),
+    ] {
+        assert!(
+            repo.get_with_parameters_for_types("trusted-s3", tenant, &types)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cipher.0.load(Ordering::SeqCst), 0);
+    }
+    assert!(
+        repo.get_with_parameters_for_types("trusted-s3", TENANT, &["s3_compatible".to_owned()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(cipher.0.load(Ordering::SeqCst), 1);
+}

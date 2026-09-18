@@ -76,6 +76,7 @@ async fn aborts(cpu_body: bool) -> anyhow::Result<()> {
         executor.execute_invoke(
             &pre,
             WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(10),
@@ -156,6 +157,7 @@ async fn emitted_deadline_success_disarms_alarm_before_long_continuation() -> an
     let run = executor.execute_invoke(
         &pre,
         WorkflowRunSpec {
+            trusted_tenant: None,
             env: HashMap::new(),
             stderr: None,
             timeout: Duration::from_secs(10),

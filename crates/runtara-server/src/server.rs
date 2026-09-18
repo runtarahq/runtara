@@ -1318,8 +1318,16 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // - Core functionality (checkpoints, signals) on port 8003 (RUNTARA_CORE_HTTP_PORT)
     // Migrations are run automatically via runtara_environment::migrations::run()
 
+    let trusted_executor = component_dispatcher.as_ref().map(|d| d.trusted_executor());
+    if let Some(executor) = &trusted_executor {
+        executor.set_credentials(Arc::new(api::services::trusted::BuiltinTrustedCredentials(
+            connections_facade.clone(),
+        )))?;
+    }
+
     // Start embedded Runtara servers (using dedicated database)
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
+        trusted_executor,
         execution_timeout_policy,
         Some(workers::step_counter::StepCounter::new(Arc::clone(
             &pipeline_gauges,

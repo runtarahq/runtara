@@ -23,7 +23,7 @@ use crate::host_state::{
     CallContext, DEFAULT_GUEST_MEMORY_MAX_BYTES, DEFAULT_GUEST_TABLE_MAX_ELEMENTS, HostState,
     Termination,
 };
-use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent};
+use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent_bytes};
 
 /// Server-facing per-call request shape. Mirrors today's `TestAgentRequest`
 /// in `runtara-server/src/api/dto/agent_testing.rs` so wiring is a near-pass-
@@ -38,7 +38,7 @@ pub struct TestCapabilityRequest {
 }
 
 /// A connection record resolved by the host before invoke. Mirrors today's
-/// `ConnectionsFacade::get_with_parameters` output.
+/// `ConnectionsFacade::get_connection` safe metadata; parameters stay empty.
 #[derive(Debug, Clone)]
 pub struct ResolvedConnection {
     pub connection_id: String,
@@ -97,6 +97,7 @@ fn parse_memory_max(raw: Option<String>) -> usize {
 
 pub struct ComponentDispatcherService {
     engine: Arc<Engine>,
+    trusted: Arc<crate::trusted::TrustedExecutor>,
     agents: HashMap<String, Arc<LoadedAgent>>,
     /// Snapshot of every loaded agent's metadata. Shared (`Arc`) so the
     /// server-side `AgentsService` + workflow validation paths can hold the
@@ -126,6 +127,7 @@ impl ComponentDispatcherService {
         spawn_epoch_ticker(Arc::clone(&engine));
         let linker = build_linker(&engine)?;
 
+        let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
         let mut agents = HashMap::new();
         let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
 
@@ -181,7 +183,9 @@ impl ComponentDispatcherService {
             // returns None while `agent_ids()` yields it.
             info.id = agent_id.clone();
 
-            let loaded = load_agent(&engine, &linker, &path, &agent_id)?;
+            let bytes = std::fs::read(&path)?;
+            trusted.register(&info, &bytes, &meta_bytes)?;
+            let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 
             agent_info.insert(agent_id.clone(), info);
             agents.insert(agent_id, loaded);
@@ -201,6 +205,7 @@ impl ComponentDispatcherService {
         ));
 
         Ok(Self {
+            trusted: Arc::new(trusted),
             engine,
             agents,
             catalog,
@@ -218,6 +223,11 @@ impl ComponentDispatcherService {
     /// ids resolve to the same agent.
     pub fn has_agent(&self, agent_id: &str) -> bool {
         self.agents.contains_key(&canonical_agent_id(agent_id))
+    }
+
+    /// Executor backed only by this operator-installed built-in bundle.
+    pub fn trusted_executor(&self) -> Arc<crate::trusted::TrustedExecutor> {
+        Arc::clone(&self.trusted)
     }
 
     /// All loaded agent ids.
@@ -283,6 +293,7 @@ impl ComponentDispatcherService {
         // invocation's shorter watchdog expires.
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
+        state.trusted = Some(Arc::clone(&self.trusted));
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 

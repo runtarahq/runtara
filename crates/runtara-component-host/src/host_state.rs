@@ -194,6 +194,8 @@ pub enum Termination {
 }
 
 pub struct HostState {
+    pub(crate) restricted: bool,
+    pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
@@ -212,6 +214,17 @@ pub struct HostState {
 }
 
 impl HostState {
+    pub(crate) fn restricted() -> Self {
+        let mut state = Self::new(Arc::new(CallContext::placeholder_for_metadata()));
+        state.wasi = WasiCtxBuilder::new()
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .build();
+        state.restricted = true;
+        state
+    }
+
     pub fn new(ctx: Arc<CallContext>) -> Self {
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stderr();
@@ -236,6 +249,8 @@ impl HostState {
         }
 
         Self {
+            restricted: false,
+            trusted: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -270,7 +285,10 @@ impl HostState {
 
 impl HostIoContext for HostState {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
-        Some(&self.cleanup_alarm)
+        (!self.restricted).then_some(&self.cleanup_alarm)
+    }
+    fn http_allowed(&self) -> bool {
+        !self.restricted
     }
     fn http_deadline(&self) -> Option<tokio::time::Instant> {
         self.http_deadline

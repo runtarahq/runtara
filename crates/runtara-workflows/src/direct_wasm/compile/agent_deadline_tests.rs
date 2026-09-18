@@ -664,6 +664,7 @@ async fn invoke_with_env(
         .execute_invoke(
             &pre,
             WorkflowRunSpec {
+                trusted_tenant: None,
                 env,
                 stderr: None,
                 timeout: Duration::from_secs(5),

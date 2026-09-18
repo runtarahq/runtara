@@ -19,3 +19,5 @@ pub mod webhook_manager;
 pub mod webhook_verification;
 pub mod workflow_runtime;
 pub mod workflows;
+
+pub mod trusted;

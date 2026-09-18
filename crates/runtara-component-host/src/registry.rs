@@ -44,6 +44,7 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // Concurrent host-io HTTP hop for agents' proxied requests (wasip3 route
     // (b)) — agents built against runtara:host-io import it unconditionally.
     crate::host_io::add_host_io_to_linker(&mut linker)?;
+    crate::trusted::add_to_linker(&mut linker)?;
     Ok(linker)
 }
 
@@ -57,10 +58,21 @@ pub fn load_agent(
     agent_id: impl Into<String>,
 ) -> Result<Arc<LoadedAgent>> {
     let wasm_path = wasm_path.as_ref();
+    load_agent_bytes(engine, linker, &std::fs::read(wasm_path)?, agent_id)
+        .with_context(|| format!("agent component at {}", wasm_path.display()))
+}
+
+/// Load exactly the bytes that the built-in loader registered and hashed.
+pub(crate) fn load_agent_bytes(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    wasm: &[u8],
+    agent_id: impl Into<String>,
+) -> Result<Arc<LoadedAgent>> {
     let agent_id = agent_id.into();
-    let component = Component::from_file(engine, wasm_path)?;
+    let component = Component::new(engine, wasm)?;
     let capabilities_iface = find_capabilities_iface(engine, &component)
-        .with_context(|| format!("agent `{agent_id}` at {}", wasm_path.display()))?;
+        .with_context(|| format!("agent `{agent_id}`"))?;
     let pre = linker.instantiate_pre(&component)?;
     Ok(Arc::new(LoadedAgent {
         agent_id,

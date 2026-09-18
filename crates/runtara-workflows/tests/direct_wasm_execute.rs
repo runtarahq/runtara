@@ -707,6 +707,8 @@ fn route(
                     {"name": "sqs.queues", "description": "Available Amazon SQS queues"}
                 ]),
             )
+        } else if connection_id == "s3-connection" {
+            ("s3_compatible", serde_json::json!([]))
         } else {
             (
                 "openai_api_key",
@@ -1824,6 +1826,7 @@ fn execute_via_embedded_invoke(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_tenant: None,
                         env: env_pairs.iter().cloned().collect(),
                         stderr: None,
                         timeout: Duration::from_secs(300),
@@ -1914,6 +1917,7 @@ fn execute_via_embedded(
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: env_pairs.iter().cloned().collect(),
                     stderr: None,
                     timeout: Duration::from_secs(300),
@@ -2543,6 +2547,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -5800,6 +5805,7 @@ async fn invoke_replaying_parks_with_env(
             .execute_invoke(
                 pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: env.clone(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -6678,6 +6684,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -6980,6 +6987,7 @@ fn direct_wasm_execute_invoke_abi_is_repeatable_across_runs() {
         let run = runtime.block_on(executor.execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(60),
@@ -7781,6 +7789,7 @@ fn run_invoke_once_with_env(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_tenant: None,
                         env,
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -10892,6 +10901,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_tenant: None,
                         env: HashMap::new(),
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -11175,6 +11185,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_tenant: None,
                         env: HashMap::new(),
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -12633,6 +12644,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_tenant: None,
                         env,
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -12953,6 +12965,7 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: None,
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -13142,3 +13155,501 @@ fn direct_wasm_execute_xlsx_parses_in_guest() {
 // Reproductions and controls for docs/wasm-emitter-audit.md.
 #[path = "wasm_emitter_audit/execution.rs"]
 mod wasm_emitter_audit;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
+    let components = shared_components_dir();
+    let (_bundle, dispatcher, resolves) = trusted_test_dispatcher(&components).await;
+    let graph = serde_json::json!({
+        "steps": {
+            "sign": {"id":"sign", "stepType":"Agent", "agentId":"s3-storage", "capabilityId":"storage-generate-presigned-url", "maxRetries":0, "durable":true,
+                "inputMapping": {
+                    "bucket":{"valueType":"immediate","value":"uploads"},
+                    "key":{"valueType":"immediate","value":"report.csv"},
+                    "operation":{"valueType":"immediate","value":"download"},
+                    "_connection":{"valueType":"immediate","value":{"connection_id":"s3-connection"}}
+                }},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{"url":{"valueType":"reference","value":"steps.sign.outputs.url"}}}
+        }, "entryPoint":"sign", "executionPlan":[{"fromStep":"sign","toStep":"finish"}]
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "trusted-presign".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: Some(dispatcher.catalog()),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut compiled, &components).unwrap();
+    let imports = top_level_component_imports(&fs::read(&compiled.wasm_path).unwrap());
+    assert!(
+        imports
+            .iter()
+            .any(|name| name.starts_with("runtara:trusted-artifacts/s3-storage-"))
+    );
+    let executor =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    executor
+        .set_trusted_executor(dispatcher.trusted_executor())
+        .unwrap();
+    let pre = executor
+        .load_instance_pre(&compiled.wasm_path)
+        .await
+        .unwrap();
+    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let run = executor
+        .execute_invoke(
+            &pre,
+            runtara_component_host::WorkflowRunSpec {
+                trusted_tenant: Some("tenant-authorized".into()),
+                env: HashMap::from([(
+                    "RUNTARA_TENANT_ID".into(),
+                    "forged-environment-tenant".into(),
+                )]),
+                stderr: None,
+                timeout: Duration::from_secs(10),
+                cancel: None,
+                limits: runtara_component_host::WorkflowLimits::default(),
+                runtime: Some(host),
+            },
+            b"{}".to_vec(),
+        )
+        .await;
+    let runtara_component_host::InvokeExit::Completed(output) = run.exit else {
+        panic!("{:?}", run.exit)
+    };
+    let output: Value = serde_json::from_slice(&output).unwrap();
+    assert!(
+        output["url"].as_str().unwrap().contains("X-Amz-Signature="),
+        "{output}"
+    );
+    assert!(!output.to_string().contains("synthetic-test-secret"));
+    // Durable replay returns the approved result without resolving credentials again.
+    let persisted = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let before = resolves.load(std::sync::atomic::Ordering::SeqCst);
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let replay = executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    trusted_tenant: Some("tenant-authorized".into()),
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(10),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(persisted.clone()),
+                },
+                b"{}".to_vec(),
+            )
+            .await;
+        let runtara_component_host::InvokeExit::Completed(bytes) = replay.exit else {
+            panic!("{:?}", replay.exit)
+        };
+        results.push(bytes);
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(
+        resolves.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+    {
+        let checkpoints = persisted.checkpoints.lock().unwrap();
+        assert!(!checkpoints.is_empty());
+        for bytes in checkpoints.values() {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(!text.contains("synthetic-test-secret"));
+            assert!(!text.contains("secret_access_key"));
+        }
+    }
+
+    // Packaging a separately instantiated child must keep its approval pin on
+    // the root before the package section, where precompilation can validate it.
+    let mut scoped = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "trusted-scoped".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("scoped"),
+            track_events: false,
+            agent_catalog: Some(dispatcher.catalog()),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    use sha2::Digest;
+    let digest = format!(
+        "{:x}",
+        sha2::Sha256::digest(fs::read(components.join("runtara_agent_s3_storage.wasm")).unwrap())
+    );
+    let package_limits = runtara_workflow_wit::isolation_package::PackageLimits {
+        total_bytes: 64 * 1024 * 1024,
+        manifest_bytes: 1024 * 1024,
+        artifacts: 16,
+        bindings: 16,
+    };
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_isolated_agents(
+        &mut scoped,
+        &components,
+        &[],
+        &std::collections::BTreeMap::from([("s3-storage".into(), digest)]),
+        package_limits,
+    )
+    .unwrap();
+    let packaged = fs::read(&scoped.wasm_path).unwrap();
+    let parsed = runtara_workflow_wit::isolation_package::parse(&packaged, package_limits)
+        .unwrap()
+        .unwrap();
+    assert!(
+        top_level_component_imports(parsed.root)
+            .iter()
+            .any(|name| name.starts_with("runtara:trusted-artifacts/s3-storage-"))
+    );
+
+    // Parallel Split uses the same host route for every item.
+    let split_graph = serde_json::json!({
+        "steps": {
+            "split":{"id":"split","stepType":"Split", "config":{"value":{"valueType":"immediate","value":[1,2,3]},"sequential":false,"parallelism":3},"subgraph":graph.clone()},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{"urls":{"valueType":"reference","value":"steps.split.outputs"}}}
+        }, "entryPoint":"split", "executionPlan":[{"fromStep":"split","toStep":"finish"}]
+    });
+    let mut split = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "trusted-split".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(split_graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("split"),
+            track_events: false,
+            agent_catalog: Some(dispatcher.catalog()),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut split, &components).unwrap();
+    let split_output = run_trusted_fixture(&executor, &split.wasm_path).await;
+    assert_eq!(split_output["urls"].as_array().unwrap().len(), 3);
+    assert!(split_output.to_string().contains("X-Amz-Signature="));
+
+    // A published workflow-agent may call the trusted built-in, while its own
+    // metadata stays untrusted. Its transitive artifact pin must survive WAC.
+    let child_graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+    let child_info = certified_workflow_agent_info(
+        "trusted-wrapper",
+        "Wrapper",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    assert!(!child_info.capabilities[0].trusted);
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "trusted-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph,
+            child_workflows: vec![],
+            output_dir: temp.path().join("child"),
+            track_events: false,
+            agent_catalog: Some(dispatcher.catalog()),
+            agent_slug: Some("trusted-wrapper".into()),
+        },
+        &components,
+        RuntimeBinding::HostImport,
+        WorkflowAbi::AgentCapabilities,
+        false,
+    )
+    .unwrap();
+    let staging = temp.path().join("published");
+    fs::create_dir_all(&staging).unwrap();
+    fs::copy(
+        child.wasm_path,
+        staging.join("runtara_agent_trusted_wrapper.wasm"),
+    )
+    .unwrap();
+    fs::write(
+        staging.join("runtara_agent_trusted_wrapper.meta.json"),
+        serde_json::to_vec_pretty(&child_info).unwrap(),
+    )
+    .unwrap();
+    let mut agents = dispatcher.catalog().agents().to_vec();
+    agents.push(child_info);
+    let parent_graph = serde_json::json!({
+        "steps": {
+            "child":{"id":"child","stepType":"Agent","agentId":"trusted-wrapper","capabilityId":"run","maxRetries":0},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{"url":{"valueType":"reference","value":"steps.child.outputs.url"}}}
+        }, "entryPoint":"child", "executionPlan":[{"fromStep":"child","toStep":"finish"}]
+    });
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "trusted-parent".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(parent_graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent"),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(agents),
+            )),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components,
+        &[staging],
+    )
+    .unwrap();
+    let parent_output = run_trusted_fixture(&executor, &parent.wasm_path).await;
+    assert!(
+        parent_output["url"]
+            .as_str()
+            .unwrap()
+            .contains("X-Amz-Signature=")
+    );
+
+    // Hosts without that approved version cannot link a persisted workflow.
+    let older_host =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    let error = older_host
+        .load_instance_pre(&compiled.wasm_path)
+        .await
+        .err()
+        .expect("missing trusted dependency must fail before execution");
+    assert!(format!("{error:#}").contains("trusted-artifacts"));
+
+    // Even valid replacement metadata constitutes a different approved version.
+    let sidecar = _bundle.path().join("runtara_agent_s3_storage.meta.json");
+    let mut metadata = fs::read(&sidecar).unwrap();
+    metadata.push(b'\n');
+    fs::write(&sidecar, metadata).unwrap();
+    let replacement = runtara_component_host::ComponentDispatcherService::from_dir(
+        _bundle.path(),
+        runtara_component_host::DispatcherEnv {
+            proxy_url: "http://127.0.0.1:1".into(),
+            object_model_url: "http://127.0.0.1:1".into(),
+            core_http_url: "http://127.0.0.1:1".into(),
+        },
+    )
+    .await
+    .unwrap();
+    older_host
+        .set_trusted_executor(replacement.trusted_executor())
+        .unwrap();
+    let error = older_host
+        .load_instance_pre(&compiled.wasm_path)
+        .await
+        .err()
+        .expect("different trusted version must fail before credentials");
+    assert!(format!("{error:#}").contains("trusted-artifacts"));
+}
+
+async fn run_trusted_fixture(
+    executor: &runtara_component_host::WorkflowExecutor,
+    path: &Path,
+) -> Value {
+    let pre = executor.load_instance_pre(path).await.unwrap();
+    let run = executor
+        .execute_invoke(
+            &pre,
+            runtara_component_host::WorkflowRunSpec {
+                trusted_tenant: Some("tenant-authorized".into()),
+                env: HashMap::new(),
+                stderr: None,
+                timeout: Duration::from_secs(10),
+                cancel: None,
+                limits: runtara_component_host::WorkflowLimits::default(),
+                runtime: Some(Arc::new(RecordingRuntimeHost::new(b"{}"))),
+            },
+            b"{}".to_vec(),
+        )
+        .await;
+    let runtara_component_host::InvokeExit::Completed(output) = run.exit else {
+        panic!("{:?}", run.exit)
+    };
+    assert!(!String::from_utf8_lossy(&output).contains("synthetic-test-secret"));
+    serde_json::from_slice(&output).unwrap()
+}
+
+async fn trusted_test_dispatcher(
+    components: &Path,
+) -> (
+    tempfile::TempDir,
+    runtara_component_host::ComponentDispatcherService,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use runtara_agent_trusted::TrustedContext;
+    use runtara_component_host::trusted::TrustedCredentials;
+    struct Credentials(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl TrustedCredentials for Credentials {
+        async fn resolve(
+            &self,
+            tenant: &str,
+            agent: &str,
+            connection: &str,
+            allowed: &[String],
+        ) -> Result<TrustedContext, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(tenant, "tenant-authorized");
+            assert_eq!(connection, "s3-connection");
+            assert_eq!(agent, "s3-storage");
+            assert_eq!(allowed, ["s3_compatible"]);
+            Ok(TrustedContext {
+                integration_id: "s3_compatible".into(),
+                now_ms: 1_700_000_000_000,
+                credentials: serde_json::json!({"base_url":"https://storage.example.test", "access_key_id":"test-access", "secret_access_key":"synthetic-test-secret", "region":"us-east-1"}),
+            })
+        }
+    }
+    let bundle = tempfile::tempdir().unwrap();
+    for suffix in ["wasm", "meta.json"] {
+        let file = format!("runtara_agent_s3_storage.{suffix}");
+        fs::copy(components.join(&file), bundle.path().join(file)).unwrap();
+    }
+    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
+        bundle.path(),
+        runtara_component_host::DispatcherEnv {
+            proxy_url: "http://127.0.0.1:1".into(),
+            object_model_url: "http://127.0.0.1:1".into(),
+            core_http_url: "http://127.0.0.1:1".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    dispatcher
+        .trusted_executor()
+        .set_credentials(Arc::new(Credentials(resolves.clone())))
+        .unwrap();
+    (bundle, dispatcher, resolves)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_messages() {
+    let components = shared_components_dir();
+    let (_bundle, dispatcher, _resolves) = trusted_test_dispatcher(&components).await;
+    let mut graph: Value = serde_json::from_str(&ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai"]
+        .as_object_mut()
+        .unwrap()
+        .remove("breakpoint");
+    graph["steps"]["echo_tool"]["agentId"] = Value::String("s3-storage".into());
+    graph["steps"]["echo_tool"]["capabilityId"] =
+        Value::String("storage-generate-presigned-url".into());
+    graph["steps"]["echo_tool"]["connectionId"] = Value::String("s3-connection".into());
+    let temp = tempfile::tempdir().unwrap();
+    let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "trusted-ai-tool".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: Some(dispatcher.catalog()),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut compiled, &components).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (sink, _events) = mpsc::channel();
+    let (stop, stop_rx) = mpsc::channel();
+    let state = Arc::new(ServerState {
+        llm_responses: Mutex::new(vec![
+            llm_tool_call(
+                "echo",
+                r#"{"bucket":"uploads","key":"report.csv","operation":"download"}"#,
+            ),
+            llm_ok("signed"),
+        ]),
+        ..Default::default()
+    });
+    let state_for_server = state.clone();
+    let server = thread::spawn(move || {
+        serve(
+            listener,
+            sink,
+            state_for_server,
+            stop_rx,
+            Arc::new(b"{}".to_vec()),
+        )
+    });
+    let executor =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    executor
+        .set_trusted_executor(dispatcher.trusted_executor())
+        .unwrap();
+    let pre = executor
+        .load_instance_pre(&compiled.wasm_path)
+        .await
+        .unwrap();
+    let result = executor
+        .execute_invoke(
+            &pre,
+            runtara_component_host::WorkflowRunSpec {
+                trusted_tenant: Some("tenant-authorized".into()),
+                env: HashMap::from([
+                    (
+                        "RUNTARA_HTTP_PROXY_URL".into(),
+                        format!("http://{addr}/llm-proxy"),
+                    ),
+                    ("CONNECTION_SERVICE_URL".into(), format!("http://{addr}")),
+                    ("RUNTARA_TENANT_ID".into(), "tenant-authorized".into()),
+                ]),
+                stderr: None,
+                timeout: Duration::from_secs(10),
+                cancel: None,
+                limits: runtara_component_host::WorkflowLimits::default(),
+                runtime: Some(Arc::new(RecordingRuntimeHost::new(b"{}"))),
+            },
+            b"{}".to_vec(),
+        )
+        .await;
+    let _ = stop.send(());
+    server.join().unwrap();
+    let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
+        panic!("{:?}", result.exit)
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).unwrap()["answer"],
+        "signed"
+    );
+    let messages = state.llm_requests.lock().unwrap();
+    assert_eq!(messages.len(), 2);
+    let second = messages[1].to_string();
+    assert!(
+        second.contains("X-Amz-Signature="),
+        "model must receive the approved signed URL: {second}"
+    );
+    assert!(!second.contains("synthetic-test-secret"));
+}
