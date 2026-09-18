@@ -1,0 +1,11 @@
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      # CodeQL's sensitive-name heuristic treats "trusted" as secret data.
+      # These exact helpers handle artifact identity and component linking;
+      # neither resolves credentials nor returns credential material.
+      # "log-injection" is the barrier kind used by Rust CleartextLogging.
+      - ['<runtara_component_host::workflow::WorkflowExecutor>::linker_with_trusted_pins', 'ReturnValue', 'log-injection', 'manual']
+      - ['runtara_workflows::direct_wasm::compile::trusted::pin_trusted_dependencies', 'ReturnValue', 'log-injection', 'manual']
