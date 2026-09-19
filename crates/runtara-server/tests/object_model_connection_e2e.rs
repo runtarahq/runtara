@@ -236,7 +236,29 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         .expect("create alternate object_model connection");
 
     let manager = Arc::new(ObjectStoreManager::new(fixture.default_object_url));
-    let schemas = SchemaService::new(manager, facade);
+    let schemas = SchemaService::new(manager.clone(), facade.clone());
+    use runtara_component_host::DatabaseHost;
+    use runtara_database_contract::{Outcome, QueryRequest, ResultSpec, SqlValue};
+    let database = runtara_server::api::services::database::NativeDatabase {
+        manager,
+        connections: facade,
+    };
+    let fresh = database
+        .query(
+            tenant_id,
+            &alternate_connection_id,
+            QueryRequest {
+                sql: "SELECT to_regclass('__schema')::text AS metadata".into(),
+                params: vec![],
+                result_schema: ResultSpec::Raw,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(fresh.rows[0][0], SqlValue::Null(_)),
+        "SQL pool creation must not issue Object Model DDL"
+    );
 
     schemas
         .create_schema(schema_request("default_orders"), tenant_id, None)
@@ -273,4 +295,53 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
     assert!(!default_names.contains(&"alternate_orders"));
     assert!(alternate_names.contains(&"alternate_orders"));
     assert!(!alternate_names.contains(&"default_orders"));
+
+    // The native SQL path must use the same tenant-aware connection lookup as
+    // public Object Model services, including after a successful cached lookup.
+    let query = || QueryRequest {
+        sql: "SELECT 1::bigint AS value".into(),
+        params: vec![],
+        result_schema: ResultSpec::Raw,
+    };
+    assert_eq!(
+        database
+            .query(tenant_id, &alternate_connection_id, query())
+            .await
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    let wrong_type = connection_service
+        .create_connection(
+            CreateConnectionRequest {
+                title: "Non-database connection".into(),
+                connection_subtype: None,
+                connection_parameters: Some(
+                    json!({"url":"https://example.invalid/mcp","auth_mode":"none"}),
+                ),
+                integration_id: Some("mcp".into()),
+                rate_limit_config: None,
+                valid_until: None,
+                is_default_file_storage: None,
+                default_for: None,
+            },
+            tenant_id,
+        )
+        .await
+        .unwrap();
+    for (tenant, connection) in [
+        ("other-tenant", alternate_connection_id.as_str()),
+        (tenant_id, wrong_type.as_str()),
+        (tenant_id, "unknown-connection"),
+    ] {
+        let error = database
+            .query(tenant, connection, query())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "DATABASE_CONNECTION_UNAVAILABLE");
+        assert_eq!(error.message, "Database connection is unavailable");
+        assert_eq!(error.outcome, Outcome::NotStarted);
+        assert!(!error.retryable);
+    }
 }

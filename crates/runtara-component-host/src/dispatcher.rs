@@ -67,12 +67,11 @@ pub struct TestError {
     pub retryable: bool,
 }
 
-/// Routing context shared across calls — HTTP proxy, object-model, and core URLs.
+/// Routing context shared across calls — HTTP proxy and core URLs.
 /// Per-tenant fields go into `TestCapabilityRequest`.
 #[derive(Debug, Clone)]
 pub struct DispatcherEnv {
     pub proxy_url: String,
-    pub object_model_url: String,
     pub core_http_url: String,
 }
 
@@ -96,6 +95,7 @@ fn parse_memory_max(raw: Option<String>) -> usize {
 }
 
 pub struct ComponentDispatcherService {
+    database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     engine: Arc<Engine>,
     trusted: Arc<crate::trusted::TrustedExecutor>,
@@ -112,6 +112,12 @@ pub struct ComponentDispatcherService {
 }
 
 impl ComponentDispatcherService {
+    pub fn set_database(&self, database: Arc<dyn crate::DatabaseHost>) -> anyhow::Result<()> {
+        self.database
+            .set(database)
+            .map_err(|_| anyhow::anyhow!("database service already configured"))
+    }
+
     pub fn set_connection_resolver(
         &self,
         resolver: Arc<dyn crate::ConnectionResolverHost>,
@@ -216,6 +222,7 @@ impl ComponentDispatcherService {
 
         Ok(Self {
             trusted: Arc::new(trusted),
+            database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             engine,
             agents,
@@ -295,7 +302,6 @@ impl ComponentDispatcherService {
         let ctx = Arc::new(CallContext::for_test(
             &req.tenant_id,
             &self.env.proxy_url,
-            &self.env.object_model_url,
             &self.env.core_http_url,
         ));
         // Capture the same active deadline that protects the component call.
@@ -305,6 +311,8 @@ impl ComponentDispatcherService {
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
         state.trusted = Some(Arc::clone(&self.trusted));
+        state.database =
+            crate::database_host::database_for_run(self.database.get(), Some(&req.tenant_id));
         state.connection_resolver = crate::connection_resolver_host::resolver_for_run(
             self.connection_resolver.get(),
             Some(&req.tenant_id),
@@ -543,7 +551,6 @@ mod tests {
         Arc::new(CallContext::for_test(
             "tenant-test",
             "http://localhost:1",
-            "http://localhost:3",
             "http://localhost:4",
         ))
     }

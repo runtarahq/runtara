@@ -244,6 +244,16 @@ async fn cancel_and_reuse_with_resolver(
     cleaned: Arc<Notify>,
     resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
 ) -> anyhow::Result<Value> {
+    let state = HostState::new(Arc::new(context)).with_connection_resolver(resolver);
+    cancel_and_reuse_with_state(bytes, state, started, cleaned).await
+}
+
+pub(super) async fn cancel_and_reuse_with_state(
+    bytes: Vec<u8>,
+    state: HostState,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+) -> anyhow::Result<Value> {
     let sibling_started = Arc::new(Notify::new());
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
@@ -274,7 +284,6 @@ async fn cancel_and_reuse_with_resolver(
                 Ok(())
             })
         })?;
-    let state = HostState::new(Arc::new(context)).with_connection_resolver(resolver);
     let mut store = Store::new(&engine, state);
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, "run")?;
@@ -307,17 +316,24 @@ pub(super) async fn invoke_named_agent(
     capability: &str,
     input: Vec<u8>,
 ) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
+    let state = HostState::new(Arc::new(context))
+        .with_connection_resolver(Arc::new(super::real_mcp::McpResolver::default()));
+    invoke_named_agent_with_state(agent_id, state, capability, input).await
+}
+
+pub(super) async fn invoke_named_agent_with_state(
+    agent_id: &str,
+    state: HostState,
+    capability: &str,
+    input: Vec<u8>,
+) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
     })?;
     let component = Component::from_file(&engine, agent_path(agent_id)?)?;
     let linker = runtara_component_host::build_linker(&engine)?;
-    let mut store = Store::new(
-        &engine,
-        HostState::new(Arc::new(context))
-            .with_connection_resolver(Arc::new(super::real_mcp::McpResolver::default())),
-    );
+    let mut store = Store::new(&engine, state);
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let interface = instance
         .get_export_index(
@@ -424,7 +440,7 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         invoke_agent(
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            CallContext::for_test("fixture-tenant", proxy, ""),
             "http-request",
             input,
         ),

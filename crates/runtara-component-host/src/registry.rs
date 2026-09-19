@@ -46,6 +46,7 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     crate::host_io::add_host_io_to_linker(&mut linker)?;
     crate::trusted::add_to_linker(&mut linker)?;
     crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
+    crate::database_host::add_database_to_linker(&mut linker)?;
     Ok(linker)
 }
 

@@ -98,7 +98,7 @@ async fn cancellation(
         Duration::from_secs(15),
         cancel_and_reuse(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            CallContext::for_test("fixture-tenant", proxy, ""),
             started,
             cleaned,
         ),
@@ -211,7 +211,7 @@ async fn slack_async_dispatch_preserves_retry_and_slack_error_contracts() -> any
             Duration::from_secs(10),
             invoke_named_agent(
                 "slack",
-                CallContext::for_test("fixture-tenant", proxy, "", ""),
+                CallContext::for_test("fixture-tenant", proxy, ""),
                 "add-reaction",
                 input,
             ),

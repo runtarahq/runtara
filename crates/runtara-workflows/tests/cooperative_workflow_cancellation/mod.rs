@@ -916,51 +916,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                 anyhow::ensure!(n > 0, "internal request body closed early");
                                 request.extend_from_slice(&buffer[..n]);
                             }
-                            if scenario.is_object() {
-                                let path = if scenario == Scenario::ObjectQuery {"query"} else {"execute"};
-                                assert!(request.starts_with(format!("POST /sql/{path}?connectionId=fixture-connection ").as_bytes()));
-                                let body: Value = serde_json::from_slice(&request[end..end + length])?;
-                                assert_eq!(body["connectionId"], "fixture-connection");
-                                assert_eq!(body["sql"], "SELECT 1");
-                            }
-                        }
-                        if scenario.is_ai() {
-                            let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
-                            let headers = std::str::from_utf8(&request[..end])?;
-                            let line = headers.lines().next().unwrap();
-                            if line.contains(" /object-model/") {
-                                // The summary fixture permits only memory loading. The
-                                // load/save fixtures cancel at their selected request.
-                                assert!(matches!(scenario, Scenario::AiSummary | Scenario::AiMemoryLoad | Scenario::AiMemorySave));
-                                let cancel_load = scenario == Scenario::AiMemoryLoad && line.starts_with("POST /object-model/instances/query?");
-                                let cancel_save = scenario == Scenario::AiMemorySave && line.starts_with("POST /object-model/instances?connectionId=");
-                                if cancel_load || cancel_save {
-                                    let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
-                                    assert_eq!(started, expected_requests);
-                                    if !deadline { server_host.requested.store(true, Ordering::SeqCst); }
-                                    loop {
-                                        match stream.read(&mut buffer).await {
-                                            Ok(0) => break,
-                                            Ok(_) => {},
-                                            Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe) => break,
-                                            Err(e) => return Err(e.into()),
-                                        }
-                                    }
-                                    server_host.closed_count.fetch_add(1, Ordering::SeqCst);
-                                    server_host.closed.notify_one();
-                                    return anyhow::Ok(());
-                                }
-                                let reply = if line.starts_with("GET /object-model/schemas/ai_conversation_memory?connectionId=conn-1 ") {
-                                    serde_json::json!({"success":true,"schema":{}})
-                                } else {
-                                    assert!(line.starts_with("POST /object-model/instances/query?connectionId=conn-1 "), "memory was mutated after cancellation: {line}");
-                                    serde_json::json!({"success":true,"instances":[]})
-                                };
-                                let bytes = serde_json::to_vec(&reply)?;
-                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
-                                stream.write_all(&bytes).await?;
-                                return anyhow::Ok(());
-                            }
+
                         }
                         if scenario.uses_proxy() {
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
@@ -1189,7 +1145,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
                 bundle.path(),
                 runtara_component_host::DispatcherEnv {
-                    proxy_url: url.clone(), object_model_url: url.clone(), core_http_url: url.clone(),
+                    proxy_url: url.clone(), core_http_url: url.clone(),
                 },
             ).await?;
             let executor = runtara_component_host::WorkflowExecutor::new(
@@ -1201,6 +1157,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         let normal_executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))?;
         let executor = storage_executor.as_ref().unwrap_or(&normal_executor);
         executor.set_connection_resolver(Arc::new(CancellationConnections))?;
+        executor.set_database(Arc::new(CancellationDatabase { host:host.clone(), deadline, expected_requests }))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
@@ -1208,7 +1165,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                 runtara_component_host::WorkflowRunSpec {
                     trusted_tenant: Some("fixture-tenant".into()),
                     env: if scenario.uses_proxy() || scenario.is_object() || scenario.is_storage() {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent")), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
+                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent"))])
                     } else { HashMap::new() },
                     stderr: None,
                     timeout: Duration::from_secs(10),
@@ -1619,6 +1576,10 @@ struct CancellationConnections;
 impl runtara_component_host::ConnectionResolverHost for CancellationConnections {
     async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
         assert_eq!(tenant, "fixture-tenant");
+        if connection == "om-conn" {
+            return Ok(sql_fixture::descriptor(&connection));
+        }
+
         Ok(
             serde_json::to_vec(&serde_json::json!({"connectionId":connection,
             "integrationId": if connection == "conn-1" {"openai_api_key"} else {"mcp"},
@@ -1628,5 +1589,95 @@ impl runtara_component_host::ConnectionResolverHost for CancellationConnections 
     }
     async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
         Err("unsupported fixture resource".into())
+    }
+}
+
+struct CancellationDatabase {
+    host: Arc<Host>,
+    deadline: bool,
+    expected_requests: usize,
+}
+impl CancellationDatabase {
+    async fn pending(&self) {
+        let started = self.host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(
+            started, self.expected_requests,
+            "unexpected SQL after cancellation"
+        );
+        struct Cleanup(Arc<Host>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.closed_count.fetch_add(1, Ordering::SeqCst);
+                self.0.closed.notify_one();
+            }
+        }
+        let _cleanup = Cleanup(self.host.clone());
+        if !self.deadline {
+            self.host.requested.store(true, Ordering::SeqCst);
+        }
+        std::future::pending::<()>().await;
+    }
+    fn authority(&self, tenant: &str, connection: &str) {
+        assert_eq!(tenant, "fixture-tenant");
+        assert_eq!(
+            connection,
+            if self.host.scenario.is_object() {
+                "fixture-connection"
+            } else {
+                "om-conn"
+            }
+        );
+    }
+}
+#[async_trait::async_trait]
+impl runtara_component_host::DatabaseHost for CancellationDatabase {
+    async fn query(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: QueryRequest,
+    ) -> Result<RowSet, DatabaseError> {
+        self.authority(tenant, connection);
+        if self.host.scenario.is_object() {
+            assert_eq!(request.sql, "SELECT 1");
+            self.pending().await;
+        }
+        if request.sql.contains("FROM \"__schema\"") {
+            return Ok(sql_fixture::memory_schema());
+        }
+        if request.sql.contains("COUNT(*)") {
+            return Ok(sql_fixture::rows(vec![serde_json::json!({"count":0})]));
+        }
+        if self.host.scenario == Scenario::AiMemoryLoad {
+            self.pending().await;
+        }
+        Ok(RowSet::default())
+    }
+    async fn execute(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: Statement,
+    ) -> Result<ExecutionResult, DatabaseError> {
+        self.authority(tenant, connection);
+        assert!(matches!(
+            self.host.scenario,
+            Scenario::ObjectExecute | Scenario::AiMemorySave
+        ));
+        if self.host.scenario.is_object() {
+            assert_eq!(request.sql, "SELECT 1");
+        } else {
+            assert!(request.sql.starts_with("INSERT"));
+        }
+        self.pending().await;
+        unreachable!()
+    }
+    async fn execute_batch(
+        &self,
+        _: &str,
+        _: &str,
+        _: BatchRequest,
+    ) -> Result<BatchResult, DatabaseError> {
+        panic!("unexpected schema creation")
     }
 }

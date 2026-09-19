@@ -11,6 +11,7 @@ categories = ["wasm"]
 
 [features]
 component-integration-tests = []
+db-integration-tests = []
 # Test-only experiment: guest-owned orchestration across disposable Stores.
 
 [[test]]
@@ -48,7 +49,13 @@ name = "trusted"
 path = "tests/trusted.rs"
 required-features = ["component-integration-tests"]
 
+[[test]]
+name = "object_model_database"
+path = "tests/object_model_database.rs"
+required-features = ["component-integration-tests", "db-integration-tests"]
+
 [dependencies]
+runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 runtara-agent-wit = { path = "../runtara-agent-wit" }
 # Used as the canonical AgentInfo shape for sidecar meta.json files. The host
@@ -107,6 +114,8 @@ wasmparser = "0.247"
 tokio = { version = "1", features = ["macros", "rt", "time", "sync", "io-util"] }
 
 [dev-dependencies]
+runtara-object-store = { path = "../runtara-object-store" }
+uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 testcontainers = "0.27"
 runtara-connections = { path = "../runtara-connections" }

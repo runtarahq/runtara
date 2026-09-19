@@ -1685,6 +1685,9 @@ fn build_direct_component_resolve_scoped(
             .map_err(component_error)?;
     }
     resolve
+        .push_str("runtara-database.wit", runtara_workflow_wit::DATABASE_WIT)
+        .map_err(component_error)?;
+    resolve
         .push_str("runtara-connection-resolver.wit", CONNECTION_RESOLVER_WIT)
         .map_err(component_error)?;
     resolve

@@ -206,7 +206,7 @@ pub enum AliasKind {
 }
 
 /// Compile a column's schema type into an [`AliasKind`].
-pub(crate) fn column_kind(sql_field: &str, schema: &Schema) -> AliasKind {
+pub fn column_kind(sql_field: &str, schema: &Schema) -> AliasKind {
     match sql_field {
         "id" => return AliasKind::Text,
         "created_at" | "updated_at" => return AliasKind::Timestamp,
@@ -268,7 +268,7 @@ fn vector_column_dimension(name: &str, schema: &Schema) -> Option<u32> {
 /// `prior` is the ordered list of aliases already declared (with their
 /// inferred kinds). Aliases must resolve against this list — forward refs
 /// are rejected.
-pub(crate) fn validate_expression(
+pub fn validate_expression(
     node: &ExprNode,
     prior: &[(String, AliasKind)],
     depth: u8,
@@ -450,7 +450,7 @@ fn check_comparable(op: ExprOp, a: AliasKind, b: AliasKind) -> Result<(), String
 // ============================================================================
 
 /// Map from alias name → (precompiled SQL fragment, inferred kind).
-pub(crate) type AliasSqlMap = HashMap<String, (String, AliasKind)>;
+pub type AliasSqlMap = HashMap<String, (String, AliasKind)>;
 
 /// Compile an expression tree into a standalone SQL fragment.
 ///
@@ -459,7 +459,7 @@ pub(crate) type AliasSqlMap = HashMap<String, (String, AliasKind)>;
 /// in the SELECT list itself, so inline substitution keeps the whole
 /// aggregate query in a single grouped SELECT. Depth is bounded by
 /// [`EXPR_MAX_DEPTH`] so the resulting SQL can't blow up.
-pub(crate) fn render_expression(
+pub fn render_expression(
     node: &ExprNode,
     alias_sql: &AliasSqlMap,
     depth: u8,
@@ -547,7 +547,7 @@ fn render_literal(v: &serde_json::Value) -> Result<String, String> {
 /// (validated against `schema`) and alias references are rejected, since
 /// row-level scoring runs in the same SELECT as the columns it computes from
 /// and has no aggregate aliases to substitute.
-pub(crate) fn validate_row_expression(
+pub fn validate_row_expression(
     node: &ExprNode,
     schema: &Schema,
     depth: u8,
@@ -851,7 +851,7 @@ fn row_op_result_kind(op: ExprOp, kinds: &[AliasKind]) -> Result<AliasKind, Stri
 // schema-aware behaviour later (e.g. type-driven casts) without a signature
 // churn.
 #[allow(clippy::only_used_in_recursion)]
-pub(crate) fn render_row_expression(
+pub fn render_row_expression(
     node: &ExprNode,
     schema: &Schema,
     params: &mut Vec<serde_json::Value>,

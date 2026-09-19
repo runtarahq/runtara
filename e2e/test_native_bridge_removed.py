@@ -76,14 +76,13 @@ def main():
         status, _ = request(PUBLIC, f"/api/runtime/workflows/{workflow_id}/delete", "POST", {})
         assert status == 200, "disposable workflow cleanup failed"
 
-    # Retained internal routes must still dispatch: invalid input produces a
-    # typed client error instead of the removed bridge's 404.
-    status, _ = request(INTERNAL, "/api/internal/presign", "POST", {})
-    assert status == 404, f"legacy presign route still available: {status}"
-    for path in ["/api/internal/proxy", "/api/internal/object-model/sql/query"]:
+    for path in ["/api/internal/presign", "/api/internal/object-model/sql/query", "/api/internal/object-model/sql/execute", "/api/internal/object-model/instances", "/api/internal/object-model/schemas"]:
         status, _ = request(INTERNAL, path, "POST", {})
-        assert status in (400, 422), f"retained route {path}: {status}"
-    print("PASS: SFTP absent, native dispatch removed, SFTP workflow rejected, retained routes present")
+        assert status == 404, f"legacy route still available: {path}: {status}"
+    # Outbound proxy still dispatches; invalid input produces a typed client error.
+    status, _ = request(INTERNAL, "/api/internal/proxy", "POST", {})
+    assert status in (400, 422), f"outbound proxy route: {status}"
+    print("PASS: native dispatch, presign and Object Model HTTP removed; outbound proxy present")
 
 
 if __name__ == "__main__":

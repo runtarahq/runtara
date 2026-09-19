@@ -43,7 +43,15 @@ pub fn build_runner_with_core_http_url(
     >,
     core_http_url: Option<String>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
-    build_runner_configured(persistence, event_observer, core_http_url, None, None, None)
+    build_runner_configured(
+        persistence,
+        event_observer,
+        core_http_url,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build the runner with an explicit shared operator isolation policy.
@@ -57,6 +65,7 @@ pub fn build_runner_configured(
     scoped_agents: Option<ScopedAgentRunnerConfig>,
     trusted: Option<std::sync::Arc<runtara_component_host::trusted::TrustedExecutor>>,
     connections: Option<std::sync::Arc<dyn runtara_component_host::ConnectionResolverHost>>,
+    database: Option<std::sync::Arc<dyn runtara_component_host::DatabaseHost>>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
     if let Some(requested) = crate::config::ProcessEnv.get("RUNTARA_RUNNER")
         && !requested.is_empty()
@@ -69,6 +78,9 @@ pub fn build_runner_configured(
     let mut runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
     if let Some(config) = scoped_agents {
         runner = runner.with_scoped_agents(config)?;
+    }
+    if let Some(database) = database {
+        runner = runner.with_database(database)?;
     }
     if let Some(connections) = connections {
         runner = runner.with_connection_resolver(connections)?;

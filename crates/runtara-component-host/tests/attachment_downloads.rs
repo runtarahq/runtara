@@ -85,7 +85,6 @@ async fn workflow_agents_download_only_on_explicit_invocation() -> anyhow::Resul
         bundle.path(),
         DispatcherEnv {
             proxy_url: format!("http://{address}/proxy"),
-            object_model_url: "http://127.0.0.1:1".into(),
             core_http_url: "http://127.0.0.1:1".into(),
         },
     )

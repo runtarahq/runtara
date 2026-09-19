@@ -41,7 +41,6 @@ fn build_test_bundle() -> tempfile::TempDir {
 fn env() -> DispatcherEnv {
     DispatcherEnv {
         proxy_url: "http://localhost:9999".into(),
-        object_model_url: "http://localhost:9997".into(),
         core_http_url: "http://localhost:9996".into(),
     }
 }

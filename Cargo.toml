@@ -27,6 +27,8 @@ members = [
     "crates/runtara-server",
     # Object model storage
     "crates/runtara-object-store",
+    "crates/runtara-object-model-core",
+    "crates/runtara-database-contract",
     # Reports DSL: schema + minijinja + condition evaluator (server-side, also compiled to WASM)
     "crates/runtara-report-dsl",
     # WASM Component Model migration

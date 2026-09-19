@@ -5,6 +5,10 @@
 #[cfg(feature = "isolation-package")]
 pub mod isolation_package;
 
+/// Native database operations available to ordinary WASM agents.
+pub const DATABASE_INTERFACE_NAME: &str = "runtara:database/sql@0.1.0";
+pub const DATABASE_WIT: &str = include_str!("../wit/database/runtara-database.wit");
+
 /// Generic owned child-execution imports, independent of the DSL schema.
 pub const EXECUTION_INTERFACE_NAME: &str = "runtara:workflow-execution/tasks@0.1.0";
 pub const EXECUTION_WIT: &str = include_str!("../wit/execution/runtara-workflow-execution.wit");
@@ -74,6 +78,25 @@ mod tests {
 
     fn crate_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn database_wit_has_exactly_three_async_operations() {
+        let mut resolve = Resolve::default();
+        let id = resolve
+            .push_str("database.wit", super::DATABASE_WIT)
+            .unwrap();
+        let package = &resolve.packages[id];
+        let interface = &resolve.interfaces[package.interfaces["sql"]];
+        assert_eq!(interface.functions.len(), 3);
+        for name in ["query", "execute", "execute-batch"] {
+            assert!(matches!(
+                interface.functions[name].kind,
+                wit_parser::FunctionKind::AsyncFreestanding
+            ));
+        }
+        assert!(package.worlds.contains_key("database-client"));
+        assert!(package.worlds.contains_key("database-host"));
     }
 
     #[test]

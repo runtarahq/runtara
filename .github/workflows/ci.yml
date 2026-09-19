@@ -39,7 +39,7 @@ env:
   # plus embed-ui. Used by the lint and build jobs so `--all-targets` really
   # means all targets. Static value — no workflow-context interpolation.
   GATE_FEATURES: >-
-    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-environment/db-integration-tests,runtara-environment/scoped-workflow-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-workflows/direct-wasm-integration-tests
+    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-agent-object-model/db-integration-tests,runtara-environment/db-integration-tests,runtara-environment/scoped-workflow-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-component-host/db-integration-tests,runtara-workflows/direct-wasm-integration-tests
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
@@ -406,7 +406,12 @@ jobs:
       - name: Run object-store PostgreSQL integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
-        run: cargo test -p runtara-object-store --features db-integration-tests --test integration -- --test-threads=1
+        run: cargo test -p runtara-object-store --features db-integration-tests --test integration --test native_database -- --test-threads=1
+
+      - name: Run Object Model agent SQL parity tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+        run: cargo test -p runtara-agent-object-model --features db-integration-tests --test native_sql_model -- --test-threads=1
 
       - name: Run TLS-only Valkey integration tests
         run: scripts/test-valkey-tls.sh
@@ -648,6 +653,12 @@ jobs:
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
         run: cargo test -p runtara-component-host --features component-integration-tests --tests
+
+      - name: Run Object Model WASM against native PostgreSQL
+        env:
+          TEST_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        run: cargo test -p runtara-component-host --features component-integration-tests,db-integration-tests --test object_model_database
 
       - name: Qualify emitted Agent deadlines before relaxing E128
         env:

@@ -62,6 +62,7 @@ wac-graph = { version = "0.10", optional = true }
 wasmparser = { version = "0.247", optional = true }
 
 [dev-dependencies]
+runtara-database-contract = { path = "../runtara-database-contract" }
 wat = "1.253"
 anyhow = "1"
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }

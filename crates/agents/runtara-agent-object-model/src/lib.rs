@@ -1,12 +1,8 @@
 //! Object Model CRUD agent — WebAssembly component.
 //!
-//! This agent is special: it does not talk to an external service. Requests
-//! target the **internal** runtara-server object-model HTTP API
-//! (`RUNTARA_OBJECT_MODEL_URL`). Because the traffic is internal we call
-//! `.call_async().await` directly, preserving the existing internal API routing
-//! independently of `RUNTARA_HTTP_PROXY_URL`. The connection is identified by the
-//! `connectionId` query parameter and JSON body field; the tenant id is
-//! supplied via the `X-Org-Id` header sourced from `RUNTARA_TENANT_ID`.
+//! The component builds SQL using the shared Object Model core and executes
+//! through native query/execute/execute-batch imports. Tenant authority and
+//! database credentials stay in the host.
 //!
 //! Capability metadata travels through `#[capability_input]` / `#[capability]` /
 //! `#[capability_output]` annotations on the same Rust types and functions that
@@ -15,6 +11,11 @@
 //! the host architecture and writes `runtara_agent_object_model.meta.json` next
 //! to the `.wasm` — the JSON is a build artifact, never hand-edited.
 #![allow(clippy::result_large_err)]
+
+pub mod model;
+pub mod operations;
+use operations::{Operation, call as object_call};
+pub mod sql_client;
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
@@ -90,21 +91,6 @@ pub struct RawConnection {
 }
 
 // ============================================================================
-// Env helpers
-// ============================================================================
-
-fn object_model_base_url() -> String {
-    std::env::var("RUNTARA_OBJECT_MODEL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/internal/object-model".to_string())
-}
-
-fn tenant_id() -> String {
-    std::env::var("RUNTARA_TENANT_ID").unwrap_or_default()
-}
-
-// ============================================================================
-// Connection helpers
-// ============================================================================
 
 fn require_connection_id(connection: Option<&RawConnection>) -> Result<&str, AgentError> {
     match connection {
@@ -120,204 +106,6 @@ fn require_connection_id(connection: Option<&RawConnection>) -> Result<&str, Age
         )
         .with_attr("integration", "OBJECT_MODEL")),
     }
-}
-
-fn path_with_connection(path: &str, connection_id: &str) -> String {
-    let sep = if path.contains('?') { '&' } else { '?' };
-    format!("{}{}connectionId={}", path, sep, url_encode(connection_id))
-}
-
-fn with_connection_in_body(mut body: Value, connection_id: &str) -> Value {
-    if let Some(map) = body.as_object_mut() {
-        map.insert(
-            "connectionId".to_string(),
-            Value::String(connection_id.to_string()),
-        );
-    }
-    body
-}
-
-// ============================================================================
-// HTTP helpers (use .call_async().await directly — internal API, no proxy)
-// ============================================================================
-
-/// Truncate a string to at most `max` bytes on a UTF-8 char boundary, appending
-/// an ellipsis when clipped. Used to bound the body sample attached to errors.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut t = s[..end].to_string();
-    t.push('…');
-    t
-}
-
-/// Reject a non-2xx object-model API response **before** attempting to parse it
-/// as JSON. `runtara_http::HttpClient::call()` returns `Ok` for every valid HTTP
-/// response (only transport failures are `Err`), so without this guard a
-/// plain-text 413 "Payload Too Large" body (e.g. from Axum's `Json` extractor
-/// when a column write exceeds the internal API body limit) would reach
-/// `into_json()` and surface as a misleading `OBJECT_MODEL_PARSE_ERROR`
-/// ("expected value at line 1 column 1"). See SYN-491.
-fn check_status(
-    resp: runtara_http::HttpResponse,
-) -> Result<runtara_http::HttpResponse, AgentError> {
-    let status = resp.status;
-    if (200..300).contains(&status) {
-        return Ok(resp);
-    }
-    let body_text = String::from_utf8_lossy(&resp.body).to_string();
-    let body_sample = truncate(&body_text, 512);
-    let err = if status == 413 {
-        AgentError::permanent(
-            "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
-            format!(
-                "Object model request body exceeds the internal API size limit \
-                 (HTTP 413). Prefer object storage (s3/sharepoint) for very large \
-                 column values. Response: {body_sample}"
-            ),
-        )
-    } else if status == 429 || (500..600).contains(&status) {
-        // Transient: retrying the same request may succeed.
-        AgentError::transient(
-            "OBJECT_MODEL_UPSTREAM_ERROR",
-            format!("Object model HTTP {status}: {body_sample}"),
-        )
-    } else if status == 401 || status == 403 {
-        AgentError::permanent(
-            "OBJECT_MODEL_UNAUTHORIZED",
-            format!("Object model HTTP {status}: {body_sample}"),
-        )
-    } else {
-        AgentError::permanent(
-            "OBJECT_MODEL_REQUEST_FAILED",
-            format!("Object model HTTP {status}: {body_sample}"),
-        )
-    };
-    Err(err
-        .with_attr("integration", "OBJECT_MODEL")
-        .with_attr("status_code", status.to_string())
-        .with_attr("body", body_sample))
-}
-
-async fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
-    let path = path_with_connection(path, connection_id);
-    let body = with_connection_in_body(body, connection_id);
-    let url = format!("{}{}", object_model_base_url(), path);
-    let tid = tenant_id();
-    let request_bytes = serde_json::to_vec(&body).map(|v| v.len()).unwrap_or(0);
-
-    let resp = runtara_http::HttpClient::new()
-        .request("POST", &url)
-        .header("X-Org-Id", &tid)
-        .header("Content-Type", "application/json")
-        .body_json(&body)
-        .call_async()
-        .await
-        .map_err(|e| {
-            AgentError::permanent(
-                "OBJECT_MODEL_HTTP_ERROR",
-                format!("Object model API request failed: {e}"),
-            )
-            .with_attr("integration", "OBJECT_MODEL")
-        })?;
-
-    let resp =
-        check_status(resp).map_err(|e| e.with_attr("requestBytes", request_bytes.to_string()))?;
-
-    resp.into_json::<Value>().map_err(|e| {
-        AgentError::permanent(
-            "OBJECT_MODEL_PARSE_ERROR",
-            format!("Failed to parse object model API response: {e}"),
-        )
-        .with_attr("integration", "OBJECT_MODEL")
-    })
-}
-
-async fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
-    let path = path_with_connection(path, connection_id);
-    let body = with_connection_in_body(body, connection_id);
-    let url = format!("{}{}", object_model_base_url(), path);
-    let tid = tenant_id();
-    let request_bytes = serde_json::to_vec(&body).map(|v| v.len()).unwrap_or(0);
-
-    let resp = runtara_http::HttpClient::new()
-        .request("PUT", &url)
-        .header("X-Org-Id", &tid)
-        .header("Content-Type", "application/json")
-        .body_json(&body)
-        .call_async()
-        .await
-        .map_err(|e| {
-            AgentError::permanent(
-                "OBJECT_MODEL_HTTP_ERROR",
-                format!("Object model API request failed: {e}"),
-            )
-            .with_attr("integration", "OBJECT_MODEL")
-        })?;
-
-    let resp =
-        check_status(resp).map_err(|e| e.with_attr("requestBytes", request_bytes.to_string()))?;
-
-    resp.into_json::<Value>().map_err(|e| {
-        AgentError::permanent(
-            "OBJECT_MODEL_PARSE_ERROR",
-            format!("Failed to parse object model API response: {e}"),
-        )
-        .with_attr("integration", "OBJECT_MODEL")
-    })
-}
-
-async fn http_get(path: &str, connection_id: &str) -> Result<Value, AgentError> {
-    let path = path_with_connection(path, connection_id);
-    let url = format!("{}{}", object_model_base_url(), path);
-    let tid = tenant_id();
-
-    let resp = runtara_http::HttpClient::new()
-        .request("GET", &url)
-        .header("X-Org-Id", &tid)
-        .call_async()
-        .await
-        .map_err(|e| {
-            AgentError::permanent(
-                "OBJECT_MODEL_HTTP_ERROR",
-                format!("Object model API request failed: {e}"),
-            )
-            .with_attr("integration", "OBJECT_MODEL")
-        })?;
-
-    let resp = check_status(resp)?;
-
-    resp.into_json::<Value>().map_err(|e| {
-        AgentError::permanent(
-            "OBJECT_MODEL_PARSE_ERROR",
-            format!("Failed to parse object model API response: {e}"),
-        )
-        .with_attr("integration", "OBJECT_MODEL")
-    })
-}
-
-// ============================================================================
-// URL encoding (no external dep — same logic as runtara-agent-http)
-// ============================================================================
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
-            _ => {
-                for byte in c.to_string().as_bytes() {
-                    out.push_str(&format!("%{byte:02X}"));
-                }
-            }
-        }
-    }
-    out
 }
 
 // ============================================================================
@@ -448,7 +236,7 @@ pub struct CreateInstanceOutput {
     display_name = "Create Instance",
     description = "Create a new instance in an object model schema",
     module_display_name = "Object Model",
-    module_description = "CRUD operations over the runtara object-model API (list schemas, \
+    module_description = "CRUD operations over the runtara object model (list schemas, \
                           create/query/update/delete instances, bulk operations, aggregates, \
                           and conversation memory).",
     module_has_side_effects = true,
@@ -461,8 +249,8 @@ pub async fn create_instance(
     input: CreateInstanceInput,
 ) -> Result<CreateInstanceOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
-    let resp = http_post(
-        "/instances",
+    let resp = object_call(
+        Operation::Create,
         json!({
             "schema_name": input.schema_name,
             "properties": input.data,
@@ -605,8 +393,8 @@ pub async fn query_instances(
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let condition_json = parse_condition(input.condition.as_ref());
 
-    let resp = http_post(
-        "/instances/query",
+    let resp = object_call(
+        Operation::Query,
         json!({
             "schema_name": input.schema_name,
             "filters": input.filters,
@@ -692,8 +480,8 @@ pub async fn check_instance_exists(
     input: CheckInstanceExistsInput,
 ) -> Result<CheckInstanceExistsOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
-    let resp = http_post(
-        "/instances/exists",
+    let resp = object_call(
+        Operation::Exists,
         json!({
             "schema_name": input.schema_name,
             "filters": input.filters,
@@ -792,8 +580,8 @@ pub async fn create_if_not_exists(
     input: CreateIfNotExistsInput,
 ) -> Result<CreateIfNotExistsOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
-    let resp = http_post(
-        "/instances/create-if-not-exists",
+    let resp = object_call(
+        Operation::CreateIfMissing,
         json!({
             "schema_name": input.schema_name,
             "match_filters": input.match_filters,
@@ -883,13 +671,9 @@ pub async fn update_instance(
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let properties = Value::Object(input.data.into_iter().collect());
 
-    let resp = http_put(
-        &format!(
-            "/instances/{}/{}",
-            url_encode(&input.schema_name),
-            url_encode(&input.instance_id),
-        ),
-        json!({ "data": properties }),
+    let resp = object_call(
+        Operation::Update,
+        json!({ "schema_name": input.schema_name, "instance_id": input.instance_id, "data": properties }),
         &connection_id,
     )
     .await?;
@@ -956,8 +740,8 @@ pub async fn delete_instance(
     input: DeleteInstanceInput,
 ) -> Result<DeleteInstanceOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
-    let resp = http_post(
-        "/instances/delete",
+    let resp = object_call(
+        Operation::Delete,
         json!({
             "schema_name": input.schema_name,
             "instance_id": input.instance_id,
@@ -1143,7 +927,7 @@ pub async fn bulk_create_instances(
         body["conflict_columns"] = json!(cols);
     }
 
-    let resp = http_post("/instances/bulk-create", body, &connection_id).await?;
+    let resp = object_call(Operation::BulkCreate, body, &connection_id).await?;
 
     let errors: Vec<AgentBulkRowError> = resp
         .get("errors")
@@ -1289,7 +1073,7 @@ pub async fn bulk_update_instances(
         });
     };
 
-    let resp = http_post("/instances/bulk-update", body, &connection_id).await?;
+    let resp = object_call(Operation::BulkUpdate, body, &connection_id).await?;
 
     Ok(BulkUpdateInstancesOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1391,7 +1175,7 @@ pub async fn bulk_delete_instances(
         }
     };
 
-    let resp = http_post("/instances/bulk-delete", body, &connection_id).await?;
+    let resp = object_call(Operation::BulkDelete, body, &connection_id).await?;
 
     Ok(BulkDeleteInstancesOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1453,7 +1237,7 @@ pub struct QueryAggregateInput {
 
     #[field(
         display_name = "Limit",
-        description = "Max result rows. Server caps at 100000.",
+        description = "Max result rows, subject to the configured database row and byte limits.",
         example = "200"
     )]
     #[serde(default)]
@@ -1521,8 +1305,8 @@ pub async fn query_aggregate(
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let condition_json = parse_condition(input.condition.as_ref());
 
-    let resp = http_post(
-        "/instances/aggregate",
+    let resp = object_call(
+        Operation::Aggregate,
         json!({
             "schema_name": input.schema_name,
             "condition": condition_json,
@@ -1566,38 +1350,8 @@ pub async fn query_aggregate(
 }
 
 // ============================================================================
-// Capability: query_sql / execute_sql (raw SQL).await
+// Capability: query_sql / execute_sql (raw SQL)
 // ============================================================================
-
-/// Retry reclassification for `query-sql`: transport failures
-/// (`OBJECT_MODEL_HTTP_ERROR`, hard-coded permanent in `http_post`) become
-/// transient — the server runs the query in a READ ONLY transaction, so a
-/// retry is provably safe, and a server restart mid-read must not permanently
-/// fail a nightly rebuild. Status-code classification (5xx/429 transient)
-/// stays as `check_status` produced it.
-fn query_sql_reclassify(mut err: AgentError) -> AgentError {
-    if err.code == "OBJECT_MODEL_HTTP_ERROR" {
-        err.category = "transient";
-        err.severity = "warning";
-    }
-    err
-}
-
-/// Retry reclassification for `execute-sql`: server 5xx
-/// (`OBJECT_MODEL_UPSTREAM_ERROR`, transient from `check_status`) becomes
-/// permanent — the statement outcome on the tenant DB is unknown, and
-/// auto-retrying a write is the double-apply case. 429 stays transient (the
-/// request was rejected before reaching Postgres). Transport failures are
-/// already permanent from `http_post`; for a write that default is the
-/// correct one — kept deliberately.
-fn execute_sql_reclassify(mut err: AgentError) -> AgentError {
-    let is_429 = err.attributes.get("status_code").and_then(|v| v.as_str()) == Some("429");
-    if err.code == "OBJECT_MODEL_UPSTREAM_ERROR" && !is_429 {
-        err.category = "permanent";
-        err.severity = "error";
-    }
-    err
-}
 
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "Query SQL Input")]
@@ -1683,15 +1437,15 @@ pub struct QuerySqlOutput {
         ),
         transient(
             "OBJECT_MODEL_UPSTREAM_ERROR",
-            "Object-model API 5xx/429 — retried automatically (reads are safe to retry)"
+            "Retryable native database failure; reads may be retried"
         ),
         transient(
-            "OBJECT_MODEL_HTTP_ERROR",
-            "Transport failure reaching the object-model API — retried automatically"
+            "OBJECT_MODEL_HOST_ERROR",
+            "Native database deadline exceeded; reads may be retried"
         ),
         permanent(
             "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
-            "Request body exceeds the internal API size limit"
+            "Request exceeds the native database size limit"
         )
     )
 )]
@@ -1706,9 +1460,7 @@ pub async fn query_sql(input: QuerySqlInput) -> Result<QuerySqlOutput, AgentErro
         body["resultSchema"] = json!(schema);
     }
 
-    let resp = http_post("/sql/query", body, &connection_id)
-        .await
-        .map_err(query_sql_reclassify)?;
+    let resp = object_call(Operation::QuerySql, body, &connection_id).await?;
 
     let rows = resp
         .get("rows")
@@ -1795,8 +1547,8 @@ pub struct ExecuteSqlOutput {
     description = "Run one SQL write statement against the tenant object-model database with a \
                    server-side statement timeout. The workhorse for derived-table rebuilds: \
                    computed-expression UPDATEs, TRUNCATE, INSERT...SELECT...GROUP BY write-back. \
-                   Never auto-retries server errors (statement outcome unknown — retrying a \
-                   write is the double-apply case). Bypasses per-schema authorization, \
+                   Retries transient errors only when the host confirms the write never committed. \
+                   Unknown commit outcomes are never retried. Bypasses per-schema authorization, \
                    validation, and soft-delete — use the row-shaped capabilities when their \
                    safety net fits.",
     side_effects = true,
@@ -1805,33 +1557,32 @@ pub struct ExecuteSqlOutput {
             "OBJECT_MODEL_REQUEST_FAILED",
             "SQL failed deterministically: syntax, constraint violation, insufficient privilege, or statement timeout"
         ),
-        permanent(
+        transient(
             "OBJECT_MODEL_UPSTREAM_ERROR",
-            "Object-model API 5xx — never auto-retried for writes; 429 stays retryable (rejected before reaching the database)"
+            "Transient native database failure with a confirmed not-started or rolled-back outcome"
         ),
         permanent(
-            "OBJECT_MODEL_HTTP_ERROR",
-            "Transport failure — never auto-retried for writes (the statement may have committed)"
+            "OBJECT_MODEL_HOST_ERROR",
+            "Native database deadline exceeded; an unknown commit outcome is never retried"
         ),
         permanent(
             "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
-            "Request body exceeds the internal API size limit"
+            "Request exceeds the native database size limit"
         )
     )
 )]
 pub async fn execute_sql(input: ExecuteSqlInput) -> Result<ExecuteSqlOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
 
-    let resp = http_post(
-        "/sql/execute",
+    let resp = object_call(
+        Operation::ExecuteSql,
         json!({
             "sql": input.sql,
             "params": input.params,
         }),
         &connection_id,
     )
-    .await
-    .map_err(execute_sql_reclassify)?;
+    .await?;
 
     Ok(ExecuteSqlOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1853,7 +1604,12 @@ const MEMORY_TABLE_NAME: &str = "ai_conversation_memory";
 /// Ensure the conversation memory schema exists (mirrors legacy
 /// `ensure_memory_schema`). GET the schema first; create it on 404 / missing.
 async fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
-    let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME), connection_id).await?;
+    let resp = object_call(
+        Operation::GetSchema,
+        json!({"name": MEMORY_SCHEMA_NAME}),
+        connection_id,
+    )
+    .await?;
 
     if resp["success"].as_bool().unwrap_or(false)
         && resp.get("schema").is_some()
@@ -1862,8 +1618,8 @@ async fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
         return Ok(());
     }
 
-    let create_resp = http_post(
-        "/schemas",
+    let create_resp = object_call(
+        Operation::CreateSchema,
         json!({
             "name": MEMORY_SCHEMA_NAME,
             "tableName": MEMORY_TABLE_NAME,
@@ -1959,8 +1715,8 @@ pub async fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, Age
         Value::String(input.conversation_id.clone()),
     );
 
-    let resp = http_post(
-        "/instances/query",
+    let resp = object_call(
+        Operation::Query,
         json!({
             "schema_name": MEMORY_SCHEMA_NAME,
             "filters": filters,
@@ -2070,8 +1826,8 @@ pub async fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, Age
         Value::String(input.conversation_id.clone()),
     );
 
-    let query_resp = http_post(
-        "/instances/query",
+    let query_resp = object_call(
+        Operation::Query,
         json!({
             "schema_name": MEMORY_SCHEMA_NAME,
             "filters": filters,
@@ -2096,13 +1852,11 @@ pub async fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, Age
     if let Some(instance) = query_resp["instances"].as_array().and_then(|a| a.first()) {
         // Update existing
         let instance_id = instance["id"].as_str().unwrap_or("").to_string();
-        let update_resp = http_put(
-            &format!(
-                "/instances/{}/{}",
-                url_encode(MEMORY_SCHEMA_NAME),
-                url_encode(&instance_id),
-            ),
+        let update_resp = object_call(
+            Operation::Update,
             json!({
+                "schema_name": MEMORY_SCHEMA_NAME,
+                "instance_id": instance_id,
                 "data": {
                     "messages": messages_json,
                     "message_count": message_count,
@@ -2124,8 +1878,8 @@ pub async fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, Age
         }
     } else {
         // Create new
-        let create_resp = http_post(
-            "/instances",
+        let create_resp = object_call(
+            Operation::Create,
             json!({
                 "schema_name": MEMORY_SCHEMA_NAME,
                 "properties": {
@@ -2274,7 +2028,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     AgentInfo {
         id: "object-model".into(),
         name: "Object Model".into(),
-        description: "CRUD operations over the runtara object-model API (list schemas, \
+        description: "CRUD operations over the runtara object model (list schemas, \
                       create/query/update/delete instances, bulk operations, aggregates, \
                       and conversation memory)."
             .into(),
@@ -2350,114 +2104,6 @@ mod tests {
         assert_eq!(score_expression["alias"], json!("vec_dist"));
         assert_eq!(input.order_by.unwrap().as_array().unwrap().len(), 1);
     }
-
-    fn resp(status: u16, body: &str) -> runtara_http::HttpResponse {
-        runtara_http::HttpResponse {
-            status,
-            body: body.as_bytes().to_vec(),
-            headers: HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn check_status_passes_2xx_through() {
-        // The success path Test A exercises end-to-end: a 2xx response is
-        // returned untouched so the caller can parse it.
-        let r = check_status(resp(201, "{\"success\":true}")).expect("2xx is Ok");
-        assert_eq!(r.status, 201);
-        assert_eq!(r.body, b"{\"success\":true}");
-    }
-
-    #[test]
-    fn check_status_413_is_permanent_payload_too_large() {
-        // Regression for SYN-491: a 413 with the plain-text body Axum's `Json`
-        // extractor returns must surface as a distinct, actionable error —
-        // NOT the cryptic OBJECT_MODEL_PARSE_ERROR that serde produced when the
-        // body was parsed as JSON without a status check.
-        let err = check_status(resp(413, "Failed to buffer the request body"))
-            .err()
-            .expect("413 must be an error");
-        assert_eq!(err.code, "OBJECT_MODEL_PAYLOAD_TOO_LARGE");
-        assert_eq!(err.category, "permanent");
-        assert_eq!(
-            err.attributes.get("status_code"),
-            Some(&Value::String("413".to_string()))
-        );
-        assert_eq!(
-            err.attributes.get("body"),
-            Some(&Value::String(
-                "Failed to buffer the request body".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn check_status_5xx_is_transient() {
-        let err = check_status(resp(503, "upstream down"))
-            .err()
-            .expect("503 must be an error");
-        assert_eq!(err.code, "OBJECT_MODEL_UPSTREAM_ERROR");
-        assert_eq!(err.category, "transient");
-    }
-
-    #[test]
-    fn check_status_auth_and_other_4xx_are_permanent() {
-        let unauthorized = check_status(resp(403, "forbidden"))
-            .err()
-            .expect("403 must be an error");
-        assert_eq!(unauthorized.code, "OBJECT_MODEL_UNAUTHORIZED");
-        assert_eq!(unauthorized.category, "permanent");
-
-        let other = check_status(resp(404, "not found"))
-            .err()
-            .expect("404 must be an error");
-        assert_eq!(other.code, "OBJECT_MODEL_REQUEST_FAILED");
-        assert_eq!(other.category, "permanent");
-    }
-
-    #[test]
-    fn query_sql_transport_errors_become_transient() {
-        // A network blip or server restart mid-read must not permanently fail
-        // a nightly rebuild: the READ ONLY transaction makes retry safe.
-        let err = query_sql_reclassify(AgentError::permanent(
-            "OBJECT_MODEL_HTTP_ERROR",
-            "connection reset",
-        ));
-        assert_eq!(err.category, "transient");
-
-        // Other codes pass through untouched.
-        let err = query_sql_reclassify(AgentError::permanent(
-            "OBJECT_MODEL_REQUEST_FAILED",
-            "syntax error",
-        ));
-        assert_eq!(err.category, "permanent");
-    }
-
-    #[test]
-    fn execute_sql_server_errors_become_permanent_except_429() {
-        // 5xx on a write: statement outcome unknown — never auto-retry.
-        let err = execute_sql_reclassify(
-            AgentError::transient("OBJECT_MODEL_UPSTREAM_ERROR", "HTTP 503")
-                .with_attr("status_code", "503"),
-        );
-        assert_eq!(err.category, "permanent");
-
-        // 429 was rejected before reaching Postgres — safe to retry.
-        let err = execute_sql_reclassify(
-            AgentError::transient("OBJECT_MODEL_UPSTREAM_ERROR", "HTTP 429")
-                .with_attr("status_code", "429"),
-        );
-        assert_eq!(err.category, "transient");
-
-        // Transport failure on a write stays permanent — the statement may
-        // have committed. This is deliberate, not http_post's accident.
-        let err = execute_sql_reclassify(AgentError::permanent(
-            "OBJECT_MODEL_HTTP_ERROR",
-            "connection reset",
-        ));
-        assert_eq!(err.category, "permanent");
-    }
-
     #[test]
     fn sql_capability_metadata_pins_wire_shapes() {
         // params is a Vec<Value> passthrough (aggregates precedent) and
@@ -2492,7 +2138,6 @@ mod tests {
                 .any(|field| field.name == "row_count")
         );
     }
-
     #[test]
     fn sql_inputs_accept_both_result_schema_spellings() {
         for key in ["resultSchema", "result_schema"] {
@@ -2508,21 +2153,5 @@ mod tests {
         let input: QuerySqlInput = serde_json::from_value(json!({"sql": "SELECT 1"})).unwrap();
         assert!(input.params.is_empty());
         assert!(input.result_schema.is_none());
-    }
-
-    #[test]
-    fn check_status_truncates_long_bodies() {
-        let huge = "x".repeat(2000);
-        let err = check_status(resp(500, &huge))
-            .err()
-            .expect("500 must be an error");
-        let body = match err.attributes.get("body") {
-            Some(Value::String(s)) => s.clone(),
-            other => panic!("expected string body attr, got {other:?}"),
-        };
-        // 512 retained bytes + a 3-byte ellipsis char.
-        assert!(body.len() < huge.len());
-        assert!(body.starts_with(&"x".repeat(512)));
-        assert!(body.ends_with('…'));
     }
 }

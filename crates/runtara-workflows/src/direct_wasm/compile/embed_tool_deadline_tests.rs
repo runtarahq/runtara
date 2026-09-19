@@ -1,6 +1,9 @@
 //! Real composed AI-loop dispatch with scoped inline Embed tools.
 use super::*;
 use crate::direct_wasm::WorkflowAbi;
+use runtara_database_contract::*;
+#[path = "../../../../runtara-component-host/tests/support/object_model.rs"]
+pub(super) mod sql_fixture;
 
 #[path = "agent_tool_deadline_tests.rs"]
 mod agent_tool;
@@ -93,6 +96,98 @@ fn compiled_with_delay(
     )
 }
 
+// The memory fixture models native SQL suspension, with the same counters used
+// by the HTTP tool fixture. Cleanup occurs when Wasmtime drops the pending call.
+struct NativeMemory {
+    host: std::sync::Weak<Host>,
+    script: Vec<Child>,
+    children: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<Value>>>,
+    closed: Arc<AtomicUsize>,
+}
+impl NativeMemory {
+    async fn step(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: Value,
+    ) -> Result<(), DatabaseError> {
+        assert_eq!(tenant, "fixture");
+        assert_eq!(connection, "om-conn");
+        self.requests.lock().unwrap().push(request);
+        let index = self.children.fetch_add(1, Ordering::SeqCst);
+        let operation = *self.script.get(index).expect("unexpected native SQL call");
+        if matches!(operation, Child::Headers | Child::Body | Child::Cancel) {
+            struct Cleanup(Arc<AtomicUsize>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let _cleanup = Cleanup(self.closed.clone());
+            if operation == Child::Cancel {
+                self.host
+                    .upgrade()
+                    .unwrap()
+                    .cancel
+                    .store(true, Ordering::SeqCst);
+            }
+            std::future::pending::<()>().await;
+        }
+        if matches!(operation, Child::Permanent | Child::Retryable) {
+            return Err(DatabaseError {
+                code: "DATABASE_CONNECTION_UNAVAILABLE".into(),
+                message: "Fixture storage failure".into(),
+                outcome: Outcome::NotStarted,
+                retryable: operation == Child::Retryable,
+                sqlstate: None,
+                statement_index: None,
+            });
+        }
+        Ok(())
+    }
+}
+#[async_trait::async_trait]
+impl runtara_component_host::DatabaseHost for NativeMemory {
+    async fn query(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: QueryRequest,
+    ) -> Result<RowSet, DatabaseError> {
+        self.step(tenant, connection, serde_json::to_value(&request).unwrap())
+            .await?;
+        if request.sql.contains("FROM \"__schema\"") {
+            return Ok(sql_fixture::memory_schema());
+        }
+        if request.sql.contains("COUNT(*)") {
+            return Ok(sql_fixture::rows(vec![json!({"count":0})]));
+        }
+        Ok(RowSet::default())
+    }
+    async fn execute(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: Statement,
+    ) -> Result<ExecutionResult, DatabaseError> {
+        self.step(tenant, connection, serde_json::to_value(&request).unwrap())
+            .await?;
+        Ok(ExecutionResult {
+            rows_affected: 1,
+            returned: None,
+        })
+    }
+    async fn execute_batch(
+        &self,
+        _: &str,
+        _: &str,
+        _: BatchRequest,
+    ) -> Result<BatchResult, DatabaseError> {
+        panic!("fixture schema already exists")
+    }
+}
+
 struct Server {
     connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -125,6 +220,13 @@ impl Server {
         let child_requests = Arc::new(Mutex::new(Vec::new()));
         let child_inputs = child_requests.clone();
         let closed = Arc::new(AtomicUsize::new(0));
+        *host.database.lock().unwrap() = Some(Arc::new(NativeMemory {
+            host: Arc::downgrade(&host),
+            script: script.clone(),
+            children: children.clone(),
+            requests: child_requests.clone(),
+            closed: closed.clone(),
+        }));
         let (seen, count, cleanup) = (requests.clone(), children.clone(), closed.clone());
         let task = tokio::spawn(async move {
             loop {
@@ -149,22 +251,18 @@ impl Server {
                     })
                     .unwrap_or(0);
                 let request_line = headers.lines().next().unwrap();
-                let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
-                let object_model = path.starts_with("/schemas") || path.starts_with("/instances");
+                assert!(
+                    request_line.contains("/proxy"),
+                    "unexpected internal HTTP route: {request_line}"
+                );
                 while bytes.len() < end + length {
                     let n = stream.read(&mut buffer).await?;
                     anyhow::ensure!(n > 0, "incomplete body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
-                let mut response_status = 200;
                 let response = {
-                    let envelope: Value = if object_model {
-                        json!({"url":path,"body":if length == 0 {Value::Null} else {serde_json::from_slice(&bytes[end..end + length])?}})
-                    } else {
-                        serde_json::from_slice(&bytes[end..end + length])?
-                    };
-                    if object_model
-                        || envelope["connection_id"] == "mcp-conn"
+                    let envelope: Value = serde_json::from_slice(&bytes[end..end + length])?;
+                    if envelope["connection_id"] == "mcp-conn"
                         || envelope["url"]
                             .as_str()
                             .is_some_and(|url| url.ends_with("/child"))
@@ -187,41 +285,20 @@ impl Server {
                             cleanup.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
-                        let payload = if object_model {
-                            if matches!(operation, Child::Permanent | Child::Retryable) {
-                                response_status = if operation == Child::Permanent {
-                                    400
-                                } else {
-                                    503
-                                };
-                                json!({"error":"fixture storage failure"})
-                            } else if path.starts_with("/schemas") {
-                                json!({"success":true,"schema":{}})
-                            } else if path.starts_with("/instances/query") {
-                                json!({"success":true,"instances":[]})
-                            } else {
-                                json!({"success":true,"id":"memory"})
+                        let payload = match envelope["body"]["method"].as_str() {
+                            Some("initialize") => {
+                                json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
                             }
-                        } else {
-                            match envelope["body"]["method"].as_str() {
-                                Some("initialize") => {
-                                    json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
-                                }
-                                Some("notifications/initialized") => Value::Null,
-                                Some("tools/list") => {
-                                    json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
-                                }
-                                Some("tools/call") => {
-                                    json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
-                                }
-                                _ => json!({"ok":operation == Child::Success}),
+                            Some("notifications/initialized") => Value::Null,
+                            Some("tools/list") => {
+                                json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
                             }
+                            Some("tools/call") => {
+                                json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
+                            }
+                            _ => json!({"ok":operation == Child::Success}),
                         };
-                        if object_model {
-                            payload
-                        } else {
-                            json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
-                        }
+                        json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
                     } else {
                         let index = {
                             let mut requests = seen.lock().unwrap();
@@ -254,7 +331,7 @@ impl Server {
                 stream
                     .write_all(
                         format!(
-                            "HTTP/1.1 {response_status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         )
                         .as_bytes(),
@@ -279,7 +356,6 @@ impl Server {
                 "RUNTARA_HTTP_PROXY_URL".into(),
                 format!("{}/proxy", self.url),
             ),
-            ("RUNTARA_OBJECT_MODEL_URL".into(), self.url.clone()),
             ("RUNTARA_TENANT_ID".into(), "fixture".into()),
         ])
     }

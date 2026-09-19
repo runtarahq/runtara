@@ -871,6 +871,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach native SQL execution shared by all runs, including scoped children.
+    pub fn with_database(
+        self,
+        database: Arc<dyn runtara_component_host::DatabaseHost>,
+    ) -> Result<Self> {
+        self.executor
+            .set_database(database)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach the native connection service shared by all runs.
     pub fn with_connection_resolver(
         self,

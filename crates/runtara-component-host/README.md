@@ -25,7 +25,6 @@ use runtara_component_host::{
 
 let env = DispatcherEnv {
     proxy_url: "http://127.0.0.1:7002/api/internal/proxy".into(),
-    object_model_url: "http://127.0.0.1:7002/api/internal/object-model".into(),
     core_http_url: "http://127.0.0.1:7002".into(),
 };
 

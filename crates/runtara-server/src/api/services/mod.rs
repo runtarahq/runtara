@@ -23,3 +23,4 @@ pub mod workflows;
 pub mod trusted;
 
 pub mod connection_resolver;
+pub mod database;

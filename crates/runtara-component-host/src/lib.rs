@@ -19,6 +19,8 @@
 pub mod bindings;
 mod cleanup_alarm;
 pub mod connection_resolver_host;
+pub mod database_host;
+pub use database_host::DatabaseHost;
 pub mod dispatcher;
 pub mod engine;
 pub mod execution_host;

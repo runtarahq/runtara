@@ -102,6 +102,7 @@ path = "tests/valkey_tls.rs"
 required-features = ["valkey-tls-integration-tests"]
 
 [dependencies]
+runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }

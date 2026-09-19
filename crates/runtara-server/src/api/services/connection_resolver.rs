@@ -27,12 +27,21 @@ fn guest_error(error: ConnectionsError) -> String {
 #[async_trait::async_trait]
 impl ConnectionResolverHost for NativeConnectionResolver {
     async fn describe(&self, tenant: &str, connection_id: String) -> Result<Vec<u8>, String> {
-        let descriptor = self
+        let mut descriptor = self
             .0
             .describe_connection(&connection_id, tenant)
             .await
             .map_err(guest_error)?
             .ok_or_else(|| guest_error(ConnectionsError::NotFound(String::new())))?;
+        if descriptor.integration_id == "postgres" {
+            let config = runtara_object_store::StoreConfig::builder("")
+                .soft_delete(crate::config::object_model_soft_delete())
+                .bulk_request_limit(crate::config::object_model_bulk_request_limit())
+                .build();
+            descriptor.metadata = serde_json::json!({
+                "object_model": runtara_object_store::config::ObjectModelLayout::from(&config)
+            });
+        }
         serde_json::to_vec(&descriptor).map_err(|_| "Cannot encode connection metadata".into())
     }
 

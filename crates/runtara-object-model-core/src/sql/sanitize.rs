@@ -95,7 +95,7 @@ pub const POSTGRES_RESERVED_WORDS: &[&str] = &[
 ///
 /// # Example
 /// ```
-/// use runtara_object_store::sql::quote_identifier;
+/// use runtara_object_model_core::sql::quote_identifier;
 ///
 /// let quoted = quote_identifier("my_table");
 /// assert_eq!(quoted, "\"my_table\"");
@@ -123,7 +123,7 @@ pub fn quote_identifier(identifier: &str) -> String {
 ///
 /// # Example
 /// ```
-/// use runtara_object_store::sql::validate_identifier;
+/// use runtara_object_model_core::sql::validate_identifier;
 ///
 /// assert!(validate_identifier("products", &[]).is_ok());
 /// assert!(validate_identifier("select", &[]).is_err()); // reserved keyword

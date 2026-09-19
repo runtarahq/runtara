@@ -32,7 +32,6 @@ pub struct CallContext {
     pub proxy_url: String,
     pub proxy_host: String,
     pub core_http_url: String,
-    pub object_model_url: String,
 }
 
 impl CallContext {
@@ -41,7 +40,6 @@ impl CallContext {
     pub fn for_test(
         tenant_id: impl Into<String>,
         proxy_url: impl Into<String>,
-        object_model_url: impl Into<String>,
         core_http_url: impl Into<String>,
     ) -> Self {
         let proxy_url = proxy_url.into();
@@ -52,7 +50,6 @@ impl CallContext {
             proxy_url,
             proxy_host,
             core_http_url: core_http_url.into(),
-            object_model_url: object_model_url.into(),
         }
     }
 
@@ -66,7 +63,6 @@ impl CallContext {
             proxy_url: String::new(),
             proxy_host: String::new(),
             core_http_url: String::new(),
-            object_model_url: String::new(),
         }
     }
 }
@@ -191,6 +187,7 @@ pub enum Termination {
 }
 
 pub struct HostState {
+    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
     pub(crate) connection_resolver:
         Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
     pub(crate) restricted: bool,
@@ -213,6 +210,12 @@ pub struct HostState {
 }
 
 impl HostState {
+    pub fn with_database(mut self, database: Arc<dyn crate::DatabaseHost>) -> Self {
+        self.database =
+            crate::database_host::database_for_run(Some(&database), Some(&self.ctx.tenant_id));
+        self
+    }
+
     /// Configure a native resolver using this invocation's host-owned tenant.
     pub fn with_connection_resolver(
         mut self,
@@ -249,15 +252,13 @@ impl HostState {
         if !ctx.core_http_url.is_empty() {
             builder.env("RUNTARA_HTTP_URL", &ctx.core_http_url);
         }
-        if !ctx.object_model_url.is_empty() {
-            builder.env("RUNTARA_OBJECT_MODEL_URL", &ctx.object_model_url);
-        }
         if let Some(iid) = &ctx.instance_id {
             builder.env("RUNTARA_INSTANCE_ID", iid);
         }
 
         Self {
             restricted: false,
+            database: Err("native database service is not configured".into()),
             connection_resolver: Err("native connection resolver is not configured".into()),
             trusted: None,
             wasi: builder.build(),
@@ -332,7 +333,6 @@ mod tests {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
-            "http://obj.local:7003",
             "http://core.local:7004",
         ));
         let state = HostState::new(Arc::clone(&ctx));
@@ -348,7 +348,6 @@ mod tests {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
-            "http://obj.local:7003",
             "http://core.local:7004",
         ));
         let state = HostState::new(ctx);
@@ -404,7 +403,6 @@ mod tests {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
-            "http://obj.local:7003",
             "http://core.local:7004",
         ));
         let mut state = HostState::new(ctx);

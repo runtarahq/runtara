@@ -3,7 +3,7 @@
 //! Provides a builder pattern for configuring the object store.
 
 /// Configuration for auto-managed columns
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AutoColumns {
     /// Whether to include `id` column (UUID primary key)
     pub id: bool,
@@ -542,5 +542,44 @@ mod tests {
         assert_eq!(config.pool.max_connections, 42);
         assert_eq!(config.pool.min_connections, 7);
         assert!(config.pool.test_before_acquire);
+    }
+}
+
+/// Safe schema-layout metadata supplied by the native connection descriptor.
+/// Never contains database URLs, credentials, or pool configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectModelLayout {
+    pub version: u32,
+    pub metadata_table: String,
+    pub soft_delete: bool,
+    pub auto_columns: AutoColumns,
+    pub bulk_request_limit: usize,
+}
+
+impl From<&StoreConfig> for ObjectModelLayout {
+    fn from(config: &StoreConfig) -> Self {
+        Self {
+            version: 1,
+            metadata_table: config.metadata_table.clone(),
+            soft_delete: config.soft_delete,
+            auto_columns: config.auto_columns.clone(),
+            bulk_request_limit: config.bulk_request_limit,
+        }
+    }
+}
+
+impl ObjectModelLayout {
+    pub fn store_config(&self) -> Result<StoreConfig, String> {
+        if self.version != 1 {
+            return Err("Unsupported Object Model layout version".into());
+        }
+        let mut config = StoreConfig::builder("")
+            .metadata_table(&self.metadata_table)
+            .soft_delete(self.soft_delete)
+            .bulk_request_limit(self.bulk_request_limit)
+            .build();
+        config.auto_columns = self.auto_columns.clone();
+        Ok(config)
     }
 }

@@ -11,7 +11,6 @@ pub mod csv_import_export;
 pub mod entitlements;
 pub mod events;
 pub mod executions;
-pub mod internal_object_model;
 pub mod internal_proxy;
 pub mod metrics;
 pub mod object_model;

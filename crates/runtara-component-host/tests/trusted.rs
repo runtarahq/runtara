@@ -77,7 +77,6 @@ async fn dispatcher_with_credentials(
     }
     let env = DispatcherEnv {
         proxy_url: "http://127.0.0.1:1".into(),
-        object_model_url: "http://127.0.0.1:1".into(),
         core_http_url: "http://127.0.0.1:1".into(),
     };
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env).await?;

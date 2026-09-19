@@ -39,6 +39,7 @@ struct CheckpointFault {
 }
 
 struct Host {
+    database: Mutex<Option<Arc<dyn runtara_component_host::DatabaseHost>>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     started: Instant,
     clock_override: AtomicU64,
@@ -81,6 +82,7 @@ struct Host {
 impl Host {
     fn new() -> Self {
         Self {
+            database: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             started: Instant::now(),
             clock_override: AtomicU64::new(0),
@@ -671,9 +673,14 @@ async fn invoke_with_connections(
     env: HashMap<String, String>,
     connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
 ) -> anyhow::Result<InvokeExit> {
-    let local = if let Some(connections) = connections {
+    let database = host.database.lock().unwrap().clone();
+    let local = if connections.is_some() || database.is_some() {
         let local = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
-        local.set_connection_resolver(connections)?;
+        local
+            .set_connection_resolver(connections.unwrap_or_else(|| Arc::new(FixtureConnections)))?;
+        if let Some(database) = database {
+            local.set_database(database)?;
+        }
         Some(local)
     } else {
         None
@@ -1043,7 +1050,7 @@ async fn agent_deadline_includes_retry_backoff_and_durable_replay() -> anyhow::R
     for durable in [false, true] {
         run(
             Response::Error,
-            if durable { 60_000 } else { 200 },
+            if durable { 60_000 } else { 1_000 },
             durable,
             5,
             60_000,
@@ -1164,7 +1171,9 @@ async fn agent_deadline_rejects_corrupted_durable_budget() -> anyhow::Result<()>
 async fn agent_deadline_inventory_includes_inline_nested_definitions() -> anyhow::Result<()> {
     for depth in [1, 2] {
         for response in [Response::Hang, Response::Ok, Response::Error] {
-            run_shaped(response, 200, false, 0, 0, Shape::InlineWhile(depth)).await?;
+            // Include cold component activation while still requiring the
+            // first request to enter before testing its timeout/error path.
+            run_shaped(response, 1_000, false, 0, 0, Shape::InlineWhile(depth)).await?;
         }
     }
     Ok(())
@@ -1394,6 +1403,9 @@ struct FixtureConnections;
 impl runtara_component_host::ConnectionResolverHost for FixtureConnections {
     async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
         assert_eq!(tenant, "fixture");
+        if connection == "om-conn" {
+            return Ok(embed_tool::sql_fixture::descriptor(&connection));
+        }
         Ok(serde_json::to_vec(&json!({"connectionId": connection,
             "integrationId": if connection == "mcp-conn" {"mcp"} else {"openai_api_key"},
             "status":"ACTIVE","resources":[],"metadata":null}))

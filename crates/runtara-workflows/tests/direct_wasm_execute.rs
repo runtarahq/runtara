@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use runtara_database_contract::*;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
     DirectCompileError, RuntimeBinding, WorkflowAbi, analyze_direct_wasm_support,
@@ -30,6 +31,8 @@ use serde_json::Value;
 mod cooperative_measurement;
 mod cooperative_workflow_cancellation;
 mod isolated_agent_execution;
+#[path = "../../runtara-component-host/tests/support/object_model.rs"]
+mod sql_fixture;
 mod wasm_performance_baseline;
 
 // Independent description of the persisted v2 key contract (not a production
@@ -458,11 +461,11 @@ struct ServerState {
     llm_requests: Mutex<Vec<Value>>,
     /// Connection ids received on the internal metadata endpoint.
     connection_metadata_requests: Mutex<Vec<String>>,
-    /// Scripted `(status, body)` responses for the object-model raw-SQL
-    /// routes, served front-to-back. Empty script → generic success, so
+    /// Scripted native results for the Object Model raw-SQL imports,
+    /// served front-to-back. Empty script → generic success, so
     /// unrelated tests are unaffected.
-    sql_responses: Mutex<Vec<(u16, Value)>>,
-    /// Paths of raw-SQL requests received, in order — retry counting.
+    sql_responses: Mutex<Vec<Result<Value, DatabaseError>>>,
+    /// Native SQL operation names received, in order — retry counting.
     sql_requests: Mutex<Vec<String>>,
     /// Payloads served for custom-signal polls (`GET signals/{id}`), modeling
     /// the pending-signal row. Served **non-destructively** (peeked, never
@@ -686,6 +689,9 @@ impl runtara_component_host::ConnectionResolverHost for FixtureConnectionResolve
             .lock()
             .unwrap()
             .push(connection_id.clone());
+        if connection_id == "om-conn" {
+            return Ok(sql_fixture::descriptor(&connection_id));
+        }
         let (integration_id, resources) = if connection_id == "conn-bedrock" {
             (
                 "aws_credentials",
@@ -720,12 +726,94 @@ impl runtara_component_host::ConnectionResolverHost for FixtureConnectionResolve
     }
 }
 
+struct FixtureDatabase(Arc<ServerState>);
+impl FixtureDatabase {
+    fn reply(
+        &self,
+        tenant: &str,
+        connection: &str,
+        operation: &str,
+    ) -> Result<Value, DatabaseError> {
+        assert_eq!(tenant, "direct-wasm-execute");
+        assert!(!connection.is_empty());
+        self.0.sql_requests.lock().unwrap().push(operation.into());
+        let mut replies = self.0.sql_responses.lock().unwrap();
+        if replies.is_empty() {
+            Ok(serde_json::json!({"rows":[],"rowsAffected":1}))
+        } else {
+            replies.remove(0)
+        }
+    }
+}
+#[async_trait::async_trait]
+impl runtara_component_host::DatabaseHost for FixtureDatabase {
+    async fn query(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: QueryRequest,
+    ) -> Result<RowSet, DatabaseError> {
+        if connection == "om-conn" {
+            assert_eq!(tenant, "direct-wasm-execute");
+            if request.sql.contains("FROM \"__schema\"") {
+                return Ok(sql_fixture::memory_schema());
+            }
+            if request.sql.contains("COUNT(*)") {
+                return Ok(sql_fixture::rows(vec![serde_json::json!({"count":0})]));
+            }
+            return Ok(RowSet::default());
+        }
+        let reply = self.reply(tenant, connection, "query")?;
+        Ok(sql_fixture::rows(
+            reply["rows"].as_array().cloned().unwrap_or_default(),
+        ))
+    }
+    async fn execute(
+        &self,
+        tenant: &str,
+        connection: &str,
+        _: Statement,
+    ) -> Result<ExecutionResult, DatabaseError> {
+        let reply = self.reply(tenant, connection, "execute")?;
+        Ok(ExecutionResult {
+            rows_affected: reply["rowsAffected"].as_u64().unwrap_or(1),
+            returned: None,
+        })
+    }
+    async fn execute_batch(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: BatchRequest,
+    ) -> Result<BatchResult, DatabaseError> {
+        self.reply(tenant, connection, "execute-batch")?;
+        Ok(BatchResult {
+            mode: request.mode,
+            results: request
+                .statements
+                .iter()
+                .enumerate()
+                .map(|(index, _)| StatementResult {
+                    index,
+                    result: Ok(ExecutionResult {
+                        rows_affected: 1,
+                        returned: None,
+                    }),
+                })
+                .collect(),
+        })
+    }
+}
+
 fn executor_with_connections(state: Arc<ServerState>) -> runtara_component_host::WorkflowExecutor {
     let executor =
         runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
             .unwrap();
     executor
-        .set_connection_resolver(Arc::new(FixtureConnectionResolver(state)))
+        .set_connection_resolver(Arc::new(FixtureConnectionResolver(state.clone())))
+        .unwrap();
+    executor
+        .set_database(Arc::new(FixtureDatabase(state)))
         .unwrap();
     executor
 }
@@ -793,28 +881,6 @@ fn route(
             );
         }
         return (200, responses.remove(0));
-    }
-
-    // Raw-SQL stub for the object-model query-sql / execute-sql capabilities:
-    // record the request (retry-count assertions), then pop the next scripted
-    // (status, body). An empty script answers success.
-    if method == "POST" && path.contains("/object-model/sql/") {
-        server_state
-            .sql_requests
-            .lock()
-            .expect("sql_requests lock")
-            .push(path.to_string());
-        let mut responses = server_state
-            .sql_responses
-            .lock()
-            .expect("sql_responses lock");
-        if responses.is_empty() {
-            return (
-                200,
-                serde_json::json!({"success": true, "rows": [], "rowCount": 0, "rowsAffected": 1}),
-            );
-        }
-        return responses.remove(0);
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
@@ -1274,8 +1340,8 @@ fn run_direct_workflow_capture_full(
     )
 }
 
-/// `run_direct_workflow_capture_full` plus a scripted `(status, body)` queue
-/// for the object-model raw-SQL routes — retry-semantics tests count attempts
+/// `run_direct_workflow_capture_full` plus scripted native SQL results.
+/// Retry-semantics tests count attempts
 /// via `CapturedRun::sql_requests`.
 #[allow(clippy::too_many_arguments)]
 fn run_direct_workflow_capture_full_sql(
@@ -1287,7 +1353,7 @@ fn run_direct_workflow_capture_full_sql(
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
-    sql_script: Vec<(u16, Value)>,
+    sql_script: Vec<Result<Value, DatabaseError>>,
     custom_signals: Vec<Value>,
 ) -> CapturedRun {
     let first = run_direct_workflow_capture_attempt(
@@ -1342,7 +1408,7 @@ fn run_direct_workflow_capture_attempt(
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
-    sql_script: Vec<(u16, Value)>,
+    sql_script: Vec<Result<Value, DatabaseError>>,
     custom_signals: Vec<Value>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1392,19 +1458,12 @@ fn run_direct_workflow_capture_attempt(
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    // Env contract shared by both execution paths. The object-model URL keeps
-    // that traffic hermetic: its default base URL points at a live local
-    // environment (127.0.0.1:7002); route it to the mock, whose generic
-    // `{"success": true}` fallback answers internal calls.
+    // HTTP remains only for the runtime HTTP binding and outbound proxy.
     let mut env_pairs: Vec<(String, String)> = vec![
         ("RUNTARA_HTTP_URL".into(), format!("http://{addr}")),
         (
             "RUNTARA_HTTP_PROXY_URL".into(),
             format!("http://{addr}/llm-proxy"),
-        ),
-        (
-            "RUNTARA_OBJECT_MODEL_URL".into(),
-            format!("http://{addr}/object-model"),
         ),
         ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
         ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
@@ -1416,7 +1475,7 @@ fn run_direct_workflow_capture_attempt(
     // Under HostImport, the runtime interface is served by the capturing host
     // (same ServerState + capture sink as the mock server, so assertions see
     // one uniform CapturedRun shape); the mock keeps serving the wasi:http
-    // traffic that stays real under both bindings (LLM proxy, object-model).
+    // traffic that stays real under both bindings (LLM proxy).
     let runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>> =
         (binding == RuntimeBinding::HostImport).then(|| {
             let debug_mode = env_pairs
@@ -4414,7 +4473,7 @@ fn ai_agent_memory_graph_json() -> String {
             "compaction":{"maxMessages":1}
           }}},
         "mem": {"id":"mem","stepType":"Agent","name":"Memory","agentId":"object-model",
-          "capabilityId":"load-memory","connectionId":"conn-1","inputMapping":{}},
+          "capabilityId":"load-memory","connectionId":"om-conn","inputMapping":{}},
         "finish": {"id":"finish","stepType":"Finish","inputMapping":{
           "answer": {"valueType":"reference","value":"steps.ai.outputs.response"}
         }}
@@ -6409,21 +6468,29 @@ fn raw_sql_step_graph(capability_id: &str, max_retries: u32) -> String {
     .to_string()
 }
 
-fn sql_error_body(msg: &str) -> Value {
-    serde_json::json!({"success": false, "error": msg})
+fn sql_failure(read_only: bool) -> DatabaseError {
+    DatabaseError {
+        code: "DATABASE_CONNECTION_UNAVAILABLE".into(),
+        message: "Connection unavailable".into(),
+        outcome: if read_only {
+            Outcome::RolledBack
+        } else {
+            Outcome::Unknown
+        },
+        retryable: read_only,
+        sqlstate: None,
+        statement_index: None,
+    }
 }
 
 #[test]
-fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
+fn direct_wasm_execute_sql_unknown_outcome_is_permanent_zero_retries() {
     let components_dir = direct_e2e_components_dir();
 
-    // A 5xx on a write means the statement outcome on the tenant DB is
-    // unknown — the agent downgrades check_status's transient classification
-    // to permanent and the runtime must NOT retry. The scripted success is
-    // never consumed; exactly one request reaches the mock.
+    // An unknown write outcome must never retry into the scripted success.
     let captured = run_direct_workflow_capture_full_sql(
         &components_dir,
-        "execute-sql-5xx-permanent",
+        "execute-sql-unknown-outcome",
         &raw_sql_step_graph("execute-sql", 3),
         br#"{}"#,
         false,
@@ -6431,15 +6498,15 @@ fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
         Vec::new(),
         Vec::new(),
         vec![
-            (500, sql_error_body("upstream boom")),
-            (200, serde_json::json!({"success": true, "rowsAffected": 1})),
+            Err(sql_failure(false)),
+            Ok(serde_json::json!({"rowsAffected": 1})),
         ],
         Vec::new(),
     );
 
     assert!(
         !captured.status_success,
-        "execute-sql must fail on 5xx, not retry into the scripted success; output: {:?}",
+        "execute-sql must fail on native failure, not retry into the scripted success; output: {:?}",
         captured.output_json
     );
     assert_eq!(
@@ -6453,21 +6520,19 @@ fn direct_wasm_execute_sql_5xx_is_permanent_zero_retries() {
         .map(|e| e.to_string())
         .unwrap_or_else(|| captured.stderr.clone());
     assert!(
-        error.contains("OBJECT_MODEL_UPSTREAM_ERROR"),
-        "failure should carry the upstream error code: {error}"
+        error.contains("DATABASE_CONNECTION_UNAVAILABLE"),
+        "failure should carry the native database error code: {error}"
     );
 }
 
 #[test]
-fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
+fn direct_wasm_query_sql_rolled_back_failure_retries_then_succeeds() {
     let components_dir = direct_e2e_components_dir();
 
-    // Reads run in a READ ONLY transaction server-side, so retrying a 5xx is
-    // safe — stock transient classification stands and the runtime retries
-    // into the scripted success.
+    // A rolled-back read may safely retry into the scripted success.
     let captured = run_direct_workflow_capture_full_sql(
         &components_dir,
-        "query-sql-5xx-retries",
+        "query-sql-native-retries",
         &raw_sql_step_graph("query-sql", 2),
         br#"{}"#,
         false,
@@ -6475,24 +6540,21 @@ fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
         Vec::new(),
         Vec::new(),
         vec![
-            (500, sql_error_body("transient boom")),
-            (
-                200,
-                serde_json::json!({"success": true, "rows": [{"one": 1}], "rowCount": 1}),
-            ),
+            Err(sql_failure(true)),
+            Ok(serde_json::json!({"rows": [{"one": 1}]})),
         ],
         Vec::new(),
     );
 
     assert!(
         captured.status_success,
-        "query-sql should retry the 5xx and succeed; stderr: {}; error: {:?}",
+        "query-sql should retry the native failure and succeed; stderr: {}; error: {:?}",
         captured.stderr, captured.error_json
     );
     assert_eq!(
         captured.sql_requests.len(),
         2,
-        "expected exactly one retry (500 then 200): {:?}",
+        "expected exactly one retry (failure then success): {:?}",
         captured.sql_requests
     );
 }
@@ -6501,29 +6563,7 @@ fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
 fn direct_wasm_sql_transport_failure_classification() {
     let components_dir = direct_e2e_components_dir();
 
-    // Point the object-model URL at a port whose connections are torn down
-    // before any response bytes: transport failure on every attempt. The
-    // listener must stay bound for the whole test — probing a free port and
-    // dropping the listener let the OS hand the same ephemeral port to a
-    // mock server of a concurrently running test, whose HTTP responses then
-    // made this "unreachable" endpoint succeed. Closing an accepted
-    // connection unanswered classifies exactly like a refused one: any
-    // transport-level failure maps to OBJECT_MODEL_HTTP_ERROR, and the
-    // transient/permanent split is per capability. query-sql reclassifies
-    // transport errors to transient (retries, then exhausts); execute-sql
-    // keeps them permanent (the statement may have committed).
-    let dead_listener = TcpListener::bind("127.0.0.1:0").expect("bind dead port");
-    let dead_port = dead_listener.local_addr().expect("local_addr").port();
-    thread::spawn(move || {
-        for stream in dead_listener.incoming() {
-            drop(stream);
-        }
-    });
-    let refused_env = vec![(
-        "RUNTARA_OBJECT_MODEL_URL".to_string(),
-        format!("http://127.0.0.1:{dead_port}/object-model"),
-    )];
-
+    // A native connection failure is retryable only when the write outcome is known.
     for (capability, expected_category) in
         [("query-sql", "transient"), ("execute-sql", "permanent")]
     {
@@ -6535,8 +6575,8 @@ fn direct_wasm_sql_transport_failure_classification() {
             false,
             Vec::new(),
             Vec::new(),
-            refused_env.clone(),
             Vec::new(),
+            vec![Err(sql_failure(capability == "query-sql")); 3],
             Vec::new(),
         );
 
@@ -6549,7 +6589,7 @@ fn direct_wasm_sql_transport_failure_classification() {
             .map(|e| e.to_string())
             .unwrap_or_else(|| captured.stderr.clone());
         assert!(
-            error.contains("OBJECT_MODEL_HTTP_ERROR"),
+            error.contains("DATABASE_CONNECTION_UNAVAILABLE"),
             "{capability}: expected transport error code, got: {error}"
         );
         assert!(
@@ -13464,7 +13504,6 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
         _bundle.path(),
         runtara_component_host::DispatcherEnv {
             proxy_url: "http://127.0.0.1:1".into(),
-            object_model_url: "http://127.0.0.1:1".into(),
             core_http_url: "http://127.0.0.1:1".into(),
         },
     )
@@ -13548,7 +13587,6 @@ async fn trusted_test_dispatcher(
         bundle.path(),
         runtara_component_host::DispatcherEnv {
             proxy_url: "http://127.0.0.1:1".into(),
-            object_model_url: "http://127.0.0.1:1".into(),
             core_http_url: "http://127.0.0.1:1".into(),
         },
     )

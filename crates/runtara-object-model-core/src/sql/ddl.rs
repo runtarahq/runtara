@@ -17,6 +17,45 @@ impl<'a> DdlGenerator<'a> {
         Self { config }
     }
 
+    /// Serialize metadata bootstrap across native API and agent transactions.
+    /// The table name is a bound value, scoped to the current PostgreSQL schema.
+    pub const METADATA_LOCK_SQL: &'static str =
+        "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || $1, 0))::text";
+
+    pub fn generate_metadata_table(&self) -> String {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} (id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text, name VARCHAR(255) UNIQUE NOT NULL, description TEXT, table_name VARCHAR(255) UNIQUE NOT NULL, columns JSONB NOT NULL, indexes JSONB, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(), deleted BOOLEAN DEFAULT FALSE)",
+            quote_identifier(&self.config.metadata_table)
+        )
+    }
+
+    /// PostgreSQL keeps index names when a table is renamed. Release their
+    /// schema-wide names too, so a replacement table can recreate every index.
+    /// Callers execute this complete plan in the schema metadata transaction.
+    pub fn tombstone_table(
+        table: &str,
+        tombstone: &str,
+        indexes: &[String],
+        mut index_name: impl FnMut() -> String,
+    ) -> Vec<String> {
+        let mut statements: Vec<_> = indexes
+            .iter()
+            .map(|index| {
+                format!(
+                    "ALTER INDEX {} RENAME TO {}",
+                    quote_identifier(index),
+                    quote_identifier(&index_name())
+                )
+            })
+            .collect();
+        statements.push(format!(
+            "ALTER TABLE {} RENAME TO {}",
+            quote_identifier(table),
+            quote_identifier(tombstone)
+        ));
+        statements
+    }
+
     /// Generate CREATE TABLE statement with auto-managed columns
     ///
     /// Creates a table with:

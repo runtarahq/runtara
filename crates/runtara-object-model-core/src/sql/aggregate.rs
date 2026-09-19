@@ -81,7 +81,7 @@ pub enum SortDirection {
 }
 
 impl SortDirection {
-    pub(crate) fn as_sql(self) -> &'static str {
+    pub fn as_sql(self) -> &'static str {
         match self {
             SortDirection::Asc => "ASC",
             SortDirection::Desc => "DESC",

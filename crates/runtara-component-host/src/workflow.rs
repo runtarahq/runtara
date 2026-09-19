@@ -280,6 +280,7 @@ pub struct WorkflowState {
     /// binding); `None` for legacy composed artifacts.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
+    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
     connection_resolver:
         Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
 }
@@ -304,6 +305,10 @@ impl HostIoContext for WorkflowState {
 }
 
 impl WorkflowState {
+    pub(crate) fn database_deadline(&self) -> tokio::time::Instant {
+        self.active_deadline
+    }
+
     fn begin_active_execution(&mut self, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         self.http_deadline = deadline;
@@ -420,6 +425,7 @@ impl PreparedWorkflow {
 
 /// Loads composed workflow components and executes them in-process.
 pub struct WorkflowExecutor {
+    database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
     engine: Arc<Engine>,
@@ -428,6 +434,12 @@ pub struct WorkflowExecutor {
 }
 
 impl WorkflowExecutor {
+    pub fn set_database(&self, database: Arc<dyn crate::DatabaseHost>) -> Result<()> {
+        self.database
+            .set(database)
+            .map_err(|_| anyhow::anyhow!("database service already configured"))
+    }
+
     pub fn set_connection_resolver(
         &self,
         resolver: Arc<dyn crate::ConnectionResolverHost>,
@@ -501,6 +513,7 @@ impl WorkflowExecutor {
         // are unaffected by this registration.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
         crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
+        crate::database_host::add_database_to_linker(&mut linker)?;
         // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
         // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
@@ -508,6 +521,7 @@ impl WorkflowExecutor {
         crate::trusted::add_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
+            database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             engine,
             linker,
@@ -841,6 +855,10 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: None,
+            database: crate::database_host::database_for_run(
+                self.database.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
             connection_resolver: crate::connection_resolver_host::resolver_for_run(
                 self.connection_resolver.get(),
                 spec.trusted_tenant.as_deref(),
@@ -1135,6 +1153,10 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
+            database: crate::database_host::database_for_run(
+                self.database.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
             connection_resolver: crate::connection_resolver_host::resolver_for_run(
                 self.connection_resolver.get(),
                 spec.trusted_tenant.as_deref(),
@@ -1395,6 +1417,7 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: None,
             execution: None,
+            database: Err("database is not configured in test state".into()),
             connection_resolver: Err(
                 "connection resolution is unavailable for direct capability invocation".to_string(),
             ),
@@ -1677,3 +1700,7 @@ mod connection_resolver_tests;
 #[cfg(test)]
 #[path = "workflow/cleanup_alarm_tests.rs"]
 mod cleanup_alarm_tests;
+
+#[cfg(test)]
+#[path = "workflow/database_tests.rs"]
+mod database_tests;

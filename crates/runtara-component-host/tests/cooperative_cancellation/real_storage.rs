@@ -154,7 +154,7 @@ async fn cloud_cancel(
     });
     let output = run_cancellation_fixture(
         bytes,
-        CallContext::for_test("fixture-tenant", proxy, "", ""),
+        CallContext::for_test("fixture-tenant", proxy, ""),
         started,
         cleaned,
         server,
@@ -234,7 +234,7 @@ async fn object_storage_preserves_delete_statuses_and_download_head_fallback() -
                     Duration::from_secs(10),
                     invoke_named_agent(
                         agent,
-                        CallContext::for_test("fixture-tenant", proxy, "", ""),
+                        CallContext::for_test("fixture-tenant", proxy, ""),
                         capability,
                         serde_json::to_vec(&input(agent))?,
                     ),
