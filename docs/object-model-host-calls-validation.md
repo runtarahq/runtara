@@ -26,6 +26,12 @@ run. Their positive startup allowance is now one second, consistent with nearby
 pending-I/O tests; the request-count, retry, timeout and output assertions remain.
 Both focused reruns passed. Memory's eight cases also passed on the final component.
 
+The duplicate push CI run exposed another timing-sensitive fixture: early Split
+replay had only 1 ms of live execution budget to reach its suspension. It now
+replays 500 ms before expiry, preserving the unchanged stored-deadline assertion
+and the exact-expiry failure check. The parallel PR CI run passed all functional
+suites on the same implementation.
+
 ## Reproduction
 
 Use `RUSTC_WRAPPER=` if the local wrapper does not support the pinned compiler.
@@ -49,8 +55,12 @@ on their previous release, or explicitly restart them after recompilation; do
 not replace suspended code silently. There are no retained legacy internal
 Object Model endpoints. Public HTTP/MCP APIs and ordinary outbound HTTP remain.
 
-The standalone running-server E2E script was syntax-checked, not executed. No
-production deployment, artifact draining, or manual capacity soak was performed.
+The standalone running-server E2E script passed against an isolated local server:
+removed native dispatch/presign/Object Model endpoints return 404 and outbound
+HTTP remains available. Live public schema/CRUD/default/null mapping and
+parameterized SQL checks passed. Interactive WASM agent execution through the
+server's native SQL service preserved i64 precision. No production deployment,
+artifact draining, or manual capacity soak was performed.
 GitHub checks for the new revision are reported separately from these local runs.
 
 The SQL response budget bounds decoded rows and serialized results. SQLx receives

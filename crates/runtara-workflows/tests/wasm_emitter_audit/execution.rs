@@ -1253,7 +1253,10 @@ fn audit_05_wakes_clamp_and_early_replay_keeps_the_original_deadline() {
         let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
         assert_at(invoke(), 1_001_000);
         let recorded = host.checkpoints.lock().unwrap().clone();
-        *host.pinned_clock_ms.lock().unwrap() = Some(1_000_999);
+        // The live execution budget also advances on the monotonic clock.
+        // Leave time for the replay to reach Delay and suspend under CI load;
+        // a 1 ms remainder can legitimately expire before the suspension.
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_000_500);
         assert_at(invoke(), 1_001_000);
         assert_eq!(*host.checkpoints.lock().unwrap(), recorded);
         *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
