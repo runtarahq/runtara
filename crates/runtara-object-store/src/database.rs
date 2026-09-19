@@ -1,17 +1,11 @@
 //! Native implementation of the driver-independent SQL contract.
 //! No Object Model operation names cross this boundary.
-use std::ops::ControlFlow;
 use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use runtara_database_contract::*;
-use sqlparser::ast::{Expr, Statement as AstStatement, Visit, Visitor};
-use sqlparser::dialect::PostgreSqlDialect;
-use sqlparser::keywords::Keyword;
-use sqlparser::parser::Parser;
-use sqlparser::tokenizer::{Token, Tokenizer};
 use sqlx::postgres::{PgArguments, PgColumn, PgRow, PgTypeInfo};
 use sqlx::{
     Column as _, Connection, Either, Executor, Postgres, Row, Statement as _, Type, TypeInfo,
@@ -131,120 +125,6 @@ fn check_size<T: serde::Serialize>(
     }
     serde_json::to_writer(Counter { bytes: 0, limit }, value)
         .map_err(|_| DatabaseError::invalid(message))
-}
-
-/// Transactions and execution policy belong to the host. Accept the SQL
-/// statement families used by data/schema operations, not session/programming
-/// commands that can change transaction ownership or install executable code.
-fn validate_statement(sql: &str, read_only: bool) -> Result<(), DatabaseError> {
-    let (statements, conflict_predicates) = parse_policy_statements(sql)?;
-    if statements.len() != 1 {
-        return Err(DatabaseError::invalid(
-            "Exactly one SQL statement is required",
-        ));
-    }
-    let statement = &statements[0];
-    let allowed = matches!(statement, AstStatement::Query(_))
-        || (!read_only
-            && matches!(
-                statement,
-                AstStatement::Insert(_)
-                    | AstStatement::Update(_)
-                    | AstStatement::Delete(_)
-                    | AstStatement::CreateTable(_)
-                    | AstStatement::CreateIndex(_)
-                    | AstStatement::AlterTable(_)
-                    | AstStatement::AlterIndex { .. }
-                    | AstStatement::Drop { .. }
-                    | AstStatement::Truncate(_)
-                    | AstStatement::CreateView(_)
-                    | AstStatement::Merge(_)
-            ));
-    if !allowed {
-        return Err(DatabaseError::invalid(
-            "SQL statement is not allowed by the database interface",
-        ));
-    }
-    struct Policy;
-    impl Visitor for Policy {
-        type Break = ();
-        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-            if let Expr::Function(function) = expr {
-                let name = function
-                    .name
-                    .to_string()
-                    .replace('"', "")
-                    .to_ascii_lowercase();
-                if name.rsplit('.').next() == Some("set_config") {
-                    return ControlFlow::Break(());
-                }
-            }
-            ControlFlow::Continue(())
-        }
-    }
-    if statement.visit(&mut Policy).is_break()
-        || conflict_predicates
-            .iter()
-            .any(|expr| expr.visit(&mut Policy).is_break())
-    {
-        return Err(DatabaseError::invalid(
-            "SQL cannot change host-owned session settings",
-        ));
-    }
-    Ok(())
-}
-
-/// sqlparser 0.63 lacks PostgreSQL's partial-index inference predicate between
-/// ON CONFLICT (columns) and DO. Parse that expression separately and inspect it
-/// with the same policy visitor, then parse the remaining statement normally.
-/// Only the validation token stream changes; PostgreSQL executes the original
-/// SQL. Tokenization keeps comments, quoted identifiers and literals out of the
-/// clause matching, and parsing the complete predicate prevents hidden commands.
-fn parse_policy_statements(sql: &str) -> Result<(Vec<AstStatement>, Vec<Expr>), DatabaseError> {
-    let invalid = || DatabaseError::invalid("Invalid or unsupported PostgreSQL statement");
-    let dialect = PostgreSqlDialect {};
-    let mut tokens: Vec<_> = Tokenizer::new(&dialect, sql)
-        .tokenize()
-        .map_err(|_| invalid())?
-        .into_iter()
-        .filter(|token| !matches!(token, Token::Whitespace(_)))
-        .collect();
-    let keyword = |token: Option<&Token>, expected| matches!(token, Some(Token::Word(word)) if word.keyword == expected && word.quote_style.is_none());
-    let mut predicates = Vec::new();
-    let mut index = 0;
-    while index + 2 < tokens.len() {
-        if keyword(tokens.get(index), Keyword::ON)
-            && keyword(tokens.get(index + 1), Keyword::CONFLICT)
-            && tokens[index + 2] == Token::LParen
-        {
-            let mut end = index + 3;
-            let mut depth = 1;
-            while end < tokens.len() && depth > 0 {
-                match tokens[end] {
-                    Token::LParen => depth += 1,
-                    Token::RParen => depth -= 1,
-                    _ => {}
-                }
-                end += 1;
-            }
-            if depth == 0 && keyword(tokens.get(end), Keyword::WHERE) {
-                let mut parser = Parser::new(&dialect).with_tokens(tokens[end + 1..].to_vec());
-                let predicate = parser.parse_expr().map_err(|_| invalid())?;
-                let consumed = parser.index();
-                if !keyword(tokens.get(end + 1 + consumed), Keyword::DO) {
-                    return Err(invalid());
-                }
-                predicates.push(predicate);
-                tokens.drain(end..end + 1 + consumed);
-            }
-        }
-        index += 1;
-    }
-    let statements = Parser::new(&dialect)
-        .with_tokens(tokens)
-        .parse_statements()
-        .map_err(|_| invalid())?;
-    Ok((statements, predicates))
 }
 
 fn sql_type(value: &SqlValue) -> SqlType {
@@ -610,7 +490,6 @@ impl ObjectStore {
     ) -> Result<RowSet, DatabaseError> {
         limits.check()?;
         check_request(&request)?;
-        validate_statement(&request.sql, true)?;
         let work = async {
             let mut tx = self.pool().begin().await.map_err(driver_error)?;
             sqlx::query("SET TRANSACTION READ ONLY")
@@ -647,7 +526,6 @@ impl ObjectStore {
     ) -> Result<ExecutionResult, DatabaseError> {
         limits.check()?;
         check_request(&statement)?;
-        validate_statement(&statement.sql, false)?;
         tokio::time::timeout(
             limits.operation_timeout,
             self.database_execute_inner(&statement, limits),
@@ -715,14 +593,6 @@ impl ObjectStore {
             return Err(DatabaseError::invalid(
                 "Batch statement count is outside the allowed range",
             ));
-        }
-        if request.mode == BatchMode::Atomic {
-            for (index, statement) in request.statements.iter().enumerate() {
-                validate_statement(&statement.sql, false).map_err(|mut e| {
-                    e.statement_index = Some(index);
-                    e
-                })?;
-            }
         }
         match request.mode {
             BatchMode::Atomic => tokio::time::timeout(
@@ -830,11 +700,6 @@ impl ObjectStore {
                     DatabaseError::invalid("Statement was not started because the batch stopped");
                 error.statement_index = Some(index);
                 Err(error)
-            } else if let Err(mut error) = validate_statement(&statement.sql, false) {
-                // Independent mode reports deterministic rejection for this
-                // entry and still attempts later entries. No SQL was sent.
-                error.statement_index = Some(index);
-                Err(error)
             } else {
                 let remaining = limits.response_limit().saturating_sub(used);
                 let item_limits = DatabaseLimits {
@@ -878,45 +743,6 @@ impl ObjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rejects_transaction_and_policy_commands_even_with_comments() {
-        for sql in [
-            "/* read */ COMMIT",
-            "BEGIN",
-            "ROLLBACK",
-            "SAVEPOINT a",
-            "SET LOCAL statement_timeout=0",
-            "RESET ALL",
-            "SELECT set_config('statement_timeout', '0', true)",
-            "SELECT pg_catalog.\"set_config\"('transaction_read_only','off',true)",
-            "SELECT 1; COMMIT",
-            "DO $$ BEGIN COMMIT; END $$",
-            "INSERT INTO example (id) VALUES ($1) ON CONFLICT (id) WHERE set_config('statement_timeout','0',true) = '0' DO NOTHING",
-            "INSERT INTO example (id) VALUES ($1) ON CONFLICT (id) WHERE deleted = FALSE; COMMIT; DO NOTHING",
-        ] {
-            assert!(validate_statement(sql, false).is_err(), "accepted {sql}");
-        }
-    }
-
-    #[test]
-    fn accepts_object_model_statement_families_and_quoted_data() {
-        for sql in [
-            "SELECT 'COMMIT; SET statement_timeout=0'",
-            "INSERT INTO example (id) VALUES ($1) RETURNING id",
-            "WITH x AS (SELECT 1) SELECT * FROM x",
-            "CREATE TABLE example (id TEXT PRIMARY KEY)",
-            "CREATE INDEX example_id ON example (id)",
-            "UPDATE example SET id=$1",
-            "DELETE FROM example WHERE id=$1",
-            "INSERT INTO example (id) VALUES ($1) ON CONFLICT (id) WHERE deleted = FALSE DO NOTHING",
-            "INSERT INTO example (id) VALUES ($1) ON /* comment */ CONFLICT (id) WHERE (deleted = FALSE) DO UPDATE SET id = EXCLUDED.id RETURNING id",
-            "SELECT 'ON CONFLICT (id) WHERE set_config() DO NOTHING'",
-        ] {
-            assert!(validate_statement(sql, false).is_ok(), "rejected {sql}");
-        }
-        assert!(validate_statement("DELETE FROM example", true).is_err());
-    }
 
     #[test]
     fn errors_do_not_expose_driver_details() {

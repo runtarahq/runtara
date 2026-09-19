@@ -36,6 +36,71 @@ fn table() -> String {
 }
 
 #[tokio::test]
+async fn postgres_handles_sql_syntax_without_an_application_allowlist() {
+    let store = store().await;
+    let limits = DatabaseLimits::default();
+    let table = table();
+    store
+        .database_execute_batch(
+            BatchRequest {
+                mode: BatchMode::Atomic,
+                statements: vec![
+                    command(format!(
+                        "CREATE TABLE {table} (id bigint, active boolean, value text)"
+                    )),
+                    command(format!(
+                        "CREATE UNIQUE INDEX {table}_active ON {table} (id) WHERE active"
+                    )),
+                    command(format!("COMMENT ON TABLE {table} IS 'caller-owned SQL'")),
+                ],
+            },
+            limits,
+        )
+        .await
+        .unwrap();
+    store
+        .database_execute(
+            command(format!(
+                "DO $$ BEGIN INSERT INTO {table} VALUES (1, true, 'initial'); END $$"
+            )),
+            limits,
+        )
+        .await
+        .unwrap();
+    let result = store
+        .database_execute(
+            Statement {
+                sql: format!(
+                    "INSERT INTO {table} VALUES (1, true, $1) \
+                     ON CONFLICT (id) WHERE active DO UPDATE SET value = EXCLUDED.value \
+                     RETURNING value"
+                ),
+                params: vec![SqlValue::Text("updated".into())],
+                returning: Some(ResultSpec::Raw),
+            },
+            limits,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.rows_affected, 1);
+    assert_eq!(
+        result.returned.unwrap().rows,
+        vec![vec![SqlValue::Text("updated".into())]]
+    );
+    let result = store
+        .database_query(
+            read("SELECT set_config('application_name', 'caller-owned SQL', true)"),
+            limits,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.rows,
+        vec![vec![SqlValue::Text("caller-owned SQL".into())]]
+    );
+}
+
+#[tokio::test]
 async fn exact_codec_round_trip_and_null_distinction() {
     let store = store().await;
     let values = vec![
@@ -415,7 +480,7 @@ async fn independent_batches_continue_after_rejected_sql_and_result_decoding() {
             BatchRequest {
                 mode: BatchMode::Independent,
                 statements: vec![
-                    command("COMMIT"),
+                    command("INVALID SQL"),
                     Statement {
                         sql: format!("INSERT INTO {table} VALUES (1) RETURNING ARRAY[n]"),
                         params: vec![],
@@ -430,7 +495,7 @@ async fn independent_batches_continue_after_rejected_sql_and_result_decoding() {
         .unwrap();
     assert_eq!(
         batch.results[0].result.as_ref().unwrap_err().outcome,
-        Outcome::NotStarted
+        Outcome::RolledBack
     );
     assert_eq!(
         batch.results[1].result.as_ref().unwrap_err().outcome,

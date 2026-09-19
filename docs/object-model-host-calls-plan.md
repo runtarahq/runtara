@@ -158,11 +158,11 @@ Provide two explicit modes:
 
 Use one database connection per batch. No guest-visible begin/commit/rollback
 handles and no transaction retained across host calls or durable suspension.
-Host-owned transaction setup and limits cannot be overridden by guest SQL:
-reject transaction-control and policy-changing session commands using parsed
-statement classification rather than string-prefix matching. Keep database
-permissions as the authority for SQL effects; arbitrary SQL is not made safe
-by a superficial keyword filter.
+SQL is passed unchanged to PostgreSQL through SQLx; there is no application SQL
+parser, statement allowlist, or session-command filter. The caller owns the
+database and its role permissions. The transaction guarantees describe ordinary
+statements executed within the driver's transaction; explicit transaction or
+session manipulation in caller SQL can change those semantics.
 
 Read results needed within write transactions use a statement's explicit result
 specification, including SELECT or command RETURNING. These entries have the
@@ -322,7 +322,8 @@ and current public/MCP SQL contracts remain in their existing paths.
   soft deletes and memory. Never shadow live writes to compare paths.
 - Transactions: command RETURNING, atomic rollback on a later error, independent
   partial commits, schema/DDL rollback, bootstrap races, read-only enforcement,
-  forbidden transaction commands, batch caps and unknown commit outcomes.
+  PostgreSQL-specific syntax without application filtering, batch caps and
+  unknown commit outcomes.
 - Authority/limits: forged tenant/env/metadata, cross-tenant/wrong-type connections,
   entitlement denial, restricted instances, injection attempts, byte/row/statement
   limits, safe errors, and cancellation during lookup/acquire/query/commit.
