@@ -76,13 +76,10 @@ def main():
         status, _ = request(PUBLIC, f"/api/runtime/workflows/{workflow_id}/delete", "POST", {})
         assert status == 200, "disposable workflow cleanup failed"
 
-    for path in ["/api/internal/presign", "/api/internal/object-model/sql/query", "/api/internal/object-model/sql/execute", "/api/internal/object-model/instances", "/api/internal/object-model/schemas"]:
+    for path in ["/api/internal/proxy", "/api/internal/presign", "/api/internal/object-model/sql/query", "/api/internal/object-model/sql/execute", "/api/internal/object-model/instances", "/api/internal/object-model/schemas"]:
         status, _ = request(INTERNAL, path, "POST", {})
         assert status == 404, f"legacy route still available: {path}: {status}"
-    # Outbound proxy still dispatches; invalid input produces a typed client error.
-    status, _ = request(INTERNAL, "/api/internal/proxy", "POST", {})
-    assert status in (400, 422), f"outbound proxy route: {status}"
-    print("PASS: native dispatch, presign and Object Model HTTP removed; outbound proxy present")
+    print("PASS: native dispatch, presign, Object Model and outbound proxy HTTP routes removed")
 
 
 if __name__ == "__main__":

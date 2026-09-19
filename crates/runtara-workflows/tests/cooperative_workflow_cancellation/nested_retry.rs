@@ -201,18 +201,23 @@ async fn run_retry_in_scope(
                     anyhow::ensure!(n > 0, "proxy request ended before body");
                     request.extend_from_slice(&buffer[..n]);
                 }
-                let payload: Value = serde_json::from_slice(&request[end..end + length])?;
+                let payload = outbound_fixture::captured_request(
+                    std::str::from_utf8(&request[..end])?,
+                    &request[end..end + length],
+                );
                 anyhow::ensure!(payload["url"] == "https://slack.com/api/chat.postMessage");
             }
             let attempt = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
             let (status, body) = if rate_limited {
                 (
-                    "200 OK",
-                    serde_json::to_vec(&serde_json::json!({
-                        "status": if attempt > 2 {200} else {429},
-                        "headers":{"retry-after-ms":delay.to_string()},
-                        "body":{"ok":true,"channel":"C-fixture","ts":"123.0001"}
-                    }))?,
+                    if attempt > 2 {
+                        "200 OK"
+                    } else {
+                        "429 Too Many Requests"
+                    },
+                    serde_json::to_vec(
+                        &serde_json::json!({"ok":true,"channel":"C-fixture","ts":"123.0001"}),
+                    )?,
                 )
             } else {
                 (
@@ -231,7 +236,7 @@ async fn run_retry_in_scope(
             stream
                 .write_all(
                     format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nRetry-After-Ms: {delay}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     )
                     .as_bytes(),
@@ -253,19 +258,23 @@ async fn run_retry_in_scope(
         anyhow::Ok(())
     });
     let result = async {
-        let executor = embedded_executor();
+        let executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(
+            embedded_executor().engine(),
+        ))?;
+        executor.set_outbound_http(Arc::new(if rate_limited {
+            outbound_fixture::PublicHttp::with_upstream(url.clone())
+        } else {
+            outbound_fixture::PublicHttp::default()
+        }))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let started = std::time::Instant::now();
         let result = executor
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
-                    env: if rate_limited {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url)])
-                    } else {
-                        HashMap::new()
-                    },
+                    trusted_instance: None,
+                    trusted_tenant: Some("fixture-tenant".into()),
+                    env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(5),
                     cancel: None,
@@ -672,6 +681,7 @@ async fn published_embed_pure_child_preserves_output_without_runtime_or_agent_io
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: None,
                     env: HashMap::new(),
                     stderr: None,

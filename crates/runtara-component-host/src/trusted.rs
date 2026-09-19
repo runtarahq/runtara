@@ -522,16 +522,31 @@ mod tests {
     }
 
     fn http_probe(startup: bool) -> Vec<u8> {
-        let check = r#"i32.const 0 i32.const 0 i32.const 128 call $request
+        let check = r#"i32.const 0 i32.const 128 call $request
             i32.const 128 i32.load i32.const 1 i32.ne if unreachable end
-            i32.const 136 i32.load i32.const 37 i32.ne if unreachable end
-            i32.const 132 i32.load i32.load8_u i32.const 72 i32.ne if unreachable end"#;
+            i32.const 140 i32.load i32.const 16 i32.ne if unreachable end
+            i32.const 136 i32.load i32.load8_u i32.const 72 i32.ne if unreachable end"#;
         let start = if startup { check } else { "" };
         let body = if startup { "" } else { check };
         wat::parse_str(format!(r#"(component
-            (import "runtara:host-io/http@0.1.0" (instance $http
-                (export "request" (func async (param "input" (list u8))
-                    (result (result (list u8) (error string)))))))
+            (import "runtara:outbound-http/client@0.1.0" (instance $http
+                (type $connection-def (record (field "connection-id" string) (field "url" string)
+                    (field "endpoint" (option string)) (field "endpoint-ref" (option string))
+                    (field "ai-provider" (option string)) (field "aws-service" (option string))))
+                (export "connection-destination" (type $connection (eq $connection-def)))
+                (type $destination-def (variant (case "connection" $connection) (case "public" string)))
+                (export "destination" (type $destination (eq $destination-def)))
+                (type $headers (list (tuple string string)))
+                (type $request-def (record (field "destination" $destination) (field "method" string)
+                    (field "headers" $headers) (field "body" (option (list u8)))
+                    (field "timeout-ms" (option u64)) (field "max-response-bytes" (option u64))))
+                (export "request-options" (type $request (eq $request-def)))
+                (type $response-def (record (field "status" u16) (field "headers" $headers) (field "body" (list u8))))
+                (export "response" (type $response (eq $response-def)))
+                (type $error-def (record (field "code" string) (field "message" string)
+                    (field "status" (option u16)) (field "body" (list u8)) (field "retry-after-ms" (option u64))))
+                (export "outbound-error" (type $error (eq $error-def)))
+                (export "request" (func async (param "options" $request) (result (result $response (error $error)))))))
             (alias export $http "request" (func $request))
             (core module $memory
                 (memory (export "memory") 1)
@@ -542,7 +557,7 @@ mod tests {
             (core func $request (canon lower (func $request) (memory $memory "memory") (realloc (func $memory "realloc"))))
             (core module $main
                 (import "memory" "memory" (memory 1))
-                (import "host" "request" (func $request (param i32 i32 i32)))
+                (import "host" "request" (func $request (param i32 i32)))
                 (func $start {start}) (start $start)
                 (func (export "invoke") (param i32 i32 i32 i32 i32 i32) (result i32)
                     {body}

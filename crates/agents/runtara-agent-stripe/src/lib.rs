@@ -7,11 +7,9 @@
 //! the host architecture and writes `runtara_agent_stripe.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach
-//! `Authorization: Bearer <api_key>` and resolve `https://api.stripe.com/v1`
-//! as the base URL. The component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -111,7 +109,7 @@ pub struct RawConnection {
 // Stripe HTTP helpers
 // ============================================================================
 //
-// The proxy resolves the base URL when it sees `X-Runtara-Connection-Id`, so
+// The outbound host service resolves the base URL from the explicit connection ID, so
 // we send relative paths (`/v1/...`). Write APIs use
 // `application/x-www-form-urlencoded`; reads use query strings. 429/5xx are
 // surfaced as transient; 4xx as permanent. Retry-After is parsed and
@@ -139,7 +137,7 @@ async fn stripe_get(
     let response = client
         .request("GET", &url)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {
@@ -170,7 +168,7 @@ async fn stripe_post(
         .request("POST", &url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(body.as_bytes())
         .call_agent_async()
         .await
@@ -192,7 +190,7 @@ async fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, 
     let response = client
         .request("DELETE", &url)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {

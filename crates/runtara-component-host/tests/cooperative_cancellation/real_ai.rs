@@ -1,10 +1,12 @@
-//! Built AI Agents use the production component linker and a local proxy stub.
+//! Built AI Agents use the production component linker and a local provider stub.
 //! Cancellation must release I/O before acknowledgement and leave the same
 //! Agent instance usable, including when a capability normally catches errors.
-use super::real_agent::{cancel_and_reuse, compose_agent, invoke_named_agent, read_proxy, respond};
+use super::real_agent::{
+    cancel_and_reuse, compose_agent, invoke_named_agent, read_outbound, respond,
+};
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 fn connection(provider: &str) -> Value {
@@ -49,7 +51,7 @@ async fn cancellation(
     partial: bool,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     // Reuse the same Agent via a request distinguishable from any continuation
     // of the cancelled invocation (especially Bedrock's embedding batch).
     let (next_capability, next_input, response, expected) = match agent {
@@ -91,7 +93,7 @@ async fn cancellation(
             let cleaned = cleaned.clone();
             async move {
                 let (mut socket, _) = listener.accept().await?;
-                let request = read_proxy(&mut socket).await?;
+                let request = read_outbound(&mut socket).await?;
                 assert_connection(&request);
                 let body = request_body(&request)?;
                 let shared = matches!(
@@ -146,7 +148,7 @@ async fn cancellation(
                 cleaned.notify_one();
 
                 let (mut socket, _) = listener.accept().await?;
-                let request = read_proxy(&mut socket).await?;
+                let request = read_outbound(&mut socket).await?;
                 assert_eq!(request["connection_id"], "fixture-connection");
                 match agent.as_str() {
                     "openai" => {
@@ -177,7 +179,7 @@ async fn cancellation(
         Duration::from_secs(15),
         cancel_and_reuse(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             started,
             cleaned,
         ),
@@ -274,7 +276,7 @@ async fn ai_async_dispatch_keeps_validation_and_connection_errors() -> anyhow::R
         ] {
             let error = invoke_named_agent(
                 agent,
-                CallContext::placeholder_for_metadata(),
+                FixtureContext::public(),
                 capability,
                 input.as_bytes().to_vec(),
             )
@@ -294,10 +296,10 @@ async fn exchange(
     response: Value,
 ) -> anyhow::Result<(Value, Result<Value, runtara_component_host::ErrorInfo>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
-        let request = read_proxy(&mut socket).await?;
+        let request = read_outbound(&mut socket).await?;
         assert_connection(&request);
         respond(&mut socket, response).await?;
         anyhow::Ok(request)
@@ -306,7 +308,7 @@ async fn exchange(
         Duration::from_secs(10),
         invoke_named_agent(
             agent,
-            CallContext::for_test("fixture-tenant", proxy, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             capability,
             serde_json::to_vec(&input(provider, capability))?,
         ),

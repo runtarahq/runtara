@@ -1,13 +1,13 @@
 //! Shared HTTP cancellation through macro-generated real Agent exports.
-//! Local proxy only: no provider accounts or credentials. Distinct tests cover
+//! Local provider only: no provider accounts or credentials. Distinct tests cover
 //! request families and multi-request control flow rather than duplicating every
 //! Shopify capability that delegates to the same GraphQL helper.
 use super::real_agent::{
-    compose_agent, invoke_named_agent, read_proxy_limited, respond, run_cancellation_fixture,
+    compose_agent, invoke_named_agent, read_outbound_limited, respond, run_cancellation_fixture,
 };
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 #[derive(Clone)]
@@ -47,7 +47,7 @@ impl Request {
         }
     }
     async fn check(&self, socket: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
-        let request = read_proxy_limited(socket, 8 * 1024 * 1024).await?;
+        let request = read_outbound_limited(socket, 8 * 1024 * 1024).await?;
         assert_eq!(request["method"], self.method);
         assert_eq!(request["url"], self.url);
         assert_eq!(request["timeout_ms"], self.timeout);
@@ -372,7 +372,7 @@ async fn cancellation(cases: Vec<Case>, partial: bool) -> anyhow::Result<()> {
                 &serde_json::to_vec(&fresh.input)?,
             )?;
             let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let proxy = format!("http://{}/proxy", listener.local_addr()?);
+            let upstream = format!("http://{}/upstream", listener.local_addr()?);
             let started = Arc::new(Notify::new());
             let cleaned = Arc::new(Notify::new());
             let requests = case.requests.clone();
@@ -410,7 +410,7 @@ async fn cancellation(cases: Vec<Case>, partial: bool) -> anyhow::Result<()> {
             });
             let result = run_cancellation_fixture(
                 bytes,
-                CallContext::for_test("fixture-tenant", proxy, ""),
+                FixtureContext::with_upstream("fixture-tenant", upstream, ""),
                 started,
                 cleaned,
                 server,
@@ -423,7 +423,7 @@ async fn cancellation(cases: Vec<Case>, partial: bool) -> anyhow::Result<()> {
 }
 async fn normal(case: Case) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let mut server = tokio::spawn(async move {
         for request in case.requests {
             let (mut socket, _) = listener.accept().await?;
@@ -436,7 +436,7 @@ async fn normal(case: Case) -> anyhow::Result<Result<Vec<u8>, runtara_component_
         Duration::from_secs(20),
         invoke_named_agent(
             case.agent,
-            CallContext::for_test("fixture-tenant", proxy, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             case.capability,
             serde_json::to_vec(&case.input)?,
         ),
@@ -535,14 +535,9 @@ async fn shared_macro_preserves_unknown_capability_and_malformed_input() -> anyh
                 "INPUT_DESERIALIZATION_ERROR",
             ),
         ] {
-            let result = invoke_named_agent(
-                agent,
-                CallContext::placeholder_for_metadata(),
-                capability,
-                input,
-            )
-            .await?
-            .unwrap_err();
+            let result = invoke_named_agent(agent, FixtureContext::public(), capability, input)
+                .await?
+                .unwrap_err();
             assert_eq!(result.code, code);
             assert!(!result.retryable);
         }
@@ -586,14 +581,9 @@ async fn every_builtin_uses_shared_callback_export_and_error_contract() -> anyho
             (b"{}".to_vec(), "UNKNOWN_CAPABILITY"),
             (b"{".to_vec(), "INPUT_DESERIALIZATION_ERROR"),
         ] {
-            let error = invoke_named_agent(
-                agent,
-                CallContext::placeholder_for_metadata(),
-                "unknown",
-                input,
-            )
-            .await?
-            .unwrap_err();
+            let error = invoke_named_agent(agent, FixtureContext::public(), "unknown", input)
+                .await?
+                .unwrap_err();
             assert_eq!(error.code, code, "{agent}");
             assert!(!error.retryable);
         }
@@ -608,7 +598,7 @@ async fn synchronous_capabilities_keep_results_and_datetime_input_normalization(
     for input in [b"".to_vec(), b" \t\n".to_vec()] {
         let error = invoke_named_agent(
             "datetime",
-            CallContext::placeholder_for_metadata(),
+            FixtureContext::public(),
             "get-current-date",
             input,
         )
@@ -619,7 +609,7 @@ async fn synchronous_capabilities_keep_results_and_datetime_input_normalization(
     }
     let result = invoke_named_agent(
         "datetime",
-        CallContext::placeholder_for_metadata(),
+        FixtureContext::public(),
         "get-current-date",
         b"{}".to_vec(),
     )
@@ -629,7 +619,7 @@ async fn synchronous_capabilities_keep_results_and_datetime_input_normalization(
     assert!(value.as_str().is_some_and(|s| s.len() >= 10), "{value}");
     let result = invoke_named_agent(
         "utils",
-        CallContext::placeholder_for_metadata(),
+        FixtureContext::public(),
         "random-double",
         b"{}".to_vec(),
     )

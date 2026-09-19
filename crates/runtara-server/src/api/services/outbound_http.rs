@@ -1,26 +1,18 @@
-//! Internal HTTP Proxy Handler
-//!
-//! Proxies HTTP requests on behalf of WASM workflows, injecting connection
-//! credentials server-side so that WASM modules never see secrets directly.
-//!
-//! Mounted at `POST /api/internal/proxy` without authentication middleware —
-//! the tenant_id is passed via the `X-Org-Id` header without JWT validation.
-
-use axum::{extract::State, http::StatusCode, response::Json};
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+//! Native outbound HTTP service shared by host invocations.
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use runtara_connections::{
     AwsSigningParams, AzureSigningParams, ConnectionsFacade, RateLimitEventType,
     ResolvedConnectionAuth,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
 
-use super::proxy_url::{self, ProxyReject};
+use crate::api::handlers::proxy_url::{self, ProxyReject};
+use runtara_component_host::outbound_http::{
+    self, Destination, OutboundContext, OutboundError, OutboundHttpHost, RequestOptions, Response,
+};
 
 /// Rollout posture for the base-URL pin (`RUNTARA_PROXY_STRICT_BASE_URL`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,10 +61,7 @@ pub(crate) fn proxy_allow_http_hosts() -> Vec<String> {
 /// The pre-WP1 host-only rewrite, kept for warn/off rollout modes so behavior
 /// is byte-for-byte identical to before enforcement. Does NOT enforce the base
 /// path. New deployments default to enforce and never reach this.
-fn apply_legacy_pin(
-    final_url: &str,
-    base: Option<&str>,
-) -> Result<String, (StatusCode, Json<Value>)> {
+fn apply_legacy_pin(final_url: &str, base: Option<&str>) -> Result<String, (u16, Value)> {
     match base {
         Some(base) => {
             if final_url.starts_with('/') {
@@ -98,62 +87,57 @@ fn apply_legacy_pin(
             }
         }
         None if final_url.starts_with('/') => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Relative URL requires a connection with a base URL"})),
+            400,
+            json!({"error": "Relative URL requires a connection with a base URL"}),
         )),
         None => Ok(final_url.to_string()),
     }
 }
 
 /// Map a [`ProxyReject`] to the proxy's HTTP error contract.
-fn map_proxy_reject(reject: &ProxyReject, connection_id: &str) -> (StatusCode, Json<Value>) {
+fn map_proxy_reject(reject: &ProxyReject, connection_id: &str) -> (u16, Value) {
     match reject {
         ProxyReject::NoBaseUrl | ProxyReject::EmptyBaseUrl => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
+            502,
+            json!({
                 "error": "CONNECTION_BASE_URL_REQUIRED",
                 "message": format!(
                     "Connection '{connection_id}' has no base URL; the proxy refuses to forward \
                      injected credentials to an unpinned host. Set an https base URL on the connection."
                 ),
                 "connection_id": connection_id,
-            })),
+            }),
         ),
-        ProxyReject::UnparseableBaseUrl(detail) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
+        ProxyReject::UnparseableBaseUrl(_) => (
+            502,
+            json!({
                 "error": "CONNECTION_BASE_URL_INVALID",
-                "message": format!("Connection '{connection_id}' base URL is not a valid URL: {detail}"),
+                "message": "Connection base URL is not a valid URL",
                 "connection_id": connection_id,
-            })),
+            }),
         ),
-        ProxyReject::NonHttpsBaseUrl(base) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
+        ProxyReject::NonHttpsBaseUrl(_) => (
+            400,
+            json!({
                 "error": "CONNECTION_BASE_URL_NOT_HTTPS",
-                "message": format!("Connection '{connection_id}' base URL must use https: {base}"),
+                "message": "Connection base URL must use HTTPS",
                 "connection_id": connection_id,
-            })),
+            }),
         ),
-        ProxyReject::UnparseableAgentUrl(detail) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
+        ProxyReject::UnparseableAgentUrl(_) => (
+            400,
+            json!({
                 "error": "INVALID_REQUEST_URL",
-                "message": format!("Request URL is not valid: {detail}"),
-            })),
+                "message": "Request URL is not valid",
+            }),
         ),
-        ProxyReject::PathEscape {
-            final_path,
-            base_path,
-        } => (
-            StatusCode::FORBIDDEN,
-            Json(json!({
+        ProxyReject::PathEscape { .. } => (
+            403,
+            json!({
                 "error": "PATH_OUTSIDE_BASE",
-                "message": format!(
-                    "Request path '{final_path}' is outside the connection's base path '{base_path}'"
-                ),
+                "message": "Request path is outside the connection base path",
                 "connection_id": connection_id,
-            })),
+            }),
         ),
     }
 }
@@ -187,112 +171,132 @@ fn connection_pin_policy(
     (effective_mode, pin_opts)
 }
 
-// ============================================================================
-// State
-// ============================================================================
-
-pub struct ProxyState {
+pub struct NativeOutboundHttp {
     pub facade: Arc<ConnectionsFacade>,
     pub client: reqwest::Client,
 }
 
-// ============================================================================
-// Request / Response DTOs
-// ============================================================================
-
-#[derive(Debug, Deserialize)]
-pub struct ProxyRequest {
-    /// HTTP method (GET, POST, PUT, DELETE, PATCH, etc.)
-    pub method: String,
-    /// Target URL — full URL or relative path (prepended with connection base URL)
-    pub url: String,
-    /// Request headers to forward
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    /// JSON request body
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<Value>,
-    /// Base64-encoded binary body (takes precedence over `body` if both set)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body_raw: Option<String>,
-    /// Connection ID — when set, credentials are injected and base URL is resolved
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-    /// Explicit AI provider requested by the caller. When present, the proxy
-    /// verifies the connection's integration is compatible before credentials
-    /// are applied to the outgoing request.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ai_provider: Option<String>,
-    /// AWS service the calling agent is signing for (e.g. "sqs", "dynamodb").
-    /// When set, it overrides the connection's resolved signing service and, if
-    /// the connection pinned no explicit endpoint, selects the regional
-    /// endpoint `https://{service}.{region}.amazonaws.com`. This lets one
-    /// generic `aws_credentials` connection serve any AWS service.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aws_service: Option<String>,
-    /// Opaque, tenant+connection-bound endpoint reference (a signed token
-    /// minted after the inbound activity that produced it was authenticated).
-    /// When present and valid, it supplies the request's base URL — used for
-    /// providers whose base is per-request (e.g. a Teams conversation's
-    /// serviceUrl) rather than a static connection base. The ref must belong
-    /// to the current tenant and the request's connection, or the request is
-    /// rejected. See [`crate::api::services::endpoint_ref`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint_ref: Option<String>,
-    /// Name of a descriptor-declared alternate endpoint to send this request to
-    /// (e.g. `"graphql"` on a `quickbooks_online` connection). Unlike
-    /// `endpoint_ref`, the URL is not supplied by the caller — only the *selector*
-    /// is. The set of reachable endpoints is fixed in the connection type's
-    /// `named_endpoints`, so an agent can widen the destination only to a host the
-    /// descriptor author vetted. Lets one credential serve a provider that splits
-    /// its API across hosts. See [`apply_named_endpoint_override`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    /// Request timeout in milliseconds (default: 30 000)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-    /// Bound upstream bytes before buffering. Explicit limits return only the
-    /// raw body to avoid duplicating JSON in the component transport envelope.
-    #[serde(default)]
-    pub max_response_bytes: Option<usize>,
+// Flatten only inside the existing provider implementation. The guest contract
+// distinguishes connection and public requests and carries no caller identity.
+struct OutboundRequest {
+    method: String,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
+    connection_id: Option<String>,
+    ai_provider: Option<String>,
+    aws_service: Option<String>,
+    endpoint_ref: Option<String>,
+    endpoint: Option<String>,
+    max_response_bytes: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ProxyResponse {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    /// Parsed JSON body (if the response was valid JSON)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<Value>,
-    /// Base64-encoded raw body (always present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body_raw: Option<String>,
+#[async_trait::async_trait]
+impl OutboundHttpHost for NativeOutboundHttp {
+    #[tracing::instrument(skip_all, fields(tenant_id = %context.tenant_id, instance_id = context.instance_id.as_deref()))]
+    async fn request(
+        &self,
+        context: &OutboundContext,
+        request: RequestOptions,
+    ) -> Result<Response, OutboundError> {
+        if context.tenant_id.trim().is_empty() {
+            return Err(outbound_http::error(
+                "HTTP_UNAVAILABLE",
+                "Authoritative tenant is not configured",
+            ));
+        }
+        let timeout = outbound_http::timeout(request.timeout_ms)?;
+        let limit = outbound_http::response_limit(request.max_response_bytes)?;
+        let mut internal = OutboundRequest {
+            method: request.method,
+            url: String::new(),
+            headers: request
+                .headers
+                .into_iter()
+                .filter(|(name, _)| !name.to_ascii_lowercase().starts_with("x-runtara-"))
+                .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                .collect(),
+            body: request.body,
+            connection_id: None,
+            ai_provider: None,
+            aws_service: None,
+            endpoint_ref: None,
+            endpoint: None,
+            max_response_bytes: Some(limit),
+        };
+        match request.destination {
+            Destination::Public(url) => internal.url = url,
+            Destination::Connection(connection) => {
+                if connection.connection_id.trim().is_empty() {
+                    return Err(outbound_http::error(
+                        "HTTP_INVALID_REQUEST",
+                        "Connection ID must not be empty",
+                    ));
+                }
+                internal.url = connection.url;
+                internal.connection_id = Some(connection.connection_id);
+                internal.ai_provider = connection.ai_provider;
+                internal.aws_service = connection.aws_service;
+                internal.endpoint_ref = connection.endpoint_ref;
+                internal.endpoint = connection.endpoint;
+            }
+        }
+        tokio::time::timeout(
+            timeout,
+            execute_request(&context.tenant_id, &self.facade, &self.client, internal),
+        )
+        .await
+        .map_err(|_| {
+            outbound_http::error(
+                "HTTP_DEADLINE_EXCEEDED",
+                "HTTP request timeout: deadline elapsed",
+            )
+        })?
+        .map_err(|(status, body)| service_error(status, body))
+    }
 }
 
-// ============================================================================
-// Handler
-// ============================================================================
-
-/// POST /api/internal/proxy
-pub async fn proxy_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<Arc<ProxyState>>,
-    Json(request): Json<ProxyRequest>,
-) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
-    let tenant_id = extract_tenant_id(&headers)?;
-    execute_proxy_request(&tenant_id, &state.facade, &state.client, request).await
+fn service_error(status: u16, body: Value) -> OutboundError {
+    let code = body
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            body.get("error")
+                .and_then(Value::as_str)
+                .filter(|code| code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+        })
+        .unwrap_or(match status {
+            400 => "HTTP_INVALID_REQUEST",
+            401 => "HTTP_AUTH_FAILED",
+            403 => "HTTP_DESTINATION_DENIED",
+            404 => "CONNECTION_NOT_FOUND",
+            413 => "HTTP_TOO_LARGE",
+            502 => "HTTP_UPSTREAM_ERROR",
+            _ => "HTTP_SERVICE_ERROR",
+        });
+    OutboundError {
+        code: code.to_owned(),
+        message: body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Outbound HTTP request failed")
+            .to_owned(),
+        status: Some(status),
+        retry_after_ms: body.get("retry_after_ms").and_then(Value::as_u64),
+        body: serde_json::to_vec(&body).expect("JSON error body serializes"),
+    }
 }
 
 /// Apply an agent-declared AWS service to a resolved connection descriptor.
 ///
 /// AWS credentials are service-agnostic — the calling agent names the service
-/// it is signing for via the `X-Runtara-Aws-Service` header. This overrides the
+/// it is signing for via the explicit `aws-service` field. This overrides the
 /// resolved SigV4 signing service and, when the connection pinned no explicit
 /// endpoint, synthesizes the default regional endpoint
 /// (`https://{service}.{region}.amazonaws.com`). The net effect: one generic
 /// `aws_credentials` connection can serve SQS, DynamoDB, SNS, … without a
 /// per-service connection type. No-op unless the connection actually resolved
-/// AWS SigV4 signing (so a stray header on a non-AWS connection does nothing).
+/// AWS SigV4 signing (so the field on a non-AWS connection does nothing).
 fn apply_aws_service_override(aws_service: Option<&str>, resolved: &mut ResolvedConnectionAuth) {
     if let Some(service) = aws_service
         && let Some(aws) = resolved.aws_signing.as_mut()
@@ -334,7 +338,7 @@ fn apply_named_endpoint_override(
     params: &Value,
     final_headers: &mut HashMap<String, String>,
     resolved: &mut ResolvedConnectionAuth,
-) -> Result<(), (StatusCode, Json<Value>)> {
+) -> Result<(), (u16, Value)> {
     let Some(name) = endpoint.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(());
     };
@@ -354,11 +358,11 @@ fn apply_named_endpoint_override(
             "proxy.named_endpoint.rejected"
         );
         (
-            StatusCode::FORBIDDEN,
-            Json(json!({
+            403,
+            json!({
                 "error": format!("Named endpoint rejected: {e}"),
                 "code": "NAMED_ENDPOINT_REJECTED",
-            })),
+            }),
         )
     })?;
 
@@ -367,7 +371,12 @@ fn apply_named_endpoint_override(
     // refuses to compile a descriptor that declares `Authorization`, so this is
     // belt-and-braces rather than the only guard.
     for (header_name, header_value) in selected.headers {
-        final_headers.entry(header_name).or_insert(header_value);
+        if !final_headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(&header_name))
+        {
+            final_headers.insert(header_name, header_value);
+        }
     }
     resolved.base_url = Some(selected.base_url);
     Ok(())
@@ -381,25 +390,19 @@ fn apply_named_endpoint_override(
 /// classify it permanent and stop durable-retrying; a transient failure
 /// (transport, provider 5xx/429) keeps the legacy **502**. The `error` string
 /// shape is preserved for compatibility with existing consumers.
-fn map_credential_resolution_error(
-    e: &runtara_connections::ConnectionsError,
-) -> (StatusCode, Json<Value>) {
+fn map_credential_resolution_error(e: &runtara_connections::ConnectionsError) -> (u16, Value) {
     let permanent = matches!(
         e,
         runtara_connections::ConnectionsError::AuthResolution(err) if err.permanent
     );
-    let status = if permanent {
-        StatusCode::UNAUTHORIZED
-    } else {
-        StatusCode::BAD_GATEWAY
-    };
+    let status = if permanent { 401 } else { 502 };
     (
         status,
-        Json(json!({
-            "error": format!("Credential resolution failed: {}", e),
+        json!({
+            "error": "Credential resolution failed",
             "code": "CREDENTIAL_RESOLUTION_FAILED",
             "permanent": permanent,
-        })),
+        }),
     )
 }
 
@@ -422,7 +425,7 @@ fn apply_endpoint_ref_override(
     connection_id: &str,
     agent_url: &str,
     resolved: &mut ResolvedConnectionAuth,
-) -> Result<(), (StatusCode, Json<Value>)> {
+) -> Result<(), (u16, Value)> {
     let Some(token) = endpoint_ref else {
         return Ok(());
     };
@@ -434,16 +437,16 @@ fn apply_endpoint_ref_override(
             "proxy.endpoint_ref.rejected"
         );
         (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": format!("Endpoint reference rejected: {msg}") })),
+            403,
+            json!({ "error": format!("Endpoint reference rejected: {msg}") }),
         )
     };
 
     let keyring =
         crate::api::services::endpoint_ref::EndpointRefKeyring::from_env().map_err(|e| {
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("Endpoint reference key unavailable: {e}") })),
+                500,
+                json!({ "error": format!("Endpoint reference key unavailable: {e}") }),
             )
         })?;
     let binding = crate::api::services::endpoint_ref::verify(keyring, token)
@@ -510,13 +513,13 @@ fn path_targets_conversation(agent_url: &str, conversation_id: &str) -> bool {
     false
 }
 
-/// Core proxy logic shared between internal and authenticated debug endpoints
-pub async fn execute_proxy_request(
+/// Native outbound execution, shared by all injected component hosts.
+async fn execute_request(
     tenant_id: &str,
     facade: &ConnectionsFacade,
     client: &reqwest::Client,
-    request: ProxyRequest,
-) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
+    request: OutboundRequest,
+) -> Result<Response, (u16, Value)> {
     // Mutable copies we'll enrich with connection data
     let response_limit = proxy_response_limit(request.max_response_bytes)?;
     let mut final_headers = request.headers.clone();
@@ -533,19 +536,14 @@ pub async fn execute_proxy_request(
         let conn = facade
             .get_with_parameters(connection_id, tenant_id)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("Database error fetching connection: {}", e)})),
-                )
-            })?
+            .map_err(|_e| (500, json!({"error": "Connection lookup failed"})))?
             .ok_or_else(|| {
                 (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
+                    404,
+                    json!({
                         "error": format!("Connection '{}' not found", connection_id),
                         "code": "CONNECTION_NOT_FOUND",
-                    })),
+                    }),
                 )
             })?;
 
@@ -561,16 +559,18 @@ pub async fn execute_proxy_request(
             .cloned()
             .unwrap_or(json!({}));
 
+        let mut credential_headers = HashMap::new();
         let mut resolved = facade
             .resolve_connection_auth(
                 connection_id,
                 tenant_id,
                 integration_id,
                 &params,
-                &mut final_headers,
+                &mut credential_headers,
             )
             .await
             .map_err(|e| map_credential_resolution_error(&e))?;
+        merge_authoritative_headers(&mut final_headers, credential_headers);
 
         // Agent-declared AWS service (generic AWS credentials) — see
         // `apply_aws_service_override`.
@@ -643,9 +643,6 @@ pub async fn execute_proxy_request(
                     tracing::warn!(
                         target: "proxy",
                         connection_id = connection_id.as_str(),
-                        agent_url = %request.url,
-                        base_url = ?resolved.base_url,
-                        reject = ?reject,
                         "proxy.pin.violation (warn mode — forwarding legacy-pinned; will be REJECTED under enforce)"
                     );
                     final_url = apply_legacy_pin(&final_url, resolved.base_url.as_deref())?;
@@ -693,28 +690,24 @@ pub async fn execute_proxy_request(
             let mut headers = HashMap::new();
             headers.insert("retry-after".to_string(), retry_after_secs.to_string());
             headers.insert("retry-after-ms".to_string(), retry_after_ms.to_string());
-            return Ok((
-                StatusCode::OK,
-                Json(ProxyResponse {
-                    status: 429,
-                    headers,
-                    body: Some(json!({
-                        "error": "Rate limited (pre-flight)",
-                        "retry_after_ms": retry_after_ms
-                    })),
-                    body_raw: None,
-                }),
-            ));
+            return Ok(Response {
+                status: 429,
+                headers: headers.into_iter().collect(),
+                body: serde_json::to_vec(&json!({
+                    "error": "Rate limited (pre-flight)",
+                    "retry_after_ms": retry_after_ms
+                }))
+                .expect("rate limit JSON serializes"),
+            });
         }
     }
 
     // ── SSRF protection: block private/internal IP ranges ─────────────────
-    reject_private_url(&final_url)?;
+    reject_private_url(&final_url).await?;
 
     tracing::info!(
         target: "proxy",
         method = %request.method,
-        url = %final_url,
         connection_id = ?request.connection_id,
         header_count = final_headers.len(),
         "Proxy forwarding request"
@@ -724,37 +717,33 @@ pub async fn execute_proxy_request(
     let method = request.method.to_uppercase();
     let reqwest_method = method.parse::<reqwest::Method>().map_err(|_| {
         (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("Invalid HTTP method: {}", method)})),
+            400,
+            json!({"error": format!("Invalid HTTP method: {}", method)}),
         )
     })?;
 
-    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(30_000));
-
     // Resolve body bytes for SigV4 signing (we need them before building the request)
-    let body_bytes: Option<Vec<u8>> = if let Some(ref raw) = request.body_raw {
-        Some(BASE64.decode(raw).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Invalid base64 in body_raw: {}", e)})),
-            )
-        })?)
-    } else {
-        request
-            .body
-            .as_ref()
-            .map(|json_body| serde_json::to_vec(json_body).unwrap_or_default())
-    };
+    let body_bytes = request.body;
 
     // ── AWS SigV4 signing (if needed) ───────────────────────────────────
     if let Some(ref aws) = aws_signing {
         let parsed_url = url::Url::parse(&final_url).map_err(|e| {
             (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Invalid URL for SigV4 signing: {}", e)})),
+                400,
+                json!({"error": format!("Invalid URL for SigV4 signing: {}", e)}),
             )
         })?;
         let payload = body_bytes.as_deref().unwrap_or(b"");
+        remove_headers(
+            &mut final_headers,
+            &[
+                "authorization",
+                "host",
+                "x-amz-date",
+                "x-amz-content-sha256",
+                "x-amz-security-token",
+            ],
+        );
         runtara_connections::auth::aws_signing::sign_request_v4(
             &method,
             &parsed_url,
@@ -772,8 +761,8 @@ pub async fn execute_proxy_request(
     if let Some(ref azure) = azure_signing {
         let parsed_url = url::Url::parse(&final_url).map_err(|e| {
             (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Invalid URL for Azure signing: {}", e)})),
+                400,
+                json!({"error": format!("Invalid URL for Azure signing: {}", e)}),
             )
         })?;
 
@@ -798,6 +787,7 @@ pub async fn execute_proxy_request(
         }
 
         let payload = body_bytes.as_deref().unwrap_or(b"");
+        remove_headers(&mut final_headers, &["authorization", "x-ms-date"]);
         runtara_connections::auth::azure_signing::sign_request_shared_key(
             &method,
             &parsed_url,
@@ -808,16 +798,14 @@ pub async fn execute_proxy_request(
         )
         .map_err(|e| {
             (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Azure Shared Key signing failed: {}", e)})),
+                400,
+                json!({"error": format!("Azure Shared Key signing failed: {}", e)}),
             )
         })?;
     }
 
     let outbound_client = mtls_client.as_ref().unwrap_or(client);
-    let mut req_builder = outbound_client
-        .request(reqwest_method, &final_url)
-        .timeout(timeout);
+    let mut req_builder = outbound_client.request(reqwest_method, &final_url);
 
     // Set headers
     let mut header_map = HeaderMap::new();
@@ -833,25 +821,14 @@ pub async fn execute_proxy_request(
 
     // Set body
     if let Some(bytes) = body_bytes {
-        // If JSON body was provided and no Content-Type set, add it
-        if request.body.is_some()
-            && request.body_raw.is_none()
-            && !final_headers
-                .keys()
-                .any(|k| k.eq_ignore_ascii_case("content-type"))
-        {
-            req_builder = req_builder.header("Content-Type", "application/json");
-        }
         req_builder = req_builder.body(bytes);
     }
 
     // ── Execute request ──────────────────────────────────────────────────
-    let response = req_builder.send().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("Upstream request failed: {}", e)})),
-        )
-    })?;
+    let response = req_builder
+        .send()
+        .await
+        .map_err(|_e| (502, json!({"error": "Upstream request failed"})))?;
 
     let status = response.status().as_u16();
 
@@ -864,7 +841,14 @@ pub async fn execute_proxy_request(
     }
 
     // Read response body
-    let resp_body_bytes = read_bounded_response(response, response_limit).await?;
+    let header_bytes = resp_headers.iter().fold(2usize, |size, (name, value)| {
+        size.saturating_add(name.len())
+            .saturating_add(value.len())
+            .saturating_add(16)
+    });
+    let body_limit = response_limit.checked_sub(header_bytes).ok_or_else(||
+        (413, json!({"error": "Upstream response headers exceed byte limit", "code": "RESPONSE_TOO_LARGE"})))?;
+    let resp_body_bytes = read_bounded_response(response, body_limit).await?;
 
     // Track upstream 429 responses for analytics
     if status == 429
@@ -894,36 +878,38 @@ pub async fn execute_proxy_request(
         );
     }
 
-    // Try to parse as JSON; always provide base64 raw body too
-    let json_body = if request.max_response_bytes.is_some() {
-        None
-    } else {
-        serde_json::from_slice::<Value>(&resp_body_bytes).ok()
-    };
-    let raw_body = BASE64.encode(&resp_body_bytes);
-
-    Ok((
-        StatusCode::OK,
-        Json(ProxyResponse {
-            status,
-            headers: resp_headers,
-            body: json_body,
-            body_raw: Some(raw_body),
-        }),
-    ))
+    Ok(Response {
+        status,
+        headers: resp_headers.into_iter().collect(),
+        body: resp_body_bytes,
+    })
 }
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-const MAX_PROXY_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+fn remove_headers(headers: &mut HashMap<String, String>, names: &[&str]) {
+    headers.retain(|key, _| !names.iter().any(|name| key.eq_ignore_ascii_case(name)));
+}
 
-fn proxy_response_limit(requested: Option<usize>) -> Result<usize, (StatusCode, Json<Value>)> {
+fn merge_authoritative_headers(
+    headers: &mut HashMap<String, String>,
+    injected: HashMap<String, String>,
+) {
+    for (name, value) in injected {
+        remove_headers(headers, &[&name]);
+        headers.insert(name.to_ascii_lowercase(), value);
+    }
+}
+
+const MAX_PROXY_RESPONSE_BYTES: usize = outbound_http::MAX_RESPONSE_BYTES;
+
+fn proxy_response_limit(requested: Option<usize>) -> Result<usize, (u16, Value)> {
     match requested {
         Some(0) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Response byte limit must be positive"})),
+            400,
+            json!({"error": "Response byte limit must be positive"}),
         )),
         Some(limit) => Ok(limit.min(MAX_PROXY_RESPONSE_BYTES)),
         None => Ok(MAX_PROXY_RESPONSE_BYTES),
@@ -933,13 +919,13 @@ fn proxy_response_limit(requested: Option<usize>) -> Result<usize, (StatusCode, 
 async fn read_bounded_response(
     mut response: reqwest::Response,
     limit: usize,
-) -> Result<Vec<u8>, (StatusCode, Json<Value>)> {
+) -> Result<Vec<u8>, (u16, Value)> {
     let too_large = || {
         (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({
+            413,
+            json!({
                 "error": "Upstream response exceeds byte limit", "code": "RESPONSE_TOO_LARGE", "limit": limit
-            })),
+            }),
         )
     };
     if response
@@ -949,10 +935,10 @@ async fn read_bounded_response(
         return Err(too_large());
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| {
+    while let Some(chunk) = response.chunk().await.map_err(|_e| {
         (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("Failed to read upstream response body: {e}")})),
+            502,
+            json!({"error": "Failed to read upstream response body"}),
         )
     })? {
         if chunk.len() > limit.saturating_sub(body.len()) {
@@ -967,7 +953,7 @@ fn ensure_ai_provider_connection_compatible(
     provider: Option<&str>,
     connection_id: &str,
     integration_id: &str,
-) -> Result<(), (StatusCode, Json<Value>)> {
+) -> Result<(), (u16, Value)> {
     let Some(provider) = provider else {
         return Ok(());
     };
@@ -975,8 +961,8 @@ fn ensure_ai_provider_connection_compatible(
         return Ok(());
     }
     Err((
-        StatusCode::BAD_REQUEST,
-        Json(json!({
+        400,
+        json!({
             "error": "AI_PROVIDER_CONNECTION_MISMATCH",
             "message": format!(
                 "AI provider '{}' is not compatible with connection '{}' integration '{}'",
@@ -985,22 +971,8 @@ fn ensure_ai_provider_connection_compatible(
             "provider": provider,
             "connection_id": connection_id,
             "integration_id": integration_id
-        })),
+        }),
     ))
-}
-
-/// Extract tenant_id from X-Org-Id header (no JWT validation)
-fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
-    headers
-        .get("X-Org-Id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Missing X-Org-Id header"})),
-            )
-        })
 }
 
 fn record_credential_request_async(
@@ -1040,18 +1012,12 @@ fn record_credential_request_async(
 /// once at process start and is intended for local Azurite/MinIO-style
 /// emulators reachable on loopback. **Do not set this in production** — it
 /// re-opens the SSRF surface for every connection routed through the proxy.
-fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
-    let parsed = url::Url::parse(url).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Invalid URL"})),
-        )
-    })?;
+async fn reject_private_url(url: &str) -> Result<(), (u16, Value)> {
+    let parsed = url::Url::parse(url).map_err(|_| (400, json!({"error": "Invalid URL"})))?;
 
     if is_explicitly_allowed_host(&parsed) {
         tracing::warn!(
             target: "proxy",
-            url = %parsed,
             "SSRF guard bypassed by RUNTARA_PROXY_ALLOWED_HOSTS — dev/test only"
         );
         return Ok(());
@@ -1062,21 +1028,21 @@ fn reject_private_url(url: &str) -> Result<(), (StatusCode, Json<Value>)> {
     // Block localhost by name
     if host == "localhost" || host.ends_with(".localhost") {
         return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Requests to localhost are not allowed"})),
+            403,
+            json!({"error": "Requests to localhost are not allowed"}),
         ));
     }
 
     // Resolve hostname to IP and check
-    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
+    if let Ok(addrs) =
+        tokio::net::lookup_host((host, parsed.port_or_known_default().unwrap_or(80))).await
+    {
         for addr in addrs {
             let ip = addr.ip();
             if proxy_url::is_private_ip(&ip) {
                 return Err((
-                    StatusCode::FORBIDDEN,
-                    Json(
-                        json!({"error": format!("Requests to private/internal addresses are not allowed: {}", ip)}),
-                    ),
+                    403,
+                    json!({"error": format!("Requests to private/internal addresses are not allowed: {}", ip)}),
                 ));
             }
         }
@@ -1115,6 +1081,38 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_headers_override_guest_case_variants() {
+        let mut headers = HashMap::from([
+            ("authorization".into(), "guest".into()),
+            ("AUTHORIZATION".into(), "guest-2".into()),
+            ("accept".into(), "application/json".into()),
+        ]);
+        merge_authoritative_headers(
+            &mut headers,
+            HashMap::from([("Authorization".into(), "host-fixture".into())]),
+        );
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers["authorization"], "host-fixture");
+    }
+
+    #[test]
+    fn guest_errors_do_not_expose_provider_diagnostics_or_connection_urls() {
+        let (_, body) = map_credential_resolution_error(
+            &runtara_connections::ConnectionsError::Validation("synthetic-private-detail".into()),
+        );
+        assert!(!body.to_string().contains("synthetic-private-detail"));
+        let (_, body) = map_proxy_reject(
+            &ProxyReject::NonHttpsBaseUrl("http://synthetic-private-detail".into()),
+            "connection",
+        );
+        assert!(!body.to_string().contains("synthetic-private-detail"));
+        assert_eq!(
+            service_error(400, body).code,
+            "CONNECTION_BASE_URL_NOT_HTTPS"
+        );
+    }
 
     #[test]
     fn attachment_endpoints_pin_host_and_mailgun_domain() {
@@ -1213,8 +1211,8 @@ mod tests {
                 let result = read_bounded_response(response, limit).await;
                 if limit == 5 {
                     let (status, body) = result.unwrap_err();
-                    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-                    assert_eq!(body.0["code"], "RESPONSE_TOO_LARGE");
+                    assert_eq!(status, 413);
+                    assert_eq!(body["code"], "RESPONSE_TOO_LARGE");
                 } else {
                     assert_eq!(result.unwrap(), b"123456");
                 }
@@ -1232,8 +1230,8 @@ mod tests {
         )
         .expect_err("provider mismatch should fail");
 
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        let body = err.1.0;
+        assert_eq!(err.0, 400);
+        let body = err.1;
         assert_eq!(
             body.get("error").and_then(Value::as_str),
             Some("AI_PROVIDER_CONNECTION_MISMATCH")
@@ -1379,7 +1377,7 @@ mod tests {
         params: &Value,
         headers: &mut HashMap<String, String>,
         resolved: &mut ResolvedConnectionAuth,
-    ) -> Result<(), (StatusCode, Json<Value>)> {
+    ) -> Result<(), (u16, Value)> {
         apply_named_endpoint_override(
             endpoint,
             "conn-1",
@@ -1462,7 +1460,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
         // The critical property: NO fall-through to the default base. A typo must
         // not quietly send the Intuit token to the Accounting API and read as a 404.
         assert_eq!(resolved.base_url.as_deref(), Some(QBO_BASE));
@@ -1483,7 +1481,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
         assert_eq!(resolved.base_url.as_deref(), Some(QBO_BASE));
     }
 
@@ -1634,7 +1632,7 @@ mod tests {
             &mut resolved,
         )
         .expect_err("foreign tenant rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
         assert_eq!(resolved.base_url, None);
     }
 
@@ -1651,7 +1649,7 @@ mod tests {
             &mut resolved,
         )
         .expect_err("foreign connection rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
     }
 
     #[test]
@@ -1668,7 +1666,7 @@ mod tests {
             &mut resolved,
         )
         .expect_err("forged signature rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
     }
 
     #[test]
@@ -1686,7 +1684,7 @@ mod tests {
             &mut resolved,
         )
         .expect_err("conversation-path mismatch rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
     }
 
     #[test]
@@ -1708,7 +1706,7 @@ mod tests {
             &mut resolved,
         )
         .expect_err("bound id in a non-conversation segment must be rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
     }
 
     #[test]
@@ -1723,7 +1721,7 @@ mod tests {
         let err =
             apply_endpoint_ref_override(Some(&token), "tenant-a", "conn-1", &path, &mut resolved)
                 .expect_err("prefix conversation id must be rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, 403);
     }
 
     #[test]

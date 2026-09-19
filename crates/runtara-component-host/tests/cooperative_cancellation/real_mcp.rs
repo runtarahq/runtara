@@ -1,11 +1,12 @@
 //! Standard cancellation during MCP connection lookup and the three-request
 //! handshake. All services are local stubs; no remote tool is invoked.
 use super::real_agent::{
-    compose_agent, invoke_named_agent, read_proxy, respond, run_cancellation_fixture_with_resolver,
+    compose_agent, invoke_named_agent, read_outbound, respond,
+    run_cancellation_fixture_with_resolver,
 };
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 fn input(after: bool, lookup: bool) -> Value {
@@ -23,7 +24,7 @@ async fn request(
     method: &str,
     after: bool,
 ) -> anyhow::Result<()> {
-    let request = read_proxy(socket).await?;
+    let request = read_outbound(socket).await?;
     assert_eq!(request["url"], "");
     assert_eq!(request["connection_id"], "fixture-connection");
     assert!(request["headers"].get("X-Fixture").is_none());
@@ -131,7 +132,7 @@ async fn cancellation(method: &'static str, blocked: usize, partial: bool) -> an
             anyhow::Ok(())
         }
     });
-    let context = CallContext::for_test("fixture-tenant", format!("{base}/proxy"), "");
+    let context = FixtureContext::with_upstream("fixture-tenant", format!("{base}/upstream"), "");
     let resolver = Arc::new(McpResolver {
         pending: if blocked == 0 {
             Some((started.clone(), cleaned.clone()))
@@ -180,7 +181,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
     forbidden["tool_name"] = "forbidden".into();
     let error = invoke_named_agent(
         "mcp",
-        CallContext::for_test("fixture-tenant", "", ""),
+        FixtureContext::with_upstream("fixture-tenant", "", ""),
         "mcp-tool-invoke",
         serde_json::to_vec(&forbidden)?,
     )
@@ -190,7 +191,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
     assert!(!error.retryable);
     for server_error in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let proxy = format!("http://{}/proxy", listener.local_addr()?);
+        let upstream = format!("http://{}/upstream", listener.local_addr()?);
         let server = tokio::spawn(async move {
             for stage in 1..=if server_error { 3 } else { 1 } {
                 let (mut socket, _) = listener.accept().await?;
@@ -209,7 +210,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
             Duration::from_secs(10),
             invoke_named_agent(
                 "mcp",
-                CallContext::for_test("fixture-tenant", proxy, ""),
+                FixtureContext::with_upstream("fixture-tenant", upstream, ""),
                 "mcp-tool-invoke",
                 serde_json::to_vec(&input(false, false))?,
             ),
@@ -240,7 +241,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
 #[tokio::test]
 async fn mcp_async_search_preserves_tool_scope_and_schema() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let server = tokio::spawn(async move {
         for stage in 1..=3 {
             let (mut socket, _) = listener.accept().await?;
@@ -257,7 +258,7 @@ async fn mcp_async_search_preserves_tool_scope_and_schema() -> anyhow::Result<()
         Duration::from_secs(10),
         invoke_named_agent(
             "mcp",
-            CallContext::for_test("fixture-tenant", proxy, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             "mcp-tool-search",
             serde_json::to_vec(&input(false, false))?,
         ),

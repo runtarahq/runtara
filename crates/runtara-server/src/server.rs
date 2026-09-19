@@ -1004,7 +1004,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref dir) = cfg.agent_components_dir {
             use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
             let env = DispatcherEnv {
-                proxy_url: cfg.http_proxy_url.clone(),
                 core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
             };
             match ComponentDispatcherService::from_dir(dir, env).await {
@@ -1324,9 +1323,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let connection_resolver: Arc<dyn runtara_component_host::ConnectionResolverHost> = Arc::new(
         api::services::connection_resolver::NativeConnectionResolver(connections_facade.clone()),
     );
+    let outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost> =
+        Arc::new(api::services::outbound_http::NativeOutboundHttp {
+            facade: connections_facade.clone(),
+            client: crate::egress_client::build_proxy_client(),
+        });
     if let Some(dispatcher) = &component_dispatcher {
         dispatcher.set_connection_resolver(connection_resolver.clone())?;
         dispatcher.set_database(database.clone())?;
+        dispatcher.set_outbound_http(outbound_http.clone())?;
     }
     let trusted_executor = component_dispatcher.as_ref().map(|d| d.trusted_executor());
     if let Some(executor) = &trusted_executor {
@@ -1340,6 +1345,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         trusted_executor,
         connection_resolver,
         database,
+        outbound_http,
         execution_timeout_policy,
         Some(workers::step_counter::StepCounter::new(Arc::clone(
             &pipeline_gauges,
@@ -2393,22 +2399,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Crate-owned so the HTTP surface stays colocated with the domain logic.
     let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
 
-    // Internal HTTP proxy routes (called by WASM workflows for credential injection)
-    // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
-    let internal_proxy_state = Arc::new(api::handlers::internal_proxy::ProxyState {
-        facade: connections_facade.clone(),
-        // Hardened egress client: no redirect following (F2) + a DNS resolver
-        // that rejects hosts resolving to private/internal addresses (F5).
-        client: crate::egress_client::build_proxy_client(),
-    });
-    let internal_proxy_routes = Router::new()
-        .route(
-            "/api/internal/proxy",
-            post(api::handlers::internal_proxy::proxy_handler),
-        )
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(internal_proxy_state);
-
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
     // configured TENANT_ID directly (single-tenant runtime).
@@ -2670,7 +2660,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     let internal_app = Router::new()
         .nest("/api/internal/connections-admin", connections_admin_routes)
-        .merge(internal_proxy_routes)
         .merge(public_routes)
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));

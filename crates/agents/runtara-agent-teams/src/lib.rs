@@ -7,20 +7,13 @@
 //! the host architecture and writes `runtara_agent_teams.meta.json` next to the
 //! `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. Two control
-//! headers steer it:
-//!   * `X-Runtara-Connection-Id` — the proxy mints and injects the Bot
-//!     Connector bearer token for the connection; the component never sees the
-//!     app secret.
-//!   * `X-Runtara-Endpoint-Ref` — an opaque, tenant+connection-bound signed
-//!     token (produced by the Teams webhook after it authenticated the inbound
-//!     activity) that supplies the conversation's `serviceUrl` as the request
-//!     base. The component never sees the serviceUrl; it only relays the ref
-//!     from its trigger data.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
+//! The endpoint reference binds the request to a validated conversation service URL.
 //!
 //! The agent therefore sends a RELATIVE Bot Connector path (e.g.
-//! `/v3/conversations/{id}/activities`); the proxy verifies the ref and joins
+//! `/v3/conversations/{id}/activities`); the host verifies the ref and joins
 //! it under the validated serviceUrl base with path containment.
 #![allow(clippy::result_large_err)]
 
@@ -129,8 +122,8 @@ struct BotConnectorResponse {
     activity_id: Option<String>,
 }
 
-/// POST an activity to the Bot Connector via the proxy. `path` is a RELATIVE
-/// Bot Connector path — the proxy joins it under the conversation's serviceUrl
+/// POST an activity to the Bot Connector via the outbound host service. `path` is a RELATIVE
+/// Bot Connector path — the outbound host service joins it under the conversation's serviceUrl
 /// (bound by `endpoint_ref`) and injects the bearer token (by connection id).
 async fn bot_connector_post(
     path: &str,
@@ -151,8 +144,8 @@ async fn bot_connector_post(
     let response = client
         .request("POST", path)
         .header("Content-Type", "application/json; charset=utf-8")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .header("X-Runtara-Endpoint-Ref", endpoint_ref)
+        .connection_id(&connection.connection_id)
+        .endpoint_ref(endpoint_ref)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await

@@ -180,12 +180,14 @@ async fn run(shape: Shape, deadline: bool) -> anyhow::Result<()> {
     });
     let result = async {
         let executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))?;
+        executor.set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))?;
         executor.set_connection_resolver(Arc::new(PendingResolver { host: host.clone(), deadline, parallel }))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("fixture".into()),
                     env: HashMap::new(),
                     stderr: None,

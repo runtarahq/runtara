@@ -75,6 +75,7 @@ fn limits() -> PackageLimits {
 }
 fn spec() -> WorkflowRunSpec {
     WorkflowRunSpec {
+        trusted_instance: None,
         trusted_tenant: None,
         env: HashMap::new(),
         stderr: None,
@@ -401,6 +402,7 @@ async fn run_composed(
     let (host, _rx) = super::wasm_performance_baseline::host(&input);
     let ticker = EpochTicker::spawn(engine);
     let run_spec = WorkflowRunSpec {
+        trusted_instance: None,
         trusted_tenant: None,
         runtime: Some(host.clone()),
         ..spec()
@@ -431,6 +433,7 @@ async fn run_composed(
             .execute_invoke_with_context(
                 prepared.instance_pre(),
                 WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: None,
                     runtime: Some(host),
                     ..spec()

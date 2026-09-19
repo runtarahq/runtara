@@ -45,7 +45,6 @@ async fn sqs_dispatch_pipeline() -> anyhow::Result<()> {
 
     let ctx = Arc::new(CallContext::for_test(
         "tenant-test",
-        "http://localhost:9999",
         "http://localhost:9996",
     ));
     let state = HostState::new(ctx.clone());

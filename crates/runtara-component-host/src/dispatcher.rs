@@ -67,11 +67,10 @@ pub struct TestError {
     pub retryable: bool,
 }
 
-/// Routing context shared across calls — HTTP proxy and core URLs.
+/// Runtime address retained for legacy core HTTP consumers.
 /// Per-tenant fields go into `TestCapabilityRequest`.
 #[derive(Debug, Clone)]
 pub struct DispatcherEnv {
-    pub proxy_url: String,
     pub core_http_url: String,
 }
 
@@ -95,6 +94,7 @@ fn parse_memory_max(raw: Option<String>) -> usize {
 }
 
 pub struct ComponentDispatcherService {
+    outbound_http: std::sync::OnceLock<Arc<dyn crate::OutboundHttpHost>>,
     database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     engine: Arc<Engine>,
@@ -112,6 +112,12 @@ pub struct ComponentDispatcherService {
 }
 
 impl ComponentDispatcherService {
+    pub fn set_outbound_http(&self, service: Arc<dyn crate::OutboundHttpHost>) -> Result<()> {
+        self.outbound_http
+            .set(service)
+            .map_err(|_| anyhow::anyhow!("outbound HTTP service already configured"))
+    }
+
     pub fn set_database(&self, database: Arc<dyn crate::DatabaseHost>) -> anyhow::Result<()> {
         self.database
             .set(database)
@@ -222,6 +228,7 @@ impl ComponentDispatcherService {
 
         Ok(Self {
             trusted: Arc::new(trusted),
+            outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             engine,
@@ -277,7 +284,7 @@ impl ComponentDispatcherService {
         // single connection channel now that `invoke` has no out-of-band
         // connection argument. Id-only, exactly like the composed-workflow
         // path (stdlib `agent-connection-input`): a connection is an opaque id,
-        // and the proxy resolves credentials by (id, tenant), so nothing secret
+        // and the outbound service resolves credentials by (id, tenant), so nothing secret
         // rides the input. This also retires the old secret-materialization
         // here (`parameters` used to carry the real connection params).
         let mut input_value = req.input.clone();
@@ -301,16 +308,17 @@ impl ComponentDispatcherService {
 
         let ctx = Arc::new(CallContext::for_test(
             &req.tenant_id,
-            &self.env.proxy_url,
             &self.env.core_http_url,
         ));
         // Capture the same active deadline that protects the component call.
-        // Host-io uses it as an absolute upper bound, so a guest cannot start
+        // The outbound service uses it as an absolute upper bound, so a guest cannot start
         // a fresh 120-second HTTP timeout immediately before this interactive
         // invocation's shorter watchdog expires.
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
         state.trusted = Some(Arc::clone(&self.trusted));
+        state.outbound_http =
+            crate::outbound_http::for_run(self.outbound_http.get(), Some(&req.tenant_id), None);
         state.database =
             crate::database_host::database_for_run(self.database.get(), Some(&req.tenant_id));
         state.connection_resolver = crate::connection_resolver_host::resolver_for_run(
@@ -548,11 +556,7 @@ mod tests {
     }
 
     fn test_ctx() -> Arc<CallContext> {
-        Arc::new(CallContext::for_test(
-            "tenant-test",
-            "http://localhost:1",
-            "http://localhost:4",
-        ))
+        Arc::new(CallContext::for_test("tenant-test", "http://localhost:4"))
     }
 
     /// Instantiate a minimal WAT component that exports a no-arg `run` func and

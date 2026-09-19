@@ -7,14 +7,11 @@
 //! the host architecture and writes `runtara_agent_azure_blob_storage.meta.json`
 //! next to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to resolve the storage
-//! account, compute Azure Shared Key HMAC signatures, and forward to
-//! `https://{account}.blob.core.windows.net`. The ordinary instance receives
-//! only the connection ID. SAS generation forwards to the host, which invokes
-//! the trusted export in a fresh restricted instance with the account key.
-//! That instance performs no network I/O.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
+//! Presigning uses a fresh restricted trusted instance with signing credentials;
+//! that instance performs no network I/O.
 //!
 //! The capability surface mirrors the s3_storage agent so workflows can be
 //! ported between providers with minimal rewiring. "bucket" maps to a container
@@ -160,7 +157,7 @@ fn url_encode_blob_key(s: &str) -> String {
         .collect()
 }
 
-/// Fire an HTTP request via the runtara proxy (Azure Shared Key signing is done server-side).
+/// Fire an HTTP request via the outbound host service (Azure Shared Key signing is done server-side).
 async fn azure_request(
     method: &str,
     path: &str,
@@ -169,9 +166,7 @@ async fn azure_request(
     body: Option<&[u8]>,
 ) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_secs(60));
-    let mut req = client
-        .request(method, path)
-        .header("X-Runtara-Connection-Id", connection_id);
+    let mut req = client.request(method, path).connection_id(connection_id);
 
     for (k, v) in headers {
         req = req.header(k, v);
@@ -1076,7 +1071,7 @@ pub async fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, A
     let conn = require_connection(&input._connection)?;
 
     // Azure Copy Blob: PUT on the destination with x-ms-copy-source pointing
-    // at the source. The proxy rewrites the absolute URL from the relative
+    // at the source. The outbound host service rewrites the absolute URL from the relative
     // source path.
     let dst_path = blob_path(&input.destination_bucket, &input.destination_key);
     let copy_source = format!("/{}/{}", input.source_bucket, input.source_key);

@@ -1,5 +1,8 @@
 //! Actual DSL -> packaged WASM -> EmbeddedWasmRunner -> PostgreSQL.
 //! Requires staged components and an isolated TEST_ENVIRONMENT_DATABASE_URL.
+#[path = "../../runtara-component-host/tests/common/outbound.rs"]
+mod outbound_fixture;
+
 use runtara_core::{domain::InstanceStatus, persistence::Persistence};
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Runner, ScopedAgentRunnerConfig, WorkflowRunnerConfig,
@@ -377,10 +380,24 @@ async fn scoped_runner_stops_a_hung_http_child_on_cancel_or_root_deadline() {
         let address = listener.local_addr().unwrap();
         let (entered, pending) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let expected_instance = Arc::new(std::sync::OnceLock::<String>::new());
+        let provider_instance = expected_instance.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
             let mut bytes = [0; 4096];
-            assert!(stream.read(&mut bytes).await.unwrap() > 0);
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let n = stream.read(&mut bytes).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&bytes[..n]);
+            }
+            let metadata =
+                outbound_fixture::captured_request(std::str::from_utf8(&request).unwrap(), b"");
+            assert_eq!(metadata["tenant"], "scoped-runner-test");
+            assert_eq!(
+                metadata["instance"].as_str(),
+                provider_instance.get().map(String::as_str)
+            );
             entered.send(()).unwrap();
             // The endpoint remains hung until the test confirms workflow teardown.
             let _ = released.await;
@@ -398,11 +415,18 @@ async fn scoped_runner_stops_a_hung_http_child_on_cancel_or_root_deadline() {
             "http",
             "scoped",
         );
-        let runner = h.runner(Some(bounds("http")));
+        let runner = h
+            .runner(Some(bounds("http")))
+            .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+            .unwrap();
         let mut options = h.options(&artifact.wasm_path).await;
+        expected_instance.set(options.instance_id.clone()).unwrap();
         options
             .env
-            .insert("RUNTARA_HTTP_PROXY_URL".into(), format!("http://{address}"));
+            .insert("RUNTARA_TENANT_ID".into(), "forged-guest-tenant".into());
+        options
+            .env
+            .insert("RUNTARA_INSTANCE_ID".into(), "forged-guest-instance".into());
         if !cancel {
             options.timeout = Duration::from_secs(2);
         }

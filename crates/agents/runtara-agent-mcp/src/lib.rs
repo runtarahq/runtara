@@ -25,14 +25,8 @@
 //!
 //! Both capabilities require an `McpConnection` (see Phase 2 below). The
 //! agent never sees the bearer / api-key secret directly: it sends the
-//! request through Runtara's HTTP proxy with `X-Runtara-Connection-Id`, and
-//! the proxy injects auth headers server-side.
-//!
-//! Routing:
-//!   runtara_http::HttpClient::request(...).call_agent_async().await
-//!     → POST $RUNTARA_HTTP_PROXY_URL with body = JSON-RPC envelope
-//!     → server-side: resolve connection → inject Authorization → forward
-//!     → MCP server: respond with tools/list or tools/call payload
+//! request through Runtara's outbound host service with an explicit connection ID.
+//! The host resolves credentials and forwards the JSON-RPC body to the MCP server.
 //!
 //! Each capability invocation runs the full Streamable-HTTP handshake in
 //! one ephemeral session: `initialize` → `notifications/initialized` →

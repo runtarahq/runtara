@@ -141,6 +141,7 @@ async fn run_nested(
     let execution = executor.execute_invoke(
         &pre,
         runtara_component_host::WorkflowRunSpec {
+            trusted_instance: None,
             trusted_tenant: None,
             env: HashMap::new(),
             stderr: None,

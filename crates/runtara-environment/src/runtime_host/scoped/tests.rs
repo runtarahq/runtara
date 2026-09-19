@@ -546,6 +546,7 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
         .execute(
             prepared.command().unwrap(),
             runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: None,
                 env: Default::default(),
                 stderr: None,

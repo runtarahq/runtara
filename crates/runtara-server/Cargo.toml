@@ -29,6 +29,7 @@ path = "src/bin/dump_openapi.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
+component-integration-tests = []
 valkey-integration-tests = []
 valkey-tls-integration-tests = ["valkey-integration-tests"]
 
@@ -72,8 +73,8 @@ path = "tests/object_model_connection_e2e.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
-name = "internal_proxy_mtls"
-path = "tests/internal_proxy_mtls.rs"
+name = "outbound_http"
+path = "tests/outbound_http.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]

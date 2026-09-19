@@ -34,6 +34,8 @@ pub trait InvocationAuthority: Send + Sync {
 
 /// Settings fixed by the root runner, not by child input or relative metadata.
 pub struct ScopedRunSettings {
+    /// Host-established instance attribution inherited by scoped children.
+    pub trusted_instance: Option<String>,
     /// Authoritative root tenant; never inferred from guest environment.
     pub trusted_tenant: Option<String>,
     /// Explicitly approved guest environment, including existing opaque IO context.
@@ -180,6 +182,7 @@ impl ScopedInvocationFactory {
                 Ok(ChildInvocationSpec {
                     deadline: Some(settings.deadline),
                     spec: WorkflowRunSpec {
+                        trusted_instance: settings.trusted_instance.clone(),
                         trusted_tenant: settings.trusted_tenant.clone(),
                         env: settings.env.clone(),
                         stderr: None,

@@ -67,7 +67,7 @@ impl NativeFixture {
         })
     }
     fn state(self: &Arc<Self>) -> HostState {
-        HostState::new(Arc::new(CallContext::for_test("fixture-tenant", "", "")))
+        HostState::new(Arc::new(CallContext::for_test("fixture-tenant", "")))
             .with_connection_resolver(self.clone())
             .with_database(self.clone())
     }

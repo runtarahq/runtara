@@ -45,7 +45,8 @@ impl InvocationScopeFactory for LiveScopes {
             make_spec: Box::new(move |_| {
                 Ok(ChildInvocationSpec {
                     spec: WorkflowRunSpec {
-                        trusted_tenant: None,
+                        trusted_instance: None,
+                        trusted_tenant: Some("fixture-tenant".into()),
                         cancel: Some(cancel),
                         ..spec()
                     },
@@ -195,6 +196,11 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
     })
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
+    executor
+        .set_outbound_http(Arc::new(
+            super::super::outbound_fixture::PublicHttp::default(),
+        ))
+        .unwrap();
     let request =
         PrecompileRequest::for_artifact(super::fixture_nonce(), &compiled.wasm_path).unwrap();
     let response = PrecompileResponse::Success(precompile_artifact(&request).unwrap());
@@ -235,7 +241,8 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
             .execute_invoke_with_context(
                 prepared.instance_pre(),
                 WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_instance: None,
+                    trusted_tenant: Some("fixture-tenant".into()),
                     runtime: Some(host),
                     cancel: Some(run_cancel),
                     ..spec()

@@ -34,16 +34,16 @@ pub struct LoadedAgent {
 /// Build a shared `Linker` configured to satisfy every WASI import an agent
 /// component might pull in via its own guest world — `wasi:cli/command`
 /// (env, stdio, clocks, random, filesystem, sockets) and `wasi:http/proxy`
-/// for outbound HTTP.
+/// for compatibility. Raw WASI HTTP is denied by HostHooks.
 pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     let mut linker = Linker::<HostState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     // `add_only_http_to_linker_async` is the slim version that skips
     // re-adding wasi:io (which wasi::p2::add_to_linker_async already added).
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
-    // Concurrent host-io HTTP hop for agents' proxied requests (wasip3 route
-    // (b)) — agents built against runtara:host-io import it unconditionally.
+    // Timers retain their interface; HTTP uses the injected outbound service.
     crate::host_io::add_host_io_to_linker(&mut linker)?;
+    crate::outbound_http::add_to_linker(&mut linker)?;
     crate::trusted::add_to_linker(&mut linker)?;
     crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
     crate::database_host::add_database_to_linker(&mut linker)?;

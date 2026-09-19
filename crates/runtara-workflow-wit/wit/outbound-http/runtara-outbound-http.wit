@@ -1,0 +1,42 @@
+package runtara:outbound-http@0.1.0;
+
+interface client {
+    record connection-destination {
+        connection-id: string,
+        url: string,
+        endpoint: option<string>,
+        endpoint-ref: option<string>,
+        ai-provider: option<string>,
+        aws-service: option<string>,
+    }
+    variant destination {
+        connection(connection-destination),
+        public(string),
+    }
+    record request-options {
+        destination: destination,
+        method: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+        timeout-ms: option<u64>,
+        max-response-bytes: option<u64>,
+    }
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+    record outbound-error {
+        code: string,
+        message: string,
+        // Existing agent HTTP status/error semantics, when applicable.
+        status: option<u16>,
+        body: list<u8>,
+        retry-after-ms: option<u64>,
+    }
+    request: async func(options: request-options) -> result<response, outbound-error>;
+}
+
+world outbound-http-client {
+    import client;
+}

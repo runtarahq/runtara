@@ -183,7 +183,7 @@ async fn run(cleanup: Cleanup) -> anyhow::Result<()> {
     })?;
     let mut store = Store::new(
         &engine,
-        HostState::new(Arc::new(CallContext::placeholder_for_metadata())),
+        HostState::new(Arc::new(CallContext::for_test("fixture-tenant", ""))),
     );
     let yields = Arc::new(AtomicUsize::new(0));
     let interrupted = Arc::new(AtomicUsize::new(0));

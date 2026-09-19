@@ -83,7 +83,7 @@ async fn memory_own_timeout_recovers_inside_parent_and_continues_outside() -> an
                 if save { vec![model_done()] } else { vec![] },
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             closed(&mut server).await?;
             let InvokeExit::Completed(bytes) = exit else {
                 anyhow::bail!("{exit:?}")
@@ -122,7 +122,7 @@ async fn memory_zero_budget_skips_storage_and_model() -> anyhow::Result<()> {
         let host = Arc::new(Host::new());
         let mut server = Server::scripted(host.clone(), vec![], vec![]).await?;
         assert_code(
-            invoke_with_env(&compiled, host, server.env()).await?,
+            invoke_with_outbound(&compiled, host, server.outbound()).await?,
             "AGENT_TIMEOUT",
         )?;
         server.check().await?;
@@ -156,7 +156,7 @@ async fn memory_deadline_closes_each_load_and_save_io_before_recovery() -> anyho
             )
             .await?;
             assert_code(
-                invoke_with_env(&compiled, host, server.env()).await?,
+                invoke_with_outbound(&compiled, host, server.outbound()).await?,
                 "AGENT_TIMEOUT",
             )?;
             closed(&mut server).await?;
@@ -189,7 +189,7 @@ async fn memory_root_cancel_and_parent_expiry_bypass_local_recovery() -> anyhow:
                     if save { vec![model_done()] } else { vec![] },
                 )
                 .await?;
-                let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+                let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
                 if cancel {
                     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
                     assert!(host.acknowledged.load(Ordering::SeqCst));
@@ -215,7 +215,7 @@ async fn memory_save_has_fresh_budget_after_a_long_model_turn() -> anyhow::Resul
         response["fixture_delay_ms"] = 400.into();
         let mut server =
             Server::scripted(host.clone(), vec![Child::Success; 10], vec![response]).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert_done(exit)?;
         assert_eq!(server.children.load(Ordering::SeqCst), 10);
@@ -245,19 +245,19 @@ async fn memory_completed_load_and_save_replay_without_repeating_io_or_model() -
     *host.checkpoint_signal.lock().unwrap() = Some("runtara:v2:[\"agent\",".into());
     let mut server =
         Server::scripted(host.clone(), vec![Child::Success; 10], vec![model_done()]).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 4);
     assert!(server.requests.lock().unwrap().is_empty());
     host.acknowledged.store(false, Ordering::SeqCst);
     host.clock_override.store(10_000, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 10);
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     *host.checkpoint_signal.lock().unwrap() = None;
     host.clock_override.store(20_000, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert_done(exit)?;
     assert_eq!(server.children.load(Ordering::SeqCst), 10);
@@ -304,13 +304,13 @@ async fn memory_pending_budgets_expire_during_pause_and_reject_corruption() -> a
                 if save { vec![model_done()] } else { vec![] },
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
             if save {
                 host.acknowledged.store(false, Ordering::SeqCst);
                 *host.checkpoint_signal.lock().unwrap() =
                     Some("runtara:v2:[\"agent-deadline\",".into());
-                let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+                let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
                 assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
             }
             *host.checkpoint_signal.lock().unwrap() = None;
@@ -327,7 +327,7 @@ async fn memory_pending_budgets_expire_during_pause_and_reject_corruption() -> a
                 }
                 assert_eq!(changed, 1);
             }
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             server.check().await?;
             if corrupt.is_some() {
                 assert!(
@@ -364,7 +364,7 @@ async fn memory_maximum_budget_preserves_storage_errors_and_success() -> anyhow:
                 if fail { vec![] } else { vec![model_done()] },
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             server.check().await?;
             if fail {
                 assert_code(exit, "OBJECT_MODEL_REQUEST_FAILED")?;

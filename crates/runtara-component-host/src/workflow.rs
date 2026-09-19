@@ -50,7 +50,7 @@ pub use prepared_launcher::{
 
 use crate::engine::EPOCH_TICK;
 use crate::execution_host::{ExecutionContext, ExecutionView};
-use crate::host_io::{DEFAULT_HTTP_TIMEOUT, HostIoContext};
+use crate::host_io::HostIoContext;
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -137,6 +137,8 @@ pub struct WorkflowRunResult {
 pub struct WorkflowRunSpec {
     /// Authoritative tenant supplied by the runner, independent of guest environment.
     pub trusted_tenant: Option<String>,
+    /// Authoritative instance attribution; never sourced from guest environment.
+    pub trusted_instance: Option<String>,
     pub env: HashMap<String, String>,
     pub stderr: Option<std::fs::File>,
     pub timeout: Duration,
@@ -280,6 +282,7 @@ pub struct WorkflowState {
     /// binding); `None` for legacy composed artifacts.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
+    pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
     pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
     connection_resolver:
         Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
@@ -298,9 +301,6 @@ impl ExecutionView for WorkflowState {
 impl HostIoContext for WorkflowState {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
         Some(&self.cleanup_alarm)
-    }
-    fn http_deadline(&self) -> Option<tokio::time::Instant> {
-        Some(self.http_deadline)
     }
 }
 
@@ -425,6 +425,7 @@ impl PreparedWorkflow {
 
 /// Loads composed workflow components and executes them in-process.
 pub struct WorkflowExecutor {
+    outbound_http: std::sync::OnceLock<Arc<dyn crate::OutboundHttpHost>>,
     database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
@@ -434,6 +435,12 @@ pub struct WorkflowExecutor {
 }
 
 impl WorkflowExecutor {
+    pub fn set_outbound_http(&self, service: Arc<dyn crate::OutboundHttpHost>) -> Result<()> {
+        self.outbound_http
+            .set(service)
+            .map_err(|_| anyhow::anyhow!("outbound HTTP service already configured"))
+    }
+
     pub fn set_database(&self, database: Arc<dyn crate::DatabaseHost>) -> Result<()> {
         self.database
             .set(database)
@@ -514,13 +521,15 @@ impl WorkflowExecutor {
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
         crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
         crate::database_host::add_database_to_linker(&mut linker)?;
-        // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
-        // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
+        // Concurrent timers and outbound calls suspend only the calling guest
+        // task, allowing parallel Split subtasks to overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
+        crate::outbound_http::add_to_linker(&mut linker)?;
         crate::execution_host::add_execution_to_linker(&mut linker)?;
         crate::trusted::add_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
+            outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             engine,
@@ -855,6 +864,11 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: None,
+            outbound_http: crate::outbound_http::for_run(
+                self.outbound_http.get(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
             database: crate::database_host::database_for_run(
                 self.database.get(),
                 spec.trusted_tenant.as_deref(),
@@ -1153,6 +1167,11 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
+            outbound_http: crate::outbound_http::for_run(
+                self.outbound_http.get(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
             database: crate::database_host::database_for_run(
                 self.database.get(),
                 spec.trusted_tenant.as_deref(),
@@ -1398,7 +1417,7 @@ impl WorkflowExecutor {
         input: Vec<u8>,
     ) -> anyhow::Result<Result<Vec<u8>, crate::ErrorInfo>> {
         let limits = WorkflowLimits::default();
-        let deadline = tokio::time::Instant::now() + DEFAULT_HTTP_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
             trusted: None,
             wasi: WasiCtxBuilder::new().build(),
@@ -1417,6 +1436,7 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: None,
             execution: None,
+            outbound_http: Err("outbound HTTP is not configured in test state".into()),
             database: Err("database is not configured in test state".into()),
             connection_resolver: Err(
                 "connection resolution is unavailable for direct capability invocation".to_string(),
@@ -1581,6 +1601,7 @@ mod tests {
 
     pub(super) fn run_spec(timeout: Duration) -> WorkflowRunSpec {
         WorkflowRunSpec {
+            trusted_instance: None,
             trusted_tenant: None,
             env: HashMap::new(),
             stderr: None,

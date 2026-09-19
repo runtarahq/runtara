@@ -5,6 +5,9 @@
 #[cfg(feature = "isolation-package")]
 pub mod isolation_package;
 
+pub const OUTBOUND_HTTP_INTERFACE_NAME: &str = "runtara:outbound-http/client@0.1.0";
+pub const OUTBOUND_HTTP_WIT: &str = include_str!("../wit/outbound-http/runtara-outbound-http.wit");
+
 /// Native database operations available to ordinary WASM agents.
 pub const DATABASE_INTERFACE_NAME: &str = "runtara:database/sql@0.1.0";
 pub const DATABASE_WIT: &str = include_str!("../wit/database/runtara-database.wit");
@@ -394,5 +397,55 @@ mod execution_tests {
         ] {
             assert!(tasks.types.contains_key(name));
         }
+    }
+}
+
+#[cfg(test)]
+mod outbound_http_tests {
+    #[test]
+    fn contract_has_async_request_and_explicit_destination() {
+        use wit_parser::{FunctionKind, TypeDefKind};
+        let mut resolve = wit_parser::Resolve::default();
+        let id = resolve
+            .push_str("outbound-http.wit", super::OUTBOUND_HTTP_WIT)
+            .unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), "runtara:outbound-http@0.1.0");
+        let client = &resolve.interfaces[package.interfaces["client"]];
+        assert!(matches!(
+            client.functions["request"].kind,
+            FunctionKind::AsyncFreestanding
+        ));
+        let TypeDefKind::Variant(destination) = &resolve.types[client.types["destination"]].kind
+        else {
+            panic!("destination must be a variant")
+        };
+        assert_eq!(
+            destination
+                .cases
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["connection", "public"]
+        );
+        let TypeDefKind::Record(options) = &resolve.types[client.types["request-options"]].kind
+        else {
+            panic!("request must be a record")
+        };
+        assert_eq!(
+            options
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "destination",
+                "method",
+                "headers",
+                "body",
+                "timeout-ms",
+                "max-response-bytes"
+            ]
+        );
     }
 }

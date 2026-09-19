@@ -28,6 +28,9 @@ use runtara_workflows::{
 };
 use serde_json::Value;
 
+#[path = "../../runtara-component-host/tests/common/outbound.rs"]
+mod outbound_fixture;
+
 mod cooperative_measurement;
 mod cooperative_workflow_cancellation;
 mod isolated_agent_execution;
@@ -453,11 +456,11 @@ struct ServerState {
     /// overlap harness) — the load-robust concurrency signal: overlapping
     /// requests arrive within one think-time regardless of machine load.
     slow_item_arrivals: Mutex<Vec<Instant>>,
-    /// Scripted LLM-proxy responses, served front-to-back to POST /llm-proxy.
+    /// Scripted provider responses consumed by the injected outbound service.
     /// Each entry is the proxy envelope `{status, headers, body}` the
     /// workflow's `call_agent()` will deserialize into an HttpResponse.
     llm_responses: Mutex<Vec<Value>>,
-    /// Proxy request envelopes received on POST /llm-proxy, in order.
+    /// Typed outbound requests captured by the service, in order.
     llm_requests: Mutex<Vec<Value>>,
     /// Connection ids received on the internal metadata endpoint.
     connection_metadata_requests: Mutex<Vec<String>>,
@@ -805,12 +808,92 @@ impl runtara_component_host::DatabaseHost for FixtureDatabase {
     }
 }
 
+struct FixtureOutbound(Arc<ServerState>);
+
+#[async_trait::async_trait]
+impl runtara_component_host::OutboundHttpHost for FixtureOutbound {
+    async fn request(
+        &self,
+        context: &runtara_component_host::outbound_http::OutboundContext,
+        request: runtara_component_host::outbound_http::RequestOptions,
+    ) -> Result<
+        runtara_component_host::outbound_http::Response,
+        runtara_component_host::outbound_http::OutboundError,
+    > {
+        use runtara_component_host::outbound_http::{Destination, Response};
+        assert!(!context.tenant_id.is_empty());
+        let (url, connection, provider, service, endpoint, endpoint_ref) = match request.destination
+        {
+            Destination::Public(url) => (url, None, None, None, None, None),
+            Destination::Connection(c) => (
+                c.url,
+                Some(c.connection_id),
+                c.ai_provider,
+                c.aws_service,
+                c.endpoint,
+                c.endpoint_ref,
+            ),
+        };
+        if url.ends_with("/slow-item") {
+            self.0
+                .slow_item_arrivals
+                .lock()
+                .unwrap()
+                .push(Instant::now());
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            return Ok(Response {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"ok":true}"#.to_vec(),
+            });
+        }
+        // JSON here is only a fixture assertion format, never a network envelope.
+        self.0.llm_requests.lock().unwrap().push(serde_json::json!({
+            "url":url,"connection_id":connection,"method":request.method,
+            "headers":request.headers.into_iter().collect::<HashMap<_, _>>(),
+            "body":request.body.as_deref().and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok()),
+            "body_raw":request.body.as_deref().map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
+            "ai_provider":provider,"aws_service":service,"endpoint":endpoint,"endpoint_ref":endpoint_ref,
+            "timeout_ms":request.timeout_ms,"max_response_bytes":request.max_response_bytes,
+        }));
+        let response = {
+            let mut script = self.0.llm_responses.lock().unwrap();
+            if script.is_empty() {
+                serde_json::json!({"status":599,"headers":{},"body":{"error":"LLM fixture script exhausted"}})
+            } else {
+                script.remove(0)
+            }
+        };
+        Ok(Response {
+            status: response["status"].as_u64().unwrap_or(200) as u16,
+            headers: response["headers"]
+                .as_object()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.as_str().unwrap().into()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            body: match response["body_raw"].as_str() {
+                Some(raw) => base64::engine::general_purpose::STANDARD
+                    .decode(raw)
+                    .expect("valid fixture body"),
+                None => serde_json::to_vec(&response["body"]).unwrap(),
+            },
+        })
+    }
+}
+
 fn executor_with_connections(state: Arc<ServerState>) -> runtara_component_host::WorkflowExecutor {
     let executor =
         runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
             .unwrap();
     executor
         .set_connection_resolver(Arc::new(FixtureConnectionResolver(state.clone())))
+        .unwrap();
+    executor
+        .set_outbound_http(Arc::new(FixtureOutbound(state.clone())))
         .unwrap();
     executor
         .set_database(Arc::new(FixtureDatabase(state)))
@@ -830,57 +913,6 @@ fn route(
 
     if method == "GET" && path == "/health" {
         return (200, serde_json::json!({"ok": true}));
-    }
-
-    // Hermetic LLM stub: `call_agent()` forwards provider requests here when
-    // RUNTARA_HTTP_PROXY_URL points at the mock server. Pop the next scripted
-    // proxy envelope; running out of script is a test bug, surfaced as 599
-    // so the workflow fails loudly instead of hanging on `{success: true}`.
-    if method == "POST" && path == "/llm-proxy" {
-        let envelope: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-        // Parallel-split overlap harness: a proxied request whose TARGET url
-        // ends in /slow-item answers 200 after a fixed think time. Concurrent
-        // requests overlap (thread-per-connection), so the workflow-side wall
-        // clock reveals whether the guest truly parallelized the calls.
-        if envelope["url"]
-            .as_str()
-            .is_some_and(|url| url.ends_with("/slow-item"))
-        {
-            server_state
-                .slow_item_arrivals
-                .lock()
-                .expect("slow_item_arrivals lock")
-                .push(Instant::now());
-            thread::sleep(Duration::from_millis(400));
-            return (
-                200,
-                serde_json::json!({
-                    "status": 200,
-                    "headers": {"content-type": "application/json"},
-                    "body": {"ok": true}
-                }),
-            );
-        }
-        server_state
-            .llm_requests
-            .lock()
-            .expect("llm_requests lock")
-            .push(envelope);
-        let mut responses = server_state
-            .llm_responses
-            .lock()
-            .expect("llm_responses lock");
-        if responses.is_empty() {
-            return (
-                200,
-                serde_json::json!({
-                    "status": 599,
-                    "headers": {},
-                    "body": {"error": "llm stub script exhausted"}
-                }),
-            );
-        }
-        return (200, responses.remove(0));
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
@@ -1458,13 +1490,9 @@ fn run_direct_workflow_capture_attempt(
     let server_handle =
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    // HTTP remains only for the runtime HTTP binding and outbound proxy.
+    // The optional legacy runtime binding still uses HTTP; agents use native fixtures.
     let mut env_pairs: Vec<(String, String)> = vec![
         ("RUNTARA_HTTP_URL".into(), format!("http://{addr}")),
-        (
-            "RUNTARA_HTTP_PROXY_URL".into(),
-            format!("http://{addr}/llm-proxy"),
-        ),
         ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
         ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
         ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
@@ -1474,8 +1502,7 @@ fn run_direct_workflow_capture_attempt(
 
     // Under HostImport, the runtime interface is served by the capturing host
     // (same ServerState + capture sink as the mock server, so assertions see
-    // one uniform CapturedRun shape); the mock keeps serving the wasi:http
-    // traffic that stays real under both bindings (LLM proxy).
+    // one uniform CapturedRun shape). Outbound calls use FixtureOutbound.
     let runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>> =
         (binding == RuntimeBinding::HostImport).then(|| {
             let debug_mode = env_pairs
@@ -1906,6 +1933,7 @@ fn execute_via_embedded_invoke(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
                         trusted_tenant: Some("direct-wasm-execute".into()),
                         env: env_pairs.iter().cloned().collect(),
                         stderr: None,
@@ -1998,6 +2026,7 @@ fn execute_via_embedded(
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("direct-wasm-execute".into()),
                     env: env_pairs.iter().cloned().collect(),
                     stderr: None,
@@ -2627,6 +2656,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("direct-wasm-execute".into()),
                     env: HashMap::new(),
                     stderr: None,
@@ -5885,6 +5915,7 @@ async fn invoke_replaying_parks_with_env(
             .execute_invoke(
                 pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("direct-wasm-execute".into()),
                     env: env.clone(),
                     stderr: None,
@@ -5949,7 +5980,12 @@ fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
             runtara_component_host::build_engine(&runtara_component_host::EngineConfig::default())
                 .expect("build embedded engine");
         runtara_component_host::spawn_epoch_ticker(Arc::clone(&engine));
-        runtara_component_host::WorkflowExecutor::new(engine).expect("build workflow executor")
+        let executor =
+            runtara_component_host::WorkflowExecutor::new(engine).expect("build workflow executor");
+        executor
+            .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+            .expect("fixture outbound service");
+        executor
     })
 }
 
@@ -6745,6 +6781,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("direct-wasm-execute".into()),
                     env: HashMap::new(),
                     stderr: None,
@@ -7048,6 +7085,7 @@ fn direct_wasm_execute_invoke_abi_is_repeatable_across_runs() {
         let run = runtime.block_on(executor.execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("direct-wasm-execute".into()),
                 env: HashMap::new(),
                 stderr: None,
@@ -7507,34 +7545,43 @@ const LIFECYCLE_RETRY_EMBED_CHILD: &str = r#"{
   "outputSchema": {}
 }"#;
 
-fn spawn_retry_http_proxy(
+fn spawn_retry_http_provider(
     response_bodies: Vec<Vec<u8>>,
 ) -> (
     String,
     Arc<std::sync::atomic::AtomicU32>,
     thread::JoinHandle<()>,
 ) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry proxy");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry provider");
     let url = format!(
         "http://{}",
-        listener.local_addr().expect("retry proxy addr")
+        listener.local_addr().expect("retry provider addr")
     );
     let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let stub_hits = hits.clone();
     let handle = thread::spawn(move || {
         for body in response_bodies {
-            let (mut stream, _) = listener.accept().expect("retry proxy request");
+            let (mut stream, _) = listener.accept().expect("retry provider request");
             let mut request = [0u8; 8192];
             let _ = stream.read(&mut request);
             stub_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let fixture: Value = serde_json::from_slice(&body).expect("provider response fixture");
+            let status = fixture["status"].as_u64().unwrap();
+            let body = serde_json::to_vec(&fixture["body"]).unwrap();
+            let extra_headers = fixture["headers"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| format!("{name}: {}\r\n", value.as_str().unwrap()))
+                .collect::<String>();
             let headers = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                "HTTP/1.1 {status} Fixture\r\n{extra_headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                 body.len()
             );
             stream
                 .write_all(headers.as_bytes())
-                .expect("retry proxy headers");
-            stream.write_all(&body).expect("retry proxy body");
+                .expect("retry provider headers");
+            stream.write_all(&body).expect("retry provider body");
         }
     });
     (url, hits, handle)
@@ -7850,6 +7897,7 @@ fn run_invoke_once_with_env(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
                         trusted_tenant: Some("direct-wasm-execute".into()),
                         env,
                         stderr: None,
@@ -8041,7 +8089,7 @@ fn direct_wasm_execute_invoke_one_millisecond_delay_parks_then_resumes_once() {
 #[test]
 fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() {
     let components_dir = direct_e2e_components_dir();
-    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+    let (proxy_url, hits, proxy) = spawn_retry_http_provider(vec![
         br#"{"status":429,"headers":{"retry-after-ms":"5000"},"body":{"error":"rate limited"}}"#
             .to_vec(),
         br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec(),
@@ -8053,8 +8101,7 @@ fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() 
     );
     let input = serde_json::to_vec(&serde_json::json!({ "url": format!("{proxy_url}/item") }))
         .expect("retry input");
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), proxy_url);
+    let env = HashMap::new();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
 
     let first = run_invoke_once_with_env(
@@ -8206,7 +8253,7 @@ fn direct_wasm_execute_invoke_sequential_split_retry_parks_before_second_attempt
 #[test]
 fn direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially() {
     let components_dir = direct_e2e_components_dir();
-    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+    let (proxy_url, hits, proxy) = spawn_retry_http_provider(vec![
         br#"{"status":429,"headers":{"retry-after-ms":"5000"},"body":{"error":"rate limited"}}"#
             .to_vec(),
         br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec(),
@@ -8217,8 +8264,7 @@ fn direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially() {
         &lifecycle_parallel_split_retry_graph(&format!("{proxy_url}/item")),
     );
     let input = br#"{}"#.to_vec();
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), proxy_url);
+    let env = HashMap::new();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
 
     let first = run_invoke_once_with_env(
@@ -8340,7 +8386,7 @@ fn direct_wasm_execute_invoke_embed_workflow_retry_parks_before_second_attempt()
 #[test]
 fn direct_wasm_execute_embed_agent_error_preserves_durable_retry_replay() {
     let components_dir = direct_e2e_components_dir();
-    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+    let (proxy_url, hits, proxy) = spawn_retry_http_provider(vec![
         br#"{"status":503,"headers":{},"body":{"error":"unavailable"}}"#.to_vec(),
         br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec(),
     ]);
@@ -8369,7 +8415,7 @@ fn direct_wasm_execute_embed_agent_error_preserves_durable_retry_replay() {
     );
     let input =
         serde_json::to_vec(&serde_json::json!({"url":format!("{proxy_url}/item")})).unwrap();
-    let env = HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), proxy_url)]);
+    let env = HashMap::new();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
     let first = run_invoke_once_with_env(
         &artifact.wasm_path,
@@ -8441,7 +8487,7 @@ fn direct_wasm_execute_embed_agent_error_preserves_durable_retry_replay() {
 #[test]
 fn direct_wasm_execute_invoke_retry_park_observes_signal_before_retrying() {
     let components_dir = direct_e2e_components_dir();
-    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+    let (proxy_url, hits, proxy) = spawn_retry_http_provider(vec![
         br#"{"status":429,"headers":{"retry-after-ms":"5000"},"body":{"error":"rate limited"}}"#
             .to_vec(),
     ]);
@@ -8452,8 +8498,7 @@ fn direct_wasm_execute_invoke_retry_park_observes_signal_before_retrying() {
     );
     let input = serde_json::to_vec(&serde_json::json!({ "url": format!("{proxy_url}/item") }))
         .expect("retry input");
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), proxy_url);
+    let env = HashMap::new();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
 
     let first = run_invoke_once_with_env(
@@ -10962,6 +11007,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
                         trusted_tenant: Some("direct-wasm-execute".into()),
                         env: HashMap::new(),
                         stderr: None,
@@ -11246,6 +11292,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
                         trusted_tenant: Some("direct-wasm-execute".into()),
                         env: HashMap::new(),
                         stderr: None,
@@ -11436,10 +11483,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
 
     let mut env = HashMap::new();
     env.insert("RUNTARA_HTTP_URL".to_string(), format!("http://{addr}"));
-    env.insert(
-        "RUNTARA_HTTP_PROXY_URL".to_string(),
-        format!("http://{addr}/llm-proxy"),
-    );
     env.insert(
         "RUNTARA_TENANT_ID".to_string(),
         "direct-wasm-execute".to_string(),
@@ -11721,9 +11764,8 @@ fn direct_wasm_execute_parallel_split_http_overlap() {
     const ITEMS: usize = 4;
 
     for parallelism in [1u32, ITEMS as u32] {
-        // The http agent forwards through RUNTARA_HTTP_PROXY_URL (the harness
-        // mock); the target URL is carried in the proxy envelope and answered
-        // by the mock's /slow-item branch — no real dial happens.
+        // The native fixture awaits /slow-item requests concurrently without
+        // network I/O, exposing whether guest branches overlap their calls.
         let graph = parallel_http_split_graph("http://slow.invalid", parallelism);
         let captured = run_direct_workflow_capture(
             &components_dir,
@@ -12621,7 +12663,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let components_dir = direct_e2e_components_dir();
 
-    // Slow proxy stub: the host-io hyper client POSTs the proxy envelope
+    // Slow provider stub: the injected service sends raw HTTP requests
     // here; each response takes 300ms so the drain loop genuinely waits
     // (and polls) while subtasks are in flight. Thread-per-connection.
     let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -12645,7 +12687,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
                         let _ = stream.read(&mut buf);
                         hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         thread::sleep(Duration::from_millis(300));
-                        let body = br#"{"status":200,"headers":{},"body":{"ok":true}}"#;
+                        let body = br#"{"ok":true}"#;
                         let response = format!(
                             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                             body.len()
@@ -12685,8 +12727,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
     let host = Arc::new(PersistingRuntimeHost::new(br#"{"items":[1,2,3,4]}"#));
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
+    let env = HashMap::new();
     let run_once = |host: Arc<PersistingRuntimeHost>| {
         let env = env.clone();
         runtime.block_on(async {
@@ -12698,6 +12739,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
                         trusted_tenant: Some("direct-wasm-execute".into()),
                         env,
                         stderr: None,
@@ -13019,6 +13061,7 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("direct-wasm-execute".into()),
                     env: HashMap::new(),
                     stderr: None,
@@ -13265,6 +13308,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
         .execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("tenant-authorized".into()),
                 env: HashMap::from([(
                     "RUNTARA_TENANT_ID".into(),
@@ -13297,6 +13341,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("tenant-authorized".into()),
                     env: HashMap::new(),
                     stderr: None,
@@ -13503,7 +13548,6 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     let replacement = runtara_component_host::ComponentDispatcherService::from_dir(
         _bundle.path(),
         runtara_component_host::DispatcherEnv {
-            proxy_url: "http://127.0.0.1:1".into(),
             core_http_url: "http://127.0.0.1:1".into(),
         },
     )
@@ -13529,6 +13573,7 @@ async fn run_trusted_fixture(
         .execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("tenant-authorized".into()),
                 env: HashMap::new(),
                 stderr: None,
@@ -13586,7 +13631,6 @@ async fn trusted_test_dispatcher(
     let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
         bundle.path(),
         runtara_component_host::DispatcherEnv {
-            proxy_url: "http://127.0.0.1:1".into(),
             core_http_url: "http://127.0.0.1:1".into(),
         },
     )
@@ -13632,7 +13676,6 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
     .unwrap();
     compose_direct_workflow(&mut compiled, &components).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
     let (sink, _events) = mpsc::channel();
     let (stop, stop_rx) = mpsc::channel();
     let state = Arc::new(ServerState {
@@ -13664,6 +13707,9 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
     executor
         .set_connection_resolver(Arc::new(FixtureConnectionResolver(state.clone())))
         .unwrap();
+    executor
+        .set_outbound_http(Arc::new(FixtureOutbound(state.clone())))
+        .unwrap();
     let pre = executor
         .load_instance_pre(&compiled.wasm_path)
         .await
@@ -13672,14 +13718,9 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
         .execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("tenant-authorized".into()),
-                env: HashMap::from([
-                    (
-                        "RUNTARA_HTTP_PROXY_URL".into(),
-                        format!("http://{addr}/llm-proxy"),
-                    ),
-                    ("RUNTARA_TENANT_ID".into(), "tenant-authorized".into()),
-                ]),
+                env: HashMap::from([("RUNTARA_TENANT_ID".into(), "tenant-authorized".into())]),
                 stderr: None,
                 timeout: Duration::from_secs(10),
                 cancel: None,

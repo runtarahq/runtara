@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Isolated local-server E2E for workflow-owned Slack/Mailgun attachments.
 
-Requires Docker (pgvector/pgvector:pg18), redis-server, a built runtara-server,
+Requires Linux/OpenSSL, Docker (pgvector/pgvector:pg18), redis-server, a built runtara-server,
 and scripts/build-agent-components.sh output. Uses synthetic connections and a
-loopback provider-proxy fixture; never contacts Slack, Mailgun, or real storage.
+loopback HTTPS provider fixture; never contacts Slack, Mailgun, or real storage.
+The fixture CA is trusted only by the child process through SSL_CERT_FILE.
 Only the processes/container created here are stopped. Logs are retained in /tmp.
 """
 import base64
@@ -14,6 +15,8 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import ssl
+import sys
 import subprocess
 import tempfile
 import threading
@@ -21,6 +24,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler
+from urllib.parse import urlsplit, parse_qs
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = b"\x00\xffworkflow attachment\x80"
@@ -53,53 +57,66 @@ def request(url, payload=None, headers=None, raw=None):
 
 
 class Provider(BaseHTTPRequestHandler):
+    tls_context = None
+    allowed_tls_hosts = {"slack.com", "files.slack.com", "storage-us-west1.api.mailgun.net", "api.mailgun.net"}
+
     def log_message(self, *_):
         pass
 
     def do_CONNECT(self):
-        # Catch accidental native credentialed egress without reaching providers.
-        REQUESTS.append({"unexpected_connect": self.path})
-        self.send_error(502)
-
-    def do_GET(self):
-        REQUESTS.append({"unexpected_get": self.path})
-        if self.path == "/bounded":
-            self.send_response(200)
-            self.send_header("Content-Length", "16")
-            self.end_headers()
-            self.wfile.write(b"0123456789abcdef")
-        elif self.path == "/redirect":
-            self.send_response(302)
-            self.send_header("Location", "/must-not-follow")
-            self.end_headers()
-        else:
+        # Terminate TLS locally for these synthetic providers. Never tunnel onward.
+        host, _, port = self.path.rpartition(":")
+        if host not in self.allowed_tls_hosts or port != "443":
             self.send_error(502)
-
-    def do_POST(self):
-        event = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        REQUESTS.append(event)
-        url = event.get("url", "")
-        headers = {"content-type": "application/octet-stream"}
-        status = 200
-        if url.endswith("/files.info"):
-            args = event.get("body") or json.loads(base64.b64decode(event["body_raw"]))
-            body = json.dumps({"ok": True, "file": {"id": args["file"], "name": "invoice.bin", "mimetype": "application/octet-stream", "size": len(CONTENT), "url_private_download": FILE_URL}}).encode()
-        elif url == MESSAGE_URL:
-            headers = {"content-type": "application/json"}
-            body = json.dumps({"body-plain": "email text", "body-html": "<p>email text</p>", "attachments": [{"name": "invoice.bin", "url": MESSAGE_URL + "/attachments/0"}]}).encode()
-        elif url in [FILE_URL, MESSAGE_URL + "/attachments/0"]:
-            body = CONTENT
-        elif event.get("method") == "PUT" and url == "/attachment-test/invoice.bin":
-            UPLOADED.append(base64.b64decode(event["body_raw"]))
-            body = b""
-        else:
-            status, body = 404, b""
-        data = json.dumps({"status": status, "headers": headers, "body_raw": base64.b64encode(body).decode()}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
+            return
+        self.send_response(200, "Connection established")
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.flush()
+        self.connection = self.tls_context.wrap_socket(self.connection, server_side=True)
+        self.rfile = self.connection.makefile("rb", self.rbufsize)
+        self.wfile = self.connection.makefile("wb", self.wbufsize)
+        self.handle_one_request()
+        self.close_connection = True
+
+    def provider_request(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        REQUESTS.append({"method": self.command, "path": path})
+        status, response = 200, b""
+        headers = {"Content-Type": "application/octet-stream"}
+        if path == "/bounded":
+            response = bytes(9 * 1024 * 1024)
+        elif path == "/redirect":
+            status, headers = 302, {"Location": "/must-not-follow"}
+        elif path.endswith("/files.info"):
+            args = json.loads(body) if body else {key: values[0] for key, values in parse_qs(parsed.query).items()}
+            response = json.dumps({"ok": True, "file": {"id": args["file"], "name": "invoice.bin", "mimetype": "application/octet-stream", "size": len(CONTENT), "url_private_download": FILE_URL}}).encode()
+        elif path == urlsplit(MESSAGE_URL).path:
+            headers = {"Content-Type": "application/json"}
+            response = json.dumps({"body-plain": "email text", "body-html": "<p>email text</p>", "attachments": [{"name": "invoice.bin", "url": MESSAGE_URL + "/attachments/0"}]}).encode()
+        elif path in [urlsplit(FILE_URL).path, urlsplit(MESSAGE_URL).path + "/attachments/0"]:
+            response = CONTENT
+        elif self.command == "PUT" and path == "/attachment-test/invoice.bin":
+            UPLOADED.append(body)
+        else:
+            status = 404
+        self.send_response(status)
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(response)
+        except (BrokenPipeError, ConnectionResetError):
+            # The host can reject Content-Length before consuming the oversized body.
+            if path != "/bounded":
+                raise
+
+    do_GET = provider_request
+    do_POST = provider_request
+    do_PUT = provider_request
 
 
 def free_port():
@@ -119,6 +136,7 @@ def wait_until(fn, seconds=90):
 
 
 def main():
+    check(sys.platform.startswith("linux"), "This HTTPS fixture requires Linux/OpenSSL SSL_CERT_FILE trust")
     binary = Path(os.environ.get("RUNTARA_SERVER_BIN", ROOT / "target/debug/runtara-server")).resolve()
     components = Path(os.environ.get("RUNTARA_AGENT_COMPONENTS_DIR", ROOT / "target/wasm32-wasip2/release")).resolve()
     check(binary.is_file(), "Build runtara-server first")
@@ -128,6 +146,15 @@ def main():
     print(f"Test logs: {work}", flush=True)
     container = "runtara-attachments-" + secrets.token_hex(5)
     children = []
+    ca = work / "fixture-ca.pem"
+    key = work / "fixture-key.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=RuntaraOutboundFixture", "-addext",
+                    "subjectAltName=" + ",".join("DNS:" + host for host in sorted(Provider.allowed_tls_hosts)),
+                    "-keyout", str(key), "-out", str(ca)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    key.chmod(0o600)
+    Provider.tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    Provider.tls_context.load_cert_chain(ca, key)
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     mock = f"http://127.0.0.1:{provider.server_port}"
@@ -150,9 +177,10 @@ def main():
             "RUSTC_WRAPPER": "", "RUNTARA_SERVER_DATABASE_URL": dbbase + "attachment_server", "OBJECT_MODEL_DATABASE_URL": dbbase + "attachment_server", "RUNTARA_DATABASE_URL": dbbase + "attachment_runtime",
             "TENANT_ID": "attachments-e2e", "SERVER_HOST": "127.0.0.1", "SERVER_PORT": str(public), "INTERNAL_PORT": str(internal), "RUNTARA_CORE_PORT": str(core), "RUNTARA_ENVIRONMENT_PORT": str(environment), "RUNTARA_CORE_HTTP_PORT": str(core_http), "RUNTARA_ENV_HTTP_PORT": str(env_http),
             "RUNTARA_AGENT_COMPONENTS_DIR": str(components), "DATA_DIR": str(work / "data"), "AUTH_PROVIDER": "local", "SESSION_TOKEN_SECRET": secrets.token_hex(32),
-            "VALKEY_HOST": "127.0.0.1", "VALKEY_PORT": str(redis), "OTEL_SDK_DISABLED": "true", "RUNTARA_SDK_BACKEND": "http", "SQLX_OFFLINE": "true", "RUST_LOG": "warn", "RUNTARA_HTTP_PROXY_URL": mock + "/proxy",
+            "VALKEY_HOST": "127.0.0.1", "VALKEY_PORT": str(redis), "OTEL_SDK_DISABLED": "true", "RUNTARA_SDK_BACKEND": "http", "SQLX_OFFLINE": "true", "RUST_LOG": "warn",
             "RUNTARA_PROXY_ALLOWED_HOSTS": "127.0.0.1", "RUNTARA_PROXY_ALLOW_HTTP_HOSTS": "127.0.0.1", "RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS": "127.0.0.1",
             "HTTPS_PROXY": mock, "HTTP_PROXY": mock, "NO_PROXY": "127.0.0.1,localhost",
+            "SSL_CERT_FILE": str(ca),
         })
         server_log = open(work / "server.log", "w")
         server = subprocess.Popen([str(binary)], env=env, cwd=work, stdout=server_log, stderr=subprocess.STDOUT)
@@ -275,19 +303,17 @@ def main():
         check(metadata["success"] and metadata["output"]["message"]["body-html"] == "<p>email text</p>", "Stored message retrieval failed")
         check(len(REQUESTS) == count + 1, "Get Message must not download attachments")
         print("PASS: Mailgun stored-message retrieval through the local server", flush=True)
-        proxy_url = f"http://127.0.0.1:{internal}/api/internal/proxy"
-        proxy_headers = {"X-Org-Id": "attachments-e2e"}
-        redirected = request(proxy_url, {"method": "GET", "url": mock + "/redirect", "max_response_bytes": 100}, proxy_headers)
-        check(redirected["status"] == 302, "Production proxy followed a redirect")
-        check(not any(item.get("unexpected_get") == "/must-not-follow" for item in REQUESTS), "Redirect target was contacted")
-        bounded = Request(proxy_url, data=json.dumps({"method": "GET", "url": mock + "/bounded", "max_response_bytes": 5}).encode(), headers={**proxy_headers, "Content-Type": "application/json"})
-        try:
-            OPENER.open(bounded, timeout=10)
-            raise AssertionError("Proxy accepted an oversized response")
-        except HTTPError as error:
-            check(error.code == 413, "Proxy returned the wrong size-limit status")
-            check(json.loads(error.read())["code"] == "RESPONSE_TOO_LARGE", "Size-limit error code missing")
-        print("PASS: production proxy refuses redirects and bounds upstream responses", flush=True)
+        def http_request(path):
+            return request(api + "/agents/http/capabilities/http-request/test", {"input": {
+                "method": "GET", "url": mock + path, "response_type": "json", "fail_on_error": False,
+            }})
+        redirected = http_request("/redirect")
+        check(redirected["success"] and redirected["output"]["status_code"] == 302, "Native outbound service followed a redirect")
+        check(not any(item.get("path") == "/must-not-follow" for item in REQUESTS), "Redirect target was contacted")
+        bounded = http_request("/bounded")
+        check(bounded["success"] and bounded["output"]["status_code"] == 413, "Host accepted an oversized response")
+        check(bounded["output"]["body"]["code"] == "RESPONSE_TOO_LARGE", "Size-limit error code missing")
+        print("PASS: native outbound host calls refuse redirects and bound upstream responses", flush=True)
     finally:
         for child in reversed(children):
             child.terminate()

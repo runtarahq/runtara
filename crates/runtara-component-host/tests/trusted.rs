@@ -76,7 +76,6 @@ async fn dispatcher_with_credentials(
         }
     }
     let env = DispatcherEnv {
-        proxy_url: "http://127.0.0.1:1".into(),
         core_http_url: "http://127.0.0.1:1".into(),
     };
     let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env).await?;
@@ -238,6 +237,7 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
                 execution: None,
                 make_spec: Box::new(|_| {
                     Ok(WorkflowRunSpec {
+                        trusted_instance: None,
                         trusted_tenant: Some("tenant-a".into()),
                         env: HashMap::from([("RUNTARA_TENANT_ID".into(), "forged".into())]),
                         stderr: None,

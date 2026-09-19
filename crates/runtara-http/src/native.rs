@@ -45,25 +45,16 @@ impl Default for NativeHttpClient {
 
 /// Execute a request using the native ureq backend.
 pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError> {
+    if builder.connection_id.is_some() {
+        return Err(HttpError::Transport(
+            "Connection-aware HTTP requires the outbound host service".into(),
+        ));
+    }
     // Build the agent: use the stored one or create a fresh one
     let agent = builder.agent.unwrap_or_else(ureq::Agent::new);
 
     // Build the URL with query parameters
-    let url = if builder.query_params.is_empty() {
-        builder.url.clone()
-    } else {
-        let query_string: String = builder
-            .query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        if builder.url.contains('?') {
-            format!("{}&{}", builder.url, query_string)
-        } else {
-            format!("{}?{}", builder.url, query_string)
-        }
-    };
+    let url = crate::build_url_with_query(&builder.url, &builder.query_params);
 
     let mut request = agent.request(&builder.method, &url);
 
@@ -145,20 +136,4 @@ fn extract_headers(resp: &ureq::Response) -> HashMap<String, String> {
         }
     }
     headers
-}
-
-/// Simple percent-encoding for query parameter keys/values.
-fn url_encode(s: &str) -> String {
-    let mut result = String::new();
-    for c in s.chars() {
-        match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => result.push(c),
-            _ => {
-                for byte in c.to_string().as_bytes() {
-                    result.push_str(&format!("%{:02X}", byte));
-                }
-            }
-        }
-    }
-    result
 }

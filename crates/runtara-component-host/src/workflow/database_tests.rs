@@ -136,9 +136,8 @@ async fn restricted_instances_deny_all_database_imports_even_with_a_backend() ->
     );
     let component = Component::new(&engine, source)?;
     let database = Arc::new(Database::default());
-    let mut state =
-        crate::HostState::new(Arc::new(crate::CallContext::for_test("tenant-a", "", "")))
-            .with_database(database.clone());
+    let mut state = crate::HostState::new(Arc::new(crate::CallContext::for_test("tenant-a", "")))
+        .with_database(database.clone());
     state.restricted = true;
     let mut store = wasmtime::Store::new(&engine, state);
     let linker = crate::build_linker(&engine)?;

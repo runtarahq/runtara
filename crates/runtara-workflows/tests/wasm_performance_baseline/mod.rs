@@ -169,6 +169,7 @@ async fn run(
         .execute_invoke(
             pre,
             WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,

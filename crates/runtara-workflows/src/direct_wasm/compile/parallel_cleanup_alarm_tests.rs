@@ -53,6 +53,7 @@ async fn aborts(shape: Shape, cpu_body: bool, inherited: bool) -> anyhow::Result
         executor.execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
@@ -119,9 +120,14 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
         graph["steps"]["scope"]["subgraph"]["steps"]["b"]["connectionRef"] =
             json!({"valueType":"immediate","value":"pending"});
     }
-    graph["steps"]["scope"]["subgraph"]["steps"]["a"]["timeout"] = 500.into();
+    // Allow cold component/HTTP setup before returning the fast request.
+    // Seven seconds still exceeds this budget plus the five-second cleanup grace.
+    graph["steps"]["scope"]["subgraph"]["steps"]["a"]["timeout"] = 1_000.into();
     let compiled = compile_graph(dir.path(), graph)?;
     let executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(executor().engine()))?;
+    executor.set_outbound_http(Arc::new(
+        outbound_fixture::PublicHttp::with_loopback_connections(),
+    ))?;
     let lookup_started = Arc::new(tokio::sync::Notify::new());
     let lookup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     executor.set_connection_resolver(Arc::new(SlowResolver(
@@ -129,15 +135,18 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
         lookup_count.clone(),
     )))?;
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
-    let server = async move {
+    let server = tokio::spawn(async move {
         let mut requests = tokio::task::JoinSet::new();
         for _ in 0..2 {
             let (mut socket, _) = listener.accept().await?;
             let lookup_started = lookup_started.clone();
             requests.spawn(async move {
                 let mut headers = Vec::new();
-                while !headers.ends_with(b"\r\n\r\n") {
-                    headers.push(socket.read_u8().await?);
+                let mut buffer = [0; 4096];
+                while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let n = socket.read(&mut buffer).await?;
+                    anyhow::ensure!(n > 0, "provider request ended before headers");
+                    headers.extend_from_slice(&buffer[..n]);
                     anyhow::ensure!(headers.len() < 8192, "oversized fixture request");
                 }
                 let slow = headers.starts_with(b"GET /slow ");
@@ -145,7 +154,7 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
                 if preparation && !slow {
                     tokio::time::timeout(Duration::from_secs(2), lookup_started.notified()).await?;
                 } else if !preparation && slow {
-                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    tokio::time::sleep(Duration::from_secs(7)).await;
                 }
                 socket
                     .write_all(
@@ -166,14 +175,22 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
             "wrong lookup count"
         );
         Ok::<_, anyhow::Error>(())
-    };
+    });
+    struct AbortFixture(tokio::task::AbortHandle);
+    impl Drop for AbortFixture {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _server_guard = AbortFixture(server.abort_handle());
     let run = executor.execute_invoke(
         &pre,
         runtara_component_host::WorkflowRunSpec {
+            trusted_instance: None,
             trusted_tenant: Some("fixture".into()),
             env: HashMap::new(),
             stderr: None,
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(11),
             cancel: None,
             limits: Default::default(),
             runtime: Some(Arc::new(Host::new())),
@@ -181,29 +198,13 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
         b"{}".to_vec(),
     );
     let started = Instant::now();
-    let (result, server) = tokio::time::timeout(Duration::from_secs(12), async {
-        tokio::pin!(run, server);
-        tokio::select! {
-            result = &mut run => {
-                // A failed workflow need not send the remaining fixture requests.
-                // Report its actual exit instead of waiting for an unused listener.
-                let server = if matches!(result.exit, InvokeExit::Completed(_)) {
-                    Some(server.await)
-                } else {
-                    None
-                };
-                (result, server)
-            }
-            server = &mut server => (run.await, Some(server)),
-        }
-    })
-    .await?;
+    let result = tokio::time::timeout(Duration::from_secs(13), run).await?;
     let InvokeExit::Completed(bytes) = result.exit else {
         anyhow::bail!("{result:?}");
     };
-    server.expect("successful execution awaits its fixture")?;
+    tokio::time::timeout(Duration::from_secs(2), server).await???;
     assert_eq!(serde_json::from_slice::<Value>(&bytes)?, json!({"ok":true}));
-    assert!(started.elapsed() >= Duration::from_secs(6));
+    assert!(started.elapsed() >= Duration::from_secs(7));
     Ok(())
 }
 
@@ -235,7 +236,7 @@ impl runtara_component_host::ConnectionResolverHost for SlowResolver {
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.0.notify_one();
         // Native preparation outlives the returned peer's timeout and cleanup grace.
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        tokio::time::sleep(Duration::from_secs(7)).await;
         Ok(serde_json::to_vec(
             &json!({"connectionId":connection,"integrationId":"http_bearer",
             "status":"ACTIVE","resources":[],"metadata":null}),

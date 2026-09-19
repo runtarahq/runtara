@@ -72,7 +72,7 @@ async fn attempt_checkpoint_read_failure_never_reinvokes() -> anyhow::Result<()>
         let host = Arc::new(Host::new());
         host.fail_checkpoints("::attempt::", false);
         let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_storage_error(exit, false);
         assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -102,7 +102,7 @@ async fn parallel_prelaunch_preserves_transient_checkpoint_failure() -> anyhow::
         .unwrap()
         .remaining = 1;
     let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert_storage_error(exit, false);
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -119,7 +119,7 @@ async fn breakpoint_checkpoint_failure_prevents_step_execution() -> anyhow::Resu
     *host.recovery_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
     host.fail_checkpoints("breakpoint", true);
     let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     assert_storage_error(exit, true);
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -155,13 +155,13 @@ async fn checkpoint_failure_resolves_queued_parallel_calls() -> anyhow::Result<(
         let host = Arc::new(Host::new());
         host.fail_checkpoints(pattern, false);
         host.checkpoint_fault.lock().unwrap().as_mut().unwrap().skip = skip;
-        // A bound but unserved listener keeps any started proxy call pending.
+        // A bound but unserved listener keeps any started outbound call pending.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let env = HashMap::from([(
-            "RUNTARA_HTTP_PROXY_URL".into(),
-            format!("http://{}/proxy", listener.local_addr()?),
-        )]);
-        let exit = invoke_with_env(&compiled, host, env).await?;
+        let outbound = Arc::new(outbound_fixture::PublicHttp::with_upstream(format!(
+            "http://{}/upstream",
+            listener.local_addr()?
+        )));
+        let exit = invoke_with_outbound(&compiled, host, outbound).await?;
         assert_storage_error(exit, false);
     }
     Ok(())
@@ -182,7 +182,7 @@ async fn attempt_checkpoint_write_failure_stops_retry_and_finish() -> anyhow::Re
         let host = Arc::new(Host::new());
         host.fail_checkpoints("::attempt::", true);
         let mut server = Server::start(host.clone(), vec![Child::Retryable], 0).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert_storage_error(exit, true);
         assert_eq!(server.children.load(Ordering::SeqCst), 1);
@@ -303,7 +303,7 @@ async fn live_peer_server_preparation(
                     anyhow::ensure!(n > 0, "incomplete fixture body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
-                let request: Value = serde_json::from_slice(&bytes[end..end+length])?;
+                let request = outbound_fixture::captured_request(std::str::from_utf8(&bytes[..end])?, &bytes[end..end+length]);
                 count.fetch_add(1, Ordering::SeqCst);
                 if request["url"].as_str().unwrap().ends_with("/slow") {
                     if matches!(preparation, Some(Preparation::ReturnBeforeSecond(_))) {
@@ -368,17 +368,9 @@ async fn write_peer_response(
     stream: &mut tokio::net::TcpStream,
     response: &Value,
 ) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec(response)?;
     stream
-        .write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            )
-            .as_bytes(),
-        )
+        .write_all(&outbound_fixture::response_bytes(response))
         .await?;
-    stream.write_all(&bytes).await?;
     Ok(())
 }
 
@@ -394,7 +386,7 @@ async fn checkpoint_failure_resolves_live_parallel_io_before_reporting() -> anyh
         host.fail_checkpoints("runtara:v2:[\"agent\",", true);
         *host.failure_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
         let mut server = live_peer_server(host.clone(), body, false).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_storage_error(exit, true);
         assert_eq!(server.children.load(Ordering::SeqCst), 2);

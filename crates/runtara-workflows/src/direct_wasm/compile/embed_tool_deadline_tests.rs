@@ -252,7 +252,7 @@ impl Server {
                     .unwrap_or(0);
                 let request_line = headers.lines().next().unwrap();
                 assert!(
-                    request_line.contains("/proxy"),
+                    request_line.contains("/upstream"),
                     "unexpected internal HTTP route: {request_line}"
                 );
                 while bytes.len() < end + length {
@@ -261,7 +261,10 @@ impl Server {
                     bytes.extend_from_slice(&buffer[..n]);
                 }
                 let response = {
-                    let envelope: Value = serde_json::from_slice(&bytes[end..end + length])?;
+                    let envelope = outbound_fixture::captured_request(
+                        std::str::from_utf8(&bytes[..end])?,
+                        &bytes[end..end + length],
+                    );
                     if envelope["connection_id"] == "mcp-conn"
                         || envelope["url"]
                             .as_str()
@@ -327,17 +330,9 @@ impl Server {
                     cleanup.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
-                let body = serde_json::to_vec(&response)?;
                 stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    )
+                    .write_all(&outbound_fixture::response_bytes(&response))
                     .await?;
-                stream.write_all(&body).await?;
             }
         });
         Ok(Self {
@@ -350,14 +345,11 @@ impl Server {
             closed,
         })
     }
-    fn env(&self) -> HashMap<String, String> {
-        HashMap::from([
-            (
-                "RUNTARA_HTTP_PROXY_URL".into(),
-                format!("{}/proxy", self.url),
-            ),
-            ("RUNTARA_TENANT_ID".into(), "fixture".into()),
-        ])
+    fn outbound(&self) -> Arc<dyn runtara_component_host::OutboundHttpHost> {
+        Arc::new(outbound_fixture::PublicHttp::with_upstream(format!(
+            "{}/upstream",
+            self.url
+        )))
     }
     async fn check(&mut self) -> anyhow::Result<()> {
         if self.task.is_finished() {
@@ -374,7 +366,7 @@ async fn embed_tool_zero_budget_is_model_feedback_without_child_io() -> anyhow::
         let compiled = compiled(dir.path(), durable, Some(0), None)?;
         let host = Arc::new(Host::new());
         let mut server = Server::start(host.clone(), vec![], 1).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -405,7 +397,7 @@ async fn embed_tool_pending_io_closes_and_next_call_has_fresh_budget() -> anyhow
             let compiled = compiled(dir.path(), durable, Some(400), None)?;
             let host = Arc::new(Host::new());
             let mut server = Server::start(host.clone(), script, 2).await?;
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             server.check().await?;
             let InvokeExit::Completed(bytes) = exit else {
                 anyhow::bail!("{exit:?}")
@@ -453,7 +445,7 @@ async fn embed_tool_root_cancel_and_parent_timeout_bypass_model_feedback() -> an
                 1,
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             if cancel {
                 // This fixture host acknowledges the signal through the runtime
@@ -497,7 +489,7 @@ async fn embed_tool_resume_reuses_completed_call_and_original_pending_budget() -
         Server::scripted(host.clone(), vec![Child::Success], vec![turn, model_done()]).await?;
     for now in [1_000, 1_100] {
         host.clock_override.store(now, Ordering::SeqCst);
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit,InvokeExit::Suspended(ref wakes) if matches!(wakes.as_slice(),[runtara_component_host::lifecycle::WorkflowWake::At(1_200)])),
@@ -510,7 +502,7 @@ async fn embed_tool_resume_reuses_completed_call_and_original_pending_budget() -
         );
     }
     host.clock_override.store(1_200, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")
@@ -559,7 +551,7 @@ async fn embed_tool_untimed_calls_preserve_errors_success_and_completed_replay()
         let host = Arc::new(Host::new());
         let mut server =
             Server::start(host.clone(), vec![Child::Permanent, Child::Success], 2).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -580,7 +572,7 @@ async fn embed_tool_untimed_calls_preserve_errors_success_and_completed_replay()
         }
         if durable {
             host.clock_override.store(u64::MAX, Ordering::SeqCst);
-            let replay = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let replay = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             assert!(
                 matches!(replay,InvokeExit::Completed(ref value) if value == &bytes),
@@ -601,7 +593,7 @@ async fn embed_tool_own_timeout_allows_model_to_finish_inside_parent_budget() ->
         let compiled = compiled(dir.path(), durable, Some(200), Some(4_000))?;
         let host = Arc::new(Host::new());
         let mut server = Server::start(host.clone(), vec![Child::Headers], 1).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         let requests = server.requests.lock().unwrap();
@@ -641,7 +633,7 @@ async fn embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io() -
             json!({"id":"second","function":{"name":"run_child","arguments":"{\"pause\":true}"}}),
         ]);
         let mut server = Server::scripted(host.clone(), vec![Child::Success], vec![turn]).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
         for (key, value) in host.checkpoints.lock().unwrap().iter_mut() {
@@ -649,7 +641,7 @@ async fn embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io() -
                 *value = vec![0; length];
             }
         }
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit,InvokeExit::Failed(ref error) if error.code == "EMBED_DEADLINE_STATE" && !error.retryable),
@@ -675,7 +667,7 @@ async fn ai_response_checkpoint_failures_prevent_tool_dispatch() -> anyhow::Resu
         let host = Arc::new(Host::new());
         host.fail_checkpoints(RESPONSE_PREFIX, write);
         let mut server = Server::start(host.clone(), vec![], 1).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Failed(error) = exit else {
             anyhow::bail!("{exit:?}")
@@ -709,14 +701,14 @@ async fn ai_response_pause_after_persistence_replays_before_tool_dispatch() -> a
     let host = Arc::new(Host::new());
     *host.checkpoint_signal.lock().unwrap() = Some(RESPONSE_PREFIX.into());
     let mut server = Server::start(host.clone(), vec![Child::Success], 1).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert!(host.acknowledged.load(Ordering::SeqCst));
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     *host.checkpoint_signal.lock().unwrap() = None;
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")
@@ -749,7 +741,7 @@ async fn ai_response_corrupt_checkpoint_fails_without_model_or_child_io() -> any
     let host = Arc::new(Host::new());
     *host.checkpoint_signal.lock().unwrap() = Some(RESPONSE_PREFIX.into());
     let mut server = Server::start(host.clone(), vec![], 1).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     *host.checkpoint_signal.lock().unwrap() = None;
     let key = host
@@ -767,7 +759,7 @@ async fn ai_response_corrupt_checkpoint_fails_without_model_or_child_io() -> any
         br#"{"action":"tools","tool_calls":[]}"#.to_vec(),
     ] {
         host.checkpoints.lock().unwrap().insert(key.clone(), bytes);
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit,InvokeExit::Failed(ref error) if error.code == "AI_TURN_RESPONSE_STATE" && !error.retryable),
@@ -795,7 +787,7 @@ async fn shared_checkpoint_errors_stop_ordinary_agent_execution() -> anyhow::Res
         let host = Arc::new(Host::new());
         host.fail_checkpoints("runtara:v2:[\"agent\",", write);
         let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Failed(error) = exit else {
             anyhow::bail!("{exit:?}")
@@ -857,7 +849,7 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
     let mut server = Server::scripted(host.clone(), vec![], vec![turn, model_done()]).await?;
     let mut wait_key = None;
     for _ in 0..2 {
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Suspended(wakes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -881,7 +873,7 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
         .lock()
         .unwrap()
         .insert(wait_key.unwrap(), br#"{"approved":true}"#.to_vec());
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")

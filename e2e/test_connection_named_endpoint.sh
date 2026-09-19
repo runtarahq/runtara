@@ -35,7 +35,7 @@
 #
 # The positive path (a 2xx from the GraphQL endpoint) needs live Intuit
 # credentials and is therefore NOT covered here; it is covered offline by
-# `internal_proxy::tests::named_endpoint_round_trips_through_the_pin`, which
+# `outbound_http::tests::named_endpoint_round_trips_through_the_pin`, which
 # runs the same decision function against the same real descriptor.
 #
 # Prerequisites: Postgres + docker (for an isolated Valkey) and the agent /

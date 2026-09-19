@@ -7,17 +7,15 @@
 //! the host architecture and writes `runtara_agent_s3_storage.meta.json` next
 //! to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to resolve the connection,
-//! attach AWS SigV4 signing, and forward to the configured S3 endpoint. The
-//! ordinary component instance receives only the connection ID. Presigning is
-//! forwarded to the host, which invokes the trusted export in a fresh restricted
-//! instance with signing credentials. That instance performs no network I/O.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
+//! Presigning uses a fresh restricted trusted instance with signing credentials;
+//! that instance performs no network I/O.
 //!
 //! Binary content (upload/download) flows over the wire as base64 inside the
 //! JSON capability input/output. The component decodes/encodes base64 itself;
-//! the raw bytes only exist as the body of the proxied PUT/GET. Default upload
+//! the raw bytes cross the host boundary as the PUT/GET body. Default upload
 //! cap is 50 MB (matches the legacy `s3_storage` agent).
 #![allow(clippy::result_large_err)]
 
@@ -156,7 +154,7 @@ fn url_encode_s3_key(s: &str) -> String {
         .collect()
 }
 
-/// Fire an HTTP request via the runtara proxy (SigV4 is done server-side).
+/// Fire an HTTP request via the outbound host service (SigV4 is done server-side).
 async fn s3_request(
     method: &str,
     path: &str,
@@ -165,9 +163,7 @@ async fn s3_request(
     body: Option<&[u8]>,
 ) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(S3_TIMEOUT);
-    let mut req = client
-        .request(method, path)
-        .header("X-Runtara-Connection-Id", connection_id);
+    let mut req = client.request(method, path).connection_id(connection_id);
 
     for (k, v) in headers {
         req = req.header(k, v);

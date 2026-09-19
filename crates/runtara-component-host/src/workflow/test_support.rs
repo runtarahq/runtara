@@ -87,6 +87,7 @@ pub(super) fn parent_wat(root_exit: &str) -> String {
 
 pub(super) fn spec() -> WorkflowRunSpec {
     WorkflowRunSpec {
+        trusted_instance: None,
         trusted_tenant: None,
         env: HashMap::new(),
         stderr: None,

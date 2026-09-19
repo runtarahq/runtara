@@ -138,7 +138,6 @@ pub(crate) fn build_env(
         env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
     }
 
-    // RUNTARA_HTTP_PROXY_URL,
     // and RUNTARA_TENANT_ID overrides arrive via
     // LaunchOptions.env (populated by the caller from its typed config) and
     // are merged into `env` by the caller of build_env.

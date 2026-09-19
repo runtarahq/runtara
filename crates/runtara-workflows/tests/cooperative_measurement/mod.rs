@@ -204,6 +204,7 @@ async fn run(
         .execute_invoke(
             pre,
             WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: None,
                 env: HashMap::new(),
                 stderr: None,
@@ -453,7 +454,7 @@ fn random_service(
     let mut samples = Vec::new();
     for i in 0..warmups + measured {
         let elapsed = runtime.block_on(async {
-            let state = HostState::new(Arc::new(CallContext::for_test("benchmark-tenant", "", "")));
+            let state = HostState::new(Arc::new(CallContext::for_test("benchmark-tenant", "")));
             let (mut store, instance) = instantiate(engine, &agent.pre, state).await.unwrap();
             let iface = instance
                 .get_export_index(&mut store, None, &agent.capabilities_iface)

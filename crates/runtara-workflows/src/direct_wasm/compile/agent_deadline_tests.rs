@@ -1,5 +1,7 @@
 //! Actual composed Agent deadlines through public compilation and composition.
 use super::*;
+#[path = "../../../../runtara-component-host/tests/common/outbound.rs"]
+mod outbound_fixture;
 use runtara_component_host::runtime_host::{
     RuntimeCheckpointResult, RuntimeHost, RuntimeSignalInfo,
 };
@@ -42,6 +44,7 @@ struct Host {
     database: Mutex<Option<Arc<dyn runtara_component_host::DatabaseHost>>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     started: Instant,
+    first_invocation_start: Mutex<Option<Instant>>,
     clock_override: AtomicU64,
     cancel: AtomicBool,
     acknowledged: AtomicBool,
@@ -85,6 +88,7 @@ impl Host {
             database: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             started: Instant::now(),
+            first_invocation_start: Mutex::new(None),
             clock_override: AtomicU64::new(0),
             cancel: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
@@ -355,6 +359,9 @@ fn executor() -> &'static WorkflowExecutor {
         let engine = runtara_component_host::build_engine(&Default::default()).unwrap();
         runtara_component_host::spawn_epoch_ticker(engine.clone());
         let executor = WorkflowExecutor::new(engine).unwrap();
+        executor
+            .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+            .unwrap();
         executor
             .set_connection_resolver(Arc::new(FixtureConnections))
             .unwrap();
@@ -656,43 +663,52 @@ fn wrap_published(
 }
 
 async fn invoke(compiled: &DirectCompilationResult, host: Arc<Host>) -> anyhow::Result<InvokeExit> {
-    invoke_with_env(compiled, host, HashMap::new()).await
+    invoke_with_outbound(
+        compiled,
+        host,
+        Arc::new(outbound_fixture::PublicHttp::default()),
+    )
+    .await
 }
 
-async fn invoke_with_env(
+async fn invoke_with_outbound(
     compiled: &DirectCompilationResult,
     host: Arc<Host>,
-    env: HashMap<String, String>,
+    outbound: Arc<dyn runtara_component_host::OutboundHttpHost>,
 ) -> anyhow::Result<InvokeExit> {
-    invoke_with_connections(compiled, host, env, None).await
+    invoke_with_connections(compiled, host, outbound, None).await
 }
 
 async fn invoke_with_connections(
     compiled: &DirectCompilationResult,
     host: Arc<Host>,
-    env: HashMap<String, String>,
+    outbound: Arc<dyn runtara_component_host::OutboundHttpHost>,
     connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
 ) -> anyhow::Result<InvokeExit> {
     let database = host.database.lock().unwrap().clone();
-    let local = if connections.is_some() || database.is_some() {
+    let local = {
         let local = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
         local
             .set_connection_resolver(connections.unwrap_or_else(|| Arc::new(FixtureConnections)))?;
         if let Some(database) = database {
             local.set_database(database)?;
         }
-        Some(local)
-    } else {
-        None
+        local.set_outbound_http(outbound)?;
+        local
     };
-    let executor = local.as_ref().unwrap_or_else(|| executor());
+    let executor = &local;
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
+    host.first_invocation_start
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Instant::now);
     Ok(executor
         .execute_invoke(
             &pre,
             WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("fixture".into()),
-                env,
+                env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(5),
                 cancel: None,
@@ -828,6 +844,7 @@ async fn run_shaped(
             }))?;
             let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
             executor.execute_invoke(&pre, WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("fixture".into()), env: HashMap::new(), stderr: None,
                 timeout: Duration::from_secs(5), cancel: None, limits: Default::default(), runtime: Some(host.clone()),
             }, b"{}".to_vec()).await.exit
@@ -979,9 +996,12 @@ async fn run_shaped(
             Response::RetryThenHang | Response::RollbackThenHang
         ) {
             let elapsed = first_request.lock().unwrap().unwrap().elapsed();
+            // The budget starts before component initialization and the first
+            // provider request. Measure its lower bound from invocation entry.
+            let active_elapsed = host.first_invocation_start.lock().unwrap().expect("invocation start recorded").elapsed();
             assert!(
-                elapsed >= Duration::from_millis(1_700),
-                "wall clock jump shortened a live budget: {elapsed:?}"
+                active_elapsed >= Duration::from_millis(1_700),
+                "wall clock jump shortened a live budget: {active_elapsed:?}"
             );
             assert!(
                 elapsed < Duration::from_millis(2_700),

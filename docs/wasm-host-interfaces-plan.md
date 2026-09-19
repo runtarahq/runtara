@@ -2,6 +2,10 @@
 
 Status: proposed implementation plan. No runtime changes are part of this document.
 
+The focused [outbound HTTP migration plan](outbound-http-host-calls-plan.md)
+supersedes this document's outbound transport migration details, including its
+legacy HTTP compatibility proposal.
+
 Companion decision: [trusted capabilities](trusted-capabilities-plan.md) defines
 the `trusted` flag for built-in capabilities executed in fresh restricted WASM
 instances with credentials for their own connection types. Host interfaces remain
@@ -47,7 +51,7 @@ automatically be deleted.
 | --- | --- | --- |
 | Runtime | `runtime@0.4.0` host imports, implemented by `PersistenceRuntimeHost`; production workflow entry uses `lifecycle@0.2.0.invoke` | Preserve existing native behavior and lifecycle semantics; include it in the common context and compatibility model |
 | Connections | Async `resolver@0.2.0` imports call `NativeConnectionResolver` and `ConnectionsFacade` directly; existing `0.1.0` artifacts use the same native backend | Implemented: host-owned tenant, per-run caches, interactive and workflow execution, no internal connection HTTP routes or URL configuration |
-| Outbound HTTP | `runtara-http` wraps requests for the internal proxy, then uses `host-io/http@0.1.0` to make that HTTP hop | Introduce a policy-aware host request interface calling an extracted native egress service |
+| Outbound HTTP | Async `outbound-http/client@0.1.0` imports call `NativeOutboundHttp` with host-owned identity | Implemented: explicit connection/public destinations, shared credential and egress policy, no internal proxy endpoint; see [the outbound migration plan](outbound-http-host-calls-plan.md) |
 | Object Model | Migrating to native SQL imports; schema/CRUD/memory run in the agent | See [the superseding SQL host-call plan](object-model-host-calls-plan.md); no domain host operations |
 | Presigning | S3/Azure trusted capabilities execute their agent-owned signers in restricted WASM; the legacy HTTP endpoint is removed | Authorize on the host and invoke the approved built-in provider's `trusted` capability in a restricted instance |
 
@@ -59,8 +63,8 @@ Source anchors:
 - [Resolver host](../crates/runtara-component-host/src/connection_resolver_host.rs)
   and [connection facade](../crates/runtara-connections/src/facade.rs).
 - [Guest HTTP client](../crates/runtara-http/src/lib.rs),
-  [host transport](../crates/runtara-component-host/src/host_io.rs),
-  [proxy implementation](../crates/runtara-server/src/api/handlers/internal_proxy.rs),
+  [outbound host interface](../crates/runtara-component-host/src/outbound_http.rs),
+  [native outbound service](../crates/runtara-server/src/api/services/outbound_http.rs),
   and [hardened client](../crates/runtara-server/src/egress_client.rs).
 - [Object Model agent](../crates/agents/runtara-agent-object-model/src/lib.rs),
   [native database adapter](../crates/runtara-server/src/api/services/database.rs),

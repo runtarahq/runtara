@@ -2,6 +2,9 @@
 //! real HTTP teardown -> PostgreSQL acknowledgement and runner/monitor cleanup.
 //! Uses the existing artifact-dependent integration test gate, not an alternate
 //! production backend. No isolation policy or custom invocation catalog.
+#[path = "../../runtara-component-host/tests/common/outbound.rs"]
+mod outbound_fixture;
+
 use runtara_core::{domain::InstanceStatus, persistence::Persistence};
 use runtara_environment::{
     container_registry::{ContainerInfo, ContainerRegistry},
@@ -47,14 +50,8 @@ fn stalled_agent_components(source: &Path, output: &Path, url: &str) -> anyhow::
             std::fs::copy(entry.path(), output.join(name))?;
         }
     }
-    let request = |path: &str| {
-        serde_json::to_vec(&json!({
-            "method":"GET", "url":format!("{url}/{path}"), "headers":[],
-            "body_b64":null, "timeout_ms":300_000,
-        }))
-    };
-    let first = request("pending")?;
-    let cleanup = request("cleanup-entered")?;
+    let first = format!("{url}/pending").into_bytes();
+    let cleanup = format!("{url}/cleanup-entered").into_bytes();
     anyhow::ensure!(first.len() < 2048 && cleanup.len() < 2048);
     let escape = |bytes: &[u8]| {
         bytes
@@ -154,7 +151,8 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             },
             persistence.clone(),
         )?
-        .with_in_process_precompiler_for_tests(),
+        .with_in_process_precompiler_for_tests()
+        .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))?,
     );
     let state = EnvironmentHandlerState::new(
         pool.clone(),

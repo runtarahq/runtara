@@ -1,10 +1,10 @@
-//! Actual messaging components; every request goes to a local proxy fixture.
+//! Actual messaging components; every request goes to a local provider fixture.
 use super::real_agent::{
-    compose_agent, invoke_named_agent, read_proxy, respond, run_cancellation_fixture,
+    compose_agent, invoke_named_agent, read_outbound, respond, run_cancellation_fixture,
 };
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 fn input(agent: &str, after: bool) -> Value {
@@ -29,7 +29,7 @@ async fn cancellation(agent: &'static str, blocked: usize, partial: bool) -> any
         &serde_json::to_vec(&input(agent, true))?,
     )?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let started = Arc::new(Notify::new());
     let cleaned = Arc::new(Notify::new());
     let server = tokio::spawn({
@@ -38,7 +38,7 @@ async fn cancellation(agent: &'static str, blocked: usize, partial: bool) -> any
         async move {
             for stage in 1..=blocked {
                 let (mut socket, _) = listener.accept().await?;
-                let request = read_proxy(&mut socket).await?;
+                let request = read_outbound(&mut socket).await?;
                 assert_eq!(request["connection_id"], "fixture-connection");
                 let body = BASE64.decode(request["body_raw"].as_str().unwrap())?;
                 if agent == "mailgun" {
@@ -82,7 +82,7 @@ async fn cancellation(agent: &'static str, blocked: usize, partial: bool) -> any
                 }
             }
             let (mut socket, _) = listener.accept().await?;
-            let request = read_proxy(&mut socket).await?;
+            let request = read_outbound(&mut socket).await?;
             let body = BASE64.decode(request["body_raw"].as_str().unwrap())?;
             if agent == "mailgun" {
                 assert!(String::from_utf8(body)?.contains("subject=after"));
@@ -98,7 +98,7 @@ async fn cancellation(agent: &'static str, blocked: usize, partial: bool) -> any
     });
     let output = run_cancellation_fixture(
         bytes,
-        CallContext::for_test("fixture-tenant", proxy, ""),
+        FixtureContext::with_upstream("fixture-tenant", upstream, ""),
         started,
         cleaned,
         server,
@@ -137,17 +137,17 @@ async fn messaging_async_exports_preserve_error_classification() -> anyhow::Resu
     for (agent, capability) in [("mailgun", "send-email"), ("teams", "send-message")] {
         for status in [429, 403, 503] {
             let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let proxy = format!("http://{}/proxy", listener.local_addr()?);
+            let upstream = format!("http://{}/upstream", listener.local_addr()?);
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await?;
-                read_proxy(&mut socket).await?;
+                read_outbound(&mut socket).await?;
                 respond(&mut socket, json!({"status":status,"headers":{"retry-after":"2"},"body":{"error":{"code":"fixture","message":"fixture"}}})).await
             });
             let result = tokio::time::timeout(
                 Duration::from_secs(10),
                 invoke_named_agent(
                     agent,
-                    CallContext::for_test("fixture-tenant", proxy, ""),
+                    FixtureContext::with_upstream("fixture-tenant", upstream, ""),
                     capability,
                     serde_json::to_vec(&input(agent, true))?,
                 ),

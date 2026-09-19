@@ -310,7 +310,6 @@ impl RuntimeClient {
         // race-prone pattern and makes the workflow ABI typed.
         let server_config = crate::config::get();
         options = options.with_env_var("RUNTARA_TENANT_ID", &server_config.tenant_id);
-        options = options.with_env_var("RUNTARA_HTTP_PROXY_URL", &server_config.http_proxy_url);
 
         // Debug mode (pause at breakpoints)
         if debug {

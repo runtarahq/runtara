@@ -54,6 +54,11 @@ name = "object_model_database"
 path = "tests/object_model_database.rs"
 required-features = ["component-integration-tests", "db-integration-tests"]
 
+[[test]]
+name = "outbound_http"
+path = "tests/outbound_http.rs"
+required-features = ["component-integration-tests"]
+
 [dependencies]
 runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
@@ -92,13 +97,6 @@ wasmtime-wasi-http = "46"
 zeroize = "1"
 anyhow = "1"
 sha2 = { workspace = true }
-# host-io concurrent HTTP hop (route (b)). Same
-# hyper family wasmtime-wasi-http already pulls in.
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
-http-body-util = "0.1"
-bytes = "1"
-base64 = { workspace = true }
 # Dyn-compatible async for the RuntimeHost trait (implemented in
 # runtara-environment; this crate stays persistence-agnostic).
 async-trait = "0.1"

@@ -96,7 +96,7 @@ async fn timed_branch_preserves_live_http_sibling_and_recovers() -> anyhow::Resu
         for body in [false, true] {
             let host = Arc::new(Host::new());
             let mut server = live_peer_server(host.clone(), body, true).await?;
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             server.check().await?;
             let InvokeExit::Completed(bytes) = exit else {
                 anyhow::bail!("{exit:?}")
@@ -122,7 +122,7 @@ async fn timed_branch_scheduler_keeps_fast_sibling_advancing() -> anyhow::Result
     let compiled = compiled_mode(dir.path(), true, 400, false, 3)?;
     let host = Arc::new(Host::new());
     let mut server = live_peer_server_chain(host.clone(), false, false, 3).await?;
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")
@@ -155,7 +155,7 @@ async fn ordinary_branch_failure_cleans_live_peer_before_outer_handler() -> anyh
         let host = Arc::new(Host::new());
         *host.recovery_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
         let mut server = live_peer_server_status(host.clone(), body, false, 1, 503).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}");
         };
@@ -193,7 +193,7 @@ async fn parallel_agent_zero_budget_and_maximum_budget() -> anyhow::Result<()> {
                 let compiled = compile_timed_graph(dir.path(), graph, Some(timeout))?;
                 let host = Arc::new(Host::new());
                 let mut server = Server::start(host.clone(), vec![Child::Success; 2], 0).await?;
-                let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+                let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
                 let InvokeExit::Completed(bytes) = exit else {
                     anyhow::bail!(
                         "wavefront={wavefront}, durable={durable}, timeout={timeout}: {exit:?}"
@@ -217,7 +217,7 @@ async fn parallel_agent_zero_budget_and_maximum_budget() -> anyhow::Result<()> {
                         "u64::MAX must not overflow into immediate timeout"
                     );
                     if durable {
-                        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+                        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
                         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
                         assert_eq!(
                             server.children.load(Ordering::SeqCst),
@@ -257,7 +257,7 @@ async fn parallel_split_aggregates_each_agent_deadline() -> anyhow::Result<()> {
             0,
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("timeout={timeout}: {exit:?}");
         };
@@ -348,7 +348,7 @@ async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<
         let exit = invoke_with_connections(
             &compiled,
             host.clone(),
-            server.env(),
+            server.outbound(),
             server.connections.clone(),
         )
         .await?;

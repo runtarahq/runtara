@@ -55,6 +55,7 @@ async fn invoke(outcome: Option<InvokeExit>) -> Arc<TaskResult> {
                     .execute_isolated_capability_with_context(
                         &pre,
                         WorkflowRunSpec {
+                            trusted_instance: None,
                             trusted_tenant: None,
                             env: Default::default(),
                             stderr: None,

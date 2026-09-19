@@ -871,6 +871,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach native outbound HTTP shared by all runs and scoped children.
+    pub fn with_outbound_http(
+        self,
+        service: Arc<dyn runtara_component_host::OutboundHttpHost>,
+    ) -> Result<Self> {
+        self.executor
+            .set_outbound_http(service)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach native SQL execution shared by all runs, including scoped children.
     pub fn with_database(
         self,
@@ -1000,6 +1011,7 @@ impl EmbeddedWasmRunner {
         let runtime = Arc::new(host);
         (
             WorkflowRunSpec {
+                trusted_instance: Some(options.instance_id.clone()),
                 trusted_tenant: Some(options.tenant_id.clone()),
                 env,
                 stderr,

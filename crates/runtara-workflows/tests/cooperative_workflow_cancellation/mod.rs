@@ -323,7 +323,7 @@ impl Scenario {
     fn is_mcp(self) -> bool {
         matches!(self, Self::McpInitialize | Self::McpTool)
     }
-    fn uses_proxy(self) -> bool {
+    fn uses_connection_http(self) -> bool {
         matches!(self, Self::SlackHeaders | Self::Mailgun | Self::TeamsChunks)
             || self.is_ai()
             || self.is_mcp()
@@ -918,19 +918,19 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                             }
 
                         }
-                        if scenario.uses_proxy() {
+                        if scenario.uses_connection_http() {
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                             let headers = std::str::from_utf8(&request[..end])?;
-                            anyhow::ensure!(headers.starts_with("POST / "), "Agent request bypassed local proxy");
+
                             let length: usize = headers.lines().filter_map(|line| line.split_once(':'))
-                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length")).unwrap().1.trim().parse()?;
+                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length")).map(|(_, value)| value.trim().parse()).transpose()?.unwrap_or(0);
                             anyhow::ensure!(length < 16_384, "unexpected proxy request size");
                             while request.len() < end + length {
                                 let n = stream.read(&mut buffer).await?;
                                 anyhow::ensure!(n > 0, "proxy body closed early");
                                 request.extend_from_slice(&buffer[..n]);
                             }
-                            let body: Value = serde_json::from_slice(&request[end..end + length])?;
+                            let body = outbound_fixture::captured_request(std::str::from_utf8(&request[..end])?, &request[end..end + length]);
                             if scenario.is_ai() {
                                 assert_eq!(body["url"], "/v1/chat/completions");
                                 assert_eq!(body["connection_id"], "conn-1");
@@ -1035,48 +1035,42 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
                         if matches!(scenario, Scenario::SharepointContentAfterMetadata | Scenario::ShopifyDeleteAfterRead) && started == 1 {
                             let body = if scenario.is_sharepoint() { serde_json::json!({"id":"42","name":"fixture.txt"}) } else { serde_json::json!({"data":{"product":{"media":{"edges":[{"node":{"id":"old-image"}}]}}}}) };
-                            let bytes=serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":body}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",bytes.len()).as_bytes()).await?;
+                            let bytes=outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":body}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1,Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::HubspotUpdateAfterRead && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"42","properties":{"name":"fixture"}}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"id":"42","properties":{"name":"fixture"}}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::QuickbooksUpdateAfterRead && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Customer":{"Id":"42","SyncToken":"3","DisplayName":"fixture"}}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"Customer":{"Id":"42","SyncToken":"3","DisplayName":"fixture"}}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::StripeFinalizeAfterCreate && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"in_fixture","status":"draft"}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"id":"in_fixture","status":"draft"}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::SqsDeleteAfterReceive && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Messages":[{"MessageId":"one","ReceiptHandle":"fixture-receipt","Body":"hello"}]}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"Messages":[{"MessageId":"one","ReceiptHandle":"fixture-receipt","Body":"hello"}]}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if matches!(scenario, Scenario::StorageDownload(_, true)) && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body_raw":""}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body_raw":""}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
@@ -1084,16 +1078,14 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                         }
                         if (scenario == Scenario::TeamsChunks && started == 1) || (scenario == Scenario::McpTool && started < 3) {
                             let body = if scenario == Scenario::TeamsChunks {serde_json::json!({"id":"first"})} else {serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})};
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":if scenario.is_mcp() && started==2 {202} else {200},"headers":{"mcp-session-id":"fixture-session"},"body":body}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":if scenario.is_mcp() && started==2 {202} else {200},"headers":{"mcp-session-id":"fixture-session"},"body":body}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1,Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if matches!(scenario, Scenario::AiSummary | Scenario::AiMemorySave) && started == 1 {
-                            let bytes = serde_json::to_vec(&llm_ok("completed first turn"))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&llm_ok("completed first turn"));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
@@ -1145,7 +1137,8 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
                 bundle.path(),
                 runtara_component_host::DispatcherEnv {
-                    proxy_url: url.clone(), core_http_url: url.clone(),
+
+                    core_http_url: url.clone(),
                 },
             ).await?;
             let executor = runtara_component_host::WorkflowExecutor::new(
@@ -1157,16 +1150,18 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         let normal_executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))?;
         let executor = storage_executor.as_ref().unwrap_or(&normal_executor);
         executor.set_connection_resolver(Arc::new(CancellationConnections))?;
+        executor.set_outbound_http(Arc::new(if scenario.uses_connection_http() {
+            outbound_fixture::PublicHttp::with_upstream(url.clone())
+        } else { outbound_fixture::PublicHttp::default() }))?;
         executor.set_database(Arc::new(CancellationDatabase { host:host.clone(), deadline, expected_requests }))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: Some("fixture-tenant".into()),
-                    env: if scenario.uses_proxy() || scenario.is_object() || scenario.is_storage() {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent"))])
-                    } else { HashMap::new() },
+                    env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(10),
                     cancel: None,
@@ -1219,6 +1214,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         }
         if scenario.drains_normally() {
             let resumed = executor.execute_invoke(&pre, runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
                 trusted_tenant: Some("fixture-tenant".into()),
                 env: HashMap::new(), stderr: None, timeout: Duration::from_secs(10), cancel: None,
                 limits: Default::default(), runtime: Some(host.clone()),

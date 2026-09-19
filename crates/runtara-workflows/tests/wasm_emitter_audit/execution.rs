@@ -746,6 +746,7 @@ fn audit_02_nested_growing_accumulator_completes_with_bounded_memory() {
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
                     trusted_tenant: None,
                     env: Default::default(),
                     stderr: None,

@@ -1,39 +1,47 @@
-//! Real WASM agents against a local proxy fixture. Ingestion is covered by the
+//! Real WASM agents against an injected outbound fixture, with no HTTP listener. Ingestion is covered by the
 //! local-server E2E; this suite verifies component dispatch and download transport.
 mod common;
 
-use axum::{Json, Router, extract::State, routing::post};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use runtara_component_host::outbound_http::{
+    Destination, OutboundContext, OutboundError, OutboundHttpHost, RequestOptions, Response,
+};
 use runtara_component_host::{
     ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
-type Requests = Arc<Mutex<Vec<Value>>>;
+type Requests = Arc<Mutex<Vec<RequestOptions>>>;
+struct DownloadService(Requests);
+
+#[async_trait::async_trait]
+impl OutboundHttpHost for DownloadService {
+    async fn request(
+        &self,
+        context: &OutboundContext,
+        request: RequestOptions,
+    ) -> Result<Response, OutboundError> {
+        assert_eq!(context.tenant_id, "attachments-test");
+        Ok(download_fixture(&self.0, request))
+    }
+}
 const FILE_URL: &str = "https://files.slack.com/files-pri/T-F/invoice.bin";
 const MESSAGE_URL: &str =
     "https://storage-us-west1.api.mailgun.net/v3/domains/inbound.example/messages/key";
 const CONTENT: &[u8] = &[0, 255, 1, 128];
 
-async fn proxy(State(requests): State<Requests>, Json(request): Json<Value>) -> Json<Value> {
+fn download_fixture(requests: &Requests, request: RequestOptions) -> Response {
     requests.lock().unwrap().push(request.clone());
-    let url = request["url"].as_str().unwrap();
+    let url = match &request.destination {
+        Destination::Connection(c) => &c.url,
+        Destination::Public(url) => url,
+    };
     let mut status = 200;
     let mut headers = json!({"content-type": "application/octet-stream"});
     let body = if url.ends_with("/files.info") {
-        let id = request["body"]["file"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                let bytes = STANDARD
-                    .decode(request["body_raw"].as_str().unwrap())
-                    .unwrap();
-                serde_json::from_slice::<Value>(&bytes).unwrap()["file"]
-                    .as_str()
-                    .unwrap()
-                    .into()
-            });
+        let body: Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+        let id = body["file"].as_str().unwrap();
         serde_json::to_vec(&json!({"ok": true, "file": {
             "id": id, "name": "invoice.bin", "mimetype": "application/octet-stream",
             "size": if id == "F-large" { 100 } else { CONTENT.len() },
@@ -62,18 +70,21 @@ async fn proxy(State(requests): State<Requests>, Json(request): Json<Value>) -> 
     } else {
         CONTENT.to_vec()
     };
-    Json(json!({"status": status, "headers": headers, "body_raw": STANDARD.encode(body)}))
+    Response {
+        status,
+        headers: headers
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.as_str().unwrap().into()))
+            .collect(),
+        body,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workflow_agents_download_only_on_explicit_invocation() -> anyhow::Result<()> {
     let requests = Requests::default();
-    let app = Router::new()
-        .route("/proxy", post(proxy))
-        .with_state(requests.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let bundle = tempfile::tempdir()?;
     for agent in ["slack", "mailgun"] {
         for extension in ["wasm", "meta.json"] {
@@ -84,11 +95,11 @@ async fn workflow_agents_download_only_on_explicit_invocation() -> anyhow::Resul
     let dispatcher = ComponentDispatcherService::from_dir(
         bundle.path(),
         DispatcherEnv {
-            proxy_url: format!("http://{address}/proxy"),
             core_http_url: "http://127.0.0.1:1".into(),
         },
     )
     .await?;
+    dispatcher.set_outbound_http(Arc::new(DownloadService(requests.clone())))?;
     let call = |agent: &str, capability: &str, input| TestCapabilityRequest {
         tenant_id: "attachments-test".into(),
         agent_id: agent.into(),
@@ -196,23 +207,23 @@ async fn workflow_agents_download_only_on_explicit_invocation() -> anyhow::Resul
 
     for request in requests.lock().unwrap().iter() {
         assert!(
-            request["headers"].get("Authorization").is_none(),
+            !request
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
             "guest must not receive provider credentials"
         );
-        assert!(
-            request["connection_id"]
-                .as_str()
-                .unwrap()
-                .ends_with("-connection")
-        );
-        if request["url"] == FILE_URL {
-            assert_eq!(request["endpoint"], "files");
+        let Destination::Connection(connection) = &request.destination else {
+            panic!("download must name its connection")
+        };
+        assert!(connection.connection_id.ends_with("-connection"));
+        if connection.url == FILE_URL {
+            assert_eq!(connection.endpoint.as_deref(), Some("files"));
         }
-        if request["url"].as_str().unwrap().starts_with(MESSAGE_URL) {
-            assert_eq!(request["endpoint"], "storage-us-west1");
-            assert_eq!(request["max_response_bytes"], 5 * 1024 * 1024);
+        if connection.url.starts_with(MESSAGE_URL) {
+            assert_eq!(connection.endpoint.as_deref(), Some("storage-us-west1"));
+            assert_eq!(request.max_response_bytes, Some(5 * 1024 * 1024));
         }
     }
-    server.abort();
     Ok(())
 }

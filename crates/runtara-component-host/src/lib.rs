@@ -1,26 +1,22 @@
-//! Embedded wasmtime host for runtara agent components.
+//! Embedded Wasmtime host for Runtara agent and workflow components.
 //!
-//! Phase 1 scope (in progress):
-//!
-//! - `engine` — shared `wasmtime::Engine` builder with component-model on
-//!   and epoch-interruption for per-call deadlines.
-//! - `host_state` — `WasiView` + `WasiHttpView` impls with defensive
-//!   `X-Org-Id` injection on outbound HTTP.
-//!
-//! Not yet landed (next steps):
-//!
-//! - `bindings` — `wasmtime::component::bindgen!` against the WIT; needs
-//!   WASI WIT deps vendored or remapped to wasmtime-wasi's built-in
-//!   bindings.
-//! - `registry` — load components from a manifest, pre-instantiate, cache.
-//! - `dispatcher` — `ComponentDispatcherService` replacing the legacy
-//!   `DispatcherService`.
+//! Loads approved component bundles and binds runtime, connection, database,
+//! and outbound HTTP services. Invocation identity comes from host-owned context.
+//! Raw WASI HTTP is denied; trusted isolated capabilities also deny outbound calls.
+
+#[cfg(test)]
+extern crate self as runtara_component_host;
+#[cfg(test)]
+#[path = "../tests/common/outbound.rs"]
+mod outbound_test_fixture;
 
 pub mod bindings;
 mod cleanup_alarm;
 pub mod connection_resolver_host;
 pub mod database_host;
 pub use database_host::DatabaseHost;
+pub mod outbound_http;
+pub use outbound_http::OutboundHttpHost;
 pub mod dispatcher;
 pub mod engine;
 pub mod execution_host;

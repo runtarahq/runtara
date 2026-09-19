@@ -75,7 +75,7 @@ impl Agent {
     async fn invoke(&self, capability: &str, mut input: Value) -> anyhow::Result<Value> {
         input["_connection"] =
             json!({"connection_id":"wasm-connection","integration_id":"postgres","parameters":{}});
-        let state = HostState::new(Arc::new(CallContext::for_test("wasm-tenant", "", "")))
+        let state = HostState::new(Arc::new(CallContext::for_test("wasm-tenant", "")))
             .with_database(self.backend.clone())
             .with_connection_resolver(self.backend.clone());
         let mut store = Store::new(&self.engine, state);

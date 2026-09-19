@@ -3,10 +3,10 @@
 //! Central HTTP client abstraction for runtara.
 //!
 //! Provides a blocking HTTP client that works on both native (via ureq)
-//! and WASI (via wasi-http, future) targets.
+//! and WASM (via the typed Runtara outbound host service) targets.
 
 // Exactly one backend feature must be enabled by the consumer. `native`
-// pulls ureq + the Rust TLS stack; `wasi` pulls the wasi crate. The cfg
+// pulls ureq + the Rust TLS stack; `wasi` generates host bindings. The cfg
 // gates below are written so the two cannot accidentally co-link.
 #[cfg(not(any(feature = "native", feature = "wasi")))]
 compile_error!(
@@ -29,7 +29,6 @@ pub use wasi_backend::WasiHttpClient as HttpClient;
 pub mod download;
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Builder for an HTTP request.
@@ -40,6 +39,13 @@ pub struct RequestBuilder {
     pub(crate) query_params: Vec<(String, String)>,
     pub(crate) body: Option<Body>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) connection_id: Option<String>,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) endpoint_ref: Option<String>,
+    pub(crate) ai_provider: Option<String>,
+    pub(crate) aws_service: Option<String>,
+    pub(crate) max_response_bytes: Option<u64>,
+
     #[cfg(feature = "native")]
     pub(crate) agent: Option<ureq::Agent>,
 }
@@ -106,6 +112,13 @@ impl RequestBuilder {
             query_params: Vec::new(),
             body: None,
             timeout: None,
+            connection_id: None,
+            endpoint: None,
+            endpoint_ref: None,
+            ai_provider: None,
+            aws_service: None,
+            max_response_bytes: None,
+
             #[cfg(feature = "native")]
             agent: None,
         }
@@ -141,60 +154,58 @@ impl RequestBuilder {
         self
     }
 
-    /// Execute the request and return the response.
-    ///
-    /// Note: Unlike ureq, this does NOT treat non-2xx as errors.
-    /// All valid HTTP responses are returned as `Ok(HttpResponse)`.
-    /// Only transport-level failures return `Err`.
-    ///
-    /// When the `RUNTARA_HTTP_PROXY_URL` environment variable is set, the request
-    /// is serialized as JSON and POSTed to the proxy endpoint instead of being
-    /// executed directly.
-    /// Execute the request directly (no proxy). Used by SDK and internal APIs.
+    /// Use credentials from this opaque connection ID, resolved by the host.
+    pub fn connection_id(mut self, value: &str) -> Self {
+        self.connection_id = Some(value.to_owned());
+        self
+    }
+
+    /// Select a named endpoint declared by the connection type.
+    pub fn endpoint(mut self, value: &str) -> Self {
+        self.endpoint = Some(value.to_owned());
+        self
+    }
+
+    /// Use a host-issued endpoint reference bound to the connection.
+    pub fn endpoint_ref(mut self, value: &str) -> Self {
+        self.endpoint_ref = Some(value.to_owned());
+        self
+    }
+
+    /// Select the AI provider for connection compatibility checks.
+    pub fn ai_provider(mut self, value: &str) -> Self {
+        self.ai_provider = Some(value.to_owned());
+        self
+    }
+
+    /// Select the AWS service used for outgoing request signing.
+    pub fn aws_service(mut self, value: &str) -> Self {
+        self.aws_service = Some(value.to_owned());
+        self
+    }
+
+    /// Limit raw response bytes at the host boundary, subject to its ceiling.
+    pub fn max_response_bytes(mut self, value: u64) -> Self {
+        self.max_response_bytes = Some(value);
+        self
+    }
+
+    /// Execute through the native SDK or the WASM outbound host service.
+    /// All HTTP statuses are responses; transport failures return errors.
     pub fn call(self) -> Result<HttpResponse, HttpError> {
         #[cfg(feature = "native")]
         return native::execute(self);
         #[cfg(all(feature = "wasi", not(feature = "native")))]
-        return wasi_backend::execute(self);
+        return host_io::execute(self);
     }
 
-    /// Execute the request through the HTTP proxy (if configured).
-    /// Used by agent capabilities — the proxy handles credential injection
-    /// and URL rewriting for requests with X-Runtara-Connection-Id.
-    /// Falls back to direct call if no proxy is configured.
+    /// Execute an agent request using the same outbound contract.
     pub fn call_agent(self) -> Result<HttpResponse, HttpError> {
-        static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
-        let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
-
-        if let Some(proxy) = proxy_url {
-            return self.call_via_proxy(proxy);
-        }
-
-        // No proxy configured — fall back to direct call
         self.call()
     }
 
-    /// Execute the request by forwarding it through an HTTP proxy.
-    ///
-    /// The original request is serialized as JSON and POSTed to the proxy URL.
-    /// The proxy response is deserialized back into an `HttpResponse`.
-    fn call_via_proxy(self, proxy_url: &str) -> Result<HttpResponse, HttpError> {
-        let proxy_request = self.prepare_proxy_request(proxy_url)?;
-        // Execute directly (bypass proxy check to avoid recursion). Under
-        // WASI the proxy hop rides the host-io import (func_wrap_concurrent
-        // host-side) so concurrent Split subtasks overlap their agent I/O —
-        // the p2 wasi:http pollable wait would hold the whole store.
-        #[cfg(feature = "native")]
-        let proxy_response = native::execute(proxy_request)?;
-        #[cfg(all(feature = "wasi", not(feature = "native")))]
-        let proxy_response = host_io::execute(proxy_request)?;
-
-        Self::decode_proxy_response(proxy_response)
-    }
-
-    /// Await host I/O through the standard Component Model async ABI in WASM.
-    /// Native metadata/test builds retain the existing blocking ureq backend:
-    /// polling this future on native can block, and is not cancellable I/O.
+    /// Await the concurrent host service. Dropping the guest future cancels I/O.
+    /// Native SDK builds retain their blocking ureq backend.
     pub async fn call_async(self) -> Result<HttpResponse, HttpError> {
         #[cfg(feature = "native")]
         return native::execute(self);
@@ -202,176 +213,9 @@ impl RequestBuilder {
         return host_io::execute_async(self).await;
     }
 
-    /// Preserve the existing proxy/connection policy while allowing cancellation.
+    /// Await an agent request using the same outbound contract.
     pub async fn call_agent_async(self) -> Result<HttpResponse, HttpError> {
-        static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
-        let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
-        if let Some(proxy) = proxy_url {
-            let response = self.prepare_proxy_request(proxy)?.call_async().await?;
-            Self::decode_proxy_response(response)
-        } else {
-            self.call_async().await
-        }
-    }
-
-    fn prepare_proxy_request(self, proxy_url: &str) -> Result<RequestBuilder, HttpError> {
-        use base64::Engine as _;
-        use base64::engine::general_purpose::STANDARD as BASE64;
-
-        // Extract connection_id from headers if present
-        let connection_id = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-id"))
-            .map(|(_, v)| v.clone());
-        let ai_provider = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-ai-provider"))
-            .map(|(_, v)| v.clone());
-        // The AWS service the calling agent is signing for (e.g. "sqs"). Lets a
-        // single generic AWS-credentials connection serve any AWS service — the
-        // proxy uses this to select the signing service and regional endpoint.
-        let aws_service = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-aws-service"))
-            .map(|(_, v)| v.clone());
-        // Name of a descriptor-declared alternate endpoint of the connection
-        // (e.g. "graphql"). Only the selector travels — the URL set is fixed in
-        // the connection type, so this cannot point egress at an arbitrary host.
-        let endpoint = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-endpoint"))
-            .map(|(_, v)| v.clone());
-        // Opaque, tenant+connection-bound endpoint reference (a signed token).
-        // Lets a connection reach a validated per-request base URL (e.g. a
-        // Teams conversation's serviceUrl) the connection itself did not pin.
-        let endpoint_ref = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-endpoint-ref"))
-            .map(|(_, v)| v.clone());
-
-        // Remove X-Runtara-* headers from forwarded headers
-        let max_response_bytes = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-max-response-bytes"))
-            .map(|(_, v)| v.parse::<u64>())
-            .transpose()
-            .map_err(|_| HttpError::Transport("Invalid response byte limit".into()))?;
-        let clean_headers: Vec<(String, String)> = self
-            .headers
-            .iter()
-            .filter(|(k, _)| !k.to_lowercase().starts_with("x-runtara-"))
-            .cloned()
-            .collect();
-
-        // Build the full URL with query params
-        let full_url = build_url_with_query(&self.url, &self.query_params);
-
-        // Serialize body
-        let (body_json, body_raw, _body_type) = match &self.body {
-            Some(Body::Json(v)) => (Some(v.clone()), None::<String>, "json"),
-            Some(Body::Bytes(b)) => (None, Some(BASE64.encode(b)), "binary"),
-            None => (None, None, "none"),
-        };
-
-        // Build proxy request payload
-        let proxy_body = serde_json::json!({
-            "method": self.method,
-            "url": full_url,
-            "headers": headers_to_map(&clean_headers),
-            "body": body_json,
-            "body_raw": body_raw,
-            "connection_id": connection_id,
-            "ai_provider": ai_provider,
-            "aws_service": aws_service,
-            "endpoint": endpoint,
-            "endpoint_ref": endpoint_ref,
-            "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
-            "max_response_bytes": max_response_bytes,
-        });
-
-        // Create a new request to the proxy
-        let mut proxy_request = RequestBuilder::new("POST", proxy_url);
-        proxy_request.body = Some(Body::Json(proxy_body));
-        proxy_request
-            .headers
-            .push(("Content-Type".to_string(), "application/json".to_string()));
-
-        // Forward tenant ID header (X-Org-Id)
-        // Try from original request headers first, then from RUNTARA_TENANT_ID env var
-        // (cached on first read — env is stable for workflow lifetime).
-        static TENANT_ID: OnceLock<Option<String>> = OnceLock::new();
-        if let Some(tenant) = self
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("x-org-id"))
-        {
-            proxy_request.headers.push(tenant.clone());
-        } else if let Some(tenant_id) =
-            TENANT_ID.get_or_init(|| std::env::var("RUNTARA_TENANT_ID").ok())
-        {
-            proxy_request
-                .headers
-                .push(("X-Org-Id".to_string(), tenant_id.clone()));
-        }
-
-        Ok(proxy_request)
-    }
-
-    fn decode_proxy_response(proxy_response: HttpResponse) -> Result<HttpResponse, HttpError> {
-        use base64::Engine as _;
-        use base64::engine::general_purpose::STANDARD as BASE64;
-        // Parse proxy response
-        let resp_json: serde_json::Value = serde_json::from_slice(&proxy_response.body)
-            .map_err(|e| HttpError::Transport(format!("Failed to parse proxy response: {}", e)))?;
-
-        // Reconstruct HttpResponse. Proxy-level errors (e.g. a 400
-        // AI_PROVIDER_CONNECTION_MISMATCH or 404 connection-not-found) are
-        // plain JSON error objects, not the forwarding envelope — when the
-        // `status` key is absent, surface the proxy transport status and body
-        // verbatim instead of synthesizing an empty transient 502 (which sent
-        // agents into a retry storm and swallowed the actionable message).
-        let status = resp_json["status"]
-            .as_u64()
-            .map(|v| v as u16)
-            .unwrap_or(proxy_response.status);
-        let resp_headers: HashMap<String, String> = resp_json["headers"]
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Decode body — prefer body_raw (base64) if present, otherwise body (JSON)
-        let body = if let Some(raw) = resp_json["body_raw"].as_str() {
-            BASE64.decode(raw).map_err(|e| {
-                HttpError::Transport(format!("Invalid base64 in proxy response: {e}"))
-            })?
-        } else if let Some(body_val) = resp_json.get("body") {
-            if body_val.is_null() {
-                Vec::new()
-            } else {
-                serde_json::to_vec(body_val).unwrap_or_default()
-            }
-        } else if resp_json.get("status").is_none() {
-            // Non-envelope response: keep the raw proxy error body
-            proxy_response.body.clone()
-        } else {
-            Vec::new()
-        };
-
-        Ok(HttpResponse {
-            status,
-            body,
-            headers: resp_headers,
-        })
+        self.call_async().await
     }
 }
 
@@ -408,14 +252,25 @@ fn url_encode(s: &str) -> String {
     result
 }
 
-/// Convert a header list to a map (last value wins for duplicate keys).
-fn headers_to_map(headers: &[(String, String)]) -> HashMap<String, String> {
-    headers.iter().cloned().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn native_connection_requests_fail_without_attempting_network() {
+        let error = HttpClient::new()
+            .request("GET", "http://127.0.0.1:1/unused")
+            .connection_id("opaque-id")
+            .call()
+            .err()
+            .expect("native SDK has no credential service");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the outbound host service")
+        );
+    }
 
     #[test]
     fn test_request_starts_empty_from_either_constructor() {
@@ -432,6 +287,7 @@ mod tests {
             assert!(req.headers.is_empty());
             assert!(req.query_params.is_empty());
             assert!(req.body.is_none());
+            #[cfg(feature = "native")]
             assert!(req.timeout.is_none());
         }
     }

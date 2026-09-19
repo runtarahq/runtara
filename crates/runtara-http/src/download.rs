@@ -2,7 +2,7 @@
 use crate::{HttpClient, HttpResponse};
 use std::time::Duration;
 
-/// Leaves room for the base64 proxy envelope within host-io's 8 MiB cap.
+/// Existing download ceiling, below the host boundary's 8 MiB response budget.
 pub const MAX_DOWNLOAD_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -35,7 +35,7 @@ pub fn byte_limit(requested: Option<usize>) -> Result<usize, DownloadError> {
     Ok(limit)
 }
 
-/// The caller selects a provider-approved URL and endpoint. The proxy enforces
+/// The caller selects a provider-approved URL and endpoint. The host enforces
 /// the connection destination, injects auth, bounds bytes, and refuses redirects.
 /// Async so a cancelled Agent call drops the in-flight download.
 pub async fn get(
@@ -55,11 +55,11 @@ pub async fn get(
     let mut request = HttpClient::new()
         .request("GET", url)
         .timeout(Duration::from_secs(30))
-        .header("X-Runtara-Connection-Id", connection_id)
-        .header("X-Runtara-Max-Response-Bytes", &limit.to_string())
+        .connection_id(connection_id)
+        .max_response_bytes(limit as u64)
         .header("Accept", accept);
     if let Some(endpoint) = endpoint {
-        request = request.header("X-Runtara-Connection-Endpoint", endpoint);
+        request = request.endpoint(endpoint);
     }
     let response = request
         .call_agent_async()
@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn limits_cover_actual_bytes_and_proxy_rejections() {
+    fn limits_cover_actual_bytes_and_host_rejections() {
         assert!(byte_limit(Some(0)).is_err());
         assert!(byte_limit(Some(MAX_DOWNLOAD_BYTES + 1)).is_err());
         for (status, body) in [(200, vec![0; 11]), (413, vec![])] {

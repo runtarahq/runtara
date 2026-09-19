@@ -1,8 +1,10 @@
-//! Real Slack WASM bindings, with every request confined to a local proxy stub.
-use super::real_agent::{cancel_and_reuse, compose_agent, invoke_named_agent, read_proxy, respond};
+//! Real Slack WASM bindings, with every request confined to a local provider stub.
+use super::real_agent::{
+    cancel_and_reuse, compose_agent, invoke_named_agent, read_outbound, respond,
+};
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 fn connection() -> Value {
@@ -18,7 +20,7 @@ async fn cancellation(
     partial_body: bool,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let (capability, input) = if upload {
         (
             "upload-file",
@@ -42,7 +44,7 @@ async fn cancellation(
         async move {
             for stage in 1..=blocked_stage {
                 let (mut socket, _) = listener.accept().await?;
-                let request = read_proxy(&mut socket).await?;
+                let request = read_outbound(&mut socket).await?;
                 let expected_url = match (upload, stage) {
                     (false, _) => "https://slack.com/api/chat.postMessage",
                     (true, 1) => "https://slack.com/api/files.getUploadURLExternal",
@@ -84,7 +86,7 @@ async fn cancellation(
             // The cancelled invocation cannot advance to another upload stage.
             // Only the parent's fresh call in the same Agent instance may arrive.
             let (mut socket, _) = listener.accept().await?;
-            let request = read_proxy(&mut socket).await?;
+            let request = read_outbound(&mut socket).await?;
             assert_eq!(request["url"], "https://slack.com/api/chat.postMessage");
             let body: Value =
                 serde_json::from_slice(&BASE64.decode(request["body_raw"].as_str().unwrap())?)?;
@@ -98,7 +100,7 @@ async fn cancellation(
         Duration::from_secs(15),
         cancel_and_reuse(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             started,
             cleaned,
         ),
@@ -160,7 +162,7 @@ async fn slack_async_dispatch_preserves_validation_and_connection_errors() -> an
     ] {
         let error = invoke_named_agent(
             "slack",
-            CallContext::placeholder_for_metadata(),
+            FixtureContext::public(),
             capability,
             input.as_bytes().to_vec(),
         )
@@ -192,10 +194,10 @@ async fn slack_async_dispatch_preserves_retry_and_slack_error_contracts() -> any
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let proxy = format!("http://{}/proxy", listener.local_addr()?);
+        let upstream = format!("http://{}/upstream", listener.local_addr()?);
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await?;
-            let request = read_proxy(&mut socket).await?;
+            let request = read_outbound(&mut socket).await?;
             assert_eq!(request["url"], "https://slack.com/api/reactions.add");
             assert_eq!(request["connection_id"], "fixture-connection");
             respond(
@@ -211,7 +213,7 @@ async fn slack_async_dispatch_preserves_retry_and_slack_error_contracts() -> any
             Duration::from_secs(10),
             invoke_named_agent(
                 "slack",
-                CallContext::for_test("fixture-tenant", proxy, ""),
+                FixtureContext::with_upstream("fixture-tenant", upstream, ""),
                 "add-reaction",
                 input,
             ),
