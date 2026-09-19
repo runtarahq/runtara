@@ -20,3 +20,8 @@ interface resolver {
 world connection-resolver {
     export resolver;
 }
+
+// Guest-side clients use the same canonical interface.
+world connection-client {
+    import resolver;
+}

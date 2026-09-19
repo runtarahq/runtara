@@ -151,7 +151,6 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
                 data_dir: dir.path().join("data"),
                 default_timeout: Duration::from_secs(30),
                 skip_cert_verification: false,
-                connection_service_url: None,
             },
             persistence.clone(),
         )?

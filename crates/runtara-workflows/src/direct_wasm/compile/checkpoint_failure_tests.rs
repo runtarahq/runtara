@@ -256,9 +256,20 @@ async fn live_peer_server_preparation(
     let preparing_second = Arc::new(tokio::sync::Notify::new());
     let observations = Arc::new(Mutex::new(Vec::new()));
     let requests = observations.clone();
+    let lookup_cleaned = Arc::new(tokio::sync::Notify::new());
+    let connections = preparation.map(|preparation| {
+        Arc::new(PeerPreparation {
+            host: host.clone(),
+            preparation,
+            started: started.clone(),
+            target_closed: target_closed.clone(),
+            preparing_second: preparing_second.clone(),
+            lookup_cleaned: lookup_cleaned.clone(),
+        }) as Arc<dyn runtara_component_host::ConnectionResolverHost>
+    });
     let task = tokio::spawn(async move {
         let mut calls = tokio::task::JoinSet::new();
-        for _ in 0..1 + fast_calls + 2 * usize::from(preparation.is_some())
+        for _ in 0..1 + fast_calls
             - usize::from(matches!(
                 preparation,
                 Some(Preparation::CancelSecond(_) | Preparation::ParentSecond(_))
@@ -291,26 +302,6 @@ async fn live_peer_server_preparation(
                     let n = stream.read(&mut buffer).await?;
                     anyhow::ensure!(n > 0, "incomplete fixture body");
                     bytes.extend_from_slice(&buffer[..n]);
-                }
-                let headers = std::str::from_utf8(&bytes[..end])?;
-                if headers.lines().next().unwrap().contains("/metadata ") {
-                    let slow = headers.contains("slow-prep");
-                    if slow {
-                        let (Preparation::DelayFirst(delay) | Preparation::PeerBeforeSecond(delay) | Preparation::ReturnBeforeSecond(delay) | Preparation::CancelSecond(delay) | Preparation::ParentSecond(delay)) = preparation.unwrap();
-                        tokio::time::sleep(delay).await;
-                    } else if matches!(preparation, Some(Preparation::CancelSecond(_) | Preparation::ParentSecond(_))) {
-                        tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
-                        if matches!(preparation, Some(Preparation::CancelSecond(_))) { host.cancel.store(true, Ordering::SeqCst); }
-                        await_peer_close(&mut stream).await?;
-                        return Ok(());
-                    } else if matches!(preparation, Some(Preparation::PeerBeforeSecond(_) | Preparation::ReturnBeforeSecond(_))) {
-                        preparing_second.notify_one();
-                        // This response can only complete after the earlier
-                        // Agent has been cancelled while this lookup is live.
-                        tokio::time::timeout(Duration::from_secs(3), target_closed.notified()).await?;
-                    }
-                    write_peer_response(&mut stream, &json!({"connectionId":if slow { "slow-prep" } else { "fast-prep" },"integrationId":"http_bearer","status":"ACTIVE","resources":[],"metadata":null})).await?;
-                    return Ok(());
                 }
                 let request: Value = serde_json::from_slice(&bytes[end..end+length])?;
                 count.fetch_add(1, Ordering::SeqCst);
@@ -346,6 +337,12 @@ async fn live_peer_server_preparation(
         while let Some(result) = calls.join_next().await {
             result??;
         }
+        if matches!(
+            preparation,
+            Some(Preparation::CancelSecond(_) | Preparation::ParentSecond(_))
+        ) {
+            tokio::time::timeout(Duration::from_secs(2), lookup_cleaned.notified()).await?;
+        }
         if let Some(done) = host.cancel_cleanup.lock().unwrap().as_ref() {
             done.notify_one();
         }
@@ -357,6 +354,7 @@ async fn live_peer_server_preparation(
         Ok(())
     });
     Ok(Server {
+        connections,
         task,
         url,
         requests,
@@ -416,3 +414,60 @@ mod checkpoint_cancellation;
 
 #[path = "breakpoint_cancellation_tests.rs"]
 mod breakpoint_cancellation;
+
+struct PeerPreparation {
+    host: Arc<Host>,
+    preparation: Preparation,
+    started: Arc<tokio::sync::Notify>,
+    target_closed: Arc<tokio::sync::Notify>,
+    preparing_second: Arc<tokio::sync::Notify>,
+    lookup_cleaned: Arc<tokio::sync::Notify>,
+}
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for PeerPreparation {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture");
+        if connection == "slow-prep" {
+            let (Preparation::DelayFirst(delay)
+            | Preparation::PeerBeforeSecond(delay)
+            | Preparation::ReturnBeforeSecond(delay)
+            | Preparation::CancelSecond(delay)
+            | Preparation::ParentSecond(delay)) = self.preparation;
+            tokio::time::sleep(delay).await;
+        } else if matches!(
+            self.preparation,
+            Preparation::CancelSecond(_) | Preparation::ParentSecond(_)
+        ) {
+            struct Cleanup(Arc<tokio::sync::Notify>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+            let _cleanup = Cleanup(self.lookup_cleaned.clone());
+            tokio::time::timeout(Duration::from_secs(2), self.started.notified())
+                .await
+                .map_err(|e| e.to_string())?;
+            if matches!(self.preparation, Preparation::CancelSecond(_)) {
+                self.host.cancel.store(true, Ordering::SeqCst);
+            }
+            std::future::pending::<()>().await;
+        } else if matches!(
+            self.preparation,
+            Preparation::PeerBeforeSecond(_) | Preparation::ReturnBeforeSecond(_)
+        ) {
+            self.preparing_second.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), self.target_closed.notified())
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(serde_json::to_vec(
+            &json!({"connectionId":connection,"integrationId":"http_bearer",
+            "status":"ACTIVE","resources":[],"metadata":null}),
+        )
+        .unwrap())
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
+}

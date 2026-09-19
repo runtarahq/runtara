@@ -675,29 +675,16 @@ fn read_chunked_body(reader: &mut BufReader<std::net::TcpStream>) -> std::io::Re
     Ok(out)
 }
 
-fn route(
-    method: &str,
-    path: &str,
-    body: &[u8],
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-    workflow_input: &[u8],
-) -> (u16, Value) {
-    let path = path.split('?').next().unwrap_or(path);
+struct FixtureConnectionResolver(Arc<ServerState>);
 
-    if method == "GET" && path == "/health" {
-        return (200, serde_json::json!({"ok": true}));
-    }
-
-    // Trusted connection-metadata endpoint used by the host resolver. The id
-    // controls the fixture's authoritative integration so tests can prove a
-    // legacy authored provider never wins over the referenced connection.
-    if method == "GET" && path.ends_with("/metadata") {
-        let connection_id = path.split('/').rev().nth(1).unwrap_or_default().to_string();
-        server_state
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for FixtureConnectionResolver {
+    async fn describe(&self, tenant: &str, connection_id: String) -> Result<Vec<u8>, String> {
+        assert!(!tenant.is_empty());
+        self.0
             .connection_metadata_requests
             .lock()
-            .expect("connection metadata requests lock")
+            .unwrap()
             .push(connection_id.clone());
         let (integration_id, resources) = if connection_id == "conn-bedrock" {
             (
@@ -717,16 +704,44 @@ fn route(
                 ]),
             )
         };
-        return (
-            200,
-            serde_json::json!({
-                "connectionId": connection_id,
-                "integrationId": integration_id,
-                "status": "ACTIVE",
-                "resources": resources,
-                "metadata": null
-            }),
-        );
+        Ok(serde_json::to_vec(&serde_json::json!({
+            "connectionId": connection_id, "integrationId": integration_id,
+            "status": "ACTIVE", "resources": resources, "metadata": null
+        }))
+        .unwrap())
+    }
+    async fn resolve_resource(
+        &self,
+        _tenant: &str,
+        _connection: String,
+        _request: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        Err("fixture does not provide resources".into())
+    }
+}
+
+fn executor_with_connections(state: Arc<ServerState>) -> runtara_component_host::WorkflowExecutor {
+    let executor =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    executor
+        .set_connection_resolver(Arc::new(FixtureConnectionResolver(state)))
+        .unwrap();
+    executor
+}
+
+fn route(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    sink: &mpsc::Sender<CapturedMessage>,
+    server_state: &ServerState,
+    workflow_input: &[u8],
+) -> (u16, Value) {
+    let path = path.split('?').next().unwrap_or(path);
+
+    if method == "GET" && path == "/health" {
+        return (200, serde_json::json!({"ok": true}));
     }
 
     // Hermetic LLM stub: `call_agent()` forwards provider requests here when
@@ -1391,7 +1406,6 @@ fn run_direct_workflow_capture_attempt(
             "RUNTARA_OBJECT_MODEL_URL".into(),
             format!("http://{addr}/object-model"),
         ),
-        ("CONNECTION_SERVICE_URL".into(), format!("http://{addr}")),
         ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
         ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
         ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
@@ -1426,9 +1440,15 @@ fn run_direct_workflow_capture_attempt(
             &env_pairs,
             runtime_host.expect("invoke ABI requires the capturing host"),
             workflow_input_for_host.as_ref().clone(),
+            server_state_for_assertions.clone(),
         )
     } else {
-        execute_via_embedded(&compiled.wasm_path, &env_pairs, runtime_host)
+        execute_via_embedded(
+            &compiled.wasm_path,
+            &env_pairs,
+            runtime_host,
+            Some(server_state_for_assertions.clone()),
+        )
     };
     let _ = stop_tx.send(());
     let _ = server_handle.join();
@@ -1798,8 +1818,9 @@ fn execute_via_embedded_invoke(
     env_pairs: &[(String, String)],
     runtime_host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
     input: Vec<u8>,
+    connections: Arc<ServerState>,
 ) -> (bool, String, Option<u64>) {
-    let executor = embedded_executor();
+    let executor = executor_with_connections(connections);
     let mut limits = runtara_component_host::WorkflowLimits::default();
     if let Some(max) = env_pairs
         .iter()
@@ -1826,7 +1847,7 @@ fn execute_via_embedded_invoke(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
-                        trusted_tenant: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
                         env: env_pairs.iter().cloned().collect(),
                         stderr: None,
                         timeout: Duration::from_secs(300),
@@ -1894,8 +1915,9 @@ fn execute_via_embedded(
     wasm_path: &Path,
     env_pairs: &[(String, String)],
     runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>>,
+    connections: Option<Arc<ServerState>>,
 ) -> (bool, String, Option<u64>) {
-    let executor = embedded_executor();
+    let executor = executor_with_connections(connections.unwrap_or_default());
     let mut limits = runtara_component_host::WorkflowLimits::default();
     // Honor a per-run guest memory cap exactly as the production embedded runner
     // does (runtara-environment's `limits_from_env`), so a test can exercise the
@@ -1917,7 +1939,7 @@ fn execute_via_embedded(
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_tenant: Some("direct-wasm-execute".into()),
                     env: env_pairs.iter().cloned().collect(),
                     stderr: None,
                     timeout: Duration::from_secs(300),
@@ -1990,7 +2012,6 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             execution_graph: graph,
             track_events: false,
             child_workflows: vec![],
-            connection_service_url: None,
             agent_catalog: None,
             agent_slug: None,
             progress_callback: None,
@@ -2547,7 +2568,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_tenant: Some("direct-wasm-execute".into()),
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -5805,7 +5826,7 @@ async fn invoke_replaying_parks_with_env(
             .execute_invoke(
                 pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_tenant: Some("direct-wasm-execute".into()),
                     env: env.clone(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -6684,7 +6705,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_tenant: Some("direct-wasm-execute".into()),
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -6987,7 +7008,7 @@ fn direct_wasm_execute_invoke_abi_is_repeatable_across_runs() {
         let run = runtime.block_on(executor.execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
-                trusted_tenant: None,
+                trusted_tenant: Some("direct-wasm-execute".into()),
                 env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(60),
@@ -7789,7 +7810,7 @@ fn run_invoke_once_with_env(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
-                        trusted_tenant: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
                         env,
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -8525,7 +8546,7 @@ fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
 
     let input = br#"{"value":"cli-run"}"#.to_vec();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
-    let (ok, stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()));
+    let (ok, stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()), None);
     assert!(ok, "cli-run artifact must run to completion: {stderr}");
 
     assert_eq!(
@@ -8594,7 +8615,7 @@ fn direct_wasm_execute_cli_run_reports_a_failed_durable_sleep() {
     let input = br#"{"value":"cli-run"}"#.to_vec();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
     host.fail_sleeps_with(SLEEP_FAILURE);
-    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()));
+    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()), None);
 
     assert!(
         !ok,
@@ -8905,7 +8926,7 @@ fn direct_wasm_execute_cli_run_wait_timeout_gets_no_skew_tolerance() {
     let input = br#"{}"#.to_vec();
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
     let started = std::time::Instant::now();
-    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()));
+    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()), None);
     let elapsed = started.elapsed();
 
     assert!(
@@ -10901,7 +10922,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
-                        trusted_tenant: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
                         env: HashMap::new(),
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -11185,7 +11206,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
-                        trusted_tenant: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
                         env: HashMap::new(),
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -11379,13 +11400,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         "RUNTARA_HTTP_PROXY_URL".to_string(),
         format!("http://{addr}/llm-proxy"),
     );
-    // This test constructs WorkflowRunSpec directly, bypassing the
-    // environment runner that translates RUNTARA_CONNECTION_SERVICE_URL into
-    // the per-run CONNECTION_SERVICE_URL consumed by the resolver host.
-    env.insert(
-        "CONNECTION_SERVICE_URL".to_string(),
-        format!("http://{addr}"),
-    );
     env.insert(
         "RUNTARA_TENANT_ID".to_string(),
         "direct-wasm-execute".to_string(),
@@ -11393,14 +11407,14 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     env.insert("RUST_LOG".to_string(), "warn".to_string());
 
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let executor = embedded_executor();
+    let executor = executor_with_connections(server_state_for_assertions.clone());
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
         let pre = executor
             .load_instance_pre(&parent.wasm_path)
             .await
             .expect("load parent artifact");
-        invoke_replaying_parks_with_env(executor, &pre, host.clone(), env, b"{}".to_vec()).await
+        invoke_replaying_parks_with_env(&executor, &pre, host.clone(), env, b"{}".to_vec()).await
     });
     let _ = stop_tx.send(());
     let _ = server_handle.join();
@@ -12644,7 +12658,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
-                        trusted_tenant: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
                         env,
                         stderr: None,
                         timeout: Duration::from_secs(60),
@@ -12965,7 +12979,7 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
             .execute(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_tenant: Some("direct-wasm-execute".into()),
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(60),
@@ -13609,6 +13623,9 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
     executor
         .set_trusted_executor(dispatcher.trusted_executor())
         .unwrap();
+    executor
+        .set_connection_resolver(Arc::new(FixtureConnectionResolver(state.clone())))
+        .unwrap();
     let pre = executor
         .load_instance_pre(&compiled.wasm_path)
         .await
@@ -13623,7 +13640,6 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
                         "RUNTARA_HTTP_PROXY_URL".into(),
                         format!("http://{addr}/llm-proxy"),
                     ),
-                    ("CONNECTION_SERVICE_URL".into(), format!("http://{addr}")),
                     ("RUNTARA_TENANT_ID".into(), "tenant-authorized".into()),
                 ]),
                 stderr: None,

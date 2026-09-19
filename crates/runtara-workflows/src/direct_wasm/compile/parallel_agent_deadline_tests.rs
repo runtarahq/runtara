@@ -345,7 +345,13 @@ async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<
         if parent_timeout {
             *host.failure_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
         }
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_connections(
+            &compiled,
+            host.clone(),
+            server.env(),
+            server.connections.clone(),
+        )
+        .await?;
         if parent_timeout {
             let InvokeExit::Failed(error) = exit else {
                 anyhow::bail!("{exit:?}");

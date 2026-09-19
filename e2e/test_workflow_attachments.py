@@ -149,7 +149,7 @@ def main():
         env.update({
             "RUSTC_WRAPPER": "", "RUNTARA_SERVER_DATABASE_URL": dbbase + "attachment_server", "OBJECT_MODEL_DATABASE_URL": dbbase + "attachment_server", "RUNTARA_DATABASE_URL": dbbase + "attachment_runtime",
             "TENANT_ID": "attachments-e2e", "SERVER_HOST": "127.0.0.1", "SERVER_PORT": str(public), "INTERNAL_PORT": str(internal), "RUNTARA_CORE_PORT": str(core), "RUNTARA_ENVIRONMENT_PORT": str(environment), "RUNTARA_CORE_HTTP_PORT": str(core_http), "RUNTARA_ENV_HTTP_PORT": str(env_http),
-            "RUNTARA_AGENT_COMPONENTS_DIR": str(components), "DATA_DIR": str(work / "data"), "AUTH_PROVIDER": "local", "SESSION_TOKEN_SECRET": secrets.token_hex(32), "RUNTARA_CONNECTION_SERVICE_URL": f"http://127.0.0.1:{internal}/api/connections",
+            "RUNTARA_AGENT_COMPONENTS_DIR": str(components), "DATA_DIR": str(work / "data"), "AUTH_PROVIDER": "local", "SESSION_TOKEN_SECRET": secrets.token_hex(32),
             "VALKEY_HOST": "127.0.0.1", "VALKEY_PORT": str(redis), "OTEL_SDK_DISABLED": "true", "RUNTARA_SDK_BACKEND": "http", "SQLX_OFFLINE": "true", "RUST_LOG": "warn", "RUNTARA_HTTP_PROXY_URL": mock + "/proxy",
             "RUNTARA_PROXY_ALLOWED_HOSTS": "127.0.0.1", "RUNTARA_PROXY_ALLOW_HTTP_HOSTS": "127.0.0.1", "RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS": "127.0.0.1",
             "HTTPS_PROXY": mock, "HTTP_PROXY": mock, "NO_PROXY": "127.0.0.1,localhost",

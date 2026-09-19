@@ -68,6 +68,7 @@ impl EmbeddedRuntara {
     pub async fn start(
         config: EmbeddedRuntaraConfig,
         trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
+        connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
         event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
@@ -109,6 +110,7 @@ impl EmbeddedRuntara {
                     .as_ref()
                     .map(|policy| policy.runner_config()),
                 trusted,
+                Some(connections),
             )
             .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
@@ -285,6 +287,7 @@ pub async fn create_runtara_pool(
 /// already parsed at startup. It applies only to the pool this process opens.
 pub async fn maybe_start_embedded(
     trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
+    connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
 ) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
@@ -356,6 +359,6 @@ pub async fn maybe_start_embedded(
         isolation_policy: crate::config::isolation_policy(),
     };
 
-    let runtara = EmbeddedRuntara::start(config, trusted, event_observer).await?;
+    let runtara = EmbeddedRuntara::start(config, trusted, connections, event_observer).await?;
     Ok(Some(runtara))
 }

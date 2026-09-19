@@ -281,7 +281,7 @@ pub struct WorkflowState {
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
     connection_resolver:
-        Result<Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>, String>,
+        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
 }
 
 impl ExecutionView for WorkflowState {
@@ -317,7 +317,7 @@ impl WorkflowState {
 
     pub(crate) fn connection_resolver_host(
         &self,
-    ) -> Option<&Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>> {
+    ) -> Option<&Arc<crate::connection_resolver_host::RunConnectionResolver>> {
         self.connection_resolver.as_ref().ok()
     }
 
@@ -420,6 +420,7 @@ impl PreparedWorkflow {
 
 /// Loads composed workflow components and executes them in-process.
 pub struct WorkflowExecutor {
+    connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
@@ -427,6 +428,15 @@ pub struct WorkflowExecutor {
 }
 
 impl WorkflowExecutor {
+    pub fn set_connection_resolver(
+        &self,
+        resolver: Arc<dyn crate::ConnectionResolverHost>,
+    ) -> Result<()> {
+        self.connection_resolver
+            .set(resolver)
+            .map_err(|_| anyhow::anyhow!("connection resolver already configured"))
+    }
+
     fn linker_with_trusted_pins(
         &self,
         component: &Component,
@@ -498,6 +508,7 @@ impl WorkflowExecutor {
         crate::trusted::add_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
+            connection_resolver: std::sync::OnceLock::new(),
             engine,
             linker,
             cache: tokio::sync::Mutex::new(HashMap::new()),
@@ -830,7 +841,10 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: None,
-            connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
+            connection_resolver: crate::connection_resolver_host::resolver_for_run(
+                self.connection_resolver.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -1121,7 +1135,10 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
-            connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
+            connection_resolver: crate::connection_resolver_host::resolver_for_run(
+                self.connection_resolver.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
         };
 
         let mut store = Store::new(&self.engine, state);

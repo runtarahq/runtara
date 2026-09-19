@@ -543,7 +543,6 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
             execution_graph: serde_json::from_value(graph).unwrap(),
             track_events: false,
             child_workflows: vec![],
-            connection_service_url: None,
             agent_catalog: None,
             progress_callback: None,
             agent_slug: None,

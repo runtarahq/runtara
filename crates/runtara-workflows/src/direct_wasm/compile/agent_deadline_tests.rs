@@ -352,7 +352,11 @@ fn executor() -> &'static WorkflowExecutor {
     EXECUTOR.get_or_init(|| {
         let engine = runtara_component_host::build_engine(&Default::default()).unwrap();
         runtara_component_host::spawn_epoch_ticker(engine.clone());
-        WorkflowExecutor::new(engine).unwrap()
+        let executor = WorkflowExecutor::new(engine).unwrap();
+        executor
+            .set_connection_resolver(Arc::new(FixtureConnections))
+            .unwrap();
+        executor
     })
 }
 
@@ -360,7 +364,7 @@ fn executor() -> &'static WorkflowExecutor {
 enum Shape {
     Root,
     LongContinuation,
-    Preparation(bool),
+    Preparation,
     Published(usize),
     InlineWhile(usize),
     InheritedWhile {
@@ -426,7 +430,7 @@ fn compile_shaped(
             .unwrap()
             .push(json!({"fromStep":"after","toStep":"finish"}));
     }
-    if matches!(shape, Shape::Preparation(_)) {
+    if matches!(shape, Shape::Preparation) {
         graph["steps"]["fetch"]["connectionId"] = "conn".into();
     }
     if !recover {
@@ -658,13 +662,29 @@ async fn invoke_with_env(
     host: Arc<Host>,
     env: HashMap<String, String>,
 ) -> anyhow::Result<InvokeExit> {
-    let executor = executor();
+    invoke_with_connections(compiled, host, env, None).await
+}
+
+async fn invoke_with_connections(
+    compiled: &DirectCompilationResult,
+    host: Arc<Host>,
+    env: HashMap<String, String>,
+    connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
+) -> anyhow::Result<InvokeExit> {
+    let local = if let Some(connections) = connections {
+        let local = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
+        local.set_connection_resolver(connections)?;
+        Some(local)
+    } else {
+        None
+    };
+    let executor = local.as_ref().unwrap_or_else(|| executor());
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
     Ok(executor
         .execute_invoke(
             &pre,
             WorkflowRunSpec {
-                trusted_tenant: None,
+                trusted_tenant: Some("fixture".into()),
                 env,
                 stderr: None,
                 timeout: Duration::from_secs(5),
@@ -726,19 +746,10 @@ async fn run_shaped(
                 anyhow::ensure!(n > 0, "request ended before headers");
                 request.extend_from_slice(&buffer[..n]);
             }
-            if let Shape::Preparation(partial) = shape {
-                anyhow::ensure!(
-                    std::str::from_utf8(&request)?
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .contains("/metadata"),
-                    "Agent invoked after cancelled preparation"
-                );
-                if partial {
-                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").await?;
-                }
-            }
+            anyhow::ensure!(
+                !matches!(shape, Shape::Preparation),
+                "Agent invoked after cancelled preparation"
+            );
             let attempt = req.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
                 *first.lock().unwrap() = Some(Instant::now());
@@ -802,10 +813,18 @@ async fn run_shaped(
             true,
             shape,
         )?;
-        let env = if matches!(shape, Shape::Preparation(_)) {
-            HashMap::from([("CONNECTION_SERVICE_URL".into(),url.clone()),("RUNTARA_TENANT_ID".into(),"fixture".into())])
-        } else { HashMap::new() };
-        let mut exit = invoke_with_env(&compiled, host.clone(), env).await?;
+        let mut exit = if matches!(shape, Shape::Preparation) {
+            let executor = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
+            executor.set_connection_resolver(Arc::new(PendingPreparation {
+                host: host.clone(), requests: requests.clone(), closed: closed.clone(),
+                first: first_request.clone(), cancel: matches!(response, Response::RootCancel),
+            }))?;
+            let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
+            executor.execute_invoke(&pre, WorkflowRunSpec {
+                trusted_tenant: Some("fixture".into()), env: HashMap::new(), stderr: None,
+                timeout: Duration::from_secs(5), cancel: None, limits: Default::default(), runtime: Some(host.clone()),
+            }, b"{}".to_vec()).await.exit
+        } else { invoke(&compiled, host.clone()).await? };
         if matches!(response, Response::RootCancel) {
             anyhow::ensure!(
                 matches!(exit, InvokeExit::Suspended(_)),
@@ -1324,27 +1343,63 @@ async fn agent_deadline_inherited_budget_bounds_backoff_and_durable_replay() -> 
 async fn agent_deadline_interrupts_connection_preparation_without_invocation() -> anyhow::Result<()>
 {
     for durable in [false, true] {
-        for partial in [false, true] {
-            run_shaped(
-                Response::Hang,
-                500,
-                durable,
-                3,
-                0,
-                Shape::Preparation(partial),
-            )
-            .await?;
+        {
+            run_shaped(Response::Hang, 500, durable, 3, 0, Shape::Preparation).await?;
             run_shaped(
                 Response::RootCancel,
                 5_000,
                 durable,
                 3,
                 0,
-                Shape::Preparation(partial),
+                Shape::Preparation,
             )
             .await?;
         }
-        run_shaped(Response::Hang, 0, durable, 3, 0, Shape::Preparation(false)).await?;
+        run_shaped(Response::Hang, 0, durable, 3, 0, Shape::Preparation).await?;
     }
     Ok(())
+}
+
+struct PendingPreparation {
+    host: Arc<Host>,
+    requests: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
+    first: Arc<Mutex<Option<Instant>>>,
+    cancel: bool,
+}
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for PendingPreparation {
+    async fn describe(&self, _: &str, _: String) -> Result<Vec<u8>, String> {
+        struct Cleanup(Arc<AtomicUsize>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let _cleanup = Cleanup(self.closed.clone());
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        *self.first.lock().unwrap() = Some(Instant::now());
+        if self.cancel {
+            self.host.cancel.store(true, Ordering::SeqCst);
+        }
+        std::future::pending().await
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
+}
+
+struct FixtureConnections;
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for FixtureConnections {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture");
+        Ok(serde_json::to_vec(&json!({"connectionId": connection,
+            "integrationId": if connection == "mcp-conn" {"mcp"} else {"openai_api_key"},
+            "status":"ACTIVE","resources":[],"metadata":null}))
+        .unwrap())
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
 }

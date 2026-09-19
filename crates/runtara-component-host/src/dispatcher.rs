@@ -96,6 +96,7 @@ fn parse_memory_max(raw: Option<String>) -> usize {
 }
 
 pub struct ComponentDispatcherService {
+    connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     engine: Arc<Engine>,
     trusted: Arc<crate::trusted::TrustedExecutor>,
     agents: HashMap<String, Arc<LoadedAgent>>,
@@ -111,6 +112,15 @@ pub struct ComponentDispatcherService {
 }
 
 impl ComponentDispatcherService {
+    pub fn set_connection_resolver(
+        &self,
+        resolver: Arc<dyn crate::ConnectionResolverHost>,
+    ) -> Result<()> {
+        self.connection_resolver
+            .set(resolver)
+            .map_err(|_| anyhow::anyhow!("connection resolver already configured"))
+    }
+
     /// Build the service from a directory of `runtara_agent_*.wasm` files,
     /// each accompanied by a sibling `runtara_agent_*.meta.json`. The filename
     /// stem after the `runtara_agent_` prefix becomes the agent id (e.g.
@@ -206,6 +216,7 @@ impl ComponentDispatcherService {
 
         Ok(Self {
             trusted: Arc::new(trusted),
+            connection_resolver: std::sync::OnceLock::new(),
             engine,
             agents,
             catalog,
@@ -294,6 +305,10 @@ impl ComponentDispatcherService {
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
         state.trusted = Some(Arc::clone(&self.trusted));
+        state.connection_resolver = crate::connection_resolver_host::resolver_for_run(
+            self.connection_resolver.get(),
+            Some(&req.tenant_id),
+        );
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 

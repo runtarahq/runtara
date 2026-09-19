@@ -45,8 +45,8 @@ automatically be deleted.
 
 | Surface | Current path | Required change |
 | --- | --- | --- |
-| Runtime | `runtime@0.3.0` host imports, implemented by `PersistenceRuntimeHost`; production workflow entry uses `lifecycle@0.2.0.invoke` | Preserve existing native behavior and lifecycle semantics; include it in the common context and compatibility model |
-| Connections | `resolver@0.1.0` host import, implemented by `HttpConnectionResolverHost` | Inject a native implementation using `ConnectionsFacade`; migrate the synchronous WIT surface to a new async version |
+| Runtime | `runtime@0.4.0` host imports, implemented by `PersistenceRuntimeHost`; production workflow entry uses `lifecycle@0.2.0.invoke` | Preserve existing native behavior and lifecycle semantics; include it in the common context and compatibility model |
+| Connections | Async `resolver@0.2.0` imports call `NativeConnectionResolver` and `ConnectionsFacade` directly; existing `0.1.0` artifacts use the same native backend | Implemented: host-owned tenant, per-run caches, interactive and workflow execution, no internal connection HTTP routes or URL configuration |
 | Outbound HTTP | `runtara-http` wraps requests for the internal proxy, then uses `host-io/http@0.1.0` to make that HTTP hop | Introduce a policy-aware host request interface calling an extracted native egress service |
 | Object Model | WASM agent calls internal Object Model routes through `runtara-http.call()` | Add domain host operations using the existing schema/instance services and ObjectStore |
 | Presigning | S3/Azure trusted capabilities execute their agent-owned signers in restricted WASM; the legacy HTTP endpoint is removed | Authorize on the host and invoke the approved built-in provider's `trusted` capability in a restricted instance |

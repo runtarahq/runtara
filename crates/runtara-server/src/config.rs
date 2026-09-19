@@ -74,10 +74,6 @@ pub struct Config {
     pub http_proxy_url: String,
     /// Object-model internal API URL forwarded to workflow processes.
     pub object_model_url: String,
-    /// Base URL workflows use to resolve connections. Served by the internal
-    /// listener, so it tracks `INTERNAL_PORT` unless `CONNECTION_SERVICE_URL`
-    /// overrides it.
-    pub connection_service_url: String,
     /// Directory containing per-agent WASM components (`runtara_agent_*.wasm`).
     /// When set, `AgentTestingService` routes known agents through the
     /// embedded wasmtime path instead of the legacy dispatcher image.
@@ -230,13 +226,6 @@ impl Config {
         });
 
         // Derived from `internal_port` like the two above, because
-        // `/api/connections` is nested on the very same internal listener.
-        // Leaving it undderived meant a server on any non-default INTERNAL_PORT
-        // handed workflows a connection endpoint pointing at 7002 — either
-        // nothing, or somebody else's server.
-        let connection_service_url = std::env::var("CONNECTION_SERVICE_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/connections", internal_port));
-
         let agent_components_dir = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -317,7 +306,6 @@ impl Config {
             internal_port,
             http_proxy_url,
             object_model_url,
-            connection_service_url,
             agent_components_dir,
             direct_wasm_components_dir,
             isolation_policy,

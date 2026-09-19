@@ -266,3 +266,56 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Interactive execution uses the same native metadata boundary as workflows.
+/// No connection HTTP listener or egress endpoint is needed for scope rejection.
+#[tokio::test]
+async fn dispatcher_mcp_uses_native_metadata_and_host_tenant() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    struct Resolver;
+    #[async_trait::async_trait]
+    impl runtara_component_host::ConnectionResolverHost for Resolver {
+        async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+            assert_eq!(tenant, "tenant-test");
+            assert_eq!(connection, "native-mcp");
+            Ok(br#"{"integrationId":"mcp","metadata":{"tool_scope":["allowed"]}}"#.to_vec())
+        }
+        async fn resolve_resource(
+            &self,
+            _: &str,
+            _: String,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            Err("unsupported fixture resource".into())
+        }
+    }
+    let bundle = tempfile::tempdir()?;
+    for extension in ["wasm", "meta.json"] {
+        let filename = format!("runtara_agent_mcp.{extension}");
+        std::fs::copy(
+            common::bundle_dir().join(&filename),
+            bundle.path().join(filename),
+        )?;
+    }
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    dispatcher.set_connection_resolver(Arc::new(Resolver))?;
+    let result = dispatcher
+        .test_capability(TestCapabilityRequest {
+            tenant_id: "tenant-test".into(),
+            agent_id: "mcp".into(),
+            capability_id: "mcp-tool-invoke".into(),
+            input: serde_json::json!({"tool_name":"forbidden","args":{},
+            "_connection":{"connection_id":"spoofed","parameters":{"tool_scope":["forbidden"]}}}),
+            connection: Some(runtara_component_host::ResolvedConnection {
+                connection_id: "native-mcp".into(),
+                integration_id: "mcp".into(),
+                connection_subtype: None,
+                parameters: serde_json::json!({}),
+                rate_limit_config: None,
+            }),
+        })
+        .await?;
+    assert!(!result.success);
+    assert_eq!(result.error.unwrap().code, "MCP_TOOL_OUT_OF_SCOPE");
+    Ok(())
+}

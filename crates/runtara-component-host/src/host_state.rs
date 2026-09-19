@@ -33,7 +33,6 @@ pub struct CallContext {
     pub proxy_host: String,
     pub core_http_url: String,
     pub object_model_url: String,
-    pub connection_service_url: Option<String>,
 }
 
 impl CallContext {
@@ -54,7 +53,6 @@ impl CallContext {
             proxy_host,
             core_http_url: core_http_url.into(),
             object_model_url: object_model_url.into(),
-            connection_service_url: None,
         }
     }
 
@@ -69,7 +67,6 @@ impl CallContext {
             proxy_host: String::new(),
             core_http_url: String::new(),
             object_model_url: String::new(),
-            connection_service_url: None,
         }
     }
 }
@@ -194,6 +191,8 @@ pub enum Termination {
 }
 
 pub struct HostState {
+    pub(crate) connection_resolver:
+        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
     pub(crate) restricted: bool,
     pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
     pub wasi: WasiCtx,
@@ -214,6 +213,18 @@ pub struct HostState {
 }
 
 impl HostState {
+    /// Configure a native resolver using this invocation's host-owned tenant.
+    pub fn with_connection_resolver(
+        mut self,
+        resolver: Arc<dyn crate::ConnectionResolverHost>,
+    ) -> Self {
+        self.connection_resolver = crate::connection_resolver_host::resolver_for_run(
+            Some(&resolver),
+            Some(&self.ctx.tenant_id),
+        );
+        self
+    }
+
     pub(crate) fn restricted() -> Self {
         let mut state = Self::new(Arc::new(CallContext::placeholder_for_metadata()));
         state.wasi = WasiCtxBuilder::new()
@@ -241,15 +252,13 @@ impl HostState {
         if !ctx.object_model_url.is_empty() {
             builder.env("RUNTARA_OBJECT_MODEL_URL", &ctx.object_model_url);
         }
-        if let Some(url) = &ctx.connection_service_url {
-            builder.env("CONNECTION_SERVICE_URL", url);
-        }
         if let Some(iid) = &ctx.instance_id {
             builder.env("RUNTARA_INSTANCE_ID", iid);
         }
 
         Self {
             restricted: false,
+            connection_resolver: Err("native connection resolver is not configured".into()),
             trusted: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),

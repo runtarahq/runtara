@@ -97,10 +97,6 @@ pub struct CompilationInput {
     pub track_events: bool,
     /// Pre-loaded child workflows (empty if none).
     pub child_workflows: Vec<ChildWorkflowInput>,
-    /// URL for fetching connections at runtime.
-    /// If provided, generated code will fetch connections from this service.
-    /// Expected endpoint: `GET {url}/{tenant_id}/{connection_id}`.
-    pub connection_service_url: Option<String>,
     /// Runtime agent metadata catalog. Optional so callers that haven't
     /// migrated yet keep working — `None` falls back to building one from
     /// the statically-linked `runtara_agents::registry`. Production code
@@ -139,7 +135,6 @@ impl std::fmt::Debug for CompilationInput {
             .field("execution_graph", &self.execution_graph)
             .field("track_events", &self.track_events)
             .field("child_workflows", &self.child_workflows)
-            .field("connection_service_url", &self.connection_service_url)
             .field("agent_catalog", &self.agent_catalog)
             .field("progress_callback", &self.progress_callback.is_some())
             .finish()
@@ -210,7 +205,6 @@ pub fn compile_workflow_direct(
         execution_graph,
         track_events,
         child_workflows,
-        connection_service_url: _,
         agent_catalog,
         progress_callback,
         agent_slug,
@@ -371,7 +365,6 @@ mod tests {
                 execution_graph: graph,
                 track_events: false,
                 child_workflows: vec![],
-                connection_service_url: None,
                 agent_catalog: None,
                 agent_slug: None,
                 progress_callback: None,

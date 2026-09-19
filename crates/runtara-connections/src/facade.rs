@@ -144,13 +144,24 @@ impl ConnectionsFacade {
             return Ok(None);
         };
         let integration_id = connection.integration_id.unwrap_or_default();
+        // MCP tool configuration shares the encrypted parameter blob. Project
+        // only the approved fields; endpoint URLs and headers remain native.
+        let metadata = if integration_id == "mcp" {
+            let full = self
+                .get_with_parameters_for_types(id, tenant_id, &["mcp".to_owned()])
+                .await?
+                .ok_or_else(|| ConnectionsError::NotFound("Connection not found".into()))?;
+            mcp_guest_metadata(full.connection_parameters.as_ref().unwrap_or(&Value::Null))
+        } else {
+            Value::Null
+        };
         Ok(Some(ConnectionDescriptor {
             connection_id: connection.id,
             integration_id: integration_id.clone(),
             connection_subtype: connection.connection_subtype,
             status: connection.status,
             resources: resources_for_integration(&integration_id),
-            metadata: Value::Null,
+            metadata,
         }))
     }
 
@@ -706,5 +717,45 @@ mod tests {
         // Once the interval elapses it warns again, then throttles again.
         assert!(claim_warn_slot(&last, base + iv, iv));
         assert!(!claim_warn_slot(&last, base + iv + 1, iv));
+    }
+}
+
+/// Explicit allowlist: URL, auth material and extra headers never cross into WASM.
+fn mcp_guest_metadata(parameters: &Value) -> Value {
+    let hints: serde_json::Map<String, Value> = parameters["tool_hints"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, value)| value.is_string())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let scope: Vec<Value> = parameters["tool_scope"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|value| value.is_string())
+        .cloned()
+        .collect();
+    serde_json::json!({"tool_hints": hints, "tool_scope": scope})
+}
+
+#[cfg(test)]
+mod guest_metadata_tests {
+    use super::*;
+    #[test]
+    fn mcp_metadata_only_contains_tool_configuration() {
+        let parameters = serde_json::json!({
+            "url": "https://example.test/mcp?key=synthetic-secret",
+            "bearer_token": "synthetic-secret",
+            "extra_headers": {"Authorization": "synthetic-secret"},
+            "tool_hints": {"search": "Find documents", "invalid": {}},
+            "tool_scope": ["search", 7], "future_field": "synthetic-secret"
+        });
+        assert_eq!(
+            mcp_guest_metadata(&parameters),
+            serde_json::json!({
+                "tool_hints": {"search": "Find documents"}, "tool_scope": ["search"]
+            })
+        );
     }
 }

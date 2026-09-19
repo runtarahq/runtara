@@ -1318,6 +1318,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // - Core functionality (checkpoints, signals) on port 8003 (RUNTARA_CORE_HTTP_PORT)
     // Migrations are run automatically via runtara_environment::migrations::run()
 
+    let connection_resolver: Arc<dyn runtara_component_host::ConnectionResolverHost> = Arc::new(
+        api::services::connection_resolver::NativeConnectionResolver(connections_facade.clone()),
+    );
+    if let Some(dispatcher) = &component_dispatcher {
+        dispatcher.set_connection_resolver(connection_resolver.clone())?;
+    }
     let trusted_executor = component_dispatcher.as_ref().map(|d| d.trusted_executor());
     if let Some(executor) = &trusted_executor {
         executor.set_credentials(Arc::new(api::services::trusted::BuiltinTrustedCredentials(
@@ -1328,6 +1334,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Start embedded Runtara servers (using dedicated database)
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
         trusted_executor,
+        connection_resolver,
         execution_timeout_policy,
         Some(workers::step_counter::StepCounter::new(Arc::clone(
             &pipeline_gauges,
@@ -2377,11 +2384,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
 
-    // Internal API routes (called by workflow binaries, no tenant header required)
-    // Runtime connection endpoint now served by runtara-connections crate
-    // Path: /api/connections/{tenant_id}/{connection_id}
-    let internal_routes = runtara_connections::runtime_router(connections_config.clone());
-
     // Connections admin routes (operator-triggered maintenance, e.g. re-encrypt).
     // Crate-owned so the HTTP surface stays colocated with the domain logic.
     let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
@@ -2748,7 +2750,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Internal API server — localhost only, called by workflow binaries / WASM
     // =========================================================================
     let internal_app = Router::new()
-        .nest("/api/connections", internal_routes)
         .nest("/api/internal/connections-admin", connections_admin_routes)
         .merge(internal_object_model_routes)
         .merge(internal_proxy_routes)

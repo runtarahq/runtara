@@ -121,12 +121,17 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
     }
     graph["steps"]["scope"]["subgraph"]["steps"]["a"]["timeout"] = 500.into();
     let compiled = compile_graph(dir.path(), graph)?;
-    let executor = executor();
+    let executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(executor().engine()))?;
+    let lookup_started = Arc::new(tokio::sync::Notify::new());
+    let lookup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    executor.set_connection_resolver(Arc::new(SlowResolver(
+        lookup_started.clone(),
+        lookup_count.clone(),
+    )))?;
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
     let server = async move {
         let mut requests = tokio::task::JoinSet::new();
-        let lookup_started = Arc::new(tokio::sync::Notify::new());
-        for _ in 0..2 + usize::from(preparation) {
+        for _ in 0..2 {
             let (mut socket, _) = listener.accept().await?;
             let lookup_started = lookup_started.clone();
             requests.spawn(async move {
@@ -134,27 +139,6 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
                 while !headers.ends_with(b"\r\n\r\n") {
                     headers.push(socket.read_u8().await?);
                     anyhow::ensure!(headers.len() < 8192, "oversized fixture request");
-                }
-                let metadata = std::str::from_utf8(&headers)?
-                    .lines()
-                    .next()
-                    .unwrap()
-                    .contains("/metadata ");
-                if metadata {
-                    anyhow::ensure!(preparation, "unexpected connection lookup");
-                    lookup_started.notify_one();
-                    // The timed peer returns while this lookup is still pending.
-                    // Keep waiting past its former deadline + cleanup grace.
-                    tokio::time::sleep(Duration::from_secs(6)).await;
-                    write_peer_response(
-                        &mut socket,
-                        &json!({
-                            "connectionId":"pending", "integrationId":"http_bearer",
-                            "status":"ACTIVE", "resources":[], "metadata":null
-                        }),
-                    )
-                    .await?;
-                    return Ok::<_, anyhow::Error>((false, true));
                 }
                 let slow = headers.starts_with(b"GET /slow ");
                 anyhow::ensure!(slow || headers.starts_with(b"GET /fast "), "wrong path");
@@ -168,31 +152,26 @@ async fn returned_call_survives_peer_wait(preparation: bool) -> anyhow::Result<(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n42",
                     )
                     .await?;
-                Ok::<_, anyhow::Error>((slow, false))
+                Ok::<_, anyhow::Error>(slow)
             });
         }
-        let (mut slow, mut metadata) = (0, 0);
+        let mut slow = 0;
         while let Some(result) = requests.join_next().await {
-            let (is_slow, is_metadata) = result??;
+            let is_slow = result??;
             slow += usize::from(is_slow);
-            metadata += usize::from(is_metadata);
         }
         anyhow::ensure!(slow == 1, "one fast and one slow request required");
-        anyhow::ensure!(metadata == usize::from(preparation), "wrong lookup count");
+        anyhow::ensure!(
+            lookup_count.load(std::sync::atomic::Ordering::SeqCst) == usize::from(preparation),
+            "wrong lookup count"
+        );
         Ok::<_, anyhow::Error>(())
     };
     let run = executor.execute_invoke(
         &pre,
         runtara_component_host::WorkflowRunSpec {
-            trusted_tenant: None,
-            env: if preparation {
-                HashMap::from([
-                    ("CONNECTION_SERVICE_URL".into(), base),
-                    ("RUNTARA_TENANT_ID".into(), "fixture".into()),
-                ])
-            } else {
-                HashMap::new()
-            },
+            trusted_tenant: Some("fixture".into()),
+            env: HashMap::new(),
             stderr: None,
             timeout: Duration::from_secs(10),
             cancel: None,
@@ -242,4 +221,28 @@ async fn inherited_parallel_deadlines_bound_cpu_bound_cleanup() -> anyhow::Resul
         aborts(shape, false, true).await?;
     }
     Ok(())
+}
+
+struct SlowResolver(
+    Arc<tokio::sync::Notify>,
+    Arc<std::sync::atomic::AtomicUsize>,
+);
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for SlowResolver {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture");
+        assert_eq!(connection, "pending");
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.notify_one();
+        // Native preparation outlives the returned peer's timeout and cleanup grace.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        Ok(serde_json::to_vec(
+            &json!({"connectionId":connection,"integrationId":"http_bearer",
+            "status":"ACTIVE","resources":[],"metadata":null}),
+        )
+        .unwrap())
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
 }

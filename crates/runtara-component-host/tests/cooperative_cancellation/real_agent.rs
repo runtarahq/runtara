@@ -227,6 +227,23 @@ pub(super) async fn cancel_and_reuse(
     started: Arc<Notify>,
     cleaned: Arc<Notify>,
 ) -> anyhow::Result<serde_json::Value> {
+    cancel_and_reuse_with_resolver(
+        bytes,
+        context,
+        started,
+        cleaned,
+        Arc::new(super::real_mcp::McpResolver::default()),
+    )
+    .await
+}
+
+async fn cancel_and_reuse_with_resolver(
+    bytes: Vec<u8>,
+    context: CallContext,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+    resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
+) -> anyhow::Result<Value> {
     let sibling_started = Arc::new(Notify::new());
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
@@ -257,7 +274,7 @@ pub(super) async fn cancel_and_reuse(
                 Ok(())
             })
         })?;
-    let state = HostState::new(Arc::new(context));
+    let state = HostState::new(Arc::new(context)).with_connection_resolver(resolver);
     let mut store = Store::new(&engine, state);
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, "run")?;
@@ -296,7 +313,11 @@ pub(super) async fn invoke_named_agent(
     })?;
     let component = Component::from_file(&engine, agent_path(agent_id)?)?;
     let linker = runtara_component_host::build_linker(&engine)?;
-    let mut store = Store::new(&engine, HostState::new(Arc::new(context)));
+    let mut store = Store::new(
+        &engine,
+        HostState::new(Arc::new(context))
+            .with_connection_resolver(Arc::new(super::real_mcp::McpResolver::default())),
+    );
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let interface = instance
         .get_export_index(
@@ -482,11 +503,30 @@ pub(super) async fn run_cancellation_fixture(
     context: CallContext,
     started: Arc<Notify>,
     cleaned: Arc<Notify>,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<Value> {
+    run_cancellation_fixture_with_resolver(
+        bytes,
+        context,
+        started,
+        cleaned,
+        server,
+        Arc::new(super::real_mcp::McpResolver::default()),
+    )
+    .await
+}
+
+pub(super) async fn run_cancellation_fixture_with_resolver(
+    bytes: Vec<u8>,
+    context: CallContext,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
     mut server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
 ) -> anyhow::Result<Value> {
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        cancel_and_reuse(bytes, context, started, cleaned),
+        cancel_and_reuse_with_resolver(bytes, context, started, cleaned, resolver),
     )
     .await;
     let output = match result {

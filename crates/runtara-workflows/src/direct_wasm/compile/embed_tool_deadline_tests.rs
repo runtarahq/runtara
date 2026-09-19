@@ -94,6 +94,7 @@ fn compiled_with_delay(
 }
 
 struct Server {
+    connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -150,26 +151,20 @@ impl Server {
                 let request_line = headers.lines().next().unwrap();
                 let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
                 let object_model = path.starts_with("/schemas") || path.starts_with("/instances");
-                let metadata = request_line.contains("/metadata ");
-                let mcp_metadata = request_line.contains("/mcp-conn/metadata ");
-                let mcp_params = request_line.starts_with("GET /fixture/mcp-conn ");
                 while bytes.len() < end + length {
                     let n = stream.read(&mut buffer).await?;
                     anyhow::ensure!(n > 0, "incomplete body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
                 let mut response_status = 200;
-                let response = if metadata {
-                    json!({"connectionId":if mcp_metadata {"mcp-conn"} else {"conn"},"integrationId":if mcp_metadata {"mcp"} else {"openai_api_key"},"status":"ACTIVE","resources":[],"metadata":null})
-                } else if mcp_params {
-                    json!({"parameters":{"url":"http://fixture.test/child"}})
-                } else {
+                let response = {
                     let envelope: Value = if object_model {
                         json!({"url":path,"body":if length == 0 {Value::Null} else {serde_json::from_slice(&bytes[end..end + length])?}})
                     } else {
                         serde_json::from_slice(&bytes[end..end + length])?
                     };
                     if object_model
+                        || envelope["connection_id"] == "mcp-conn"
                         || envelope["url"]
                             .as_str()
                             .is_some_and(|url| url.ends_with("/child"))
@@ -269,6 +264,7 @@ impl Server {
             }
         });
         Ok(Self {
+            connections: None,
             task,
             url,
             requests,
@@ -283,7 +279,6 @@ impl Server {
                 "RUNTARA_HTTP_PROXY_URL".into(),
                 format!("{}/proxy", self.url),
             ),
-            ("CONNECTION_SERVICE_URL".into(), self.url.clone()),
             ("RUNTARA_OBJECT_MODEL_URL".into(), self.url.clone()),
             ("RUNTARA_TENANT_ID".into(), "fixture".into()),
         ])

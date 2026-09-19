@@ -1,8 +1,7 @@
 //! Standard cancellation during MCP connection lookup and the three-request
 //! handshake. All services are local stubs; no remote tool is invoked.
 use super::real_agent::{
-    compose_agent, invoke_named_agent, read_proxy, request_headers, respond,
-    run_cancellation_fixture,
+    compose_agent, invoke_named_agent, read_proxy, respond, run_cancellation_fixture_with_resolver,
 };
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -25,9 +24,9 @@ async fn request(
     after: bool,
 ) -> anyhow::Result<()> {
     let request = read_proxy(socket).await?;
-    assert_eq!(request["url"], "https://mcp.invalid/rpc");
+    assert_eq!(request["url"], "");
     assert_eq!(request["connection_id"], "fixture-connection");
-    assert_eq!(request["headers"]["X-Fixture"], "present");
+    assert!(request["headers"].get("X-Fixture").is_none());
     assert_eq!(
         request["headers"]["Accept"],
         "application/json, text/event-stream"
@@ -104,14 +103,9 @@ async fn cancellation(method: &'static str, blocked: usize, partial: bool) -> an
         let started = started.clone();
         let cleaned = cleaned.clone();
         async move {
-            for stage in (if blocked == 0 { 0 } else { 1 })..=blocked {
+            for stage in 1..=blocked {
                 let (mut socket, _) = listener.accept().await?;
-                if stage == 0 {
-                    let headers = request_headers(&mut socket).await?;
-                    assert!(headers.starts_with(b"GET /fixture-tenant/fixture-connection "));
-                } else {
-                    request(&mut socket, stage, method, false).await?;
-                }
+                request(&mut socket, stage, method, false).await?;
                 if stage < blocked {
                     reply(&mut socket, stage, false).await?;
                 } else {
@@ -137,9 +131,18 @@ async fn cancellation(method: &'static str, blocked: usize, partial: bool) -> an
             anyhow::Ok(())
         }
     });
-    let mut context = CallContext::for_test("fixture-tenant", format!("{base}/proxy"), "", "");
-    context.connection_service_url = Some(base);
-    let output = run_cancellation_fixture(bytes, context, started, cleaned, server).await?;
+    let context = CallContext::for_test("fixture-tenant", format!("{base}/proxy"), "", "");
+    let resolver = Arc::new(McpResolver {
+        pending: if blocked == 0 {
+            Some((started.clone(), cleaned.clone()))
+        } else {
+            None
+        },
+        first: Default::default(),
+    });
+    let output =
+        run_cancellation_fixture_with_resolver(bytes, context, started, cleaned, server, resolver)
+            .await?;
     assert_eq!(
         output,
         json!({"text":"after","content":[{"type":"text","text":"after"}],"is_error":false})
@@ -148,10 +151,8 @@ async fn cancellation(method: &'static str, blocked: usize, partial: bool) -> an
 }
 
 #[tokio::test]
-async fn mcp_cancel_interrupts_connection_lookup_headers_and_body() -> anyhow::Result<()> {
-    for partial in [false, true] {
-        cancellation("tools/call", 0, partial).await?;
-    }
+async fn mcp_cancel_drops_native_connection_lookup_and_allows_fresh_lookup() -> anyhow::Result<()> {
+    cancellation("tools/call", 0, false).await?;
     Ok(())
 }
 #[tokio::test]
@@ -179,7 +180,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
     forbidden["tool_name"] = "forbidden".into();
     let error = invoke_named_agent(
         "mcp",
-        CallContext::placeholder_for_metadata(),
+        CallContext::for_test("fixture-tenant", "", "", ""),
         "mcp-tool-invoke",
         serde_json::to_vec(&forbidden)?,
     )
@@ -276,4 +277,38 @@ async fn mcp_async_search_preserves_tool_scope_and_schema() -> anyhow::Result<()
     assert_eq!(output["tools"][0]["name"], "echo");
     assert_eq!(output["tools"][0]["inputSchema"], json!({"type":"object"}));
     Ok(())
+}
+
+#[derive(Default)]
+pub(super) struct McpResolver {
+    pending: Option<(Arc<Notify>, Arc<Notify>)>,
+    first: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for McpResolver {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture-tenant");
+        assert_eq!(connection, "fixture-connection");
+        if let Some((started, cleaned)) = &self.pending
+            && !self.first.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            struct Cleanup(Arc<Notify>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+            let _cleanup = Cleanup(cleaned.clone());
+            started.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Ok(serde_json::to_vec(
+            &json!({"integrationId":"mcp","metadata":{"tool_scope":["echo"],"tool_hints":{}}}),
+        )
+        .unwrap())
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
 }

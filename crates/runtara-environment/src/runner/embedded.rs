@@ -871,6 +871,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach the native connection service shared by all runs.
+    pub fn with_connection_resolver(
+        self,
+        resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
+    ) -> Result<Self> {
+        self.executor
+            .set_connection_resolver(resolver)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach the approved built-in trusted capability executor.
     pub fn with_trusted_executor(
         self,

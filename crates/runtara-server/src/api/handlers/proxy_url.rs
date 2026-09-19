@@ -124,7 +124,14 @@ pub fn pin_url_to_base(
     }
 
     // ── Build the final URL re-rooted onto the base host/scheme/port ─────────
-    let final_parsed = if agent_url.starts_with('/') {
+    let final_parsed = if agent_url.is_empty() {
+        // Opaque connection-only requests (MCP) select the exact configured
+        // endpoint, including its path/query, without exposing it to the guest.
+        let mut endpoint = base_parsed.clone();
+        let _ = endpoint.set_username("");
+        let _ = endpoint.set_password(None);
+        endpoint
+    } else if agent_url.starts_with('/') {
         // Relative path: append under the base path, then let the url crate
         // resolve dot-segments. We join an absolute-path reference against the
         // base ORIGIN (path "/"), so the result is always on the base host —
@@ -262,6 +269,21 @@ mod tests {
             enforce_path_prefix: path_prefix,
             allow_http_base_hosts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn opaque_request_selects_exact_configured_endpoint() {
+        assert_eq!(
+            pin_url_to_base(
+                "",
+                Some("https://mcp.example.test/rpc?version=1"),
+                true,
+                &opts(true)
+            )
+            .unwrap(),
+            "https://mcp.example.test/rpc?version=1"
+        );
+        assert!(pin_url_to_base("", None, true, &opts(true)).is_err());
     }
 
     // ── F1: base URL presence / validity ─────────────────────────────────────

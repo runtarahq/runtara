@@ -261,3 +261,69 @@ async fn trusted_resolution_checks_tenant_and_exact_type_before_decryption() {
     );
     assert_eq!(cipher.0.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
+    use runtara_connections::{ConnectionsFacade, ConnectionsState, IntegrationCompatibility};
+    use serde_json::json;
+    let fixture = PgFixture::start().await;
+    seed(&fixture.pool).await;
+    // Only synthetic fixture values are stored here.
+    sqlx::query(
+        "UPDATE connection_data_entity SET connection_parameters = $1 WHERE id = 'mcp-active'",
+    )
+    .bind(
+        json!({"url":"https://example.test/rpc?token=synthetic-secret",
+            "bearer_token":"synthetic-secret", "extra_headers":{"Authorization":"synthetic-secret"},
+            "tool_scope":["search"],"tool_hints":{"search":"Find documents"}}),
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![]));
+    let facade = ConnectionsFacade::new(ConnectionsState {
+        db_pool: fixture.pool.clone(),
+        redis_manager: None,
+        public_base_url: String::new(),
+        http_client: reqwest::Client::new(),
+        cipher: Arc::new(NoOpCipher),
+        compatibility: Arc::new(IntegrationCompatibility::from_catalog(&catalog)),
+        agent_catalog: catalog,
+        connection_events: None,
+    });
+    assert!(
+        facade
+            .describe_connection("mcp-active", "someone_else")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let descriptor = facade
+        .describe_connection("mcp-active", TENANT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(descriptor.integration_id, "mcp");
+    assert_eq!(
+        descriptor.metadata,
+        json!({"tool_scope":["search"], "tool_hints":{"search":"Find documents"}})
+    );
+    assert!(
+        !serde_json::to_string(&descriptor)
+            .unwrap()
+            .contains("synthetic-secret")
+    );
+    let request = serde_json::from_value(json!({"resourceName":"models"})).unwrap();
+    assert!(matches!(
+        facade
+            .resolve_connection_resource("mcp-active", "someone_else", &request)
+            .await,
+        Err(runtara_connections::ConnectionsError::NotFound(_))
+    ));
+    let http = facade
+        .describe_connection("api-key-active", TENANT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(http.metadata.is_null());
+}

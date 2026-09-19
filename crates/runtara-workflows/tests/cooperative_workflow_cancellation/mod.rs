@@ -928,12 +928,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                             let headers = std::str::from_utf8(&request[..end])?;
                             let line = headers.lines().next().unwrap();
-                            if line.starts_with("GET /fixture-tenant/conn-1/metadata ") {
-                                let bytes = serde_json::to_vec(&serde_json::json!({"connectionId":"conn-1","integrationId":"openai_api_key","status":"ACTIVE","resources":[],"metadata":null}))?;
-                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
-                                stream.write_all(&bytes).await?;
-                                return anyhow::Ok(());
-                            }
                             if line.contains(" /object-model/") {
                                 // The summary fixture permits only memory loading. The
                                 // load/save fixtures cancel at their selected request.
@@ -1070,7 +1064,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                         assert_eq!(body["endpoint_ref"], "fixture-ref");
                                     },
                                     Scenario::McpInitialize | Scenario::McpTool => {
-                                        assert_eq!(body["url"], "https://mcp.invalid/rpc");
+                                        assert_eq!(body["url"], "");
                                         let stage = server_host.requests.load(Ordering::SeqCst);
                                         assert_eq!(body["body"]["method"], match stage {0=>"initialize",1=>"notifications/initialized",_=>"tools/call"});
                                         if stage > 0 { assert_eq!(body["headers"]["Mcp-Session-Id"], "fixture-session"); }
@@ -1204,15 +1198,17 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             executor.set_trusted_executor(dispatcher.trusted_executor())?;
             Some(executor)
         } else { None };
-        let executor = storage_executor.as_ref().unwrap_or_else(|| embedded_executor());
+        let normal_executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))?;
+        let executor = storage_executor.as_ref().unwrap_or(&normal_executor);
+        executor.set_connection_resolver(Arc::new(CancellationConnections))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    trusted_tenant: None,
+                    trusted_tenant: Some("fixture-tenant".into()),
                     env: if scenario.uses_proxy() || scenario.is_object() || scenario.is_storage() {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent")), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
+                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent")), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
                     } else { HashMap::new() },
                     stderr: None,
                     timeout: Duration::from_secs(10),
@@ -1266,7 +1262,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         }
         if scenario.drains_normally() {
             let resumed = executor.execute_invoke(&pre, runtara_component_host::WorkflowRunSpec {
-                trusted_tenant: None,
+                trusted_tenant: Some("fixture-tenant".into()),
                 env: HashMap::new(), stderr: None, timeout: Duration::from_secs(10), cancel: None,
                 limits: Default::default(), runtime: Some(host.clone()),
             }, b"{}".to_vec()).await;
@@ -1617,3 +1613,20 @@ async fn emitted_expired_parallel_scope_stops_fast_branch_before_next_request() 
 }
 
 mod preparation;
+
+struct CancellationConnections;
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for CancellationConnections {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture-tenant");
+        Ok(
+            serde_json::to_vec(&serde_json::json!({"connectionId":connection,
+            "integrationId": if connection == "conn-1" {"openai_api_key"} else {"mcp"},
+            "status":"ACTIVE","resources":[], "metadata":{"tool_scope":["echo"]}}))
+            .unwrap(),
+        )
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
+}

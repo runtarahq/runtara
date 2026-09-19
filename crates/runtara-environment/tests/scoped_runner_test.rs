@@ -184,7 +184,6 @@ impl Harness {
                 data_dir: self.dir.path().join("data"),
                 default_timeout: Duration::from_secs(30),
                 skip_cert_verification: false,
-                connection_service_url: None,
             },
             self.persistence.clone(),
         )

@@ -21,3 +21,5 @@ pub mod workflow_runtime;
 pub mod workflows;
 
 pub mod trusted;
+
+pub mod connection_resolver;
