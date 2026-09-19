@@ -9,14 +9,14 @@
 //! the host architecture and writes `runtara_agent_sharepoint.meta.json` next
 //! to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: all Graph API requests go through the runtara HTTP proxy via
-//! the `X-Runtara-Connection-Id` header — the proxy attaches the Microsoft
+//! Routing model: all Graph API requests use the outbound host service with
+//! an explicit connection ID. The host attaches the Microsoft
 //! Entra OAuth token and forwards. The component never sees secrets.
 //!
 //! Chunked-upload PUTs target absolute Azure Blob URLs returned by Graph's
 //! `createUploadSession`, and async-copy monitor polling hits absolute
 //! `/_api/v2.0/monitor/...` URLs that are pre-signed by Microsoft Graph — both
-//! intentionally OMIT the connection-id header so the proxy doesn't try to
+//! use public destinations so the host does not
 //! re-authenticate the absolute URL.
 #![allow(clippy::result_large_err)]
 
@@ -140,7 +140,7 @@ fn default_search_entity_types() -> Vec<String> {
 }
 
 // ============================================================================
-// HTTP helpers (Graph API via the runtara proxy)
+// HTTP helpers (Graph API via the outbound host service)
 // ============================================================================
 
 fn graph_url(path: &str) -> String {
@@ -166,7 +166,7 @@ async fn graph_get(
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let mut req = client
         .request("GET", &url)
-        .header("X-Runtara-Connection-Id", &connection.connection_id);
+        .connection_id(&connection.connection_id);
     for (k, v) in &query {
         req = req.query(k, v);
     }
@@ -190,7 +190,7 @@ async fn graph_post(
     let resp = client
         .request("POST", &url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -214,7 +214,7 @@ async fn graph_patch(
     let resp = client
         .request("PATCH", &url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -230,7 +230,7 @@ async fn graph_delete(connection: &RawConnection, path: &str) -> Result<(), Agen
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let resp = client
         .request("DELETE", &url)
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {
@@ -257,7 +257,7 @@ async fn graph_put_bytes(
     let mut req = client
         .request("PUT", &url)
         .header("Content-Type", content_type)
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(bytes);
     for (k, v) in &query {
         req = req.query(k, v);
@@ -284,7 +284,7 @@ async fn graph_post_raw(
     client
         .request("POST", absolute_url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -295,7 +295,7 @@ async fn graph_post_raw(
 }
 
 /// GET against a pre-signed absolute URL — NO connection header (the URL
-/// carries its own auth, and the proxy would otherwise overwrite it).
+/// carries its own auth, and the outbound host service would otherwise overwrite it).
 async fn get_absolute_url(url: &str) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     client
@@ -857,7 +857,7 @@ pub async fn sharepoint_download_file(
     let conn = require_connection(input._connection.as_ref())?;
 
     // Fetch metadata first so we can populate filename / content_type even if
-    // the proxy returns the body without echoing the upstream Content-Type.
+    // the outbound host service returns the body without echoing the upstream Content-Type.
     let meta_path = item_path(&input.drive_id, &input.item_id);
     let meta = graph_get(conn, &meta_path, HashMap::new()).await.ok();
     let parsed_meta = meta.as_ref().map(parse_drive_item);
@@ -868,7 +868,7 @@ pub async fn sharepoint_download_file(
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(120_000));
     let resp = client
         .request("GET", &content_url)
-        .header("X-Runtara-Connection-Id", &conn.connection_id)
+        .connection_id(&conn.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {
@@ -892,7 +892,7 @@ pub async fn sharepoint_download_file(
     let bytes = resp.body;
     let size = bytes.len() as u64;
 
-    // The proxy may return either raw binary bytes or base64-encoded text
+    // The outbound host service may return either raw binary bytes or base64-encoded text
     // depending on the contract negotiation. If the body decodes as base64,
     // unwrap once so we don't double-encode the final response.
     let final_bytes: Vec<u8> = match String::from_utf8(bytes.clone()) {

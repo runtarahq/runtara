@@ -46,8 +46,10 @@ scoped README files, examples.
 - Make the smallest correct change and follow patterns in the affected module.
 - Search for every exhaustive match or registry when adding DSL variants,
   metadata fields, error types, or connection types.
-- Keep host and WASM boundaries explicit. WASM agents do not receive raw
-  network, filesystem, or credential access.
+- Keep host and WASM boundaries explicit. Ordinary WASM agents do not receive
+  raw network, filesystem, or credential access. Only approved built-in
+  `trusted` capabilities receive credentials for their own connection types,
+  in fresh host-managed instances with network and filesystem access denied.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

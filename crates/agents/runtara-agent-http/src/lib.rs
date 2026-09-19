@@ -18,20 +18,12 @@
 //! `runtara_agent_http.meta.json` next to the `.wasm` — the JSON is a build
 //! artifact, never hand-edited.
 //!
-//! Routing model:
-//! - Every request goes through the proxy via `runtara-http`'s `call_agent_async().await`,
-//!   which reads `RUNTARA_HTTP_PROXY_URL` and forwards the request as a JSON
-//!   envelope. Routing through the proxy — connection or not — lets the host
-//!   apply its egress filtering uniformly: SSRF/private-IP block, the
-//!   DNS-rebinding guard, and no-redirect-follow.
-//! - If a connection is attached, the `X-Runtara-Connection-Id` header
-//!   additionally causes the proxy to inject credentials server-side and pin
-//!   the request to the connection's base URL. Connectionless requests get the
-//!   same egress filtering minus the base-URL pin.
-//! - When no proxy is configured (SDK/local, no `RUNTARA_HTTP_PROXY_URL`),
-//!   `call_agent_async().await` falls back to a direct call.
-//!
-//! The component itself never sees secrets either way.
+//! Routing model: all WASM requests use the typed outbound host service.
+//! Connection destinations select host-side credentials and base URL pinning;
+//! public destinations apply the same egress policy without stored credentials.
+//! Tenant identity comes from host execution context. Native connection-aware
+//! requests require a host service and fail explicitly in the ordinary SDK.
+
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -419,35 +411,9 @@ pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, Agent
 }
 
 fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilder {
-    let mut headers = input.headers.clone();
+    let headers = input.headers.clone();
     let mut url = input.url.clone();
     let query_parameters = input.query_parameters.clone();
-
-    // Forward the connection id so the proxy can attach credentials. The
-    // wasm build never resolves the connection locally — credential
-    // injection and URL-prefix handling happen server-side via the proxy.
-    if let Some(ref raw) = input._connection
-        && !raw.connection_id.is_empty()
-    {
-        headers
-            .entry("X-Runtara-Connection-Id".to_string())
-            .or_insert_with(|| raw.connection_id.clone());
-
-        // Name an alternate endpoint the connection type declares. Only the
-        // selector is sent — the proxy owns the URL set, so this cannot point a
-        // credentialed request at a host the descriptor did not declare. Only
-        // meaningful alongside a connection, hence the nesting.
-        if let Some(endpoint) = input
-            .connection_endpoint
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            headers
-                .entry("X-Runtara-Connection-Endpoint".to_string())
-                .or_insert_with(|| endpoint.to_string());
-        }
-    }
 
     // Append query parameters.
     if !query_parameters.is_empty() {
@@ -466,6 +432,22 @@ fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilde
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(input.timeout_ms));
     let method_str = input.method.as_str();
     let mut request = client.request(method_str, &url);
+
+    if let Some(connection) = input
+        ._connection
+        .as_ref()
+        .filter(|c| !c.connection_id.is_empty())
+    {
+        request = request.connection_id(&connection.connection_id);
+        if let Some(endpoint) = input
+            .connection_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            request = request.endpoint(endpoint);
+        }
+    }
 
     for (key, value) in &headers {
         request = request.header(key, value);
@@ -488,13 +470,6 @@ fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilde
         }
     };
 
-    // Every request goes through the proxy (`call_agent`) so the host applies
-    // its egress filtering (SSRF/private-IP block, DNS-rebinding guard,
-    // no-redirect-follow) uniformly. Connection-bound requests additionally get
-    // credential injection and base-URL pinning server-side (keyed on the
-    // `X-Runtara-Connection-Id` header); connectionless requests get the same
-    // filtering minus the base-URL pin. When no proxy is configured (SDK/local),
-    // `call_agent` falls back to a direct call.
     request
 }
 

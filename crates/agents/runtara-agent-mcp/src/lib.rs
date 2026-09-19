@@ -25,14 +25,8 @@
 //!
 //! Both capabilities require an `McpConnection` (see Phase 2 below). The
 //! agent never sees the bearer / api-key secret directly: it sends the
-//! request through Runtara's HTTP proxy with `X-Runtara-Connection-Id`, and
-//! the proxy injects auth headers server-side.
-//!
-//! Routing:
-//!   runtara_http::HttpClient::request(...).call_agent_async().await
-//!     → POST $RUNTARA_HTTP_PROXY_URL with body = JSON-RPC envelope
-//!     → server-side: resolve connection → inject Authorization → forward
-//!     → MCP server: respond with tools/list or tools/call payload
+//! request through Runtara's outbound host service with an explicit connection ID.
+//! The host resolves credentials and forwards the JSON-RPC body to the MCP server.
 //!
 //! Each capability invocation runs the full Streamable-HTTP handshake in
 //! one ephemeral session: `initialize` → `notifications/initialized` →
@@ -147,117 +141,54 @@ pub struct RawConnection {
 // runtara-agents/integrations/mcp.rs for the ConnectionParams macro).
 // ============================================================================
 
-/// Return a connection whose `parameters` are guaranteed non-empty.
-///
-/// Components-mode workflow dispatch hands the agent a `_connection` with
-/// empty `parameters` (the codegen only fills in connection_id +
-/// integration_id; real credentials live in the connections service). When
-/// the input parameters are empty, fall back to fetching the full record
-/// from `CONNECTION_SERVICE_URL/{tenant}/{conn_id}` using the env vars the
-/// wasmtime host injects (see `runtara-component-host::host_state`). The
-/// proxy uses the same endpoint internally — this just gives the agent
-/// the same view so it can read `url` / `tool_hints` / `tool_scope` /
-/// `extra_headers` directly.
+#[cfg(target_family = "wasm")]
+mod connection_bindings {
+    wit_bindgen::generate!({
+        path: "../../runtara-workflow-wit/wit/connection-resolver",
+        world: "connection-client",
+        async: true,
+    });
+}
+
+/// Obtain only MCP tool configuration through the native, tenant-scoped host.
+/// Endpoint URLs and headers remain native because they may contain credentials.
 async fn resolve_connection_params(
     connection: &RawConnection,
 ) -> Result<RawConnection, AgentError> {
-    let params_is_empty = connection
-        .parameters
-        .as_object()
-        .map(|o| o.is_empty())
-        .unwrap_or(true);
-    if !params_is_empty {
-        return Ok(connection.clone());
-    }
-
     if connection.connection_id.is_empty() {
         return Err(AgentError::permanent(
             "MCP_NO_PARAMS",
-            "MCP connection has no parameters and no connection_id to look them up",
-        )
-        .with_attr("integration", "MCP"));
+            "MCP connection_id is required",
+        ));
     }
-
-    let base = std::env::var("CONNECTION_SERVICE_URL").map_err(|_| {
-        AgentError::permanent(
-            "MCP_NO_PARAMS",
-            "MCP connection has empty parameters and CONNECTION_SERVICE_URL env var \
-             is unset; cannot resolve at runtime",
+    #[cfg(target_family = "wasm")]
+    {
+        let bytes = connection_bindings::runtara::connection_resolver::resolver::describe(
+            connection.connection_id.clone(),
         )
-        .with_attr("integration", "MCP")
-    })?;
-    let tenant = std::env::var("RUNTARA_TENANT_ID").map_err(|_| {
-        AgentError::permanent(
-            "MCP_NO_PARAMS",
-            "MCP connection has empty parameters and RUNTARA_TENANT_ID env var \
-             is unset; cannot resolve at runtime",
-        )
-        .with_attr("integration", "MCP")
-    })?;
-
-    let endpoint = format!(
-        "{}/{}/{}",
-        base.trim_end_matches('/'),
-        tenant,
-        connection.connection_id
-    );
-    let client = runtara_http::HttpClient::with_timeout(std::time::Duration::from_millis(10_000));
-    let resp = client
-        .request("GET", &endpoint)
-        .call_async()
         .await
-        .map_err(|e| {
-            AgentError::permanent(
-                "MCP_NO_PARAMS",
-                format!("fallback fetch of connection params from {endpoint} failed: {e}"),
-            )
-            .with_attr("integration", "MCP")
+        .map_err(|_| {
+            AgentError::permanent("MCP_NO_PARAMS", "Cannot resolve MCP connection metadata")
         })?;
-    if !(200..300).contains(&resp.status) {
-        return Err(AgentError::permanent(
-            "MCP_NO_PARAMS",
-            format!(
-                "fallback fetch of connection params from {endpoint} returned HTTP {}",
-                resp.status
-            ),
-        )
-        .with_attr("integration", "MCP"));
-    }
-    let body: Value = serde_json::from_slice(&resp.body).map_err(|e| {
-        AgentError::permanent(
-            "MCP_NO_PARAMS",
-            format!("connection-service response was not JSON: {e}"),
-        )
-        .with_attr("integration", "MCP")
-    })?;
-    let parameters = body
-        .get("parameters")
-        .cloned()
-        .unwrap_or_else(|| Value::Object(Default::default()));
-
-    Ok(RawConnection {
-        connection_id: connection.connection_id.clone(),
-        connection_subtype: connection.connection_subtype.clone(),
-        integration_id: connection.integration_id.clone(),
-        parameters,
-        rate_limit_config: connection.rate_limit_config.clone(),
-    })
-}
-
-fn extract_url(connection: &RawConnection) -> Result<String, AgentError> {
-    connection
-        .parameters
-        .get("url")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            AgentError::permanent(
-                "MCP_NO_URL",
-                "MCP connection is missing required parameter `url`",
-            )
-            .with_attr("integration", "MCP")
+        let descriptor: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            AgentError::permanent("MCP_NO_PARAMS", "Invalid MCP connection metadata")
+        })?;
+        if descriptor["integrationId"] != "mcp" {
+            return Err(AgentError::permanent(
+                "MCP_CONNECTION_TYPE",
+                "Connection must have type mcp",
+            ));
+        }
+        Ok(RawConnection {
+            parameters: descriptor["metadata"].clone(),
+            ..connection.clone()
         })
+    }
+    #[cfg(not(target_family = "wasm"))]
+    Err(AgentError::permanent(
+        "MCP_NO_PARAMS",
+        "MCP metadata requires the WASM connection host",
+    ))
 }
 
 fn extract_hints(connection: &RawConnection) -> HashMap<String, String> {
@@ -281,19 +212,6 @@ fn extract_scope(connection: &RawConnection) -> Vec<String> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn extract_extra_headers(connection: &RawConnection) -> Vec<(String, String)> {
-    connection
-        .parameters
-        .get("extra_headers")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                 .collect()
         })
         .unwrap_or_default()
@@ -372,10 +290,11 @@ pub struct McpToolSearchOutput {
 pub async fn mcp_tool_search(input: McpToolSearchInput) -> Result<McpToolSearchOutput, AgentError> {
     let raw = require_connection(input._connection.as_ref())?;
     let connection = resolve_connection_params(raw).await?;
-    let url = extract_url(&connection)?;
+    // Empty target selects the exact connection endpoint inside the host proxy.
+    let url = String::new();
     let hints = extract_hints(&connection);
     let scope = extract_scope(&connection);
-    let extra_headers = extract_extra_headers(&connection);
+    let extra_headers = Vec::new();
     let limit = input.limit.map(|n| n as usize).unwrap_or(5).clamp(1, 20);
 
     let tools: Vec<Tool> =
@@ -456,9 +375,10 @@ pub struct McpToolInvokeOutput {
 pub async fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput, AgentError> {
     let raw = require_connection(input._connection.as_ref())?;
     let connection = resolve_connection_params(raw).await?;
-    let url = extract_url(&connection)?;
+    // Empty target selects the exact connection endpoint inside the host proxy.
+    let url = String::new();
     let scope = extract_scope(&connection);
-    let extra_headers = extract_extra_headers(&connection);
+    let extra_headers = Vec::new();
 
     if !scope.is_empty() && !scope.contains(&input.tool_name) {
         return Err(AgentError::permanent(
@@ -595,10 +515,9 @@ mod tests {
             parameters: json!({}),
             rate_limit_config: None,
         };
-        assert!(extract_url(&conn).is_err());
+
         assert!(extract_hints(&conn).is_empty());
         assert!(extract_scope(&conn).is_empty());
-        assert!(extract_extra_headers(&conn).is_empty());
     }
 
     #[test]
@@ -619,16 +538,10 @@ mod tests {
             }),
             rate_limit_config: None,
         };
-        assert_eq!(
-            extract_url(&conn).unwrap(),
-            "https://mcp.example.com/jsonrpc"
-        );
+
         let hints = extract_hints(&conn);
         assert_eq!(hints.get("create_issue").unwrap(), "Create a new ticket");
         let scope = extract_scope(&conn);
         assert_eq!(scope, vec!["create_issue".to_string()]);
-        let extras = extract_extra_headers(&conn);
-        assert_eq!(extras.len(), 1);
-        assert_eq!(extras[0], ("X-Custom".to_string(), "val".to_string()));
     }
 }

@@ -9,7 +9,7 @@
 //! Routing model (identical to the Shopify agent): the base URL is provider- and
 //! environment-specific and includes the `realmId` path segment, all resolved
 //! HOST-SIDE by the connection descriptor. The component therefore sends only
-//! RELATIVE paths (e.g. `/query`, `/invoice/42`); the proxy appends them under the
+//! RELATIVE paths (e.g. `/query`, `/invoice/42`); the outbound host service appends them under the
 //! connection's base URL (`https://…/v3/company/{realmId}`) and injects the OAuth
 //! Bearer token. The component never sees the host, the realmId, or any secret.
 #![allow(clippy::result_large_err)]
@@ -113,7 +113,7 @@ async fn qbo_get(connection: &RawConnection, path: &str) -> Result<Value, AgentE
     let response = client
         .request("GET", path)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {
@@ -142,7 +142,7 @@ async fn qbo_post(
         .request("POST", path)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await

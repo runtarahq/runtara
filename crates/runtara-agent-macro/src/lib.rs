@@ -170,6 +170,9 @@ struct CapabilityArgs {
     /// Whether this capability requires rate limiting (external API calls)
     #[darling(default)]
     rate_limited: bool,
+    /// Run in a fresh restricted instance with host-authorized credentials.
+    #[darling(default)]
+    trusted: bool,
 
     // === Error introspection attributes ===
     /// Known errors this capability can return.
@@ -332,7 +335,12 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let side_effects = args.side_effects;
     let idempotent = args.idempotent.unwrap_or(!side_effects);
     let rate_limited = args.rate_limited;
+    let trusted = args.trusted;
+    if let Err(error) = validate_capability_signature(&input_fn.sig, trusted) {
+        return error.to_compile_error().into();
+    }
     let module = args.module;
+    let module_str = module.as_deref().unwrap_or("");
 
     // Generate metadata registration
     let meta_ident = format_ident!("__CAPABILITY_META_{}", fn_name.to_string().to_uppercase());
@@ -443,6 +451,37 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    let executor_wrapper = if trusted {
+        let trusted_executor = format_ident!("__trusted_executor_{}", fn_name);
+        // Only this separate wrapper accepts host credentials. The ordinary
+        // executor forwards public input and an opaque ID across the host ABI.
+        quote! {
+            #[doc(hidden)]
+            pub(crate) async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+                #executor_fn_ident(input).await
+            }
+            #[doc(hidden)]
+            async fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+                runtara_agent_trusted::invoke(#module_str, #capability_id, input).await
+            }
+            #[doc(hidden)]
+            async fn #trusted_executor(mut input: serde_json::Value, context: &runtara_agent_trusted::TrustedContext)
+                -> Result<serde_json::Value, String>
+            {
+                // Connection authority comes exclusively from the separate host
+                // context. Ignore the ordinary guest's routing metadata here.
+                if let Some(fields) = input.as_object_mut() { fields.remove("_connection"); }
+                let input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
+                let typed_input: #input_type_ident = serde_json::from_value(input)
+                    .map_err(|_| runtara_agent_trusted::error("INVALID_INPUT", "Invalid trusted capability input"))?;
+                let result = #fn_name(typed_input, context)#await_result.map_err(|e| -> String { e.into() })?;
+                serde_json::to_value(result).map_err(|_| runtara_agent_trusted::error("INVALID_OUTPUT", "Invalid trusted capability output"))
+            }
+        }
+    } else {
+        executor_wrapper
+    };
+
     // Generate known_errors array from errors attribute
     let known_errors_ident = format_ident!("__{}_KNOWN_ERRORS", fn_name.to_string().to_uppercase());
     let (known_errors_static, known_errors_token) = if let Some(ref errors_spec) = args.errors {
@@ -518,6 +557,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             has_side_effects: #side_effects,
             is_idempotent: #idempotent,
             rate_limited: #rate_limited,
+            trusted: #trusted,
             known_errors: #known_errors_token,
             tags: #tags_token,
         };
@@ -1837,10 +1877,57 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+fn validate_capability_signature(signature: &syn::Signature, trusted: bool) -> syn::Result<()> {
+    let valid_count = signature.inputs.len() == if trusted { 2 } else { 1 };
+    let valid_context = !trusted || signature.inputs.last().is_some_and(|arg| {
+        matches!(arg, syn::FnArg::Typed(arg) if matches!(arg.ty.as_ref(),
+            syn::Type::Reference(reference) if reference.mutability.is_none()
+                && matches!(reference.elem.as_ref(), syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == "TrustedContext"))))
+    });
+    if !valid_count || !valid_context {
+        return Err(syn::Error::new_spanned(
+            signature,
+            "capabilities take one input; trusted capabilities also take an immutable &TrustedContext",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use syn::parse_quote;
+
+    #[test]
+    fn trusted_signatures_require_separate_immutable_context() {
+        let valid: syn::ItemFn = parse_quote!(
+            fn sign(
+                input: Input,
+                context: &runtara_agent_trusted::TrustedContext,
+            ) -> Result<Output, Error> {
+            }
+        );
+        assert!(validate_capability_signature(&valid.sig, true).is_ok());
+        assert!(validate_capability_signature(&valid.sig, false).is_err());
+        for function in [
+            parse_quote!(
+                fn sign(input: Input) {}
+            ),
+            parse_quote!(
+                fn sign(input: Input, context: TrustedContext) {}
+            ),
+            parse_quote!(
+                fn sign(input: Input, context: &mut TrustedContext) {}
+            ),
+            parse_quote!(
+                fn sign(input: Input, context: &Value) {}
+            ),
+        ] {
+            let function: syn::ItemFn = function;
+            assert!(validate_capability_signature(&function.sig, true).is_err());
+        }
+    }
 
     // ========================================================================
     // Tests for unwrap_option_type

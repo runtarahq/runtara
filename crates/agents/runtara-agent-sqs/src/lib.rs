@@ -7,18 +7,14 @@
 //! the host architecture and writes `runtara_agent_sqs.meta.json` next to the
 //! `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to resolve the connection
-//! and attach AWS SigV4 signing; the `X-Runtara-Aws-Service: sqs` header names
-//! the service so a single generic `aws_credentials` connection can serve SQS
-//! (and any other AWS service) without a per-service connection type. The
-//! component never sees AWS credentials and never signs requests itself.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 //!
 //! Wire protocol: the AWS JSON protocol (JSON 1.0). Every operation is a
 //! `POST /` with `X-Amz-Target: AmazonSQS.<Operation>`,
 //! `Content-Type: application/x-amz-json-1.0`, and a JSON request/response
-//! body — so no XML parser is needed in the component. The proxy synthesizes
+//! body — so no XML parser is needed in the component. The outbound host service synthesizes
 //! the regional endpoint `https://sqs.{region}.amazonaws.com` from the
 //! connection's region (or an explicit `endpoint` override for LocalStack /
 //! VPC endpoints). Server-side encryption (SSE-KMS / SSE-SQS) is a *queue*
@@ -107,7 +103,7 @@ pub struct RawConnection {
 /// Request timeout. Covers ReceiveMessage long-polling (max 20s) plus margin.
 const SQS_TIMEOUT: Duration = Duration::from_secs(65);
 
-/// The AWS service name declared to the proxy for SigV4 signing + endpoint.
+/// The AWS service name declared to the outbound host service for SigV4 signing + endpoint.
 const AWS_SERVICE: &str = "sqs";
 
 /// AWS JSON protocol content type for SQS.
@@ -135,7 +131,7 @@ impl SqsResp {
     }
 }
 
-/// POST an AWS JSON-protocol request to SQS via the runtara proxy. Credentials
+/// POST an AWS JSON-protocol request to SQS via the outbound host service. Credentials
 /// and SigV4 signing are applied server-side; this component only names the
 /// connection and the AWS service.
 async fn sqs_call(target: &str, connection_id: &str, body: &Value) -> Result<SqsResp, AgentError> {
@@ -149,8 +145,8 @@ async fn sqs_call(target: &str, connection_id: &str, body: &Value) -> Result<Sqs
     let client = runtara_http::HttpClient::with_timeout(SQS_TIMEOUT);
     let resp = client
         .request("POST", "/")
-        .header("X-Runtara-Connection-Id", connection_id)
-        .header("X-Runtara-Aws-Service", AWS_SERVICE)
+        .connection_id(connection_id)
+        .aws_service(AWS_SERVICE)
         .header("X-Amz-Target", target)
         .header("Content-Type", SQS_CONTENT_TYPE)
         .body_bytes(&payload)

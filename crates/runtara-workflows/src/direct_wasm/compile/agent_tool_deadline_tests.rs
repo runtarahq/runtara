@@ -60,7 +60,7 @@ async fn agent_tool_zero_budget_is_typed_feedback_without_invocation() -> anyhow
         let compiled = compiled_agent(dir.path(), durable, 0, None)?;
         let host = Arc::new(Host::new());
         let mut server = scripted(host.clone(), vec![], 1).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -86,7 +86,7 @@ async fn agent_tool_closes_headers_and_body_and_gives_next_call_a_fresh_budget()
             let compiled = compiled_agent(dir.path(), durable, 400, None)?;
             let host = Arc::new(Host::new());
             let mut server = scripted(host.clone(), operations, 2).await?;
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             server.check().await?;
             assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
             assert_eq!(server.children.load(Ordering::SeqCst), 2);
@@ -139,7 +139,7 @@ async fn agent_tool_root_cancel_and_parent_timeout_bypass_model_feedback() -> an
                 1,
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             if cancel {
                 assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
@@ -176,13 +176,13 @@ async fn agent_tool_completed_calls_replay_after_pause_without_reinvoking() -> a
         ],
     )
     .await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 1);
     *host.checkpoint_signal.lock().unwrap() = None;
     host.clock_override.store(10_000, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
     assert_eq!(
@@ -218,7 +218,7 @@ async fn agent_tool_maximum_budget_and_provider_errors_preserve_results() -> any
         let compiled = compiled_agent(dir.path(), durable, u64::MAX, None)?;
         let host = Arc::new(Host::new());
         let mut server = scripted(host.clone(), vec![Child::Permanent, Child::Success], 2).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         let requests = server.requests.lock().unwrap();
@@ -246,13 +246,13 @@ async fn agent_tool_pending_budget_survives_pause_without_granting_extra_time() 
         ],
     )
     .await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
     *host.checkpoint_signal.lock().unwrap() = None;
     host.clock_override.store(1_200, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
     assert_eq!(
@@ -278,7 +278,7 @@ async fn agent_tool_corrupt_pending_budget_fails_before_dispatch_or_model_feedba
         host.clock_override.store(1_000, Ordering::SeqCst);
         *host.checkpoint_signal.lock().unwrap() = Some("runtara:v2:[\"agent-deadline\",".into());
         let mut server = scripted(host.clone(), vec![], 1).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
         *host.checkpoint_signal.lock().unwrap() = None;
         let mut corrupted = 0;
@@ -289,7 +289,7 @@ async fn agent_tool_corrupt_pending_budget_fails_before_dispatch_or_model_feedba
             }
         }
         assert_eq!(corrupted, 1);
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit, InvokeExit::Failed(ref error) if error.code == "AGENT_DEADLINE_STATE" && !error.retryable),

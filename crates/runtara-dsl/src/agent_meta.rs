@@ -39,6 +39,8 @@ pub struct CapabilityMeta {
     pub is_idempotent: bool,
     /// Whether this capability requires rate limiting (external API calls)
     pub rate_limited: bool,
+    /// Requires isolated, credential-bearing execution by an approved built-in.
+    pub trusted: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
     pub known_errors: &'static [KnownError],
@@ -297,6 +299,9 @@ pub struct CapabilityInfo {
     pub is_idempotent: bool,
     #[serde(rename = "rateLimited")]
     pub rate_limited: bool,
+    /// Host-enforced execution mode; never a workflow-controlled permission.
+    #[serde(default)]
+    pub trusted: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
     #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
@@ -1509,6 +1514,7 @@ pub fn capability_to_api_with_types(
         has_side_effects: cap.has_side_effects,
         is_idempotent: cap.is_idempotent,
         rate_limited: cap.rate_limited,
+        trusted: cap.trusted,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
     }
@@ -2135,6 +2141,7 @@ pub fn workflow_agent_info(
             has_side_effects: true,
             is_idempotent: false,
             rate_limited: false,
+            trusted: false,
             known_errors: Vec::new(),
             tags: vec![
                 capability_tags::WORKFLOW_AGENT.to_string(),
@@ -2583,6 +2590,7 @@ mod output_schema_tests {
             has_side_effects: false,
             is_idempotent: true,
             rate_limited: false,
+            trusted: false,
             known_errors: &[],
             tags: &[],
         }
@@ -2656,6 +2664,7 @@ mod catalog_tests {
                 has_side_effects: false,
                 is_idempotent: true,
                 rate_limited: false,
+                trusted: false,
                 known_errors: vec![],
                 tags: vec![],
             }],
@@ -3009,6 +3018,15 @@ mod slug_tests {
         assert_eq!(validate_workflow_slug("2fa-sync"), Ok(()));
         assert_eq!(validate_workflow_slug("order-sync"), Ok(()));
     }
+}
+
+/// Content-bound import used to pin a workflow's privileged built-in dependency.
+/// The host only provides this marker for its approved installed artifact.
+pub fn trusted_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
+    format!(
+        "runtara:trusted-artifacts/{}-h{wasm_sha256}-h{metadata_sha256}@0.1.0",
+        canonical_agent_id(agent_id)
+    )
 }
 
 #[cfg(test)]
@@ -3373,6 +3391,7 @@ mod tests {
             has_side_effects: true,
             is_idempotent: false,
             rate_limited: false,
+            trusted: false,
             known_errors: vec![
                 KnownErrorInfo {
                     code: "NETWORK_ERROR".to_string(),
@@ -3424,6 +3443,7 @@ mod tests {
             has_side_effects: false,
             is_idempotent: true,
             rate_limited: false,
+            trusted: false,
             known_errors: vec![],
             tags: vec![],
         };
@@ -3431,5 +3451,32 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         // Empty knownErrors should be skipped due to skip_serializing_if
         assert!(json.get("knownErrors").is_none());
+    }
+}
+
+#[cfg(test)]
+mod trusted_metadata_tests {
+    use super::*;
+    #[test]
+    fn old_metadata_defaults_false_and_explicit_trust_round_trips() {
+        let info = workflow_agent_info(
+            "workflow",
+            "Workflow",
+            "",
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(!info.capabilities[0].trusted);
+        let mut value = serde_json::to_value(&info.capabilities[0]).unwrap();
+        value.as_object_mut().unwrap().remove("trusted");
+        assert!(
+            !serde_json::from_value::<CapabilityInfo>(value.clone())
+                .unwrap()
+                .trusted
+        );
+        value["trusted"] = serde_json::Value::Bool(true);
+        let trusted: CapabilityInfo = serde_json::from_value(value).unwrap();
+        assert!(trusted.trusted);
+        assert_eq!(serde_json::to_value(trusted).unwrap()["trusted"], true);
     }
 }

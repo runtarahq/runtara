@@ -1,13 +1,13 @@
 #!/bin/bash
 # E2E Test: Microsoft Teams `send-message` capability, end to end, through the
-# REAL credential proxy — against a MOCK Bot Connector and MOCK Azure token
+# REAL native outbound service — against a MOCK Bot Connector and MOCK Azure token
 # endpoint (no real Teams tenant, no real app registration).
 #
 # Proves the full outbound path the MVP ships:
 #   workflow teams.send-message step
-#     → runtara-agent-teams (relative Bot Connector path + X-Runtara-Endpoint-Ref
-#       + X-Runtara-Connection-Id, percent-encoded conversation id)
-#     → internal proxy:
+#     → runtara-agent-teams (relative Bot Connector path + explicit endpoint-ref
+#       and connection-id fields, percent-encoded conversation id)
+#     → outbound host import and native service:
 #         · resolve_connection_auth (teams_bot arm) mints the Bot Connector
 #           token from the MOCK Azure token endpoint via the shared token cache
 #         · apply_endpoint_ref_override verifies the signed ref, enforces
@@ -228,7 +228,6 @@ RUST_LOG="warn,runtara_server=info" \
 AUTH_PROVIDER=local \
 SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
 RUNTARA_ENDPOINT_REF_SECRET="${ENDPOINT_REF_SECRET}" \
-RUNTARA_CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
 RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 \
 RUNTARA_PROXY_ALLOW_HTTP_HOSTS=127.0.0.1 \
 VALKEY_HOST=127.0.0.1 \

@@ -58,7 +58,7 @@ async fn mcp_tool_corrupt_budget_fails_before_rpc_or_model_feedback() -> anyhow:
             vec![model_tools(vec![call("call", "invoke")])],
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
         *host.checkpoint_signal.lock().unwrap() = None;
         let mut corrupted = 0;
@@ -69,7 +69,7 @@ async fn mcp_tool_corrupt_budget_fails_before_rpc_or_model_feedback() -> anyhow:
             }
         }
         assert_eq!(corrupted, 1);
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit, InvokeExit::Failed(ref error) if error.code == "AGENT_DEADLINE_STATE" && !error.retryable),
@@ -96,7 +96,7 @@ async fn mcp_tool_zero_budget_skips_both_synthetic_capabilities() -> anyhow::Res
             ],
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -139,7 +139,7 @@ async fn mcp_tool_cancels_each_rpc_phase_and_next_call_has_a_fresh_budget() -> a
                     ],
                 )
                 .await?;
-                let exit = invoke_with_env(&compiled, host, server.env()).await?;
+                let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
                 server.check().await?;
                 assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
                 assert_eq!(server.closed.load(Ordering::SeqCst), 1);
@@ -185,7 +185,7 @@ async fn mcp_tool_root_cancel_and_parent_timeout_skip_further_model_work() -> an
                 vec![model_tools(vec![call("call", "invoke")])],
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             if cancel {
                 assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
@@ -242,7 +242,7 @@ async fn mcp_tool_completed_and_pending_replay_preserve_independent_budgets() ->
             ],
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
         assert_eq!(
@@ -251,7 +251,7 @@ async fn mcp_tool_completed_and_pending_replay_preserve_independent_budgets() ->
         );
         *host.checkpoint_signal.lock().unwrap() = None;
         host.clock_override.store(10_000, Ordering::SeqCst);
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         assert_eq!(
@@ -304,7 +304,7 @@ async fn mcp_tool_maximum_budget_preserves_provider_errors_and_success() -> anyh
             ],
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         let requests = server.requests.lock().unwrap();

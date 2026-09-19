@@ -49,7 +49,7 @@ async fn breakpoint_cancel_in_embed_parent_or_child_prevents_child_http() -> any
         let host = debug_host();
         deliver_at_breakpoint(&host, true);
         let mut server = Server::start(host.clone(), vec![], 0).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_acknowledged(exit, &host);
         assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -90,12 +90,12 @@ async fn breakpoint_rejected_pause_does_not_erase_the_existing_marker() -> anyho
     let compiled = compile_graph(dir.path(), graph(true))?;
     let host = debug_host();
     let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(host.breakpoint_pause_calls.load(Ordering::SeqCst), 1);
     deliver_at_breakpoint(&host, false);
     host.reject_checkpoint_signal.store(true, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(output) = exit else {
         anyhow::bail!("{exit:?}")
@@ -120,7 +120,7 @@ async fn breakpoint_pause_receipt_is_acknowledged_once_and_resumes_without_a_sec
     let host = debug_host();
     deliver_at_breakpoint(&host, false);
     let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert_acknowledged(exit, &host);
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -128,7 +128,7 @@ async fn breakpoint_pause_receipt_is_acknowledged_once_and_resumes_without_a_sec
     assert_eq!(host.breakpoint_hits.load(Ordering::SeqCst), 0);
     *host.checkpoint_signal.lock().unwrap() = None;
     host.acknowledged.store(false, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 1);
@@ -177,7 +177,7 @@ async fn breakpoint_cancel_on_first_checkpoint_precedes_debug_pause_and_dispatch
         let host = debug_host();
         deliver_at_breakpoint(&host, true);
         let mut server = Server::start(host.clone(), vec![], 0).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_acknowledged(exit, &host);
         assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -197,7 +197,7 @@ async fn breakpoint_cancel_on_checkpoint_hit_prevents_resumed_agent_dispatch() -
     let compiled = compile_graph(dir.path(), graph(true))?;
     let host = debug_host();
     let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -206,7 +206,7 @@ async fn breakpoint_cancel_on_checkpoint_hit_prevents_resumed_agent_dispatch() -
     let saved = host.checkpoints.lock().unwrap().clone();
 
     deliver_at_breakpoint(&host, true);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert_acknowledged(exit, &host);
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -223,7 +223,7 @@ async fn breakpoint_without_cancel_still_pauses_once_then_resumes() -> anyhow::R
         let compiled = compile_graph(dir.path(), graph(durable))?;
         let host = debug_host();
         let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         if !durable {
             assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
@@ -235,7 +235,7 @@ async fn breakpoint_without_cancel_still_pauses_once_then_resumes() -> anyhow::R
         }
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
         assert_eq!(server.children.load(Ordering::SeqCst), 0);
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(output) = exit else {
             anyhow::bail!("{exit:?}")

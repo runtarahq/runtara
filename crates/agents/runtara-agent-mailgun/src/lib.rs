@@ -7,12 +7,9 @@
 //! the host architecture and writes `runtara_agent_mailgun.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach Basic auth
-//! (derived from `api_key`) and resolve the base URL (`https://api.mailgun.net`
-//! or `https://api.eu.mailgun.net` depending on the `region` parameter). The
-//! component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 //!
 //! The `domain` connection parameter is a non-credential config value exposed
 //! in `connection.parameters` (JSON object); the capability reads it to build
@@ -271,13 +268,13 @@ pub async fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, AgentE
 
     let encoded_body = url_encode_form(&form_parts);
 
-    // Route through the proxy with the connection id so the proxy injects
+    // Route through the outbound host service with the connection id so the outbound host service injects
     // Authorization: Basic <base64(api:<key>)> and resolves the base URL.
     let url = format!("/v3/{}/messages", domain);
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(30_000));
     let response = client
         .request("POST", &url)
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body_bytes(encoded_body.as_bytes())
         .call_agent_async()

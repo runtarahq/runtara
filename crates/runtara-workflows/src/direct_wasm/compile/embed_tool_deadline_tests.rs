@@ -1,6 +1,9 @@
 //! Real composed AI-loop dispatch with scoped inline Embed tools.
 use super::*;
 use crate::direct_wasm::WorkflowAbi;
+use runtara_database_contract::*;
+#[path = "../../../../runtara-component-host/tests/support/object_model.rs"]
+pub(super) mod sql_fixture;
 
 #[path = "agent_tool_deadline_tests.rs"]
 mod agent_tool;
@@ -93,7 +96,100 @@ fn compiled_with_delay(
     )
 }
 
+// The memory fixture models native SQL suspension, with the same counters used
+// by the HTTP tool fixture. Cleanup occurs when Wasmtime drops the pending call.
+struct NativeMemory {
+    host: std::sync::Weak<Host>,
+    script: Vec<Child>,
+    children: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<Value>>>,
+    closed: Arc<AtomicUsize>,
+}
+impl NativeMemory {
+    async fn step(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: Value,
+    ) -> Result<(), DatabaseError> {
+        assert_eq!(tenant, "fixture");
+        assert_eq!(connection, "om-conn");
+        self.requests.lock().unwrap().push(request);
+        let index = self.children.fetch_add(1, Ordering::SeqCst);
+        let operation = *self.script.get(index).expect("unexpected native SQL call");
+        if matches!(operation, Child::Headers | Child::Body | Child::Cancel) {
+            struct Cleanup(Arc<AtomicUsize>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let _cleanup = Cleanup(self.closed.clone());
+            if operation == Child::Cancel {
+                self.host
+                    .upgrade()
+                    .unwrap()
+                    .cancel
+                    .store(true, Ordering::SeqCst);
+            }
+            std::future::pending::<()>().await;
+        }
+        if matches!(operation, Child::Permanent | Child::Retryable) {
+            return Err(DatabaseError {
+                code: "DATABASE_CONNECTION_UNAVAILABLE".into(),
+                message: "Fixture storage failure".into(),
+                outcome: Outcome::NotStarted,
+                retryable: operation == Child::Retryable,
+                sqlstate: None,
+                statement_index: None,
+            });
+        }
+        Ok(())
+    }
+}
+#[async_trait::async_trait]
+impl runtara_component_host::DatabaseHost for NativeMemory {
+    async fn query(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: QueryRequest,
+    ) -> Result<RowSet, DatabaseError> {
+        self.step(tenant, connection, serde_json::to_value(&request).unwrap())
+            .await?;
+        if request.sql.contains("FROM \"__schema\"") {
+            return Ok(sql_fixture::memory_schema());
+        }
+        if request.sql.contains("COUNT(*)") {
+            return Ok(sql_fixture::rows(vec![json!({"count":0})]));
+        }
+        Ok(RowSet::default())
+    }
+    async fn execute(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: Statement,
+    ) -> Result<ExecutionResult, DatabaseError> {
+        self.step(tenant, connection, serde_json::to_value(&request).unwrap())
+            .await?;
+        Ok(ExecutionResult {
+            rows_affected: 1,
+            returned: None,
+        })
+    }
+    async fn execute_batch(
+        &self,
+        _: &str,
+        _: &str,
+        _: BatchRequest,
+    ) -> Result<BatchResult, DatabaseError> {
+        panic!("fixture schema already exists")
+    }
+}
+
 struct Server {
+    connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -124,6 +220,13 @@ impl Server {
         let child_requests = Arc::new(Mutex::new(Vec::new()));
         let child_inputs = child_requests.clone();
         let closed = Arc::new(AtomicUsize::new(0));
+        *host.database.lock().unwrap() = Some(Arc::new(NativeMemory {
+            host: Arc::downgrade(&host),
+            script: script.clone(),
+            children: children.clone(),
+            requests: child_requests.clone(),
+            closed: closed.clone(),
+        }));
         let (seen, count, cleanup) = (requests.clone(), children.clone(), closed.clone());
         let task = tokio::spawn(async move {
             loop {
@@ -148,28 +251,21 @@ impl Server {
                     })
                     .unwrap_or(0);
                 let request_line = headers.lines().next().unwrap();
-                let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
-                let object_model = path.starts_with("/schemas") || path.starts_with("/instances");
-                let metadata = request_line.contains("/metadata ");
-                let mcp_metadata = request_line.contains("/mcp-conn/metadata ");
-                let mcp_params = request_line.starts_with("GET /fixture/mcp-conn ");
+                assert!(
+                    request_line.contains("/upstream"),
+                    "unexpected internal HTTP route: {request_line}"
+                );
                 while bytes.len() < end + length {
                     let n = stream.read(&mut buffer).await?;
                     anyhow::ensure!(n > 0, "incomplete body");
                     bytes.extend_from_slice(&buffer[..n]);
                 }
-                let mut response_status = 200;
-                let response = if metadata {
-                    json!({"connectionId":if mcp_metadata {"mcp-conn"} else {"conn"},"integrationId":if mcp_metadata {"mcp"} else {"openai_api_key"},"status":"ACTIVE","resources":[],"metadata":null})
-                } else if mcp_params {
-                    json!({"parameters":{"url":"http://fixture.test/child"}})
-                } else {
-                    let envelope: Value = if object_model {
-                        json!({"url":path,"body":if length == 0 {Value::Null} else {serde_json::from_slice(&bytes[end..end + length])?}})
-                    } else {
-                        serde_json::from_slice(&bytes[end..end + length])?
-                    };
-                    if object_model
+                let response = {
+                    let envelope = outbound_fixture::captured_request(
+                        std::str::from_utf8(&bytes[..end])?,
+                        &bytes[end..end + length],
+                    );
+                    if envelope["connection_id"] == "mcp-conn"
                         || envelope["url"]
                             .as_str()
                             .is_some_and(|url| url.ends_with("/child"))
@@ -192,41 +288,20 @@ impl Server {
                             cleanup.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
-                        let payload = if object_model {
-                            if matches!(operation, Child::Permanent | Child::Retryable) {
-                                response_status = if operation == Child::Permanent {
-                                    400
-                                } else {
-                                    503
-                                };
-                                json!({"error":"fixture storage failure"})
-                            } else if path.starts_with("/schemas") {
-                                json!({"success":true,"schema":{}})
-                            } else if path.starts_with("/instances/query") {
-                                json!({"success":true,"instances":[]})
-                            } else {
-                                json!({"success":true,"id":"memory"})
+                        let payload = match envelope["body"]["method"].as_str() {
+                            Some("initialize") => {
+                                json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
                             }
-                        } else {
-                            match envelope["body"]["method"].as_str() {
-                                Some("initialize") => {
-                                    json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}})
-                                }
-                                Some("notifications/initialized") => Value::Null,
-                                Some("tools/list") => {
-                                    json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
-                                }
-                                Some("tools/call") => {
-                                    json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
-                                }
-                                _ => json!({"ok":operation == Child::Success}),
+                            Some("notifications/initialized") => Value::Null,
+                            Some("tools/list") => {
+                                json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}})
                             }
+                            Some("tools/call") => {
+                                json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"done"}],"isError":false}})
+                            }
+                            _ => json!({"ok":operation == Child::Success}),
                         };
-                        if object_model {
-                            payload
-                        } else {
-                            json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
-                        }
+                        json!({"status":match operation {Child::Permanent => 400, Child::Retryable => 503, _ => 200},"headers":{},"body":payload})
                     } else {
                         let index = {
                             let mut requests = seen.lock().unwrap();
@@ -255,20 +330,13 @@ impl Server {
                     cleanup.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
-                let body = serde_json::to_vec(&response)?;
                 stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 {response_status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    )
+                    .write_all(&outbound_fixture::response_bytes(&response))
                     .await?;
-                stream.write_all(&body).await?;
             }
         });
         Ok(Self {
+            connections: None,
             task,
             url,
             requests,
@@ -277,16 +345,11 @@ impl Server {
             closed,
         })
     }
-    fn env(&self) -> HashMap<String, String> {
-        HashMap::from([
-            (
-                "RUNTARA_HTTP_PROXY_URL".into(),
-                format!("{}/proxy", self.url),
-            ),
-            ("CONNECTION_SERVICE_URL".into(), self.url.clone()),
-            ("RUNTARA_OBJECT_MODEL_URL".into(), self.url.clone()),
-            ("RUNTARA_TENANT_ID".into(), "fixture".into()),
-        ])
+    fn outbound(&self) -> Arc<dyn runtara_component_host::OutboundHttpHost> {
+        Arc::new(outbound_fixture::PublicHttp::with_upstream(format!(
+            "{}/upstream",
+            self.url
+        )))
     }
     async fn check(&mut self) -> anyhow::Result<()> {
         if self.task.is_finished() {
@@ -303,7 +366,7 @@ async fn embed_tool_zero_budget_is_model_feedback_without_child_io() -> anyhow::
         let compiled = compiled(dir.path(), durable, Some(0), None)?;
         let host = Arc::new(Host::new());
         let mut server = Server::start(host.clone(), vec![], 1).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -334,7 +397,7 @@ async fn embed_tool_pending_io_closes_and_next_call_has_fresh_budget() -> anyhow
             let compiled = compiled(dir.path(), durable, Some(400), None)?;
             let host = Arc::new(Host::new());
             let mut server = Server::start(host.clone(), script, 2).await?;
-            let exit = invoke_with_env(&compiled, host, server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
             server.check().await?;
             let InvokeExit::Completed(bytes) = exit else {
                 anyhow::bail!("{exit:?}")
@@ -382,7 +445,7 @@ async fn embed_tool_root_cancel_and_parent_timeout_bypass_model_feedback() -> an
                 1,
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             if cancel {
                 // This fixture host acknowledges the signal through the runtime
@@ -426,7 +489,7 @@ async fn embed_tool_resume_reuses_completed_call_and_original_pending_budget() -
         Server::scripted(host.clone(), vec![Child::Success], vec![turn, model_done()]).await?;
     for now in [1_000, 1_100] {
         host.clock_override.store(now, Ordering::SeqCst);
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit,InvokeExit::Suspended(ref wakes) if matches!(wakes.as_slice(),[runtara_component_host::lifecycle::WorkflowWake::At(1_200)])),
@@ -439,7 +502,7 @@ async fn embed_tool_resume_reuses_completed_call_and_original_pending_budget() -
         );
     }
     host.clock_override.store(1_200, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")
@@ -488,7 +551,7 @@ async fn embed_tool_untimed_calls_preserve_errors_success_and_completed_replay()
         let host = Arc::new(Host::new());
         let mut server =
             Server::start(host.clone(), vec![Child::Permanent, Child::Success], 2).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -509,7 +572,7 @@ async fn embed_tool_untimed_calls_preserve_errors_success_and_completed_replay()
         }
         if durable {
             host.clock_override.store(u64::MAX, Ordering::SeqCst);
-            let replay = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let replay = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             assert!(
                 matches!(replay,InvokeExit::Completed(ref value) if value == &bytes),
@@ -530,7 +593,7 @@ async fn embed_tool_own_timeout_allows_model_to_finish_inside_parent_budget() ->
         let compiled = compiled(dir.path(), durable, Some(200), Some(4_000))?;
         let host = Arc::new(Host::new());
         let mut server = Server::start(host.clone(), vec![Child::Headers], 1).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
         let requests = server.requests.lock().unwrap();
@@ -570,7 +633,7 @@ async fn embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io() -
             json!({"id":"second","function":{"name":"run_child","arguments":"{\"pause\":true}"}}),
         ]);
         let mut server = Server::scripted(host.clone(), vec![Child::Success], vec![turn]).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
         for (key, value) in host.checkpoints.lock().unwrap().iter_mut() {
@@ -578,7 +641,7 @@ async fn embed_tool_pending_call_rejects_corrupt_budget_without_new_child_io() -
                 *value = vec![0; length];
             }
         }
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit,InvokeExit::Failed(ref error) if error.code == "EMBED_DEADLINE_STATE" && !error.retryable),
@@ -604,7 +667,7 @@ async fn ai_response_checkpoint_failures_prevent_tool_dispatch() -> anyhow::Resu
         let host = Arc::new(Host::new());
         host.fail_checkpoints(RESPONSE_PREFIX, write);
         let mut server = Server::start(host.clone(), vec![], 1).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Failed(error) = exit else {
             anyhow::bail!("{exit:?}")
@@ -638,14 +701,14 @@ async fn ai_response_pause_after_persistence_replays_before_tool_dispatch() -> a
     let host = Arc::new(Host::new());
     *host.checkpoint_signal.lock().unwrap() = Some(RESPONSE_PREFIX.into());
     let mut server = Server::start(host.clone(), vec![Child::Success], 1).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert!(host.acknowledged.load(Ordering::SeqCst));
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     *host.checkpoint_signal.lock().unwrap() = None;
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")
@@ -678,7 +741,7 @@ async fn ai_response_corrupt_checkpoint_fails_without_model_or_child_io() -> any
     let host = Arc::new(Host::new());
     *host.checkpoint_signal.lock().unwrap() = Some(RESPONSE_PREFIX.into());
     let mut server = Server::start(host.clone(), vec![], 1).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     *host.checkpoint_signal.lock().unwrap() = None;
     let key = host
@@ -696,7 +759,7 @@ async fn ai_response_corrupt_checkpoint_fails_without_model_or_child_io() -> any
         br#"{"action":"tools","tool_calls":[]}"#.to_vec(),
     ] {
         host.checkpoints.lock().unwrap().insert(key.clone(), bytes);
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert!(
             matches!(exit,InvokeExit::Failed(ref error) if error.code == "AI_TURN_RESPONSE_STATE" && !error.retryable),
@@ -724,7 +787,7 @@ async fn shared_checkpoint_errors_stop_ordinary_agent_execution() -> anyhow::Res
         let host = Arc::new(Host::new());
         host.fail_checkpoints("runtara:v2:[\"agent\",", write);
         let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Failed(error) = exit else {
             anyhow::bail!("{exit:?}")
@@ -786,7 +849,7 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
     let mut server = Server::scripted(host.clone(), vec![], vec![turn, model_done()]).await?;
     let mut wait_key = None;
     for _ in 0..2 {
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Suspended(wakes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -810,7 +873,7 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
         .lock()
         .unwrap()
         .insert(wait_key.unwrap(), br#"{"approved":true}"#.to_vec());
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")

@@ -2,10 +2,8 @@
 //!
 //! `HostState` lives inside a `wasmtime::Store` and provides:
 //! - the WASI Preview 2 context (`WasiCtx`) — env vars, stderr, no fs/stdin.
-//! - the WASI HTTP context (`WasiHttpCtx`) — outbound HTTP handling.
-//! - a `WasiHttpHooks` impl that defensively injects `X-Org-Id` on every
-//!   outbound request and strips `Authorization`/`Cookie` from requests
-//!   that don't target our proxy. See § 6 / § 9 of the migration plan.
+//! - the WASI HTTP context (`WasiHttpCtx`) with raw HTTP denied.
+//! - a `WasiHttpHooks` impl that denies raw WASI HTTP; outbound uses the typed host service.
 
 use std::sync::Arc;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -22,105 +20,47 @@ use wasmtime_wasi_http::{
 use crate::host_io::HostIoContext;
 
 /// Per-call context. One of these is built before each component invocation.
-/// Carries everything the host needs to know about the call but the component
-/// must not see — secrets (proxy holds them) and tenancy that we enforce
-/// host-side.
+/// Carries authoritative identity and the optional legacy runtime address.
+/// Credentials belong to injected native services, never this context.
 #[derive(Clone, Debug)]
 pub struct CallContext {
     pub tenant_id: String,
     pub instance_id: Option<String>,
-    pub proxy_url: String,
-    pub proxy_host: String,
     pub core_http_url: String,
-    pub object_model_url: String,
-    pub connection_service_url: Option<String>,
 }
 
 impl CallContext {
     /// Build a context for the test-dispatcher path (no instance id, no
     /// checkpoint id).
-    pub fn for_test(
-        tenant_id: impl Into<String>,
-        proxy_url: impl Into<String>,
-        object_model_url: impl Into<String>,
-        core_http_url: impl Into<String>,
-    ) -> Self {
-        let proxy_url = proxy_url.into();
-        let proxy_host = url_host(&proxy_url);
+    pub fn for_test(tenant_id: impl Into<String>, core_http_url: impl Into<String>) -> Self {
         Self {
             tenant_id: tenant_id.into(),
             instance_id: None,
-            proxy_url,
-            proxy_host,
             core_http_url: core_http_url.into(),
-            object_model_url: object_model_url.into(),
-            connection_service_url: None,
         }
     }
 
     /// Placeholder context used at registry-load time to call
     /// `list-capabilities`. The agent should not make outbound HTTP during
-    /// metadata enumeration; if it does the request goes nowhere useful.
+    /// metadata enumeration; if it does the missing service fails explicitly.
     pub fn placeholder_for_metadata() -> Self {
         Self {
             tenant_id: String::new(),
             instance_id: None,
-            proxy_url: String::new(),
-            proxy_host: String::new(),
             core_http_url: String::new(),
-            object_model_url: String::new(),
-            connection_service_url: None,
         }
     }
 }
 
-fn url_host(s: &str) -> String {
-    s.parse::<http::Uri>()
-        .ok()
-        .filter(|u| u.scheme().is_some())
-        .and_then(|u| u.host().map(str::to_string))
-        .unwrap_or_default()
-}
-
-/// Hooks installed into the `wasi:http` host impl. Implements
-/// `WasiHttpHooks` so the host can intercept every outbound request.
-pub struct HostHooks {
-    pub ctx: Arc<CallContext>,
-}
+/// Raw WASI HTTP cannot bypass the typed outbound service.
+pub struct HostHooks;
 
 impl WasiHttpHooks for HostHooks {
     fn send_request(
         &mut self,
-        mut request: http::Request<HyperOutgoingBody>,
-        config: OutgoingRequestConfig,
+        _request: http::Request<HyperOutgoingBody>,
+        _config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
-        // Defensive header injection. Force X-Org-Id from the host; override
-        // any value the guest set. Closes the "tampered SDK could spoof
-        // tenancy" hole.
-        if !self.ctx.tenant_id.is_empty()
-            && let Ok(v) = self.ctx.tenant_id.parse::<http::HeaderValue>()
-        {
-            request.headers_mut().insert("X-Org-Id", v);
-        }
-        if let Some(iid) = &self.ctx.instance_id
-            && let Ok(v) = iid.parse::<http::HeaderValue>()
-        {
-            request.headers_mut().insert("X-Runtara-Instance-Id", v);
-        }
-
-        // Credentials must flow via the proxy, never directly from the agent.
-        let dest_host = request.uri().host().map(str::to_string).unwrap_or_default();
-        if !self.ctx.proxy_host.is_empty() && dest_host != self.ctx.proxy_host {
-            request.headers_mut().remove(http::header::AUTHORIZATION);
-            request.headers_mut().remove(http::header::COOKIE);
-        }
-
-        // First-party agents use `runtara-http`, whose WASI backend enters
-        // through the host-io import. Leaving raw `wasi:http` enabled here
-        // would create an unbounded alternate path that can outlive the
-        // active execution deadline or buffer an arbitrary response. Reject
-        // it rather than silently applying a different policy.
-        let _ = (request, config);
         Err(ErrorCode::HttpRequestDenied.into())
     }
 }
@@ -194,6 +134,12 @@ pub enum Termination {
 }
 
 pub struct HostState {
+    pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
+    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
+    pub(crate) connection_resolver:
+        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
+    pub(crate) restricted: bool,
+    pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
@@ -202,8 +148,8 @@ pub struct HostState {
     /// Memory/table caps for this call, enforced once the store installs it via
     /// `store.limiter(|s| &mut s.limiter)` (see `registry::instantiate`).
     pub limiter: GuestLimiter,
-    /// Absolute active-execution deadline used by host-io. `None` is valid
-    /// only for metadata/test stores, which still receive host-io's bounded
+    /// Absolute active-execution deadline used by outbound HTTP. `None` is valid
+    /// only for metadata/test stores, which still receive the outbound service's bounded
     /// per-request default.
     pub http_deadline: Option<tokio::time::Instant>,
     /// Set by the epoch deadline callback when it force-interrupts the guest.
@@ -212,6 +158,44 @@ pub struct HostState {
 }
 
 impl HostState {
+    pub fn with_outbound_http(mut self, service: Arc<dyn crate::OutboundHttpHost>) -> Self {
+        self.outbound_http = crate::outbound_http::for_run(
+            Some(&service),
+            Some(&self.ctx.tenant_id),
+            self.ctx.instance_id.as_deref(),
+        );
+        self
+    }
+
+    pub fn with_database(mut self, database: Arc<dyn crate::DatabaseHost>) -> Self {
+        self.database =
+            crate::database_host::database_for_run(Some(&database), Some(&self.ctx.tenant_id));
+        self
+    }
+
+    /// Configure a native resolver using this invocation's host-owned tenant.
+    pub fn with_connection_resolver(
+        mut self,
+        resolver: Arc<dyn crate::ConnectionResolverHost>,
+    ) -> Self {
+        self.connection_resolver = crate::connection_resolver_host::resolver_for_run(
+            Some(&resolver),
+            Some(&self.ctx.tenant_id),
+        );
+        self
+    }
+
+    pub(crate) fn restricted() -> Self {
+        let mut state = Self::new(Arc::new(CallContext::placeholder_for_metadata()));
+        state.wasi = WasiCtxBuilder::new()
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .build();
+        state.restricted = true;
+        state
+    }
+
     pub fn new(ctx: Arc<CallContext>) -> Self {
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stderr();
@@ -219,27 +203,23 @@ impl HostState {
         if !ctx.tenant_id.is_empty() {
             builder.env("RUNTARA_TENANT_ID", &ctx.tenant_id);
         }
-        if !ctx.proxy_url.is_empty() {
-            builder.env("RUNTARA_HTTP_PROXY_URL", &ctx.proxy_url);
-        }
         if !ctx.core_http_url.is_empty() {
             builder.env("RUNTARA_HTTP_URL", &ctx.core_http_url);
-        }
-        if !ctx.object_model_url.is_empty() {
-            builder.env("RUNTARA_OBJECT_MODEL_URL", &ctx.object_model_url);
-        }
-        if let Some(url) = &ctx.connection_service_url {
-            builder.env("CONNECTION_SERVICE_URL", url);
         }
         if let Some(iid) = &ctx.instance_id {
             builder.env("RUNTARA_INSTANCE_ID", iid);
         }
 
         Self {
+            restricted: false,
+            outbound_http: Err("native outbound HTTP service is not configured".into()),
+            database: Err("native database service is not configured".into()),
+            connection_resolver: Err("native connection resolver is not configured".into()),
+            trusted: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
-            hooks: HostHooks { ctx: ctx.clone() },
+            hooks: HostHooks,
             ctx,
             limiter: GuestLimiter::new(
                 DEFAULT_GUEST_MEMORY_MAX_BYTES,
@@ -270,10 +250,10 @@ impl HostState {
 
 impl HostIoContext for HostState {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
-        Some(&self.cleanup_alarm)
+        (!self.restricted).then_some(&self.cleanup_alarm)
     }
-    fn http_deadline(&self) -> Option<tokio::time::Instant> {
-        self.http_deadline
+    fn timers_allowed(&self) -> bool {
+        !self.restricted
     }
 }
 
@@ -301,29 +281,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_state_shares_one_call_context_with_its_hooks() {
-        let ctx = Arc::new(CallContext::for_test(
-            "tenant-1",
-            "http://proxy.local:7001",
-            "http://obj.local:7003",
-            "http://core.local:7004",
-        ));
+    fn host_state_retains_authoritative_call_context() {
+        let ctx = Arc::new(CallContext::for_test("tenant-1", "http://core.local:7004"));
         let state = HostState::new(Arc::clone(&ctx));
 
-        // The hooks must see the same context the state was built from — a
-        // divergence here would let host calls run against another tenant.
+        // Native services must use the context supplied by the invocation host.
         assert!(Arc::ptr_eq(&state.ctx, &ctx));
-        assert!(Arc::ptr_eq(&state.hooks.ctx, &ctx));
     }
 
     #[test]
     fn host_state_starts_unterminated_with_default_table_cap() {
-        let ctx = Arc::new(CallContext::for_test(
-            "tenant-1",
-            "http://proxy.local:7001",
-            "http://obj.local:7003",
-            "http://core.local:7004",
-        ));
+        let ctx = Arc::new(CallContext::for_test("tenant-1", "http://core.local:7004"));
         let state = HostState::new(ctx);
 
         // A fresh state has not been interrupted; the epoch callback is the
@@ -335,13 +303,6 @@ mod tests {
         );
         assert_eq!(state.limiter.memory_peak_bytes, 0);
         assert!(!state.limiter.denied_memory_grow);
-    }
-
-    #[test]
-    fn url_host_extracts_authority() {
-        assert_eq!(url_host("http://proxy.local:7001"), "proxy.local");
-        assert_eq!(url_host("https://example.com/path"), "example.com");
-        assert_eq!(url_host("not-a-url"), "");
     }
 
     #[test]
@@ -374,12 +335,7 @@ mod tests {
 
     #[test]
     fn set_limits_overrides_defaults() {
-        let ctx = Arc::new(CallContext::for_test(
-            "tenant-1",
-            "http://proxy.local:7001",
-            "http://obj.local:7003",
-            "http://core.local:7004",
-        ));
+        let ctx = Arc::new(CallContext::for_test("tenant-1", "http://core.local:7004"));
         let mut state = HostState::new(ctx);
         assert_eq!(
             state.limiter.max_memory_bytes,

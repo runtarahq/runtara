@@ -1,0 +1,18 @@
+// Native SQL execution. Tenant authority and credentials are host-owned.
+package runtara:database@0.1.0;
+
+interface sql {
+    // Requests/results use runtara-database-contract's versioned JSON schema.
+    // Error strings contain its serialized DatabaseError, never driver details.
+    query: async func(connection-id: string, request: list<u8>) -> result<list<u8>, string>;
+    execute: async func(connection-id: string, request: list<u8>) -> result<list<u8>, string>;
+    execute-batch: async func(connection-id: string, request: list<u8>) -> result<list<u8>, string>;
+}
+
+world database-host {
+    export sql;
+}
+
+world database-client {
+    import sql;
+}

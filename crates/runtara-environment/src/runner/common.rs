@@ -52,8 +52,6 @@ pub struct WorkflowRunnerConfig {
     pub default_timeout: Duration,
     /// Skip TLS certificate verification (passed to instances).
     pub skip_cert_verification: bool,
-    /// Connection service URL for fetching credentials at runtime (passed to instances).
-    pub connection_service_url: Option<String>,
 }
 
 impl WorkflowRunnerConfig {
@@ -62,7 +60,6 @@ impl WorkflowRunnerConfig {
     /// - `DATA_DIR`: data directory for instance I/O (default: `.data`).
     /// - `EXECUTION_TIMEOUT_SECS`: default execution timeout in seconds (default: 300).
     /// - `RUNTARA_SKIP_CERT_VERIFICATION`: skip TLS cert verification (default: false).
-    /// - `RUNTARA_CONNECTION_SERVICE_URL`: connection service URL (optional).
     ///
     /// The timeout follows the crate's positive-only rule, like every other
     /// interval in the crate — but be aware that it currently decides nothing.
@@ -100,13 +97,6 @@ impl WorkflowRunnerConfig {
                 .get("RUNTARA_SKIP_CERT_VERIFICATION")
                 .map(|v| parse_bool_lenient(&v))
                 .unwrap_or(false),
-            // `RUNTARA_CONNECTION_SERVICE_URL` is the runner's own setting and
-            // wins; `CONNECTION_SERVICE_URL` is the general name the rest of the
-            // stack uses, accepted as a fallback so a deployment that sets only
-            // that one still points guests at the right host.
-            connection_service_url: vars
-                .get("RUNTARA_CONNECTION_SERVICE_URL")
-                .or_else(|| vars.get("CONNECTION_SERVICE_URL")),
         }
     }
 }
@@ -139,9 +129,6 @@ pub(crate) fn build_env(
     if let Some(cp_id) = checkpoint_id {
         env.insert("RUNTARA_CHECKPOINT_ID".to_string(), cp_id.to_string());
     }
-    if let Some(ref url) = config.connection_service_url {
-        env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
-    }
     if let Some(core_http_url) = core_http_url {
         env.insert("RUNTARA_HTTP_URL".to_string(), core_http_url.to_string());
     }
@@ -151,7 +138,6 @@ pub(crate) fn build_env(
         env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
     }
 
-    // RUNTARA_HTTP_PROXY_URL, RUNTARA_OBJECT_MODEL_URL,
     // and RUNTARA_TENANT_ID overrides arrive via
     // LaunchOptions.env (populated by the caller from its typed config) and
     // are merged into `env` by the caller of build_env.
@@ -222,7 +208,6 @@ mod tests {
             data_dir: PathBuf::from("/tmp/runtara-runner-test"),
             default_timeout: Duration::from_secs(30),
             skip_cert_verification: false,
-            connection_service_url: None,
         }
     }
 
@@ -288,34 +273,6 @@ mod tests {
 
         let env_without_core = build_env(&config(), "instance-1", "tenant-1", None, None);
         assert!(!env_without_core.contains_key("RUNTARA_HTTP_URL"));
-    }
-
-    /// The runner-specific connection URL wins, and the general one is the
-    /// fallback — documented behaviour that nothing exercised.
-    #[test]
-    fn the_runner_specific_connection_url_wins() {
-        use crate::config::FixedVars;
-
-        let both = WorkflowRunnerConfig::from_vars(&FixedVars::new([
-            ("RUNTARA_CONNECTION_SERVICE_URL", "http://runner"),
-            ("CONNECTION_SERVICE_URL", "http://general"),
-        ]));
-        assert_eq!(
-            both.connection_service_url.as_deref(),
-            Some("http://runner")
-        );
-
-        let general = WorkflowRunnerConfig::from_vars(&FixedVars::new([(
-            "CONNECTION_SERVICE_URL",
-            "http://general",
-        )]));
-        assert_eq!(
-            general.connection_service_url.as_deref(),
-            Some("http://general")
-        );
-
-        let neither = WorkflowRunnerConfig::from_vars(&FixedVars::empty());
-        assert!(neither.connection_service_url.is_none());
     }
 
     /// The timeout still refuses a zero, so that if the field is ever wired up

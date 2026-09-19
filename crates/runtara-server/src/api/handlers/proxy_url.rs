@@ -18,8 +18,8 @@
 //!   F3 (base-path scope escape) and F4 (fail-open re-root).
 //! * [`is_private_ip`] — SSRF address classifier, normalizing IPv4-mapped /
 //!   IPv4-compatible IPv6 before the v6 ranges (F5).
-//! * [`path_is_under`] — segment-wise path containment used by both the proxy
-//!   and the presign path builder.
+//! * [`path_is_under`] — segment-wise path containment for proxy destination
+//!   validation.
 //!
 //! Design rule: **everything here is pure** — no I/O, no env reads, no axum
 //! types. Policy inputs (the http-base allowlist, whether path enforcement
@@ -124,7 +124,14 @@ pub fn pin_url_to_base(
     }
 
     // ── Build the final URL re-rooted onto the base host/scheme/port ─────────
-    let final_parsed = if agent_url.starts_with('/') {
+    let final_parsed = if agent_url.is_empty() {
+        // Opaque connection-only requests (MCP) select the exact configured
+        // endpoint, including its path/query, without exposing it to the guest.
+        let mut endpoint = base_parsed.clone();
+        let _ = endpoint.set_username("");
+        let _ = endpoint.set_password(None);
+        endpoint
+    } else if agent_url.starts_with('/') {
         // Relative path: append under the base path, then let the url crate
         // resolve dot-segments. We join an absolute-path reference against the
         // base ORIGIN (path "/"), so the result is always on the base host —
@@ -176,7 +183,7 @@ pub fn pin_url_to_base(
 /// True if `final_path` is contained under `base_path` after percent-decoding
 /// (once, matching one upstream decode) and dot-segment normalization. Prefer
 /// this over [`path_is_under`] when either path may carry percent-encoding or
-/// `..` segments. Shared by the proxy pin and the presign path builder.
+/// `..` segments. Used by the proxy destination pin.
 pub fn path_within_base(final_path: &str, base_path: &str) -> bool {
     let child = normalize_segments(&percent_decode(final_path));
     let base = normalize_segments(&percent_decode(base_path));
@@ -262,6 +269,21 @@ mod tests {
             enforce_path_prefix: path_prefix,
             allow_http_base_hosts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn opaque_request_selects_exact_configured_endpoint() {
+        assert_eq!(
+            pin_url_to_base(
+                "",
+                Some("https://mcp.example.test/rpc?version=1"),
+                true,
+                &opts(true)
+            )
+            .unwrap(),
+            "https://mcp.example.test/rpc?version=1"
+        );
+        assert!(pin_url_to_base("", None, true, &opts(true)).is_err());
     }
 
     // ── F1: base URL presence / validity ─────────────────────────────────────

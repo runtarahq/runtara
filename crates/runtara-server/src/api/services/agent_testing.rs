@@ -293,7 +293,7 @@ impl AgentTestingService {
             ServiceError::DatabaseError("ConnectionsFacade not configured".to_string())
         })?;
         let conn = facade
-            .get_with_parameters(connection_id, tenant_id)
+            .get_connection(connection_id, tenant_id)
             .await
             .map_err(|e| ServiceError::DatabaseError(format!("Failed to query connection: {}", e)))?
             .ok_or_else(|| {
@@ -312,10 +312,12 @@ impl AgentTestingService {
             connection_id: connection_id.to_string(),
             integration_id,
             connection_subtype: conn.connection_subtype,
-            parameters: conn
-                .connection_parameters
-                .unwrap_or_else(|| serde_json::json!({})),
-            rate_limit_config: conn.rate_limit_config,
+            parameters: serde_json::json!({}),
+            rate_limit_config: conn
+                .rate_limit_config
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|_| ServiceError::ExecutionError("Invalid rate limit metadata".into()))?,
         })
     }
 }

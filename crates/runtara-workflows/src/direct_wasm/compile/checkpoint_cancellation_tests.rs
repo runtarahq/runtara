@@ -19,7 +19,7 @@ async fn checkpoint_pause_after_failed_attempt_retains_original_backoff_on_repla
     *host.checkpoint_signal.lock().unwrap() = Some(RESULT.into());
     host.checkpoint_signal_remaining.store(1, Ordering::SeqCst);
     let mut server = Server::start(host.clone(), vec![Child::Retryable, Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert!(host.acknowledged.swap(false, Ordering::SeqCst));
@@ -33,7 +33,7 @@ async fn checkpoint_pause_after_failed_attempt_retains_original_backoff_on_repla
 
     *host.checkpoint_signal.lock().unwrap() = None;
     host.clock_override.store(2_000, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(
@@ -49,7 +49,7 @@ async fn checkpoint_pause_after_failed_attempt_retains_original_backoff_on_repla
     assert!(!host.acknowledged.load(Ordering::SeqCst));
 
     host.clock_override.store(4_000, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(output) = exit else {
         anyhow::bail!("{exit:?}")
@@ -79,14 +79,14 @@ async fn checkpoint_completed_result_replays_after_pause_even_when_budget_has_el
     *host.checkpoint_signal.lock().unwrap() = Some(RESULT.into());
     host.checkpoint_signal_remaining.store(1, Ordering::SeqCst);
     let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert!(host.acknowledged.swap(false, Ordering::SeqCst));
     let saved = host.checkpoints.lock().unwrap().clone();
     *host.checkpoint_signal.lock().unwrap() = None;
     host.clock_override.store(70_000, Ordering::SeqCst);
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(output) = exit else {
         anyhow::bail!("{exit:?}")
@@ -141,7 +141,7 @@ async fn checkpoint_cancel_after_failed_attempt_prevents_retry_and_terminal_fail
             let host = Arc::new(Host::new());
             cancel_on_checkpoint(&host, RESULT);
             let mut server = Server::start(host.clone(), vec![response], 0).await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             assert_cancelled_at_checkpoint(exit, &host);
             assert_eq!(server.children.load(Ordering::SeqCst), 1);
@@ -183,7 +183,7 @@ async fn checkpoint_cancel_retains_completed_agent_result_without_continuation()
         let host = Arc::new(Host::new());
         cancel_on_checkpoint(&host, RESULT);
         let mut server = Server::start(host.clone(), vec![Child::Success], 0).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_cancelled_at_checkpoint(exit, &host);
         assert_eq!(
@@ -221,7 +221,7 @@ async fn checkpoint_cancel_at_budget_creation_prevents_agent_dispatch() -> anyho
     let host = Arc::new(Host::new());
     cancel_on_checkpoint(&host, BUDGET);
     let mut server = Server::start(host.clone(), vec![], 0).await?;
-    let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert_cancelled_at_checkpoint(exit, &host);
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
@@ -257,7 +257,7 @@ async fn checkpoint_cancel_after_parallel_result_closes_pending_peer_before_ack(
         // The runtime acknowledgement waits for the server to observe EOF;
         // dropping the Store after invoke cannot satisfy this ordering check.
         let mut server = live_peer_server(host.clone(), body, false).await?;
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_cancelled_at_checkpoint(exit, &host);
         assert_eq!(server.children.load(Ordering::SeqCst), 2);

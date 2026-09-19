@@ -208,3 +208,122 @@ async fn unmatched_integration_ids_return_nothing() {
 
     assert!(found.is_empty(), "got: {:?}", ids(&found));
 }
+
+/// Decryption is deliberately counted independently of the selected output:
+/// returning None after decrypting would still violate the trusted boundary.
+#[tokio::test]
+async fn trusted_resolution_checks_tenant_and_exact_type_before_decryption() {
+    use runtara_connections::crypto::{CipherError, CredentialCipher};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingCipher(AtomicUsize);
+    impl CredentialCipher for CountingCipher {
+        fn encrypt(&self, value: &serde_json::Value) -> Result<serde_json::Value, CipherError> {
+            Ok(value.clone())
+        }
+        fn decrypt(&self, value: &serde_json::Value) -> Result<serde_json::Value, CipherError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(value.clone())
+        }
+        fn key_id(&self) -> &str {
+            "test"
+        }
+        fn is_encrypting(&self) -> bool {
+            true
+        }
+    }
+    let fixture = PgFixture::start().await;
+    sqlx::query("INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, status, connection_parameters) VALUES ($1, $2, $1, $3, 'ACTIVE', '{}'::jsonb)")
+        .bind("trusted-s3").bind(TENANT).bind("s3_compatible")
+        .execute(&fixture.pool).await.unwrap();
+    let cipher = Arc::new(CountingCipher(AtomicUsize::new(0)));
+    let repo = ConnectionRepository::new(fixture.pool.clone(), cipher.clone());
+    for (tenant, types) in [
+        ("other-tenant", vec!["s3_compatible".to_owned()]),
+        (TENANT, vec!["azure_blob_storage".to_owned()]),
+        (TENANT, vec!["aws_credentials".to_owned()]),
+        (TENANT, vec!["object_storage".to_owned()]),
+        (TENANT, vec!["*".to_owned()]),
+        (TENANT, vec![]),
+    ] {
+        assert!(
+            repo.get_with_parameters_for_types("trusted-s3", tenant, &types)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cipher.0.load(Ordering::SeqCst), 0);
+    }
+    assert!(
+        repo.get_with_parameters_for_types("trusted-s3", TENANT, &["s3_compatible".to_owned()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(cipher.0.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
+    use runtara_connections::{ConnectionsFacade, ConnectionsState, IntegrationCompatibility};
+    use serde_json::json;
+    let fixture = PgFixture::start().await;
+    seed(&fixture.pool).await;
+    // Only synthetic fixture values are stored here.
+    sqlx::query(
+        "UPDATE connection_data_entity SET connection_parameters = $1 WHERE id = 'mcp-active'",
+    )
+    .bind(
+        json!({"url":"https://example.test/rpc?token=synthetic-secret",
+            "bearer_token":"synthetic-secret", "extra_headers":{"Authorization":"synthetic-secret"},
+            "tool_scope":["search"],"tool_hints":{"search":"Find documents"}}),
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![]));
+    let facade = ConnectionsFacade::new(ConnectionsState {
+        db_pool: fixture.pool.clone(),
+        redis_manager: None,
+        public_base_url: String::new(),
+        http_client: reqwest::Client::new(),
+        cipher: Arc::new(NoOpCipher),
+        compatibility: Arc::new(IntegrationCompatibility::from_catalog(&catalog)),
+        agent_catalog: catalog,
+        connection_events: None,
+    });
+    assert!(
+        facade
+            .describe_connection("mcp-active", "someone_else")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let descriptor = facade
+        .describe_connection("mcp-active", TENANT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(descriptor.integration_id, "mcp");
+    assert_eq!(
+        descriptor.metadata,
+        json!({"tool_scope":["search"], "tool_hints":{"search":"Find documents"}})
+    );
+    assert!(
+        !serde_json::to_string(&descriptor)
+            .unwrap()
+            .contains("synthetic-secret")
+    );
+    let request = serde_json::from_value(json!({"resourceName":"models"})).unwrap();
+    assert!(matches!(
+        facade
+            .resolve_connection_resource("mcp-active", "someone_else", &request)
+            .await,
+        Err(runtara_connections::ConnectionsError::NotFound(_))
+    ));
+    let http = facade
+        .describe_connection("api-key-active", TENANT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(http.metadata.is_null());
+}

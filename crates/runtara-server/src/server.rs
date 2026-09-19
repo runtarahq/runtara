@@ -806,7 +806,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // self-consistency of the compile-time aggregator in `runtara-agents`,
     // which is now vestigial; the check is removed.
     println!("✓ Configured for tenant: {}", server_config.tenant_id);
-    println!("✓ Object model URL: {}", server_config.object_model_url);
     println!("✓ Direct workflow compiler: direct-only");
     println!(
         "Max concurrent executions: {} (CPU cores: {})",
@@ -1005,8 +1004,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref dir) = cfg.agent_components_dir {
             use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
             let env = DispatcherEnv {
-                proxy_url: cfg.http_proxy_url.clone(),
-                object_model_url: cfg.object_model_url.clone(),
                 core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
             };
             match ComponentDispatcherService::from_dir(dir, env).await {
@@ -1318,8 +1315,37 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // - Core functionality (checkpoints, signals) on port 8003 (RUNTARA_CORE_HTTP_PORT)
     // Migrations are run automatically via runtara_environment::migrations::run()
 
+    let database: Arc<dyn runtara_component_host::DatabaseHost> =
+        Arc::new(api::services::database::NativeDatabase {
+            manager: object_store_manager.clone(),
+            connections: connections_facade.clone(),
+        });
+    let connection_resolver: Arc<dyn runtara_component_host::ConnectionResolverHost> = Arc::new(
+        api::services::connection_resolver::NativeConnectionResolver(connections_facade.clone()),
+    );
+    let outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost> =
+        Arc::new(api::services::outbound_http::NativeOutboundHttp {
+            facade: connections_facade.clone(),
+            client: crate::egress_client::build_proxy_client(),
+        });
+    if let Some(dispatcher) = &component_dispatcher {
+        dispatcher.set_connection_resolver(connection_resolver.clone())?;
+        dispatcher.set_database(database.clone())?;
+        dispatcher.set_outbound_http(outbound_http.clone())?;
+    }
+    let trusted_executor = component_dispatcher.as_ref().map(|d| d.trusted_executor());
+    if let Some(executor) = &trusted_executor {
+        executor.set_credentials(Arc::new(api::services::trusted::BuiltinTrustedCredentials(
+            connections_facade.clone(),
+        )))?;
+    }
+
     // Start embedded Runtara servers (using dedicated database)
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
+        trusted_executor,
+        connection_resolver,
+        database,
+        outbound_http,
         execution_timeout_policy,
         Some(workers::step_counter::StepCounter::new(Arc::clone(
             &pipeline_gauges,
@@ -2369,120 +2395,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
 
-    // Internal API routes (called by workflow binaries, no tenant header required)
-    // Runtime connection endpoint now served by runtara-connections crate
-    // Path: /api/connections/{tenant_id}/{connection_id}
-    let internal_routes = runtara_connections::runtime_router(connections_config.clone());
-
     // Connections admin routes (operator-triggered maintenance, e.g. re-encrypt).
     // Crate-owned so the HTTP surface stays colocated with the domain logic.
     let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
-
-    // Internal Object Model API routes (called by integration agents in workflow guests)
-    // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
-    // These are only accessible from localhost.
-    let internal_object_model_state = Arc::new(api::handlers::object_model::ObjectModelState {
-        manager: object_store_manager.clone(),
-        pool: pool.clone(),
-        connections: connections_facade.clone(),
-        events: product_event_sink.clone(),
-    });
-    let internal_object_model_routes = Router::new()
-        .route(
-            "/api/internal/object-model/instances",
-            post(api::handlers::internal_object_model::create_instance),
-        )
-        .route(
-            "/api/internal/object-model/instances/query",
-            post(api::handlers::internal_object_model::query_instances),
-        )
-        .route(
-            "/api/internal/object-model/instances/exists",
-            post(api::handlers::internal_object_model::check_instance_exists),
-        )
-        .route(
-            "/api/internal/object-model/instances/create-if-not-exists",
-            post(api::handlers::internal_object_model::create_if_not_exists),
-        )
-        .route(
-            "/api/internal/object-model/instances/{schema_name}/{id}",
-            put(api::handlers::internal_object_model::update_instance),
-        )
-        .route(
-            "/api/internal/object-model/instances/delete",
-            post(api::handlers::internal_object_model::delete_instance),
-        )
-        .route(
-            "/api/internal/object-model/instances/bulk-create",
-            post(api::handlers::internal_object_model::bulk_create_instances),
-        )
-        .route(
-            "/api/internal/object-model/instances/bulk-update",
-            post(api::handlers::internal_object_model::bulk_update_instances),
-        )
-        .route(
-            "/api/internal/object-model/instances/bulk-delete",
-            post(api::handlers::internal_object_model::bulk_delete_instances),
-        )
-        .route(
-            "/api/internal/object-model/instances/aggregate",
-            post(api::handlers::internal_object_model::aggregate_instances),
-        )
-        .route(
-            "/api/internal/object-model/schemas/{name}",
-            get(api::handlers::internal_object_model::get_schema),
-        )
-        .route(
-            "/api/internal/object-model/schemas",
-            post(api::handlers::internal_object_model::create_schema),
-        )
-        // Workflow raw SQL (query-sql / execute-sql capabilities). Guarded
-        // server-side (READ ONLY txn on query, statement timeout, row/byte
-        // caps); registered here so they inherit the body limit, state, and
-        // the `database` entitlement gate below like every sibling route.
-        .route(
-            "/api/internal/object-model/sql/query",
-            post(api::handlers::internal_object_model::query_sql),
-        )
-        .route(
-            "/api/internal/object-model/sql/execute",
-            post(api::handlers::internal_object_model::execute_sql),
-        )
-        // Body limit raised to 64 MB: WASM workflows write multi-MB Object
-        // Model column values (file blobs, bulk imports) as base64/JSON that
-        // exceed Axum's default 2 MB limit. Without this layer the `Json`
-        // extractor rejects the body with a plain-text 413 before any handler
-        // runs, and the object-model agent — which parses the response without
-        // checking status — surfaces it as a misleading OBJECT_MODEL_PARSE_ERROR
-        // (SYN-491). Mirrors internal_proxy_routes below.
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(internal_object_model_state)
-        // Apply the `database` entitlement gate. Disabling the feature
-        // short-circuits with 403 ENTITLEMENT_REQUIRED before any handler
-        // runs — so a WASM workflow that calls object-model on a tenant
-        // without `database` sees the same denial shape the tenant-facing
-        // routes already emit. Mirrors the tenant-side gate above.
-        .route_layer(from_fn(crate::middleware::entitlement::require_database));
-
-    // Internal HTTP proxy routes (called by WASM workflows for credential injection)
-    // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
-    let internal_proxy_state = Arc::new(api::handlers::internal_proxy::ProxyState {
-        facade: connections_facade.clone(),
-        // Hardened egress client: no redirect following (F2) + a DNS resolver
-        // that rejects hosts resolving to private/internal addresses (F5).
-        client: crate::egress_client::build_proxy_client(),
-    });
-    let internal_proxy_routes = Router::new()
-        .route(
-            "/api/internal/proxy",
-            post(api::handlers::internal_proxy::proxy_handler),
-        )
-        .route(
-            "/api/internal/presign",
-            post(api::handlers::internal_presign::presign_handler),
-        )
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(internal_proxy_state);
 
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
@@ -2744,10 +2659,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Internal API server — localhost only, called by workflow binaries / WASM
     // =========================================================================
     let internal_app = Router::new()
-        .nest("/api/connections", internal_routes)
         .nest("/api/internal/connections-admin", connections_admin_routes)
-        .merge(internal_object_model_routes)
-        .merge(internal_proxy_routes)
         .merge(public_routes)
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));

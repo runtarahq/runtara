@@ -140,6 +140,7 @@ impl InvocationLauncher for PreparedInvocationLauncher {
             .execution
             .as_ref()
             .map(|execution| execution.clone().into_cleanup());
+        let trusted_pins = self.catalog.trusted_pins.get(&binding.artifact).cloned();
         let pre = pre.clone();
         let interface = binding.interface.clone();
         let executor = self.executor.clone();
@@ -171,6 +172,7 @@ impl InvocationLauncher for PreparedInvocationLauncher {
                             None,
                             entry,
                             InvocationControl {
+                                trusted_pins,
                                 task_cancel: Some(token),
                                 execution: scope.execution,
                                 deadline: child.deadline,

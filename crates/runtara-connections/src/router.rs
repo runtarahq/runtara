@@ -92,26 +92,6 @@ pub fn oauth_callback_router(config: ConnectionsConfig) -> Router {
         .with_state(state)
 }
 
-/// Runtime credential resolution router (internal, no auth).
-/// Tenant ID is extracted from the URL path.
-pub fn runtime_router(config: ConnectionsConfig) -> Router {
-    let state = ConnectionsState::from_config(config);
-    Router::new()
-        .route(
-            "/{tenant_id}/{connection_id}",
-            get(handler::connections::get_connection_for_runtime_handler),
-        )
-        .route(
-            "/{tenant_id}/{connection_id}/metadata",
-            get(handler::connections::get_connection_metadata_for_runtime_handler),
-        )
-        .route(
-            "/{tenant_id}/{connection_id}/resources",
-            post(handler::connections::resolve_connection_resource_for_runtime_handler),
-        )
-        .with_state(state)
-}
-
 /// Admin router for operator-triggered maintenance.
 ///
 /// Mount on a localhost-only / internal interface — endpoints are not

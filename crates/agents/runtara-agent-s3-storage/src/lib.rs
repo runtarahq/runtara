@@ -7,17 +7,20 @@
 //! the host architecture and writes `runtara_agent_s3_storage.meta.json` next
 //! to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to resolve the connection,
-//! attach AWS SigV4 signing, and forward to the configured S3 endpoint. The
-//! component never sees AWS credentials and never signs requests itself.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
+//! Presigning uses a fresh restricted trusted instance with signing credentials;
+//! that instance performs no network I/O.
 //!
 //! Binary content (upload/download) flows over the wire as base64 inside the
 //! JSON capability input/output. The component decodes/encodes base64 itself;
-//! the raw bytes only exist as the body of the proxied PUT/GET. Default upload
+//! the raw bytes cross the host boundary as the PUT/GET body. Default upload
 //! cap is 50 MB (matches the legacy `s3_storage` agent).
 #![allow(clippy::result_large_err)]
+
+mod aws_presign;
+mod presign;
 
 use base64::Engine as _;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -151,7 +154,7 @@ fn url_encode_s3_key(s: &str) -> String {
         .collect()
 }
 
-/// Fire an HTTP request via the runtara proxy (SigV4 is done server-side).
+/// Fire an HTTP request via the outbound host service (SigV4 is done server-side).
 async fn s3_request(
     method: &str,
     path: &str,
@@ -160,9 +163,7 @@ async fn s3_request(
     body: Option<&[u8]>,
 ) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(S3_TIMEOUT);
-    let mut req = client
-        .request(method, path)
-        .header("X-Runtara-Connection-Id", connection_id);
+    let mut req = client.request(method, path).connection_id(connection_id);
 
     for (k, v) in headers {
         req = req.header(k, v);
@@ -297,7 +298,7 @@ pub struct CreateBucketOutput {
     side_effects = true,
     idempotent = false,
     module_display_name = "S3 Storage",
-    module_description = "S3-compatible object storage: bucket and file management, plus presigned URL generation. Credentials are injected server-side by the runtara HTTP proxy.",
+    module_description = "S3-compatible object storage: bucket and file management, plus presigned URL generation. Requests use host-managed connections; presigning runs in an isolated trusted capability.",
     module_has_side_effects = true,
     module_supports_connections = true,
     module_integration_ids = "s3_compatible",
@@ -1114,6 +1115,7 @@ pub struct GeneratePresignedUrlOutput {
 }
 
 #[capability(
+    trusted = true,
     id = "storage-generate-presigned-url",
     module = "s3-storage",
     display_name = "Generate Presigned URL",
@@ -1123,9 +1125,8 @@ pub struct GeneratePresignedUrlOutput {
 )]
 pub async fn storage_generate_presigned_url(
     input: GeneratePresignedUrlInput,
+    context: &runtara_agent_trusted::TrustedContext,
 ) -> Result<GeneratePresignedUrlOutput, AgentError> {
-    let connection = require_connection(&input._connection)?;
-
     let method = match input.operation.to_lowercase().as_str() {
         "download" | "get" | "read" => "GET",
         "upload" | "put" | "write" | "create" => "PUT",
@@ -1149,15 +1150,13 @@ pub async fn storage_generate_presigned_url(
         .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
 
     Ok(
-        match runtara_http::presign(
-            &connection.connection_id,
+        match presign::presign(
+            context,
             method,
             &path,
             expires,
             input.content_type.as_deref(),
-        )
-        .await
-        {
+        ) {
             Ok(result) => GeneratePresignedUrlOutput {
                 success: true,
                 url: Some(result.url),
@@ -1308,7 +1307,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     AgentInfo {
         id: "s3-storage".into(),
         name: "S3 Storage".into(),
-        description: "S3-compatible object storage: bucket and file management, plus presigned URL generation. Credentials are injected server-side by the runtara HTTP proxy.".into(),
+        description: "S3-compatible object storage: bucket and file management, plus presigned URL generation. Requests use host-managed connections; presigning runs in an isolated trusted capability.".into(),
         has_side_effects: true,
         supports_connections: true,
         integration_ids: vec!["s3_compatible".to_string()],
@@ -1322,6 +1321,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
 runtara_agent_macro::agent_component!(
     agent = "s3-storage",
+    trusted = true,
     capabilities = [
         storage_create_bucket,
         storage_list_buckets,
@@ -1335,3 +1335,30 @@ runtara_agent_macro::agent_component!(
         storage_generate_presigned_url,
     ],
 );
+
+#[cfg(target_arch = "wasm32")]
+impl bindings::exports::runtara::trusted::execution::Guest for Component {
+    async fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        context: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        if capability_id != "storage-generate-presigned-url" {
+            return Err(runtara_agent_trusted::error(
+                "TRUSTED_CAPABILITY_DENIED",
+                "Capability is not trusted",
+            ));
+        }
+        let input = serde_json::from_slice(&input).map_err(|_| {
+            runtara_agent_trusted::error("INVALID_INPUT", "Invalid capability input")
+        })?;
+        let context: runtara_agent_trusted::TrustedContext = serde_json::from_slice(&context)
+            .map_err(|_| {
+                runtara_agent_trusted::error("INVALID_CONTEXT", "Invalid trusted context")
+            })?;
+        let result = __trusted_executor_storage_generate_presigned_url(input, &context).await?;
+        serde_json::to_vec(&result).map_err(|_| {
+            runtara_agent_trusted::error("INVALID_OUTPUT", "Invalid capability output")
+        })
+    }
+}

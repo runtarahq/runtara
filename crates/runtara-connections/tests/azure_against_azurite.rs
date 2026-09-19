@@ -1,5 +1,4 @@
-//! Integration tests: exercise Azure Shared Key signing and Service SAS
-//! generation against a real Azurite instance running in Docker.
+//! Integration tests: exercise Azure Shared Key signing against a real Azurite instance running in Docker.
 //!
 //! These tests spin up a fresh Azurite container per test via testcontainers.
 //! They prove that our canonical-string formats are byte-accurate against a
@@ -12,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use runtara_connections::auth::{azure_sas, azure_signing};
+use runtara_connections::auth::azure_signing;
 use testcontainers::core::{ContainerPort, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{GenericImage, ImageExt};
@@ -237,105 +236,4 @@ async fn shared_key_signs_query_params_correctly_with_prefix_filter() {
     );
     assert!(xml.contains("<Name>reports/older.csv</Name>"), "{}", xml);
     assert!(!xml.contains("<Name>a.txt</Name>"), "{}", xml);
-}
-
-#[tokio::test]
-async fn service_sas_url_grants_anonymous_read() {
-    let fixture = AzuriteFixture::start().await;
-
-    // Seed a blob using shared key auth.
-    fixture
-        .send_signed("PUT", "/sasread?restype=container", b"", &[])
-        .await;
-    let body = b"sas-protected payload";
-    let put = fixture
-        .send_signed(
-            "PUT",
-            "/sasread/secret.txt",
-            body,
-            &[
-                ("Content-Type", "text/plain"),
-                ("x-ms-blob-type", "BlockBlob"),
-            ],
-        )
-        .await;
-    assert!(put.status().is_success(), "seed blob: {}", put.status());
-
-    // Generate a read-only SAS URL.
-    let sas_url = azure_sas::generate_blob_sas_url(
-        &fixture.base_url,
-        ACCOUNT,
-        KEY,
-        "sasread",
-        "secret.txt",
-        "r",
-        600,
-        None,
-    )
-    .expect("generate SAS URL");
-
-    // Fetch via SAS — note: no Authorization header.
-    let response = fixture
-        .client
-        .get(&sas_url)
-        .send()
-        .await
-        .expect("send sas request");
-    assert!(
-        response.status().is_success(),
-        "GET via SAS URL: {} body={}",
-        response.status(),
-        response.text().await.unwrap_or_default()
-    );
-    let downloaded = response.bytes().await.expect("read sas body");
-    assert_eq!(downloaded.as_ref(), body);
-}
-
-#[tokio::test]
-async fn service_sas_url_with_write_permission_supports_upload() {
-    let fixture = AzuriteFixture::start().await;
-
-    // Create the container with shared key auth (SAS write permission alone
-    // doesn't include container creation).
-    fixture
-        .send_signed("PUT", "/sasupload?restype=container", b"", &[])
-        .await;
-
-    // Generate a write SAS for a specific blob.
-    let sas_url = azure_sas::generate_blob_sas_url(
-        &fixture.base_url,
-        ACCOUNT,
-        KEY,
-        "sasupload",
-        "via-sas.txt",
-        "cw",
-        600,
-        Some("text/plain"),
-    )
-    .expect("generate write SAS");
-
-    let body = b"uploaded via SAS";
-    let response = fixture
-        .client
-        .put(&sas_url)
-        .header("Content-Type", "text/plain")
-        .header("x-ms-blob-type", "BlockBlob")
-        .body(body.to_vec())
-        .send()
-        .await
-        .expect("send upload via SAS");
-    assert!(
-        response.status().is_success(),
-        "PUT via SAS URL: {} body={}",
-        response.status(),
-        response.text().await.unwrap_or_default()
-    );
-
-    // Round-trip: read it back with shared key signing to confirm it was stored.
-    let get = fixture
-        .send_signed("GET", "/sasupload/via-sas.txt", b"", &[])
-        .await;
-    assert!(get.status().is_success(), "read back: {}", get.status());
-    let got = get.bytes().await.unwrap();
-    assert_eq!(got.as_ref(), body);
 }

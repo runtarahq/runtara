@@ -7,11 +7,9 @@
 //! the host architecture and writes `runtara_agent_shopify.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach the Shopify
-//! Admin access token server-side and resolve the connection's `shop_domain`
-//! parameter to `https://{shop_domain}`. The component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 //!
 //! The `api_version` connection parameter is a non-credential config value
 //! exposed in `connection.parameters` (JSON object); each capability reads it
@@ -136,7 +134,7 @@ fn resolve_api_version(connection: &RawConnection) -> String {
 }
 
 /// Executes a GraphQL query or mutation against the Shopify Admin API via the
-/// runtara proxy. The proxy resolves the connection's `shop_domain` into the
+/// outbound host service. The outbound host service resolves the connection's `shop_domain` into the
 /// absolute URL and injects `X-Shopify-Access-Token` server-side.
 async fn execute_graphql_query(
     connection: &RawConnection,
@@ -160,7 +158,7 @@ async fn execute_graphql_query(
         .request("POST", &path)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await

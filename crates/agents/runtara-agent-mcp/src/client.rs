@@ -4,8 +4,8 @@
 //! handshake in a single ephemeral session: `initialize` → grab the
 //! `Mcp-Session-Id` from the response → `notifications/initialized` →
 //! the real request (`tools/list` / `tools/call`). Credentials never
-//! enter the .wasm binary — the awaited `runtara_http` proxy client routes POSTs
-//! through the runtara proxy with `X-Runtara-Connection-Id`, which
+//! enter the .wasm binary — the awaited `runtara_http` client routes POSTs
+//! through the outbound host service using an explicit connection ID, which
 //! injects the right Authorization / api-key header server-side.
 //!
 //! Response bodies arrive as `text/event-stream` (rmcp's default) so we
@@ -130,7 +130,7 @@ async fn send_http(
         // Streamable HTTP returns the response as SSE — servers reject
         // requests that don't advertise willingness to accept it.
         .header("Accept", "application/json, text/event-stream")
-        .header("X-Runtara-Connection-Id", connection_id);
+        .connection_id(connection_id);
     if let Some(sid) = session_id {
         req = req.header("Mcp-Session-Id", sid);
     }

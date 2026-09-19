@@ -3,6 +3,8 @@ use super::*;
 #[derive(FromMeta)]
 struct AgentComponentArgs {
     agent: String,
+    #[darling(default)]
+    trusted: bool,
     capabilities: syn::ExprArray,
     #[darling(default)]
     decode_input: Option<syn::Path>,
@@ -41,6 +43,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let interface = format_ident!("agent_{}", agent.replace('-', "_"));
     let world = format!("runtara:agent-{agent}/agent");
     let export = format!("export:runtara:agent-{agent}/capabilities@0.4.0#invoke");
+    let wit_paths = if args.trusted {
+        quote! { ["../../runtara-agent-wit/wit", "../../runtara-agent-trusted/wit", "wit"] }
+    } else {
+        quote! { ["../../runtara-agent-wit/wit", "wit"] }
+    };
+    let async_exports = if args.trusted {
+        quote! { [#export, "export:runtara:trusted/execution@0.1.0#invoke"] }
+    } else {
+        quote! { [#export] }
+    };
     let decode_input = args
         .decode_input
         .map(|path| quote! { #path(&input) })
@@ -85,9 +97,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #[allow(warnings)]
         mod bindings {
             wit_bindgen::generate!({
-                path: ["../../runtara-agent-wit/wit", "wit"],
+                path: #wit_paths,
                 world: #world,
-                async: [#export],
+                async: #async_exports,
                 generate_all,
             });
         }

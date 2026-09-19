@@ -1,5 +1,8 @@
 //! Standard Component Model cancellation proof. No custom task API, catalog,
 //! launcher or per-call Store. This fixture precedes real Agent binding changes.
+#[cfg(feature = "component-integration-tests")]
+#[path = "common/outbound.rs"]
+mod outbound_fixture;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},

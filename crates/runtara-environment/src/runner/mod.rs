@@ -43,7 +43,26 @@ pub fn build_runner_with_core_http_url(
     >,
     core_http_url: Option<String>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
-    build_runner_configured(persistence, event_observer, core_http_url, None)
+    build_runner_configured(
+        persistence,
+        event_observer,
+        core_http_url,
+        None,
+        HostServices::default(),
+    )
+}
+
+/// Native services shared across runs; each invocation supplies its own identity.
+#[derive(Default)]
+pub struct HostServices {
+    /// Approved isolated built-in capabilities.
+    pub trusted: Option<std::sync::Arc<runtara_component_host::trusted::TrustedExecutor>>,
+    /// Safe connection metadata and resource resolution.
+    pub connections: Option<std::sync::Arc<dyn runtara_component_host::ConnectionResolverHost>>,
+    /// Native SQL execution against connection-owned databases.
+    pub database: Option<std::sync::Arc<dyn runtara_component_host::DatabaseHost>>,
+    /// Credential-aware outbound HTTP.
+    pub outbound_http: Option<std::sync::Arc<dyn runtara_component_host::OutboundHttpHost>>,
 }
 
 /// Build the runner with an explicit shared operator isolation policy.
@@ -55,6 +74,7 @@ pub fn build_runner_configured(
     >,
     core_http_url: Option<String>,
     scoped_agents: Option<ScopedAgentRunnerConfig>,
+    services: HostServices,
 ) -> Result<std::sync::Arc<dyn Runner>> {
     if let Some(requested) = crate::config::ProcessEnv.get("RUNTARA_RUNNER")
         && !requested.is_empty()
@@ -67,6 +87,18 @@ pub fn build_runner_configured(
     let mut runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
     if let Some(config) = scoped_agents {
         runner = runner.with_scoped_agents(config)?;
+    }
+    if let Some(service) = services.outbound_http {
+        runner = runner.with_outbound_http(service)?;
+    }
+    if let Some(database) = services.database {
+        runner = runner.with_database(database)?;
+    }
+    if let Some(connections) = services.connections {
+        runner = runner.with_connection_resolver(connections)?;
+    }
+    if let Some(trusted) = services.trusted {
+        runner = runner.with_trusted_executor(trusted)?;
     }
     if let Some(core_http_url) = core_http_url {
         runner = runner.with_core_http_url(core_http_url);

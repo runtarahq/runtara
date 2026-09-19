@@ -7,11 +7,9 @@
 //! the host architecture and writes `runtara_agent_openai.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach
-//! `Authorization: Bearer <api_key>` from the stored connection — the
-//! component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -165,7 +163,7 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
     })
 }
 
-/// POST `body` to `https://api.openai.com{path}` via the runtara proxy. The
+/// POST `body` to `https://api.openai.com{path}` via the outbound host service. The
 /// proxy attaches `Authorization: Bearer <api_key>` based on the connection
 /// id header so the component never sees the secret.
 async fn openai_post_json(
@@ -184,7 +182,7 @@ async fn openai_post_json(
     let response = client
         .request("POST", &url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -1010,13 +1008,9 @@ pub async fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageO
         "images/variations"
     };
 
-    // NOTE: The OpenAI images/edits and images/variations endpoints require
-    // multipart/form-data with binary PNG payloads, which cannot be satisfied
-    // by a simple JSON POST. The proxy currently only supports JSON bodies.
-    // We call the JSON-compatible path here; full multipart support requires
-    // proxy-side changes. The body below is best-effort and will likely return
-    // a 415/400 from OpenAI until multipart proxy support lands.
-    // TODO: add multipart support to the runtara proxy and update this handler.
+    // These endpoints require multipart/form-data with binary PNG payloads.
+    // The host transport accepts raw bytes, but this agent still builds JSON.
+    // TODO: encode the multipart request here; JSON may receive a 415/400.
     let body = json!({
         "prompt": input.prompt,
         "n": 1,

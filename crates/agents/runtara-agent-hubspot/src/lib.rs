@@ -7,10 +7,9 @@
 //! the host architecture and writes `runtara_agent_hubspot.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach the HubSpot
-//! Bearer token server-side. The component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -143,7 +142,7 @@ async fn hubspot_get(
     let response = client
         .request("GET", &url)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {
@@ -174,7 +173,7 @@ async fn hubspot_post(
         .request("POST", &url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -206,7 +205,7 @@ async fn hubspot_patch(
         .request("PATCH", &url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -238,7 +237,7 @@ async fn hubspot_put(
         .request("PUT", &url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -261,7 +260,7 @@ async fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), Ag
     let response = client
         .request("DELETE", &url)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {

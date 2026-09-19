@@ -118,7 +118,7 @@ async fn nested_ai_preserves_two_outer_tool_calls_and_conversation() -> anyhow::
             done("outer-finished"),
         ];
         let mut server = Server::scripted(host.clone(), vec![], responses).await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -176,7 +176,7 @@ async fn nested_ai_large_histories_preserve_outer_turns_and_repeated_calls() -> 
                 ],
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             let InvokeExit::Completed(bytes) = exit else {
                 anyhow::bail!("{exit:?}")
@@ -186,7 +186,7 @@ async fn nested_ai_large_histories_preserve_outer_turns_and_repeated_calls() -> 
                 json!({"answer":"outer-finished"})
             );
             if durable {
-                let replay = invoke_with_env(&compiled, host, server.env()).await?;
+                let replay = invoke_with_outbound(&compiled, host, server.outbound()).await?;
                 server.check().await?;
                 assert!(
                     matches!(replay,InvokeExit::Completed(ref value) if value == &bytes),
@@ -238,7 +238,7 @@ async fn nested_ai_error_returns_to_outer_model_with_original_context() -> anyho
             ],
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -278,7 +278,7 @@ async fn nested_ai_wait_resume_preserves_both_decisions_and_original_signal() ->
     .await?;
     let mut key = None;
     for _ in 0..2 {
-        let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Suspended(wakes) = exit else {
             anyhow::bail!("{exit:?}")
@@ -298,7 +298,7 @@ async fn nested_ai_wait_resume_preserves_both_decisions_and_original_signal() ->
         .lock()
         .unwrap()
         .insert(key.unwrap(), br#"{"approved":true}"#.to_vec());
-    let exit = invoke_with_env(&compiled, host, server.env()).await?;
+    let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {
         anyhow::bail!("{exit:?}")
@@ -346,7 +346,7 @@ async fn nested_ai_cancellation_respects_owner_and_restores_parent_context() -> 
                 ],
             )
             .await?;
-            let exit = invoke_with_env(&compiled, host.clone(), server.env()).await?;
+            let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
             server.check().await?;
             let count = server.requests.lock().unwrap().len();
             if pending == "cancel" {
@@ -403,7 +403,7 @@ async fn nested_ai_child_collection_keeps_outer_interned_state() -> anyhow::Resu
             ],
         )
         .await?;
-        let exit = invoke_with_env(&compiled, host, server.env()).await?;
+        let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
         server.check().await?;
         let InvokeExit::Completed(bytes) = exit else {
             anyhow::bail!("{exit:?}")

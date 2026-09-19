@@ -59,8 +59,6 @@ fn build_bundle() -> tempfile::TempDir {
 /// than silently succeeding against a real host.
 fn env() -> DispatcherEnv {
     DispatcherEnv {
-        proxy_url: "http://127.0.0.1:1/unroutable".into(),
-        object_model_url: "http://127.0.0.1:1/unroutable".into(),
         core_http_url: "http://127.0.0.1:1/unroutable".into(),
     }
 }

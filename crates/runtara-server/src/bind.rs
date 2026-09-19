@@ -48,13 +48,10 @@ pub fn enforce_loopback_for_unauthenticated(
 /// Refuse to boot the **internal** listener on a non-loopback host unless a
 /// shared-secret authenticator is configured for the internal routes.
 ///
-/// Unlike the public listener, the internal API (`/api/internal/proxy`,
-/// internal object-model) is *always* unauthenticated
-/// and derives the tenant from an `X-Org-Id` header. It also injects connection
-/// credentials server-side and performs outbound egress, so exposing it on a
-/// non-loopback bind would let any host that can send an `X-Org-Id` header drive
-/// credentialed egress and SSRF. This guard is therefore independent of
-/// [`AuthProviderKind`] — the public auth provider does not protect this port.
+/// The internal connection-administration routes use host-supplied tenant
+/// headers rather than the public authentication middleware. Exposing them
+/// without an internal authenticator would allow unauthorized administration.
+/// This guard is independent of [`AuthProviderKind`].
 ///
 /// Returns the operator-facing error message; callers print it and exit non-zero.
 pub fn enforce_internal_listener_safe(
@@ -70,10 +67,9 @@ pub fn enforce_internal_listener_safe(
     Err(format!(
         "INTERNAL_HOST='{internal_host}' is not a loopback address and no \
          RUNTARA_INTERNAL_SHARED_SECRET is configured. The internal API \
-         (/api/internal/proxy, internal object-model) is \
-         UNAUTHENTICATED and injects connection credentials server-side; exposing \
-         it on a non-loopback bind would let any host that can send an X-Org-Id \
-         header drive credentialed egress and SSRF. Bind INTERNAL_HOST to a \
+         connection-administration routes trust tenant headers; exposing \
+         them without an internal authenticator would allow unauthorized \
+         connection administration. Bind INTERNAL_HOST to a \
          loopback address (127.0.0.1, ::1, localhost), or set \
          RUNTARA_INTERNAL_SHARED_SECRET and front the internal port with mTLS. \
          See docs/deployment/auth-modes.md."
