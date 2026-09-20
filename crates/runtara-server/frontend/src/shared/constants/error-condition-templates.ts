@@ -177,37 +177,3 @@ export const ERROR_CONDITION_TEMPLATES: ErrorConditionTemplate[] = [
     },
   },
 ];
-
-/**
- * Common error code patterns for quick reference
- * @lintignore Public reference table for constructing error-condition templates.
- */
-export const ERROR_CODE_PATTERNS = {
-  RATE_LIMITED: '_RATE_LIMITED',
-  UNAUTHORIZED: 'UNAUTHORIZED',
-  INVALID_KEY: 'INVALID_API_KEY',
-  NOT_FOUND: 'NOT_FOUND',
-  VALIDATION: 'VALIDATION',
-  SERVER_ERROR: 'SERVER_ERROR',
-  TIMEOUT: 'TIMEOUT',
-} as const;
-
-/**
- * Common error categories
- * @lintignore Public reference table for constructing error-condition templates.
- */
-export const ERROR_CATEGORIES = {
-  TRANSIENT: 'transient',
-  PERMANENT: 'permanent',
-} as const;
-
-/**
- * Common error severities
- * @lintignore Public reference table for constructing error-condition templates.
- */
-export const ERROR_SEVERITIES = {
-  INFO: 'info',
-  WARNING: 'warning',
-  ERROR: 'error',
-  CRITICAL: 'critical',
-} as const;

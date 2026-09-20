@@ -26,11 +26,6 @@ import {
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders, getRuntimeBaseUrl } from '@/shared/queries/utils';
 
-/** @lintignore Public query-context type kept for consumer use in useQueries callbacks. */
-export interface AgentDetailsQueryContext {
-  queryKey: readonly string[]; // flexible for useQueries
-}
-
 export interface StepEventsFilters {
   stepId?: string;
   eventType?: string;

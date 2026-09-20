@@ -12,7 +12,6 @@ import initRustValidation, {
   initAgentCatalog,
   normalizeSchemaFieldsFormJson,
   validateExecutionGraphJson,
-  validateFormDefinitionJson,
   validateSchemaFieldsJson,
   validateWorkflowStartInputsJson,
 } from '@/wasm/validation/runtara_validation.js';
@@ -30,7 +29,6 @@ export {
   getStepTypesJson,
   normalizeSchemaFieldsFormJson,
   validateExecutionGraphJson,
-  validateFormDefinitionJson,
   validateSchemaFieldsJson,
   validateWorkflowStartInputsJson,
 };

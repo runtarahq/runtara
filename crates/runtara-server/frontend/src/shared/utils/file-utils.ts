@@ -165,27 +165,6 @@ export function createDataUrl(fileData: FileData): string {
 }
 
 /**
- * Trigger a file download from FileData.
- * @param fileData - FileData object to download
- * @param defaultFilename - Default filename if not specified in FileData
- * @lintignore Public helper kept alongside FileData for consumer download flows.
- */
-export function downloadFileData(
-  fileData: FileData,
-  defaultFilename = 'download'
-): void {
-  const dataUrl = createDataUrl(fileData);
-  const filename = fileData.filename || defaultFilename;
-
-  const link = document.createElement('a');
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-/**
  * Normalize FileFieldValue to FileData object.
  * @param value - FileData object or base64 string
  * @returns FileData object

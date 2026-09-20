@@ -1,9 +1,9 @@
-import { type HTMLAttributes, type ThHTMLAttributes } from 'react';
+import { type ThHTMLAttributes } from 'react';
 import { cn } from '@/lib/utils';
 
 /**
- * Compact table primitives for workflow-editor sidebars/forms (variables,
- * schema fields, switch cases…). The header-cell and row recipes live here
+ * Compact table header for workflow-editor sidebars/forms (variables,
+ * schema fields, switch cases…). The header-cell recipe lives here
  * once — don't retype `p-2 text-left text-sm font-medium text-muted-foreground`
  * per editor.
  */
@@ -20,16 +20,5 @@ export function EditorTh({
       )}
       {...props}
     />
-  );
-}
-
-/** @lintignore Public row recipe exported alongside EditorTh so editors don't
- *  retype the border/hover classes. */
-export function EditorRow({
-  className,
-  ...props
-}: HTMLAttributes<HTMLTableRowElement>) {
-  return (
-    <tr className={cn('border-b hover:bg-muted/30', className)} {...props} />
   );
 }

@@ -85,20 +85,4 @@ RuntimeREST.instance.interceptors.response.use(
   unauthorizedInterceptor
 );
 
-// TODO: OAuth authorization redirect endpoint not yet available in RuntimeAPI
-// This function will need to be updated once the endpoint is added to RuntimeAPI
-/** @lintignore Public stub retained until OAuth redirect endpoint lands in RuntimeAPI. */
-export async function getAuthorizationRedirect(
-  _token: string,
-  context: any
-): Promise<string> {
-  const [, integrationId] = context.queryKey;
-  console.warn(
-    `OAuth authorization redirect for integration ${integrationId} is not yet available in RuntimeAPI`
-  );
-  throw new Error(
-    'OAuth authorization redirect is not yet available. Please configure connections manually.'
-  );
-}
-
 export * from './billing';

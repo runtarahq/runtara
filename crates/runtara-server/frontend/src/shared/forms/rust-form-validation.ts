@@ -1,7 +1,6 @@
 import {
   analyzeFormJson,
   ensureRustValidationInitialized,
-  validateFormDefinitionJson,
 } from '@/shared/lib/rust-validation-wasm';
 
 import type { FormAnalysisResult, FormDefinition } from './types';
@@ -41,23 +40,6 @@ function unavailable(error: unknown): FormAnalysisResult {
     wasmAvailable: false,
     unavailableReason: error instanceof Error ? error.message : String(error),
   };
-}
-
-/** @lintignore Public definition-only half of the Rust validation bridge,
- *  exported alongside analyzeFormWithRust so callers can check a form
- *  definition without supplying data. */
-export async function validateFormDefinitionWithRust(
-  definition: FormDefinition
-): Promise<FormAnalysisResult> {
-  try {
-    await ensureRustValidationInitialized();
-    return normalizeResponse(
-      JSON.parse(validateFormDefinitionJson(JSON.stringify(definition)))
-    );
-  } catch (error) {
-    console.warn('Rust form-definition validation WASM unavailable', error);
-    return unavailable(error);
-  }
 }
 
 export async function analyzeFormWithRust(

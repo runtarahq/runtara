@@ -316,6 +316,3 @@ export const queryKeys = {
       ] as const,
   },
 } as const;
-
-/** @lintignore Public type exported for consumer hooks needing the full queryKeys shape. */
-export type QueryKeys = typeof queryKeys;
