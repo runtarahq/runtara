@@ -1,0 +1,15 @@
+[package]
+name = "runtara-object-model-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared schema types, validation, and SQL planning for native and WASM Object Model clients"
+
+[dependencies]
+thiserror = "2"
+runtara-database-contract = { path = "../runtara-database-contract" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+regex = "1"

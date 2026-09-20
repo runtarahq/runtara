@@ -62,6 +62,7 @@ mod split_retry;
 mod step_context;
 mod step_error;
 mod switch_route;
+mod trusted;
 mod wait;
 mod while_loop;
 
@@ -798,7 +799,7 @@ fn compose_direct_workflow_selected(
     }
 
     let compose_start = Instant::now();
-    let composed_wasm = compose_workflow_component_in_process(
+    let mut composed_wasm = compose_workflow_component_in_process(
         &result.component_artifacts.wac_source,
         &result.build_dir,
         overrides,
@@ -809,6 +810,7 @@ fn compose_direct_workflow_selected(
         composed_bytes = composed_wasm.len(),
         "compose: in-process wac-graph composition complete",
     );
+    trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components)?;
     let isolation = if bindings.is_empty() {
         None
     } else {
@@ -1142,7 +1144,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1682,6 +1684,9 @@ fn build_direct_component_resolve_scoped(
             )
             .map_err(component_error)?;
     }
+    resolve
+        .push_str("runtara-database.wit", runtara_workflow_wit::DATABASE_WIT)
+        .map_err(component_error)?;
     resolve
         .push_str("runtara-connection-resolver.wit", CONNECTION_RESOLVER_WIT)
         .map_err(component_error)?;

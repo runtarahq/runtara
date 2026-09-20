@@ -361,7 +361,6 @@ fn run() -> Result<(), String> {
             execution_graph,
             track_events: args.track_events,
             child_workflows,
-            connection_service_url: None,
             agent_catalog: Some(Arc::new(catalog)),
             agent_slug: None,
             progress_callback,

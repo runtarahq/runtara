@@ -153,6 +153,8 @@ async fn run_loop_with_scenario(
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
+                    trusted_tenant: Some("fixture-tenant".into()),
                     env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(5),

@@ -50,7 +50,7 @@ pub use prepared_launcher::{
 
 use crate::engine::EPOCH_TICK;
 use crate::execution_host::{ExecutionContext, ExecutionView};
-use crate::host_io::{DEFAULT_HTTP_TIMEOUT, HostIoContext};
+use crate::host_io::HostIoContext;
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -135,6 +135,10 @@ pub struct WorkflowRunResult {
 /// produces; `stderr` (when given) receives both guest stderr writes and the
 /// host-side failure reason, mirroring the per-run `stderr.log` contract.
 pub struct WorkflowRunSpec {
+    /// Authoritative tenant supplied by the runner, independent of guest environment.
+    pub trusted_tenant: Option<String>,
+    /// Authoritative instance attribution; never sourced from guest environment.
+    pub trusted_instance: Option<String>,
     pub env: HashMap<String, String>,
     pub stderr: Option<std::fs::File>,
     pub timeout: Duration,
@@ -168,6 +172,7 @@ enum InvocationEntry<'a> {
 
 #[derive(Default)]
 struct InvocationControl {
+    trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
     deadline: Option<Instant>,
     task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
     abandoned: Option<Arc<AtomicBool>>,
@@ -256,6 +261,7 @@ impl WasiHttpHooks for WorkflowHooks {
 
 /// Store data for a workflow run.
 pub struct WorkflowState {
+    trusted: Option<crate::trusted::TrustedCall>,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -276,8 +282,10 @@ pub struct WorkflowState {
     /// binding); `None` for legacy composed artifacts.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
+    pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
+    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
     connection_resolver:
-        Result<Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>, String>,
+        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
 }
 
 impl ExecutionView for WorkflowState {
@@ -294,12 +302,13 @@ impl HostIoContext for WorkflowState {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
         Some(&self.cleanup_alarm)
     }
-    fn http_deadline(&self) -> Option<tokio::time::Instant> {
-        Some(self.http_deadline)
-    }
 }
 
 impl WorkflowState {
+    pub(crate) fn database_deadline(&self) -> tokio::time::Instant {
+        self.active_deadline
+    }
+
     fn begin_active_execution(&mut self, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         self.http_deadline = deadline;
@@ -313,7 +322,7 @@ impl WorkflowState {
 
     pub(crate) fn connection_resolver_host(
         &self,
-    ) -> Option<&Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>> {
+    ) -> Option<&Arc<crate::connection_resolver_host::RunConnectionResolver>> {
         self.connection_resolver.as_ref().ok()
     }
 
@@ -416,12 +425,89 @@ impl PreparedWorkflow {
 
 /// Loads composed workflow components and executes them in-process.
 pub struct WorkflowExecutor {
+    outbound_http: std::sync::OnceLock<Arc<dyn crate::OutboundHttpHost>>,
+    database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
+    connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
+    trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
 }
 
 impl WorkflowExecutor {
+    pub fn set_outbound_http(&self, service: Arc<dyn crate::OutboundHttpHost>) -> Result<()> {
+        self.outbound_http
+            .set(service)
+            .map_err(|_| anyhow::anyhow!("outbound HTTP service already configured"))
+    }
+
+    pub fn set_database(&self, database: Arc<dyn crate::DatabaseHost>) -> Result<()> {
+        self.database
+            .set(database)
+            .map_err(|_| anyhow::anyhow!("database service already configured"))
+    }
+
+    pub fn set_connection_resolver(
+        &self,
+        resolver: Arc<dyn crate::ConnectionResolverHost>,
+    ) -> Result<()> {
+        self.connection_resolver
+            .set(resolver)
+            .map_err(|_| anyhow::anyhow!("connection resolver already configured"))
+    }
+
+    fn linker_with_trusted_pins(
+        &self,
+        component: &Component,
+    ) -> Result<wasmtime::component::Linker<WorkflowState>> {
+        // Empty instance imports describe dependencies but Wasmtime does not
+        // require a linker definition for them. Validate them explicitly.
+        let pins = self.trusted_pins(component);
+        for pin in pins.iter() {
+            anyhow::ensure!(
+                self.trusted
+                    .get()
+                    .is_some_and(|executor| executor.has_artifact_pin(pin)),
+                "approved trusted artifact unavailable: {pin}"
+            );
+        }
+        if component
+            .component_type()
+            .imports(&self.engine)
+            .any(|(name, _)| name == runtara_agent_trusted::EXECUTOR_INTERFACE)
+        {
+            anyhow::ensure!(
+                !pins.is_empty(),
+                "workflow trusted executor import has no artifact pins"
+            );
+        }
+        let mut linker = self.linker.clone();
+        if let Some(executor) = self.trusted.get() {
+            executor.add_artifact_pins(&mut linker)?;
+        }
+        Ok(linker)
+    }
+
+    fn trusted_pins(&self, component: &Component) -> Arc<std::collections::HashSet<String>> {
+        Arc::new(
+            component
+                .component_type()
+                .imports(&self.engine)
+                .filter(|(name, _)| name.starts_with("runtara:trusted-artifacts/"))
+                .map(|(name, _)| name.to_owned())
+                .collect(),
+        )
+    }
+
+    pub fn set_trusted_executor(
+        &self,
+        executor: Arc<crate::trusted::TrustedExecutor>,
+    ) -> anyhow::Result<()> {
+        self.trusted
+            .set(executor)
+            .map_err(|_| anyhow::anyhow!("trusted executor already configured"))
+    }
+
     /// `engine` must have epoch interruption enabled (see
     /// [`crate::engine::build_engine`]) and an epoch ticker running.
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
@@ -434,11 +520,18 @@ impl WorkflowExecutor {
         // are unaffected by this registration.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
         crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
-        // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
-        // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
+        crate::database_host::add_database_to_linker(&mut linker)?;
+        // Concurrent timers and outbound calls suspend only the calling guest
+        // task, allowing parallel Split subtasks to overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
+        crate::outbound_http::add_to_linker(&mut linker)?;
         crate::execution_host::add_execution_to_linker(&mut linker)?;
+        crate::trusted::add_to_linker(&mut linker)?;
         Ok(Self {
+            trusted: std::sync::OnceLock::new(),
+            outbound_http: std::sync::OnceLock::new(),
+            database: std::sync::OnceLock::new(),
+            connection_resolver: std::sync::OnceLock::new(),
             engine,
             linker,
             cache: tokio::sync::Mutex::new(HashMap::new()),
@@ -514,7 +607,7 @@ impl WorkflowExecutor {
         .context("workflow component compile task panicked")??;
 
         let instance_pre = Arc::new(
-            self.linker
+            self.linker_with_trusted_pins(&component)?
                 .instantiate_pre(&component)
                 .map_err(|e| anyhow::anyhow!("link workflow component: {e:#}"))?,
         );
@@ -553,10 +646,13 @@ impl WorkflowExecutor {
     /// allocations with the opaque prepared token; a count-only cache cannot
     /// safely bound those allocations.
     pub async fn prepare_precompiled(&self, component: Component) -> Result<PreparedWorkflow> {
-        let instance_pre =
-            Arc::new(self.linker.instantiate_pre(&component).map_err(|error| {
-                anyhow::anyhow!("link precompiled workflow component: {error:#}")
-            })?);
+        let instance_pre = Arc::new(
+            self.linker_with_trusted_pins(&component)?
+                .instantiate_pre(&component)
+                .map_err(|error| {
+                    anyhow::anyhow!("link precompiled workflow component: {error:#}")
+                })?,
+        );
         let command = if crate::lifecycle::exports_lifecycle_invoke(&instance_pre, &self.engine) {
             None
         } else {
@@ -581,8 +677,46 @@ impl WorkflowExecutor {
         &self,
         package: crate::precompile::CompiledWorkflowPackage,
     ) -> Result<PreparedWorkflow> {
+        // Child bytes were verified by the precompile worker against these
+        // digests. Bare built-ins have no workflow pin import, so bind them to
+        // the approved registry AND the root's metadata-bound version here.
+        let root_pins = self.trusted_pins(&package.root);
+        let mut child_pins = std::collections::BTreeMap::new();
+        let linker = self.linker_with_trusted_pins(&package.root)?;
+        for (digest, component) in &package.artifacts {
+            let mut pins = (*self.trusted_pins(component)).clone();
+            if let Some(pin) = self
+                .trusted
+                .get()
+                .and_then(|executor| executor.pin_for_wasm(digest))
+            {
+                anyhow::ensure!(
+                    root_pins.contains(pin),
+                    "isolated trusted built-in lacks matching root artifact pin"
+                );
+                pins.insert(pin.to_owned());
+            }
+            for pin in &pins {
+                anyhow::ensure!(
+                    root_pins.contains(pin),
+                    "isolated trusted dependency is not pinned by root"
+                );
+            }
+            if component
+                .component_type()
+                .imports(&self.engine)
+                .any(|(name, _)| name == runtara_agent_trusted::EXECUTOR_INTERFACE)
+            {
+                anyhow::ensure!(
+                    !pins.is_empty(),
+                    "isolated trusted caller has no approved artifact pin"
+                );
+            }
+            child_pins.insert(digest.clone(), Arc::new(pins));
+        }
         let mut catalog =
-            PreparedChildCatalog::prepare(&self.linker, package.artifacts, package.bindings)?;
+            PreparedChildCatalog::prepare(&linker, package.artifacts, package.bindings)?;
+        catalog.trusted_pins = child_pins;
         catalog.set_invocations(package.invocations)?;
         let mut root = self.prepare_precompiled(package.root).await?;
         if catalog.binding_count() != 0 {
@@ -704,6 +838,16 @@ impl WorkflowExecutor {
 
         let initial_deadline = tokio::time::Instant::now() + spec.timeout;
         let state = WorkflowState {
+            trusted: self
+                .trusted
+                .get()
+                .cloned()
+                .map(|executor| crate::trusted::TrustedCall {
+                    executor,
+                    tenant: spec.trusted_tenant.clone().unwrap_or_default(),
+                    deadline: tokio::time::Instant::now() + spec.timeout,
+                    pins: Some(self.trusted_pins(pre.instance_pre().component())),
+                }),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -720,7 +864,19 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: None,
-            connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
+            outbound_http: crate::outbound_http::for_run(
+                self.outbound_http.get(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
+            database: crate::database_host::database_for_run(
+                self.database.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
+            connection_resolver: crate::connection_resolver_host::resolver_for_run(
+                self.connection_resolver.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -980,6 +1136,21 @@ impl WorkflowExecutor {
         let initial_deadline =
             inherited_deadline.map_or(initial_deadline, |deadline| deadline.min(initial_deadline));
         let state = WorkflowState {
+            trusted: self
+                .trusted
+                .get()
+                .cloned()
+                .map(|executor| crate::trusted::TrustedCall {
+                    executor,
+                    tenant: spec.trusted_tenant.clone().unwrap_or_default(),
+                    deadline: tokio::time::Instant::now() + spec.timeout,
+                    pins: Some(
+                        control
+                            .trusted_pins
+                            .clone()
+                            .unwrap_or_else(|| self.trusted_pins(pre.component())),
+                    ),
+                }),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -996,7 +1167,19 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
-            connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
+            outbound_http: crate::outbound_http::for_run(
+                self.outbound_http.get(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
+            database: crate::database_host::database_for_run(
+                self.database.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
+            connection_resolver: crate::connection_resolver_host::resolver_for_run(
+                self.connection_resolver.get(),
+                spec.trusted_tenant.as_deref(),
+            ),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -1234,8 +1417,9 @@ impl WorkflowExecutor {
         input: Vec<u8>,
     ) -> anyhow::Result<Result<Vec<u8>, crate::ErrorInfo>> {
         let limits = WorkflowLimits::default();
-        let deadline = tokio::time::Instant::now() + DEFAULT_HTTP_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
+            trusted: None,
             wasi: WasiCtxBuilder::new().build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1252,6 +1436,8 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             runtime: None,
             execution: None,
+            outbound_http: Err("outbound HTTP is not configured in test state".into()),
+            database: Err("database is not configured in test state".into()),
             connection_resolver: Err(
                 "connection resolution is unavailable for direct capability invocation".to_string(),
             ),
@@ -1320,6 +1506,15 @@ fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {
             return;
         };
         cache.remove(&oldest);
+    }
+}
+
+impl crate::trusted::TrustedCaller for WorkflowState {
+    fn trusted_call(&self) -> Option<crate::trusted::TrustedCall> {
+        self.trusted.clone().map(|mut call| {
+            call.deadline = self.http_deadline;
+            call
+        })
     }
 }
 
@@ -1406,6 +1601,8 @@ mod tests {
 
     pub(super) fn run_spec(timeout: Duration) -> WorkflowRunSpec {
         WorkflowRunSpec {
+            trusted_instance: None,
+            trusted_tenant: None,
             env: HashMap::new(),
             stderr: None,
             timeout,
@@ -1524,3 +1721,7 @@ mod connection_resolver_tests;
 #[cfg(test)]
 #[path = "workflow/cleanup_alarm_tests.rs"]
 mod cleanup_alarm_tests;
+
+#[cfg(test)]
+#[path = "workflow/database_tests.rs"]
+mod database_tests;

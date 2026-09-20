@@ -81,6 +81,8 @@ async fn run(
             .execute_invoke_with_coordinator(
                 prepared.instance_pre(),
                 WorkflowRunSpec {
+                    trusted_instance: None,
+                    trusted_tenant: None,
                     env: Default::default(),
                     stderr: None,
                     timeout: Duration::from_secs(5),

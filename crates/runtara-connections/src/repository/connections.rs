@@ -750,6 +750,27 @@ impl ConnectionRepository {
         id: &str,
         tenant_id: &str,
     ) -> Result<Option<ConnectionWithParameters>, sqlx::Error> {
+        self.get_with_parameters_matching(id, tenant_id, None).await
+    }
+
+    /// Filter the authoritative row before unsealing its parameters. Ownership,
+    /// type and credentials therefore come from the same database snapshot.
+    pub async fn get_with_parameters_for_types(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        allowed: &[String],
+    ) -> Result<Option<ConnectionWithParameters>, sqlx::Error> {
+        self.get_with_parameters_matching(id, tenant_id, Some(allowed))
+            .await
+    }
+
+    async fn get_with_parameters_matching(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        allowed: Option<&[String]>,
+    ) -> Result<Option<ConnectionWithParameters>, sqlx::Error> {
         let result = sqlx::query_as::<
             _,
             (
@@ -773,6 +794,9 @@ impl ConnectionRepository {
         .await?;
 
         result
+            .filter(|row| {
+                allowed.is_none_or(|types| row.2.as_ref().is_some_and(|kind| types.contains(kind)))
+            })
             .map(
                 |(
                     id,

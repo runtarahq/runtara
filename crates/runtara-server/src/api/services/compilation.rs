@@ -422,7 +422,6 @@ fn data_dir() -> PathBuf {
 /// Service for workflow compilation operations
 pub struct CompilationService {
     repository: Arc<WorkflowRepository>,
-    connection_service_url: Option<String>,
     /// Runtime client for registering images with runtara-environment
     runtime_client: Option<Arc<RuntimeClient>>,
     /// Runtime agent metadata catalog (snapshot of every `<agent>.meta.json`
@@ -463,12 +462,10 @@ impl CompilationService {
 
     pub fn new(
         repository: Arc<WorkflowRepository>,
-        connection_service_url: Option<String>,
         runtime_client: Option<Arc<RuntimeClient>>,
     ) -> Self {
         Self {
             repository,
-            connection_service_url,
             runtime_client,
             agent_catalog: None,
             redis_manager: None,
@@ -672,7 +669,6 @@ impl CompilationService {
             execution_graph,
             track_events,
             child_workflows,
-            connection_service_url: self.connection_service_url.clone(),
             // When configured, the compile uses the runtime catalog from
             // the component dispatcher so the compiled view of agents
             // matches what the runtime can actually invoke — merged with the

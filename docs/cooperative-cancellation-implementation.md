@@ -841,21 +841,18 @@ Agent integration tests enabled.
 
 ## Object-model I/O and memory load/save
 
-The normal object-model Agent now uses callback bindings and async dispatch for
-all 14 capabilities. Its GET, POST and PUT helpers await the existing internal
-HTTP transport. Connection IDs remain in the query string and JSON body, tenant
-context remains in `X-Org-Id`, and requests still target `RUNTARA_OBJECT_MODEL_URL`
-directly. The server API, SQL execution rules and storage implementation are
-unchanged; no host-side workflow management was added.
+The Object Model agent uses async native `runtara:database/sql@0.1.0`
+imports for query, execute and execute-batch. The host resolves opaque connection
+IDs using authoritative tenant context. Schema, CRUD and memory orchestration
+run inside the agent; the internal Object Model HTTP transport is removed.
 
-Built-component tests cover 26 pending-request cases, each with no headers and
-with a partial response body: SQL query/execute; memory schema lookup; optional
-schema creation; loading conversation messages; save-time lookup; and memory
-create/update. After cancellation, the next request must belong to a fresh SQL
-query in the same Agent instance. This rules out advancing to a later memory
-stage from the cancelled invocation, while the independent sibling completes.
-Additional tests preserve the distinct read/write retry contracts for HTTP 429,
-503 and 413. Every endpoint is a local fixture, not a database.
+Built-component tests suspend native calls during connection metadata lookup,
+schema lookup/bootstrap, count/select, and memory create/update. Cancellation
+must drop the pending native future before an independent sibling finishes, and
+the same agent instance must then answer a fresh SQL query without running later
+steps from the cancelled invocation. Separate tests verify complete memory flows
+and read/write retry classification using transaction outcomes. These fixtures
+inject native services; PostgreSQL driver parity and rollback are tested separately.
 
 Four emitted-DSL cases extend the lifecycle proof to SQL query, SQL execute,
 AiAgent memory load and AiAgent memory save. Root cancellation bypasses retries
@@ -943,6 +940,11 @@ database/server E2E, Linux qualification or new performance/capacity measurement
 was run in this stage.
 
 ## S3, Azure Blob Storage and SFTP I/O
+
+Historical stage notes below: presigning has since moved to restricted trusted
+WASM execution. Its HTTP helper and endpoint are removed; HTTP-stub presign
+fixtures are replaced by the trusted executor cancellation tests and real WASM
+provider acceptance tests. See [trusted capabilities](trusted-capabilities-plan.md).
 
 The existing S3 and Azure Blob Storage components now use callback exports and
 await their normal proxy requests across all ten capabilities each. The shared

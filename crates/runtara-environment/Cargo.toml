@@ -62,6 +62,8 @@ getrandom = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+base64 = { workspace = true }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 # Compatibility fixtures must still construct old isolated packages. The
 # scoped-workflow-integration-tests feature turns on the compiler hooks they
 # need; enabling them here would unify into `cargo test --workspace --lib` and

@@ -1,11 +1,11 @@
-//! Real SQS component, standard parent cancellation and a local proxy fixture.
+//! Real SQS component, standard parent cancellation and a local provider fixture.
 //! No AWS account, real queue, receipt handle or message is used.
 use super::real_agent::{
-    compose_agent, invoke_named_agent, read_proxy, respond, run_cancellation_fixture,
+    compose_agent, invoke_named_agent, read_outbound, respond, run_cancellation_fixture,
 };
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 const QUEUE: &str = "https://sqs.invalid/fixture/queue.fifo";
@@ -73,7 +73,7 @@ async fn request(
     operation: &str,
     wire: &Value,
 ) -> anyhow::Result<()> {
-    let envelope = read_proxy(socket).await?;
+    let envelope = read_outbound(socket).await?;
     assert_eq!(envelope["url"], "/");
     assert_eq!(envelope["method"], "POST");
     assert_eq!(envelope["connection_id"], "fixture-connection");
@@ -102,7 +102,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
             &serde_json::to_vec(&json!({"_connection":connection(),"queue_name_prefix":"after"}))?,
         )?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let proxy = format!("http://{}/proxy", listener.local_addr()?);
+        let upstream = format!("http://{}/upstream", listener.local_addr()?);
         let started = Arc::new(Notify::new());
         let cleaned = Arc::new(Notify::new());
         let server = tokio::spawn({
@@ -139,7 +139,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
         });
         let output = run_cancellation_fixture(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             started,
             cleaned,
             server,
@@ -168,7 +168,7 @@ async fn invoke_response(
     envelope: Value,
 ) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
         request(&mut socket, case.operation, &case.wire).await?;
@@ -178,7 +178,7 @@ async fn invoke_response(
         Duration::from_secs(10),
         invoke_named_agent(
             "sqs",
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             case.capability,
             serde_json::to_vec(&case.input)?,
         ),
@@ -274,7 +274,7 @@ async fn sqs_transport_and_missing_connection_keep_distinct_retry_contracts() ->
         Duration::from_secs(10),
         invoke_named_agent(
             "sqs",
-            CallContext::for_test("fixture-tenant", "http://127.0.0.1:1/unused", "", ""),
+            FixtureContext::with_upstream("fixture-tenant", "http://127.0.0.1:1/unused", ""),
             "queue-receive-messages",
             serde_json::to_vec(&json!({"queue_url":QUEUE}))?,
         ),

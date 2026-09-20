@@ -1,7 +1,8 @@
 //! Built Agents + normal composition + production host I/O. The parent and
 //! signal source are fixtures; emitted DSL proofs live in runtara-workflows.
 use super::*;
-use runtara_component_host::{CallContext, HostState};
+use crate::outbound_fixture::FixtureContext;
+use runtara_component_host::HostState;
 use serde_json::Value;
 use std::path::PathBuf;
 use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
@@ -191,13 +192,7 @@ async fn cancel_real_http(body_wait: bool) -> anyhow::Result<()> {
         }
     });
     let run = async {
-        let output = cancel_and_reuse(
-            bytes,
-            CallContext::placeholder_for_metadata(),
-            started,
-            cleaned,
-        )
-        .await?;
+        let output = cancel_and_reuse(bytes, FixtureContext::public(), started, cleaned).await?;
         assert_eq!(output["status_code"], 200);
         assert_eq!(output["body"], "ok");
         assert_eq!(output["success"], true);
@@ -223,10 +218,37 @@ async fn cancel_real_http(body_wait: bool) -> anyhow::Result<()> {
 
 pub(super) async fn cancel_and_reuse(
     bytes: Vec<u8>,
-    context: CallContext,
+    context: FixtureContext,
     started: Arc<Notify>,
     cleaned: Arc<Notify>,
 ) -> anyhow::Result<serde_json::Value> {
+    cancel_and_reuse_with_resolver(
+        bytes,
+        context,
+        started,
+        cleaned,
+        Arc::new(super::real_mcp::McpResolver::default()),
+    )
+    .await
+}
+
+async fn cancel_and_reuse_with_resolver(
+    bytes: Vec<u8>,
+    context: FixtureContext,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+    resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
+) -> anyhow::Result<Value> {
+    let state = context.into_state().with_connection_resolver(resolver);
+    cancel_and_reuse_with_state(bytes, state, started, cleaned).await
+}
+
+pub(super) async fn cancel_and_reuse_with_state(
+    bytes: Vec<u8>,
+    state: HostState,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+) -> anyhow::Result<Value> {
     let sibling_started = Arc::new(Notify::new());
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
@@ -257,7 +279,6 @@ pub(super) async fn cancel_and_reuse(
                 Ok(())
             })
         })?;
-    let state = HostState::new(Arc::new(context));
     let mut store = Store::new(&engine, state);
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, "run")?;
@@ -277,7 +298,7 @@ async fn built_http_agent_cancels_after_partial_response_and_can_be_reused() -> 
 }
 
 async fn invoke_agent(
-    context: CallContext,
+    context: FixtureContext,
     capability: &str,
     input: Vec<u8>,
 ) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
@@ -286,7 +307,19 @@ async fn invoke_agent(
 
 pub(super) async fn invoke_named_agent(
     agent_id: &str,
-    context: CallContext,
+    context: FixtureContext,
+    capability: &str,
+    input: Vec<u8>,
+) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
+    let state = context
+        .into_state()
+        .with_connection_resolver(Arc::new(super::real_mcp::McpResolver::default()));
+    invoke_named_agent_with_state(agent_id, state, capability, input).await
+}
+
+pub(super) async fn invoke_named_agent_with_state(
+    agent_id: &str,
+    state: HostState,
     capability: &str,
     input: Vec<u8>,
 ) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
@@ -296,7 +329,7 @@ pub(super) async fn invoke_named_agent(
     })?;
     let component = Component::from_file(&engine, agent_path(agent_id)?)?;
     let linker = runtara_component_host::build_linker(&engine)?;
-    let mut store = Store::new(&engine, HostState::new(Arc::new(context)));
+    let mut store = Store::new(&engine, state);
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let interface = instance
         .get_export_index(
@@ -329,7 +362,7 @@ async fn async_http_export_preserves_input_and_dispatch_errors() -> anyhow::Resu
         ),
     ] {
         let result = invoke_agent(
-            CallContext::placeholder_for_metadata(),
+            FixtureContext::public(),
             capability,
             input.as_bytes().to_vec(),
         )
@@ -344,52 +377,23 @@ async fn async_http_export_preserves_input_and_dispatch_errors() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn async_http_preserves_coercion_proxy_context_and_error_response() -> anyhow::Result<()> {
+async fn async_http_preserves_coercion_host_context_and_error_response() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
-        let headers = request_headers(&mut socket).await?;
-        let headers = String::from_utf8(headers)?;
-        anyhow::ensure!(
-            headers.starts_with("POST /proxy "),
-            "request bypassed proxy"
-        );
-        anyhow::ensure!(
-            headers
-                .to_lowercase()
-                .contains("x-org-id: fixture-tenant\r\n"),
-            "missing tenant header"
-        );
-        let length: usize = headers
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .expect("buffered proxy request has content-length")
-            .1
-            .trim()
-            .parse()?;
-        anyhow::ensure!(length < 8192, "unexpected proxy body size");
-        let mut body = vec![0; length];
-        socket.read_exact(&mut body).await?;
-        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        let body = read_outbound(&mut socket).await?;
         assert_eq!(body["connection_id"], "fixture-connection");
         assert_eq!(body["endpoint"], "reports");
         assert_eq!(body["url"], "https://service.invalid/item?q=hello%20world");
         assert_eq!(body["timeout_ms"], 1000);
         assert_eq!(body["headers"]["X-Fixture"], "input");
         assert!(body["headers"].get("X-Runtara-Connection-Id").is_none());
-        let response = br#"{"status":503,"headers":{"x-fixture":"response"},"body_raw":"bm8="}"#;
-        socket
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response.len()
-                )
-                .as_bytes(),
-            )
-            .await?;
-        socket.write_all(response).await?;
+        respond(
+            &mut socket,
+            serde_json::json!({"status":503,"headers":{"x-fixture":"response"},"body_raw":"bm8="}),
+        )
+        .await?;
         Ok::<_, anyhow::Error>(())
     });
     let input = serde_json::to_vec(&serde_json::json!({
@@ -403,7 +407,7 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         invoke_agent(
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             "http-request",
             input,
         ),
@@ -412,7 +416,7 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
     if !matches!(result, Ok(Ok(Ok(_)))) {
         server.abort();
         let _ = server.await;
-        anyhow::bail!("proxy request failed: {result:?}");
+        anyhow::bail!("outbound request failed: {result:?}");
     }
     let output = result??.unwrap();
     let output: serde_json::Value = serde_json::from_slice(&output)?;
@@ -424,54 +428,81 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
     Ok(())
 }
 
-pub(super) async fn read_proxy(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Value> {
-    read_proxy_limited(socket, 16_384).await
+pub(super) async fn read_outbound(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Value> {
+    read_outbound_limited(socket, 16_384).await
 }
 
-pub(super) async fn read_proxy_limited(
+pub(super) async fn read_outbound_limited(
     socket: &mut tokio::net::TcpStream,
     max_bytes: usize,
 ) -> anyhow::Result<Value> {
+    use base64::Engine as _;
     let headers = String::from_utf8(request_headers(socket).await?)?;
-    anyhow::ensure!(
-        headers.starts_with("POST /proxy "),
-        "request bypassed the local proxy"
-    );
-    anyhow::ensure!(
+    let header = |name: &str| {
         headers
-            .to_lowercase()
-            .contains("x-org-id: fixture-tenant\r\n"),
-        "missing tenant context"
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+    };
+    let metadata = base64::engine::general_purpose::STANDARD
+        .decode(header("x-test-outbound").expect("native fixture metadata"))?;
+    let mut request: Value = serde_json::from_slice(&metadata)?;
+    assert_eq!(request["tenant"], "fixture-tenant");
+    assert_eq!(
+        headers.split_whitespace().next().unwrap(),
+        request["method"].as_str().unwrap()
     );
-    let length: usize = headers
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .unwrap()
-        .1
-        .trim()
-        .parse()?;
-    anyhow::ensure!(length < max_bytes, "unexpected request size");
+    let length: usize = header("content-length").unwrap_or("0").parse()?;
+    anyhow::ensure!(length < max_bytes, "unexpected provider body size");
     let mut bytes = vec![0; length];
     socket.read_exact(&mut bytes).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+    if request["body_present"] == true {
+        request["body_raw"] = base64::engine::general_purpose::STANDARD
+            .encode(&bytes)
+            .into();
+        request["body"] = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    }
+    Ok(request)
 }
 
 pub(super) async fn respond(
     socket: &mut tokio::net::TcpStream,
-    envelope: Value,
+    fixture: Value,
 ) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec(&envelope)?;
-    socket
-        .write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            )
-            .as_bytes(),
-        )
-        .await?;
-    socket.write_all(&bytes).await?;
+    use base64::Engine as _;
+    let status = fixture["status"].as_u64().unwrap_or(200);
+    let body = if let Some(raw) = fixture["body_raw"].as_str() {
+        match base64::engine::general_purpose::STANDARD.decode(raw) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // A malformed transport fixture now corrupts HTTP framing,
+                // since base64 no longer exists on the production wire.
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n")
+                    .await?;
+                return Ok(());
+            }
+        }
+    } else if fixture.get("status").is_none() {
+        serde_json::to_vec(&fixture)?
+    } else if fixture["body"].is_null() {
+        vec![]
+    } else {
+        serde_json::to_vec(&fixture["body"])?
+    };
+    let mut headers = format!(
+        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    if let Some(values) = fixture["headers"].as_object() {
+        for (name, value) in values {
+            headers.push_str(&format!("{name}: {}\r\n", value.as_str().unwrap()));
+        }
+    }
+    headers.push_str("\r\n");
+    socket.write_all(headers.as_bytes()).await?;
+    socket.write_all(&body).await?;
     Ok(())
 }
 
@@ -479,14 +510,33 @@ pub(super) async fn respond(
 /// bounded failure cleanup so a broken Agent cannot leave a fixture running.
 pub(super) async fn run_cancellation_fixture(
     bytes: Vec<u8>,
-    context: CallContext,
+    context: FixtureContext,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<Value> {
+    run_cancellation_fixture_with_resolver(
+        bytes,
+        context,
+        started,
+        cleaned,
+        server,
+        Arc::new(super::real_mcp::McpResolver::default()),
+    )
+    .await
+}
+
+pub(super) async fn run_cancellation_fixture_with_resolver(
+    bytes: Vec<u8>,
+    context: FixtureContext,
     started: Arc<Notify>,
     cleaned: Arc<Notify>,
     mut server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
 ) -> anyhow::Result<Value> {
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        cancel_and_reuse(bytes, context, started, cleaned),
+        cancel_and_reuse_with_resolver(bytes, context, started, cleaned, resolver),
     )
     .await;
     let output = match result {

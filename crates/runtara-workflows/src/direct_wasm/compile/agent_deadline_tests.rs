@@ -1,5 +1,7 @@
 //! Actual composed Agent deadlines through public compilation and composition.
 use super::*;
+#[path = "../../../../runtara-component-host/tests/common/outbound.rs"]
+mod outbound_fixture;
 use runtara_component_host::runtime_host::{
     RuntimeCheckpointResult, RuntimeHost, RuntimeSignalInfo,
 };
@@ -39,8 +41,10 @@ struct CheckpointFault {
 }
 
 struct Host {
+    database: Mutex<Option<Arc<dyn runtara_component_host::DatabaseHost>>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     started: Instant,
+    first_invocation_start: Mutex<Option<Instant>>,
     clock_override: AtomicU64,
     cancel: AtomicBool,
     acknowledged: AtomicBool,
@@ -81,8 +85,10 @@ struct Host {
 impl Host {
     fn new() -> Self {
         Self {
+            database: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             started: Instant::now(),
+            first_invocation_start: Mutex::new(None),
             clock_override: AtomicU64::new(0),
             cancel: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
@@ -352,7 +358,14 @@ fn executor() -> &'static WorkflowExecutor {
     EXECUTOR.get_or_init(|| {
         let engine = runtara_component_host::build_engine(&Default::default()).unwrap();
         runtara_component_host::spawn_epoch_ticker(engine.clone());
-        WorkflowExecutor::new(engine).unwrap()
+        let executor = WorkflowExecutor::new(engine).unwrap();
+        executor
+            .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+            .unwrap();
+        executor
+            .set_connection_resolver(Arc::new(FixtureConnections))
+            .unwrap();
+        executor
     })
 }
 
@@ -360,7 +373,7 @@ fn executor() -> &'static WorkflowExecutor {
 enum Shape {
     Root,
     LongContinuation,
-    Preparation(bool),
+    Preparation,
     Published(usize),
     InlineWhile(usize),
     InheritedWhile {
@@ -426,7 +439,7 @@ fn compile_shaped(
             .unwrap()
             .push(json!({"fromStep":"after","toStep":"finish"}));
     }
-    if matches!(shape, Shape::Preparation(_)) {
+    if matches!(shape, Shape::Preparation) {
         graph["steps"]["fetch"]["connectionId"] = "conn".into();
     }
     if !recover {
@@ -650,21 +663,52 @@ fn wrap_published(
 }
 
 async fn invoke(compiled: &DirectCompilationResult, host: Arc<Host>) -> anyhow::Result<InvokeExit> {
-    invoke_with_env(compiled, host, HashMap::new()).await
+    invoke_with_outbound(
+        compiled,
+        host,
+        Arc::new(outbound_fixture::PublicHttp::default()),
+    )
+    .await
 }
 
-async fn invoke_with_env(
+async fn invoke_with_outbound(
     compiled: &DirectCompilationResult,
     host: Arc<Host>,
-    env: HashMap<String, String>,
+    outbound: Arc<dyn runtara_component_host::OutboundHttpHost>,
 ) -> anyhow::Result<InvokeExit> {
-    let executor = executor();
+    invoke_with_connections(compiled, host, outbound, None).await
+}
+
+async fn invoke_with_connections(
+    compiled: &DirectCompilationResult,
+    host: Arc<Host>,
+    outbound: Arc<dyn runtara_component_host::OutboundHttpHost>,
+    connections: Option<Arc<dyn runtara_component_host::ConnectionResolverHost>>,
+) -> anyhow::Result<InvokeExit> {
+    let database = host.database.lock().unwrap().clone();
+    let local = {
+        let local = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
+        local
+            .set_connection_resolver(connections.unwrap_or_else(|| Arc::new(FixtureConnections)))?;
+        if let Some(database) = database {
+            local.set_database(database)?;
+        }
+        local.set_outbound_http(outbound)?;
+        local
+    };
+    let executor = &local;
     let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
+    host.first_invocation_start
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Instant::now);
     Ok(executor
         .execute_invoke(
             &pre,
             WorkflowRunSpec {
-                env,
+                trusted_instance: None,
+                trusted_tenant: Some("fixture".into()),
+                env: HashMap::new(),
                 stderr: None,
                 timeout: Duration::from_secs(5),
                 cancel: None,
@@ -725,19 +769,10 @@ async fn run_shaped(
                 anyhow::ensure!(n > 0, "request ended before headers");
                 request.extend_from_slice(&buffer[..n]);
             }
-            if let Shape::Preparation(partial) = shape {
-                anyhow::ensure!(
-                    std::str::from_utf8(&request)?
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .contains("/metadata"),
-                    "Agent invoked after cancelled preparation"
-                );
-                if partial {
-                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").await?;
-                }
-            }
+            anyhow::ensure!(
+                !matches!(shape, Shape::Preparation),
+                "Agent invoked after cancelled preparation"
+            );
             let attempt = req.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
                 *first.lock().unwrap() = Some(Instant::now());
@@ -801,10 +836,19 @@ async fn run_shaped(
             true,
             shape,
         )?;
-        let env = if matches!(shape, Shape::Preparation(_)) {
-            HashMap::from([("CONNECTION_SERVICE_URL".into(),url.clone()),("RUNTARA_TENANT_ID".into(),"fixture".into())])
-        } else { HashMap::new() };
-        let mut exit = invoke_with_env(&compiled, host.clone(), env).await?;
+        let mut exit = if matches!(shape, Shape::Preparation) {
+            let executor = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
+            executor.set_connection_resolver(Arc::new(PendingPreparation {
+                host: host.clone(), requests: requests.clone(), closed: closed.clone(),
+                first: first_request.clone(), cancel: matches!(response, Response::RootCancel),
+            }))?;
+            let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
+            executor.execute_invoke(&pre, WorkflowRunSpec {
+                trusted_instance: None,
+                trusted_tenant: Some("fixture".into()), env: HashMap::new(), stderr: None,
+                timeout: Duration::from_secs(5), cancel: None, limits: Default::default(), runtime: Some(host.clone()),
+            }, b"{}".to_vec()).await.exit
+        } else { invoke(&compiled, host.clone()).await? };
         if matches!(response, Response::RootCancel) {
             anyhow::ensure!(
                 matches!(exit, InvokeExit::Suspended(_)),
@@ -952,9 +996,12 @@ async fn run_shaped(
             Response::RetryThenHang | Response::RollbackThenHang
         ) {
             let elapsed = first_request.lock().unwrap().unwrap().elapsed();
+            // The budget starts before component initialization and the first
+            // provider request. Measure its lower bound from invocation entry.
+            let active_elapsed = host.first_invocation_start.lock().unwrap().expect("invocation start recorded").elapsed();
             assert!(
-                elapsed >= Duration::from_millis(1_700),
-                "wall clock jump shortened a live budget: {elapsed:?}"
+                active_elapsed >= Duration::from_millis(1_700),
+                "wall clock jump shortened a live budget: {active_elapsed:?}"
             );
             assert!(
                 elapsed < Duration::from_millis(2_700),
@@ -1023,7 +1070,7 @@ async fn agent_deadline_includes_retry_backoff_and_durable_replay() -> anyhow::R
     for durable in [false, true] {
         run(
             Response::Error,
-            if durable { 60_000 } else { 200 },
+            if durable { 60_000 } else { 1_000 },
             durable,
             5,
             60_000,
@@ -1144,7 +1191,9 @@ async fn agent_deadline_rejects_corrupted_durable_budget() -> anyhow::Result<()>
 async fn agent_deadline_inventory_includes_inline_nested_definitions() -> anyhow::Result<()> {
     for depth in [1, 2] {
         for response in [Response::Hang, Response::Ok, Response::Error] {
-            run_shaped(response, 200, false, 0, 0, Shape::InlineWhile(depth)).await?;
+            // Include cold component activation while still requiring the
+            // first request to enter before testing its timeout/error path.
+            run_shaped(response, 1_000, false, 0, 0, Shape::InlineWhile(depth)).await?;
         }
     }
     Ok(())
@@ -1323,27 +1372,66 @@ async fn agent_deadline_inherited_budget_bounds_backoff_and_durable_replay() -> 
 async fn agent_deadline_interrupts_connection_preparation_without_invocation() -> anyhow::Result<()>
 {
     for durable in [false, true] {
-        for partial in [false, true] {
-            run_shaped(
-                Response::Hang,
-                500,
-                durable,
-                3,
-                0,
-                Shape::Preparation(partial),
-            )
-            .await?;
+        {
+            run_shaped(Response::Hang, 500, durable, 3, 0, Shape::Preparation).await?;
             run_shaped(
                 Response::RootCancel,
                 5_000,
                 durable,
                 3,
                 0,
-                Shape::Preparation(partial),
+                Shape::Preparation,
             )
             .await?;
         }
-        run_shaped(Response::Hang, 0, durable, 3, 0, Shape::Preparation(false)).await?;
+        run_shaped(Response::Hang, 0, durable, 3, 0, Shape::Preparation).await?;
     }
     Ok(())
+}
+
+struct PendingPreparation {
+    host: Arc<Host>,
+    requests: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
+    first: Arc<Mutex<Option<Instant>>>,
+    cancel: bool,
+}
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for PendingPreparation {
+    async fn describe(&self, _: &str, _: String) -> Result<Vec<u8>, String> {
+        struct Cleanup(Arc<AtomicUsize>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let _cleanup = Cleanup(self.closed.clone());
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        *self.first.lock().unwrap() = Some(Instant::now());
+        if self.cancel {
+            self.host.cancel.store(true, Ordering::SeqCst);
+        }
+        std::future::pending().await
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
+}
+
+struct FixtureConnections;
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for FixtureConnections {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture");
+        if connection == "om-conn" {
+            return Ok(embed_tool::sql_fixture::descriptor(&connection));
+        }
+        Ok(serde_json::to_vec(&json!({"connectionId": connection,
+            "integrationId": if connection == "mcp-conn" {"mcp"} else {"openai_api_key"},
+            "status":"ACTIVE","resources":[],"metadata":null}))
+        .unwrap())
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
 }

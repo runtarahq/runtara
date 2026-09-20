@@ -1,6 +1,9 @@
 //! Actual built Agent components through the guarded isolated Store runner.
 #![cfg(feature = "component-integration-tests")]
 
+#[path = "common/outbound.rs"]
+mod outbound_fixture;
+
 use runtara_component_host::execution_host::{
     Entry, ExecutionError, InvocationContext, InvocationLauncher, StartRequest,
 };
@@ -40,6 +43,8 @@ use tokio::{io::AsyncReadExt, net::TcpListener};
 
 fn spec() -> WorkflowRunSpec {
     WorkflowRunSpec {
+        trusted_instance: None,
+        trusted_tenant: Some("fixture-tenant".into()),
         env: HashMap::new(),
         stderr: None,
         timeout: Duration::from_secs(30),
@@ -73,6 +78,9 @@ async fn real_random_agent_completes_while_hung_http_agent_is_cancelled() {
     })
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
+    executor
+        .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+        .unwrap();
     // Cancellation increments the epoch itself. All other awaits have test
     // deadlines; no permanent epoch ticker thread is needed by this fixture.
     let tasks = IsolatedTasks::new(engine, 4, 1024 * 1024).unwrap();
@@ -197,6 +205,9 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     })
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
+    executor
+        .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+        .unwrap();
     let root = wat::parse_str(
         r#"(component
       (core module $m (func (export "run") (result i32) i32.const 0))
@@ -275,6 +286,9 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     assert!(executor.cached_prepared(&path).await.is_none());
     drop(executor);
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
+    executor
+        .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+        .unwrap();
     let root_result = executor.execute(prepared.command().unwrap(), spec()).await;
     assert!(matches!(
         root_result.exit,

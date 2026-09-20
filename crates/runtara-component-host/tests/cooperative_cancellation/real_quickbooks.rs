@@ -1,11 +1,11 @@
-//! Built QuickBooks component against local proxy fixtures; no Intuit account
+//! Built QuickBooks component against local provider fixtures; no Intuit account
 //! or real accounting data is used.
 use super::real_agent::{
-    compose_agent, invoke_named_agent, read_proxy, respond, run_cancellation_fixture,
+    compose_agent, invoke_named_agent, read_outbound, respond, run_cancellation_fixture,
 };
 use super::*;
+use crate::outbound_fixture::FixtureContext;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use runtara_component_host::CallContext;
 use serde_json::{Value, json};
 
 fn connection() -> Value {
@@ -37,7 +37,7 @@ fn cases() -> Vec<Case> {
 }
 
 async fn request(socket: &mut tokio::net::TcpStream, case: &Case) -> anyhow::Result<()> {
-    let envelope = read_proxy(socket).await?;
+    let envelope = read_outbound(socket).await?;
     assert_eq!(envelope["method"], case.method);
     assert_eq!(envelope["url"], case.path);
     assert_eq!(envelope["connection_id"], "fixture-connection");
@@ -78,7 +78,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
             &serde_json::to_vec(&fresh.input)?,
         )?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let proxy = format!("http://{}/proxy", listener.local_addr()?);
+        let upstream = format!("http://{}/upstream", listener.local_addr()?);
         let started = Arc::new(Notify::new());
         let cleaned = Arc::new(Notify::new());
         let server = tokio::spawn({
@@ -110,7 +110,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
         });
         let output = run_cancellation_fixture(
             bytes,
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             started,
             cleaned,
             server,
@@ -139,7 +139,7 @@ async fn invoke_response(
     envelope: Value,
 ) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let proxy = format!("http://{}/proxy", listener.local_addr()?);
+    let upstream = format!("http://{}/upstream", listener.local_addr()?);
     let capability = case.capability;
     let input = serde_json::to_vec(&case.input)?;
     let mut server = tokio::spawn(async move {
@@ -151,7 +151,7 @@ async fn invoke_response(
         Duration::from_secs(10),
         invoke_named_agent(
             "quickbooks",
-            CallContext::for_test("fixture-tenant", proxy, "", ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
             capability,
             input,
         ),
@@ -170,7 +170,7 @@ async fn invoke_response(
         Err(error) => {
             server.abort();
             let _ = server.await;
-            anyhow::bail!("QuickBooks proxy fixture did not finish: {error}; result={result:?}");
+            anyhow::bail!("QuickBooks provider fixture did not finish: {error}; result={result:?}");
         }
     }
     Ok(result)
@@ -292,7 +292,7 @@ async fn quickbooks_transport_parse_and_validation_failures_stay_distinct() -> a
             Duration::from_secs(10),
             invoke_named_agent(
                 "quickbooks",
-                CallContext::for_test("fixture-tenant", "http://127.0.0.1:1/unused", "", ""),
+                FixtureContext::with_upstream("fixture-tenant", "http://127.0.0.1:1/unused", ""),
                 capability,
                 serde_json::to_vec(&input)?,
             ),

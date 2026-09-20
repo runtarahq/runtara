@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use crate::{HttpError, HttpResponse, RequestBuilder};
+use crate::RequestBuilder;
 
 /// WASI HTTP client.
 ///
@@ -46,12 +46,4 @@ impl Default for WasiHttpClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Execute a request through `runtara:host-io/http`. The host owns the
-/// absolute deadline and response-size policy, so `.call()` cannot become an
-/// ungoverned alternative to `.call_agent()` for internal agents such as
-/// Object Model.
-pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError> {
-    crate::host_io::execute(builder)
 }

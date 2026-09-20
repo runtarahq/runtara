@@ -1,0 +1,18 @@
+package runtara:trusted@0.1.0;
+
+// Errors are JSON-encoded agent error envelopes, matching capability executors.
+interface executor {
+    invoke: async func(agent-id: string, capability-id: string,
+        connection-id: string, input: list<u8>) -> result<list<u8>, string>;
+}
+
+// Only the native executor supplies context. This export is never composed
+// into workflow logic as a credential-bearing call.
+interface execution {
+    invoke: async func(capability-id: string, input: list<u8>,
+        context: list<u8>) -> result<list<u8>, string>;
+}
+
+world client {
+    import executor;
+}

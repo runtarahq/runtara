@@ -1120,21 +1120,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn database_gate_short_circuits_internal_object_model_path() {
-        // Snapshot: `database` disabled. Any /api/internal/object-model/*
-        // path must 403 with ENTITLEMENT_REQUIRED before reaching the
-        // handler. This is the Phase 5.1 wiring under test.
+    async fn database_gate_short_circuits_public_object_model_path() {
+        // Public HTTP routes retain their database entitlement gate.
         let snapshot = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
         let gate = make_test_gate(snapshot, FeatureKey::Database);
 
         let app = Router::new()
             .route(
-                "/api/internal/object-model/instances/query",
+                "/api/runtime/object-model/instances/schema/name/filter",
                 post(|| async { dummy_handler() }),
             )
             .route_layer(from_fn(gate));
 
-        let request = Request::post("/api/internal/object-model/instances/query")
+        let request = Request::post("/api/runtime/object-model/instances/schema/name/filter")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(request).await.unwrap();
@@ -1146,27 +1144,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn database_gate_short_circuits_internal_sql_path() {
-        // The workflow raw-SQL routes live in the same internal router group
-        // and must inherit the same gate: `database` disabled → 403
-        // ENTITLEMENT_REQUIRED before the handler (and any SQL) runs.
+    async fn database_gate_short_circuits_public_sql_path() {
+        // Public SQL routes deny access before the handler runs.
         let snapshot = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
         let gate = make_test_gate(snapshot, FeatureKey::Database);
 
         let app = Router::new()
             .route(
-                "/api/internal/object-model/sql/query",
+                "/api/runtime/object-model/sql/query",
                 post(|| async { dummy_handler() }),
             )
             .route(
-                "/api/internal/object-model/sql/execute",
+                "/api/runtime/object-model/sql/execute",
                 post(|| async { dummy_handler() }),
             )
             .route_layer(from_fn(gate));
 
         for path in [
-            "/api/internal/object-model/sql/query",
-            "/api/internal/object-model/sql/execute",
+            "/api/runtime/object-model/sql/query",
+            "/api/runtime/object-model/sql/execute",
         ] {
             let request = Request::post(path).body(Body::empty()).unwrap();
             let resp = app.clone().oneshot(request).await.unwrap();
@@ -1188,12 +1184,12 @@ mod tests {
 
         let app = Router::new()
             .route(
-                "/api/internal/object-model/instances/query",
+                "/api/runtime/object-model/instances/schema/name/filter",
                 post(|| async { dummy_handler() }),
             )
             .route_layer(from_fn(gate));
 
-        let request = Request::post("/api/internal/object-model/instances/query")
+        let request = Request::post("/api/runtime/object-model/instances/schema/name/filter")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(request).await.unwrap();

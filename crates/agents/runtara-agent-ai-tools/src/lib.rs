@@ -3,7 +3,7 @@
 //! Provider-router for deterministic AI capabilities (text completion, image
 //! generation, vision, embeddings) across multiple LLM providers (OpenAI, AWS
 //! Bedrock). Each capability routes from an explicit `provider` input; the
-//! runtara HTTP proxy validates that provider against the selected connection,
+//! outbound host service validates that provider against the selected connection,
 //! then handles credential injection and base-URL rewriting per provider (OpenAI:
 //! `https://api.openai.com`; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
 //!
@@ -130,7 +130,7 @@ const DEFAULT_OPENAI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MODEL;
 const DEFAULT_OPENAI_MINI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MINI_MODEL;
 const DEFAULT_BEDROCK_MODEL: &str = runtara_ai::defaults::DEFAULT_BEDROCK_MODEL;
 // Only referenced from the host-only `agent_info()`; the wasm component
-// resolves integrations at runtime via the connection proxy.
+// resolves integrations at runtime via the connection service.
 #[cfg(not(target_arch = "wasm32"))]
 const INTEGRATION_OPENAI_API_KEY: &str = "openai_api_key";
 #[cfg(not(target_arch = "wasm32"))]
@@ -195,7 +195,7 @@ pub struct LlmUsage {
 // OpenAI HTTP helper
 // ============================================================================
 
-/// POST `body` to `https://api.openai.com{path}` via the runtara proxy.
+/// POST `body` to `https://api.openai.com{path}` via the outbound host service.
 async fn openai_post(
     connection: &RawConnection,
     path: &str,
@@ -210,8 +210,8 @@ async fn openai_post(
     let response = client
         .request("POST", &url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .header("X-Runtara-Ai-Provider", PROVIDER_OPENAI)
+        .connection_id(&connection.connection_id)
+        .ai_provider(PROVIDER_OPENAI)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -261,9 +261,9 @@ async fn openai_post(
 // ============================================================================
 
 /// POST `body` to `https://bedrock-runtime.{region}.amazonaws.com{path}` via
-/// the runtara proxy. The proxy injects SigV4 signing and resolves the regional
+/// the outbound host service. The outbound host service injects SigV4 signing and resolves the regional
 /// base URL from the aws_credentials connection parameters. We send a relative
-/// path so the proxy constructs the regional endpoint (e.g.
+/// path so the outbound host service constructs the regional endpoint (e.g.
 /// `https://bedrock-runtime.us-east-1.amazonaws.com`).
 async fn bedrock_post(
     connection: &RawConnection,
@@ -279,8 +279,8 @@ async fn bedrock_post(
         .request("POST", path)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .header("X-Runtara-Ai-Provider", PROVIDER_BEDROCK)
+        .connection_id(&connection.connection_id)
+        .ai_provider(PROVIDER_BEDROCK)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -1923,11 +1923,9 @@ async fn vision_to_image_openai(
     input: &VisionToImageInput,
     connection: &RawConnection,
 ) -> Result<VisionToImageOutput, AgentError> {
-    // NOTE: OpenAI images/edits and images/variations endpoints require
-    // multipart/form-data with binary PNG payloads. The proxy currently only
-    // supports JSON bodies. This sends a JSON body as best-effort; it will
-    // likely return 415/400 from OpenAI until proxy-side multipart support lands.
-    // TODO: add multipart support to the runtara proxy and update this handler.
+    // These endpoints require multipart/form-data with binary PNG payloads.
+    // The host transport accepts raw bytes, but this agent still builds JSON.
+    // TODO: encode the multipart request here; JSON may receive a 415/400.
     let endpoint = if input.mask_data.is_some() {
         "images/edits"
     } else {

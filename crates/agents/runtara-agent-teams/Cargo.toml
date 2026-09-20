@@ -16,10 +16,9 @@ crate-type = ["cdylib", "rlib"]
 wit-bindgen = "0.58"
 serde = { workspace = true }
 serde_json = { workspace = true }
-# runtara-http compiles host-side (ureq) and wasm-side (wasi); the wasm build
-# routes Bot Connector calls through the proxy via the `X-Runtara-Connection-Id`
-# header (token injection) plus `X-Runtara-Endpoint-Ref` (per-conversation
-# serviceUrl binding), so the app secret and serviceUrl never enter the .wasm.
+# runtara-http uses ureq natively and typed outbound host calls in WASM.
+# Connection IDs and routing controls are explicit request fields; ordinary
+# credential injection and request signing stay in the native host service.
 # Capability metadata stays beside the code: `#[capability_input]`,
 # `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
 # `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only

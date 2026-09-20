@@ -21,6 +21,7 @@ type ChildPre = Arc<InstancePre<WorkflowState>>;
 #[derive(Default)]
 pub struct PreparedChildCatalog {
     artifacts: BTreeMap<String, ChildPre>,
+    pub(super) trusted_pins: BTreeMap<String, Arc<std::collections::HashSet<String>>>,
     bindings: BTreeMap<String, Binding>,
     invocations: Option<InvocationManifest>,
 }

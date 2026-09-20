@@ -17,4 +17,5 @@ interface capabilities {
 
 world agent {
     export capabilities;
+    export runtara:trusted/execution@0.1.0;
 }

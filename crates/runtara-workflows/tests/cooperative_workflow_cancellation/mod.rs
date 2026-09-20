@@ -215,7 +215,6 @@ enum Scenario {
     ObjectQuery,
     ObjectExecute,
     StorageDownload(&'static str, bool),
-    StoragePresign(&'static str),
     SharepointDownload,
     SharepointDownloadBody,
     SharepointContentAfterMetadata,
@@ -306,7 +305,7 @@ impl Scenario {
         )
     }
     fn is_storage(self) -> bool {
-        matches!(self, Self::StorageDownload(..) | Self::StoragePresign(_))
+        matches!(self, Self::StorageDownload(..))
     }
     fn is_object(self) -> bool {
         matches!(self, Self::ObjectQuery | Self::ObjectExecute)
@@ -324,7 +323,7 @@ impl Scenario {
     fn is_mcp(self) -> bool {
         matches!(self, Self::McpInitialize | Self::McpTool)
     }
-    fn uses_proxy(self) -> bool {
+    fn uses_connection_http(self) -> bool {
         matches!(self, Self::SlackHeaders | Self::Mailgun | Self::TeamsChunks)
             || self.is_ai()
             || self.is_mcp()
@@ -704,7 +703,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
     if scenario.is_storage() {
         let (agent, capability) = match scenario {
             Scenario::StorageDownload(agent, _) => (agent, "storage-download-file"),
-            Scenario::StoragePresign(agent) => (agent, "storage-generate-presigned-url"),
             _ => unreachable!(),
         };
         let integration = match agent {
@@ -918,78 +916,21 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                 anyhow::ensure!(n > 0, "internal request body closed early");
                                 request.extend_from_slice(&buffer[..n]);
                             }
-                            if scenario.is_object() {
-                                let path = if scenario == Scenario::ObjectQuery {"query"} else {"execute"};
-                                assert!(request.starts_with(format!("POST /sql/{path}?connectionId=fixture-connection ").as_bytes()));
-                                let body: Value = serde_json::from_slice(&request[end..end + length])?;
-                                assert_eq!(body["connectionId"], "fixture-connection");
-                                assert_eq!(body["sql"], "SELECT 1");
-                            }
-                            if matches!(scenario, Scenario::StoragePresign(_)) {
-                                let body: Value = serde_json::from_slice(&request[end..end + length])?;
-                                assert!(request.starts_with(b"POST /presign "));
-                                assert_eq!(body["connection_id"], "fixture-connection");
-                                assert_eq!(body["method"], "GET");
-                                assert_eq!(body["path"], "/bucket/file.txt");
-                            }
+
                         }
-                        if scenario.is_ai() {
+                        if scenario.uses_connection_http() {
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                             let headers = std::str::from_utf8(&request[..end])?;
-                            let line = headers.lines().next().unwrap();
-                            if line.starts_with("GET /fixture-tenant/conn-1/metadata ") {
-                                let bytes = serde_json::to_vec(&serde_json::json!({"connectionId":"conn-1","integrationId":"openai_api_key","status":"ACTIVE","resources":[],"metadata":null}))?;
-                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
-                                stream.write_all(&bytes).await?;
-                                return anyhow::Ok(());
-                            }
-                            if line.contains(" /object-model/") {
-                                // The summary fixture permits only memory loading. The
-                                // load/save fixtures cancel at their selected request.
-                                assert!(matches!(scenario, Scenario::AiSummary | Scenario::AiMemoryLoad | Scenario::AiMemorySave));
-                                let cancel_load = scenario == Scenario::AiMemoryLoad && line.starts_with("POST /object-model/instances/query?");
-                                let cancel_save = scenario == Scenario::AiMemorySave && line.starts_with("POST /object-model/instances?connectionId=");
-                                if cancel_load || cancel_save {
-                                    let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
-                                    assert_eq!(started, expected_requests);
-                                    if !deadline { server_host.requested.store(true, Ordering::SeqCst); }
-                                    loop {
-                                        match stream.read(&mut buffer).await {
-                                            Ok(0) => break,
-                                            Ok(_) => {},
-                                            Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe) => break,
-                                            Err(e) => return Err(e.into()),
-                                        }
-                                    }
-                                    server_host.closed_count.fetch_add(1, Ordering::SeqCst);
-                                    server_host.closed.notify_one();
-                                    return anyhow::Ok(());
-                                }
-                                let reply = if line.starts_with("GET /object-model/schemas/ai_conversation_memory?connectionId=conn-1 ") {
-                                    serde_json::json!({"success":true,"schema":{}})
-                                } else {
-                                    assert!(line.starts_with("POST /object-model/instances/query?connectionId=conn-1 "), "memory was mutated after cancellation: {line}");
-                                    serde_json::json!({"success":true,"instances":[]})
-                                };
-                                let bytes = serde_json::to_vec(&reply)?;
-                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
-                                stream.write_all(&bytes).await?;
-                                return anyhow::Ok(());
-                            }
-                        }
-                        if scenario.uses_proxy() {
-                            let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
-                            let headers = std::str::from_utf8(&request[..end])?;
-                            anyhow::ensure!(headers.starts_with("POST / "), "Agent request bypassed local proxy");
+
                             let length: usize = headers.lines().filter_map(|line| line.split_once(':'))
-                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length")).unwrap().1.trim().parse()?;
+                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length")).map(|(_, value)| value.trim().parse()).transpose()?.unwrap_or(0);
                             anyhow::ensure!(length < 16_384, "unexpected proxy request size");
                             while request.len() < end + length {
                                 let n = stream.read(&mut buffer).await?;
                                 anyhow::ensure!(n > 0, "proxy body closed early");
                                 request.extend_from_slice(&buffer[..n]);
                             }
-                            let body: Value = serde_json::from_slice(&request[end..end + length])?;
+                            let body = outbound_fixture::captured_request(std::str::from_utf8(&request[..end])?, &request[end..end + length]);
                             if scenario.is_ai() {
                                 assert_eq!(body["url"], "/v1/chat/completions");
                                 assert_eq!(body["connection_id"], "conn-1");
@@ -1079,7 +1020,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                         assert_eq!(body["endpoint_ref"], "fixture-ref");
                                     },
                                     Scenario::McpInitialize | Scenario::McpTool => {
-                                        assert_eq!(body["url"], "https://mcp.invalid/rpc");
+                                        assert_eq!(body["url"], "");
                                         let stage = server_host.requests.load(Ordering::SeqCst);
                                         assert_eq!(body["body"]["method"], match stage {0=>"initialize",1=>"notifications/initialized",_=>"tools/call"});
                                         if stage > 0 { assert_eq!(body["headers"]["Mcp-Session-Id"], "fixture-session"); }
@@ -1094,48 +1035,42 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
                         if matches!(scenario, Scenario::SharepointContentAfterMetadata | Scenario::ShopifyDeleteAfterRead) && started == 1 {
                             let body = if scenario.is_sharepoint() { serde_json::json!({"id":"42","name":"fixture.txt"}) } else { serde_json::json!({"data":{"product":{"media":{"edges":[{"node":{"id":"old-image"}}]}}}}) };
-                            let bytes=serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":body}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",bytes.len()).as_bytes()).await?;
+                            let bytes=outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":body}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1,Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::HubspotUpdateAfterRead && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"42","properties":{"name":"fixture"}}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"id":"42","properties":{"name":"fixture"}}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::QuickbooksUpdateAfterRead && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Customer":{"Id":"42","SyncToken":"3","DisplayName":"fixture"}}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"Customer":{"Id":"42","SyncToken":"3","DisplayName":"fixture"}}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::StripeFinalizeAfterCreate && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"in_fixture","status":"draft"}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"id":"in_fixture","status":"draft"}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if scenario == Scenario::SqsDeleteAfterReceive && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Messages":[{"MessageId":"one","ReceiptHandle":"fixture-receipt","Body":"hello"}]}}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":{"Messages":[{"MessageId":"one","ReceiptHandle":"fixture-receipt","Body":"hello"}]}}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if matches!(scenario, Scenario::StorageDownload(_, true)) && started == 1 {
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body_raw":""}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body_raw":""}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
@@ -1143,16 +1078,14 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                         }
                         if (scenario == Scenario::TeamsChunks && started == 1) || (scenario == Scenario::McpTool && started < 3) {
                             let body = if scenario == Scenario::TeamsChunks {serde_json::json!({"id":"first"})} else {serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})};
-                            let bytes = serde_json::to_vec(&serde_json::json!({"status":if scenario.is_mcp() && started==2 {202} else {200},"headers":{"mcp-session-id":"fixture-session"},"body":body}))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&serde_json::json!({"status":if scenario.is_mcp() && started==2 {202} else {200},"headers":{"mcp-session-id":"fixture-session"},"body":body}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1,Ordering::SeqCst);
                             server_host.closed.notify_one();
                             return anyhow::Ok(());
                         }
                         if matches!(scenario, Scenario::AiSummary | Scenario::AiMemorySave) && started == 1 {
-                            let bytes = serde_json::to_vec(&llm_ok("completed first turn"))?;
-                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            let bytes = outbound_fixture::response_bytes(&llm_ok("completed first turn"));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1, Ordering::SeqCst);
                             server_host.closed.notify_one();
@@ -1190,15 +1123,45 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         Ok::<_, anyhow::Error>(())
     });
     let result = async {
-        let executor = embedded_executor();
+        // Storage components carry the trusted ABI even when this workflow uses
+        // only download. Approve their exact bundle bytes as production does,
+        // without installing a credential provider: ordinary HTTP cancellation
+        // must not resolve any trusted credentials.
+        let storage_executor = if let Scenario::StorageDownload(agent, _) = scenario {
+            let bundle = tempfile::tempdir()?;
+            let components = shared_components_dir();
+            for suffix in ["wasm", "meta.json"] {
+                let file = format!("runtara_agent_{}.{suffix}", agent.replace('-', "_"));
+                fs::copy(components.join(&file), bundle.path().join(file))?;
+            }
+            let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
+                bundle.path(),
+                runtara_component_host::DispatcherEnv {
+
+                    core_http_url: url.clone(),
+                },
+            ).await?;
+            let executor = runtara_component_host::WorkflowExecutor::new(
+                Arc::clone(embedded_executor().engine()),
+            )?;
+            executor.set_trusted_executor(dispatcher.trusted_executor())?;
+            Some(executor)
+        } else { None };
+        let normal_executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))?;
+        let executor = storage_executor.as_ref().unwrap_or(&normal_executor);
+        executor.set_connection_resolver(Arc::new(CancellationConnections))?;
+        executor.set_outbound_http(Arc::new(if scenario.uses_connection_http() {
+            outbound_fixture::PublicHttp::with_upstream(url.clone())
+        } else { outbound_fixture::PublicHttp::default() }))?;
+        executor.set_database(Arc::new(CancellationDatabase { host:host.clone(), deadline, expected_requests }))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    env: if scenario.uses_proxy() || scenario.is_object() || scenario.is_storage() {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent")), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
-                    } else { HashMap::new() },
+                    trusted_instance: None,
+                    trusted_tenant: Some("fixture-tenant".into()),
+                    env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(10),
                     cancel: None,
@@ -1251,6 +1214,8 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         }
         if scenario.drains_normally() {
             let resumed = executor.execute_invoke(&pre, runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
+                trusted_tenant: Some("fixture-tenant".into()),
                 env: HashMap::new(), stderr: None, timeout: Duration::from_secs(10), cancel: None,
                 limits: Default::default(), runtime: Some(host.clone()),
             }, b"{}".to_vec()).await;
@@ -1382,14 +1347,6 @@ async fn emitted_storage_download_cancel_stops_head_and_get_without_recovery() -
         for after_head in [false, true] {
             run(Scenario::StorageDownload(agent, after_head)).await?;
         }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn emitted_storage_presign_cancel_bypasses_soft_failure_and_recovery() -> anyhow::Result<()> {
-    for agent in ["s3-storage", "azure-blob-storage"] {
-        run(Scenario::StoragePresign(agent)).await?;
     }
     Ok(())
 }
@@ -1609,3 +1566,114 @@ async fn emitted_expired_parallel_scope_stops_fast_branch_before_next_request() 
 }
 
 mod preparation;
+
+struct CancellationConnections;
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for CancellationConnections {
+    async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture-tenant");
+        if connection == "om-conn" {
+            return Ok(sql_fixture::descriptor(&connection));
+        }
+
+        Ok(
+            serde_json::to_vec(&serde_json::json!({"connectionId":connection,
+            "integrationId": if connection == "conn-1" {"openai_api_key"} else {"mcp"},
+            "status":"ACTIVE","resources":[], "metadata":{"tool_scope":["echo"]}}))
+            .unwrap(),
+        )
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
+}
+
+struct CancellationDatabase {
+    host: Arc<Host>,
+    deadline: bool,
+    expected_requests: usize,
+}
+impl CancellationDatabase {
+    async fn pending(&self) {
+        let started = self.host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(
+            started, self.expected_requests,
+            "unexpected SQL after cancellation"
+        );
+        struct Cleanup(Arc<Host>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.closed_count.fetch_add(1, Ordering::SeqCst);
+                self.0.closed.notify_one();
+            }
+        }
+        let _cleanup = Cleanup(self.host.clone());
+        if !self.deadline {
+            self.host.requested.store(true, Ordering::SeqCst);
+        }
+        std::future::pending::<()>().await;
+    }
+    fn authority(&self, tenant: &str, connection: &str) {
+        assert_eq!(tenant, "fixture-tenant");
+        assert_eq!(
+            connection,
+            if self.host.scenario.is_object() {
+                "fixture-connection"
+            } else {
+                "om-conn"
+            }
+        );
+    }
+}
+#[async_trait::async_trait]
+impl runtara_component_host::DatabaseHost for CancellationDatabase {
+    async fn query(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: QueryRequest,
+    ) -> Result<RowSet, DatabaseError> {
+        self.authority(tenant, connection);
+        if self.host.scenario.is_object() {
+            assert_eq!(request.sql, "SELECT 1");
+            self.pending().await;
+        }
+        if request.sql.contains("FROM \"__schema\"") {
+            return Ok(sql_fixture::memory_schema());
+        }
+        if request.sql.contains("COUNT(*)") {
+            return Ok(sql_fixture::rows(vec![serde_json::json!({"count":0})]));
+        }
+        if self.host.scenario == Scenario::AiMemoryLoad {
+            self.pending().await;
+        }
+        Ok(RowSet::default())
+    }
+    async fn execute(
+        &self,
+        tenant: &str,
+        connection: &str,
+        request: Statement,
+    ) -> Result<ExecutionResult, DatabaseError> {
+        self.authority(tenant, connection);
+        assert!(matches!(
+            self.host.scenario,
+            Scenario::ObjectExecute | Scenario::AiMemorySave
+        ));
+        if self.host.scenario.is_object() {
+            assert_eq!(request.sql, "SELECT 1");
+        } else {
+            assert!(request.sql.starts_with("INSERT"));
+        }
+        self.pending().await;
+        unreachable!()
+    }
+    async fn execute_batch(
+        &self,
+        _: &str,
+        _: &str,
+        _: BatchRequest,
+    ) -> Result<BatchResult, DatabaseError> {
+        panic!("unexpected schema creation")
+    }
+}

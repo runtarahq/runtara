@@ -86,14 +86,16 @@
 //! instead, tenant isolation is achieved by connecting to different databases.
 //! The caller is responsible for managing database connections for each tenant.
 
-pub mod config;
+pub use runtara_object_model_core::config;
+pub mod database;
 pub mod error;
-pub mod instance;
+pub use runtara_object_model_core::instance;
 pub mod query;
-pub mod schema;
-pub mod sql;
+pub use runtara_object_model_core::schema;
+pub use runtara_object_model_core::sql;
 pub mod store;
-pub mod types;
+pub use runtara_object_model_core::types;
+pub use runtara_object_model_core::{bulk, validation};
 
 // Re-export main types for convenience
 pub use config::{

@@ -34,7 +34,7 @@ pub use resolution::{
     ConnectionDescriptor, ConnectionResourceDefinition, ConnectionResourceItem,
     ConnectionResourcePage, ConnectionResourceRequest,
 };
-pub use router::{admin_router, connections_router, oauth_callback_router, runtime_router};
+pub use router::{admin_router, connections_router, oauth_callback_router};
 pub use tenant::TenantId;
 pub use types::{
     ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitConfigDto,

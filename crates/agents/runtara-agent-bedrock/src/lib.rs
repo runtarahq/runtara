@@ -7,16 +7,12 @@
 //! the host architecture and writes `runtara_agent_bedrock.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to look up the
-//! `aws_credentials` connection, compute SigV4 server-side, and rewrite the
-//! base URL to the regional Bedrock endpoint
-//! (`https://bedrock-runtime.{region}.amazonaws.com`). The component never sees
-//! AWS credentials.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 //!
 //! For the control-plane `list-foundation-models` capability we pass a
-//! `bedrock.amazonaws.com` host placeholder; the proxy rewrites the service
+//! `bedrock.amazonaws.com` host placeholder; the outbound host service rewrites the service
 //! subdomain from `bedrock-runtime` to `bedrock` when the connection service
 //! parameter routes it that way.
 #![allow(clippy::result_large_err)]
@@ -171,7 +167,7 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
     })
 }
 
-/// POST `body` to a Bedrock runtime path via the runtara proxy. The proxy
+/// POST `body` to a Bedrock runtime path via the outbound host service. The outbound host service
 /// resolves the `aws_credentials` connection, computes SigV4, and rewrites the
 /// host to `https://bedrock-runtime.{region}.amazonaws.com`. We pass a
 /// placeholder host so the URL is well-formed for `runtara-http`.
@@ -192,7 +188,7 @@ async fn bedrock_post(
         .request("POST", &url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -259,7 +255,7 @@ async fn bedrock_post(
 }
 
 /// GET a Bedrock control-plane path (`bedrock.amazonaws.com`, distinct from
-/// the runtime endpoint). Same proxy routing as `bedrock_post` — the proxy
+/// the runtime endpoint). Same host routing as `bedrock_post` — the outbound host service
 /// resolves region/credentials from the connection.
 async fn bedrock_get(
     connection: &RawConnection,
@@ -272,7 +268,7 @@ async fn bedrock_get(
     let response = client
         .request("GET", &url)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .call_agent_async()
         .await
         .map_err(|e| {
@@ -1252,7 +1248,7 @@ pub async fn bedrock_invoke_model(
         .request("POST", &url)
         .header("Content-Type", &content_type)
         .header("Accept", &accept)
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await
@@ -1345,7 +1341,7 @@ pub async fn bedrock_list_models(
     let connection = require_connection(input._connection.as_ref())?;
 
     // list-foundation-models is on the control-plane endpoint
-    // (bedrock.region.amazonaws.com), not the runtime endpoint. The proxy
+    // (bedrock.region.amazonaws.com), not the runtime endpoint. The outbound host service
     // resolves the region from the connection.
     let resp = bedrock_get(connection, "/foundation-models", 30_000).await?;
 

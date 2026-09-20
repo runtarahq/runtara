@@ -84,7 +84,6 @@ async fn harness() -> Harness {
         data_dir: dir.path().join("data"),
         default_timeout: Duration::from_secs(30),
         skip_cert_verification: false,
-        connection_service_url: None,
     };
     let runner = EmbeddedWasmRunner::new(config, Arc::clone(&persistence))
         .expect("embedded runner")

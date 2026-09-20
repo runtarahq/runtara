@@ -7,10 +7,9 @@
 //! the host architecture and writes `runtara_agent_slack.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach the bot token
-//! and resolve `https://slack.com/api/...`. The component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 //!
 //! The `upload-file` capability follows Slack's V2 upload flow:
 //!   1. `files.getUploadURLExternal` — obtain a presigned upload URL (via proxy + auth).
@@ -153,7 +152,7 @@ async fn slack_api_call(
     let response = client
         .request("POST", &url)
         .header("Content-Type", "application/json; charset=utf-8")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
         .call_agent_async()
         .await

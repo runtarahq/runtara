@@ -37,7 +37,7 @@ let response = model.completion(request)?;
 println!("{:?}", response.choice);
 ```
 
-For proxied credentials, use `provider::create_openai_model_with_connection` with a `connection_id`; requests become relative paths with an `X-Runtara-Connection-Id` header.
+For host-managed credentials, use `provider::create_openai_model_with_connection` with a `connection_id`; requests use relative paths and an explicit connection ID through the outbound host service.
 
 ## Inside Runtara
 

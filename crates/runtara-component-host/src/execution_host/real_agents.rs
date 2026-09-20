@@ -34,6 +34,8 @@ impl InvocationLauncher for RealLauncher {
                     .execute_isolated_capability(
                         &pre,
                         WorkflowRunSpec {
+                            trusted_instance: None,
+                            trusted_tenant: Some("fixture-tenant".into()),
                             env: Default::default(),
                             stderr: None,
                             timeout: Duration::from_secs(30),
@@ -67,6 +69,9 @@ async fn guest_owned_control_cancels_real_http_agent_after_random_sibling_comple
     })
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
+    executor
+        .set_outbound_http(Arc::new(crate::outbound_test_fixture::PublicHttp::default()))
+        .unwrap();
     let mut bindings = BTreeMap::new();
     // Honour the staged component directory the rest of the suites use; a
     // separately built revision does not land in the workspace target tree.

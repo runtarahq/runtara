@@ -68,8 +68,6 @@ fn agents_crates_dir() -> PathBuf {
 
 fn env() -> DispatcherEnv {
     DispatcherEnv {
-        proxy_url: "http://localhost:9999".into(),
-        object_model_url: "http://localhost:9997".into(),
         core_http_url: "http://localhost:9996".into(),
     }
 }

@@ -28,8 +28,6 @@ pub struct CompilationWorkerConfig {
     pub redis_url: String,
     /// Timeout for blocking dequeue (seconds)
     pub dequeue_timeout_secs: u64,
-    /// Connection service URL for compiled workflows
-    pub connection_service_url: Option<String>,
 }
 
 /// Manual `Debug` so logging this config can never leak the password embedded
@@ -42,7 +40,6 @@ impl std::fmt::Debug for CompilationWorkerConfig {
                 &crate::valkey::redact_credentials(&self.redis_url),
             )
             .field("dequeue_timeout_secs", &self.dequeue_timeout_secs)
-            .field("connection_service_url", &self.connection_service_url)
             .finish()
     }
 }
@@ -51,9 +48,6 @@ impl CompilationWorkerConfig {
     pub fn from_env(redis_url: String) -> Self {
         // `try_get` because the worker config is also built in unit tests that
         // never boot a server; a missing global there means "no override".
-        let connection_service_url = crate::config::try_get()
-            .map(|config| config.connection_service_url.clone())
-            .or_else(|| std::env::var("CONNECTION_SERVICE_URL").ok());
 
         Self {
             redis_url,
@@ -68,7 +62,6 @@ impl CompilationWorkerConfig {
             // drop a compilation request on the floor. An idle worker just makes
             // a few more round trips.
             dequeue_timeout_secs: 2,
-            connection_service_url,
         }
     }
 }
@@ -137,12 +130,8 @@ pub async fn run(
     }
 
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let mut compilation_service = CompilationService::new(
-        repository.clone(),
-        config.connection_service_url.clone(),
-        runtime_client,
-    )
-    .with_direct_compilation(direct_compilation_settings_from_config());
+    let mut compilation_service = CompilationService::new(repository.clone(), runtime_client)
+        .with_direct_compilation(direct_compilation_settings_from_config());
     if let Some(catalog) = agent_catalog {
         compilation_service = compilation_service.with_agent_catalog(catalog);
     }
@@ -516,7 +505,6 @@ mod tests {
 
         assert_eq!(config.redis_url, "redis://localhost:6379");
         assert_eq!(config.dequeue_timeout_secs, 2);
-        // connection_service_url depends on env var - just check it's loaded
     }
 
     /// The dequeue block is how long the worker can take to notice shutdown,
@@ -541,7 +529,6 @@ mod tests {
         let config = CompilationWorkerConfig {
             redis_url: "redis://test:6379".to_string(),
             dequeue_timeout_secs: 10,
-            connection_service_url: Some("http://connection-service:8080".to_string()),
         };
 
         let debug_str = format!("{:?}", config);
@@ -549,7 +536,6 @@ mod tests {
         assert!(debug_str.contains("redis://test:6379"));
         assert!(debug_str.contains("dequeue_timeout_secs"));
         assert!(debug_str.contains("10"));
-        assert!(debug_str.contains("connection_service_url"));
     }
 
     #[test]
@@ -557,7 +543,6 @@ mod tests {
         let config = CompilationWorkerConfig {
             redis_url: "rediss://app:s3cret%40pw@valkey.internal:6390".to_string(),
             dequeue_timeout_secs: 10,
-            connection_service_url: None,
         };
 
         let debug_str = format!("{:?}", config);
@@ -577,38 +562,10 @@ mod tests {
         let config = CompilationWorkerConfig {
             redis_url: "redis://primary:6379".to_string(),
             dequeue_timeout_secs: 15,
-            connection_service_url: None,
         };
 
         let cloned = config.clone();
         assert_eq!(cloned.redis_url, config.redis_url);
         assert_eq!(cloned.dequeue_timeout_secs, config.dequeue_timeout_secs);
-        assert_eq!(cloned.connection_service_url, config.connection_service_url);
-    }
-
-    #[test]
-    fn test_compilation_worker_config_with_connection_service() {
-        let config = CompilationWorkerConfig {
-            redis_url: "redis://localhost:6379".to_string(),
-            dequeue_timeout_secs: 5,
-            connection_service_url: Some("http://connections.internal:3000".to_string()),
-        };
-
-        assert!(config.connection_service_url.is_some());
-        assert_eq!(
-            config.connection_service_url.unwrap(),
-            "http://connections.internal:3000"
-        );
-    }
-
-    #[test]
-    fn test_compilation_worker_config_without_connection_service() {
-        let config = CompilationWorkerConfig {
-            redis_url: "redis://localhost:6379".to_string(),
-            dequeue_timeout_secs: 5,
-            connection_service_url: None,
-        };
-
-        assert!(config.connection_service_url.is_none());
     }
 }

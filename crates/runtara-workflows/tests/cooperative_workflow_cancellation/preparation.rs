@@ -23,7 +23,7 @@ fn with_budget(graph: Value) -> Value {
             "executionPlan":[{"fromStep":"budget","toStep":"handled","label":"onError"}]})
 }
 
-async fn run(shape: Shape, deadline: bool, partial: bool) -> anyhow::Result<()> {
+async fn run(shape: Shape, deadline: bool) -> anyhow::Result<()> {
     let host = Arc::new(Host {
         inner: PersistingRuntimeHost::new(b"{}"),
         requested: AtomicBool::new(false),
@@ -159,15 +159,8 @@ async fn run(shape: Shape, deadline: bool, partial: bool) -> anyhow::Result<()> 
                             request.extend_from_slice(&buffer[..n]);
                         }
                         let path = std::str::from_utf8(&request)?.split_whitespace().nth(1).unwrap();
-                        let metadata = path.ends_with("/metadata");
                         host.requests.fetch_add(1,Ordering::SeqCst);
-                        anyhow::ensure!(metadata || path == "/peer", "Agent invoked after preparation cancellation");
-                        if metadata {
-                            if partial {
-                                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{").await?;
-                            }
-                            if !deadline { host.requested.store(true,Ordering::SeqCst); }
-                        }
+                        anyhow::ensure!(path == "/peer", "Agent invoked after preparation cancellation");
                         loop {
                             match stream.read(&mut buffer).await {
                                 Ok(0) => break, Ok(_) => {},
@@ -186,16 +179,17 @@ async fn run(shape: Shape, deadline: bool, partial: bool) -> anyhow::Result<()> 
         anyhow::Ok(())
     });
     let result = async {
-        let executor = embedded_executor();
+        let executor = runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))?;
+        executor.set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))?;
+        executor.set_connection_resolver(Arc::new(PendingResolver { host: host.clone(), deadline, parallel }))?;
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         let run = executor
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::from([
-                        ("CONNECTION_SERVICE_URL".into(), url),
-                        ("RUNTARA_TENANT_ID".into(), "fixture".into()),
-                    ]),
+                    trusted_instance: None,
+                    trusted_tenant: Some("fixture".into()),
+                    env: HashMap::new(),
                     stderr: None,
                     timeout: Duration::from_secs(8),
                     cancel: None,
@@ -220,7 +214,7 @@ async fn run(shape: Shape, deadline: bool, partial: bool) -> anyhow::Result<()> 
                     kind == "step_debug_start"
                         && serde_json::from_slice::<Value>(payload).unwrap()["step_id"] == "handled"
                 }),
-                "recovery must observe HTTP cleanup while the workflow is still running"
+                "recovery must observe native lookup and peer cleanup while the workflow is still running"
             );
         } else {
             anyhow::ensure!(
@@ -260,12 +254,9 @@ async fn run(shape: Shape, deadline: bool, partial: bool) -> anyhow::Result<()> 
 }
 
 #[tokio::test]
-async fn root_cancel_interrupts_connection_headers_and_body_before_invocation() -> anyhow::Result<()>
-{
+async fn root_cancel_drops_native_connection_lookup_before_invocation() -> anyhow::Result<()> {
     for shape in [Shape::Sequential, Shape::Embed, Shape::Ai, Shape::Published] {
-        for partial in [false, true] {
-            run(shape, false, partial).await?;
-        }
+        run(shape, false).await?;
     }
     Ok(())
 }
@@ -274,9 +265,7 @@ async fn root_cancel_interrupts_connection_headers_and_body_before_invocation() 
 async fn inherited_timeout_interrupts_connection_preparation_before_child_recovery()
 -> anyhow::Result<()> {
     for shape in [Shape::Sequential, Shape::Embed, Shape::Ai, Shape::Published] {
-        for partial in [false, true] {
-            run(shape, true, partial).await?;
-        }
+        run(shape, true).await?;
     }
     Ok(())
 }
@@ -285,10 +274,44 @@ async fn inherited_timeout_interrupts_connection_preparation_before_child_recove
 async fn preparation_cancellation_resolves_pending_parallel_peers() -> anyhow::Result<()> {
     for shape in [Shape::Split, Shape::Branches, Shape::Wavefront] {
         for deadline in [false, true] {
-            for partial in [false, true] {
-                run(shape, deadline, partial).await?;
-            }
+            run(shape, deadline).await?;
         }
     }
     Ok(())
+}
+
+struct PendingResolver {
+    host: Arc<Host>,
+    deadline: bool,
+    parallel: bool,
+}
+#[async_trait::async_trait]
+impl runtara_component_host::ConnectionResolverHost for PendingResolver {
+    async fn describe(&self, tenant: &str, _: String) -> Result<Vec<u8>, String> {
+        assert_eq!(tenant, "fixture");
+        struct Cleanup(Arc<Host>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.closed_count.fetch_add(1, Ordering::SeqCst);
+                self.0.closed.notify_one();
+            }
+        }
+        let _cleanup = Cleanup(self.host.clone());
+        self.host.requests.fetch_add(1, Ordering::SeqCst);
+        if !self.deadline {
+            // Native lookup can start before the HTTP peer has reached its
+            // listener. Trigger cancellation only once both operations are
+            // pending so this fixture actually exercises sibling cleanup.
+            if self.parallel {
+                while self.host.requests.load(Ordering::SeqCst) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            self.host.requested.store(true, Ordering::SeqCst);
+        }
+        std::future::pending().await
+    }
+    async fn resolve_resource(&self, _: &str, _: String, _: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("unsupported fixture resource".into())
+    }
 }

@@ -748,16 +748,12 @@ pub async fn publish_workflow_agent_handler(
         }
     };
 
-    let connection_service_url = Some(crate::config::get().connection_service_url.clone());
-    let compilation_service = crate::api::services::compilation::CompilationService::new(
-        repository,
-        connection_service_url,
-        runtime_client,
-    )
-    .with_agent_catalog(agent_catalog)
-    .with_direct_compilation(
-        crate::api::services::compilation::direct_compilation_settings_from_config(),
-    );
+    let compilation_service =
+        crate::api::services::compilation::CompilationService::new(repository, runtime_client)
+            .with_agent_catalog(agent_catalog)
+            .with_direct_compilation(
+                crate::api::services::compilation::direct_compilation_settings_from_config(),
+            );
 
     match compilation_service
         .publish_workflow_agent(&tenant_id, &workflow_id, version, slug)
@@ -1366,15 +1362,11 @@ pub async fn compile_workflow_handler(
     // Fallback: Valkey not configured, compile directly (still protected by semaphore)
     tracing::warn!("Valkey not configured, compiling directly (no queue)");
     let repository = Arc::new(WorkflowRepository::new(pool));
-    let connection_service_url = Some(crate::config::get().connection_service_url.clone());
-    let compilation_service = crate::api::services::compilation::CompilationService::new(
-        repository,
-        connection_service_url,
-        runtime_client,
-    )
-    .with_direct_compilation(
-        crate::api::services::compilation::direct_compilation_settings_from_config(),
-    );
+    let compilation_service =
+        crate::api::services::compilation::CompilationService::new(repository, runtime_client)
+            .with_direct_compilation(
+                crate::api::services::compilation::direct_compilation_settings_from_config(),
+            );
 
     match compilation_service
         .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)
