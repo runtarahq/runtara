@@ -54,6 +54,3 @@ runtara-object-store = { path = "../runtara-object-store", optional = true }
 # WASM-only deps. cdylib + wasm-bindgen produce the bundle Phase 2 ships to the FE.
 wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
-
-[dev-dependencies]
-insta = { version = "1", features = ["json"] }

@@ -6,6 +6,17 @@ Follow-up: finding 4's 21 exports were rechecked and removed at the user's reque
 
 Cleanup verification with pinned Node 22.12.0: Knip passes without those exclusions; all 1,513 tests across 134 files pass; the full frontend build, including browser-WASM generation, passes; ESLint passes with 34 warnings and no errors. The last bridge edit also passed focused ESLint and Prettier checks. An initial test/Knip attempt overlapped WASM regeneration and failed on missing generated imports; both checks passed after generation completed. Existing backend and generated-client worktree changes were preserved.
 
+Rust dependency follow-up (2026-09-21): removed the ten dependency declarations listed in finding 6, plus the SDK's redundant direct `tracing-attributes` dependency. The public SDK `tracing` feature remains, and `tracing::instrument` continues to use the macro supplied through `tracing`. Retained `runtara-connections`' dev dependency on `runtara-http`, which selects the native backend for standalone tests. Cargo regenerated only the corresponding eleven lockfile dependency edges; no third-party package versions changed. No Rust implementation files were edited, and the existing trusted-capability changes were preserved.
+
+Rust cleanup verification with pinned Rust 1.97.0:
+
+- Per-crate tests passed for `runtara-core` (with `test-support`), `runtara-agents`, `runtara-sdk`, `runtara-report-dsl`, `runtara-environment`, and `runtara-server`: **1,773 tests passed**, with 21 pre-existing ignored doctests. Server tests ran with one test thread.
+- Five cross-target `cargo check` runs passed: SDK WASI with and without tracing, workflow-runtime WASI, host-agent WASI, and report DSL browser WASM. These are compilation checks, not component execution tests.
+- Native SDK checks passed with `http,native` and `embedded,tracing`, each with default features disabled. Standalone `runtara-connections --all-targets` also passed with its required transport dependency retained.
+- Clippy passed with `--all-targets -- -D warnings` for all six changed crates, enabling core test support, report OpenAPI, server embedded UI, server database/Valkey/TLS integration targets, and Environment database integration targets. `cargo fmt --all -- --check` and diff whitespace checks passed.
+- The first sandboxed SDK test run could not bind its local HTTP listeners. The rerun outside that restriction passed. Remaining native checks used an isolated build directory to avoid other Cargo jobs' shared build lock; all Cargo checks used offline dependency resolution and server checks used `SQLX_OFFLINE=true`.
+- Database/Valkey integration targets were compiled and linted, but not executed against services. Full-workspace tests, component runtime integration tests, and E2E tests were not rerun for this manifest-only cleanup.
+
 The workspace contains 52 Rust packages, including 27 standalone agent components. I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The clearest cleanup opportunities are leftover session-token work, inactive cancellation plumbing, stale build inputs, and unused frontend exports.
 
 [Component diagram and package map](component-diagram.md)

@@ -50,7 +50,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 base64 = "0.22"
-strum = { version = "0.26", features = ["derive"] }
 # HTTP abstraction used by the standalone S3 client (s3_client.rs)
 runtara-http = { workspace = true, default-features = false }
 # Native-only agents — C deps that don't compile to WASM
@@ -59,9 +58,3 @@ ssh2 = { version = "0.9", optional = true }
 # crate's source — its sole job is to make openssl-sys build OpenSSL from source
 # for ssh2/libssh2-sys instead of linking the system library.
 openssl = { workspace = true, optional = true }
-
-[dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros"] }
-wiremock = "0.6"
-serial_test = "3"
