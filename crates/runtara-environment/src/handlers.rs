@@ -1731,9 +1731,8 @@ pub async fn handle_send_signal(
     // the set this accepts is by construction the set the column can hold. The
     // local match had drifted from it: it never admitted `shutdown`, though
     // `signal_type_to_str` writes it, the column holds it and `runtime_host`
-    // decodes it. `ShutdownCoordinator::drain_executions` is the caller that
-    // would have hit the refusal; its map is unpopulated today, so this was
-    // latent rather than live.
+    // decodes it. Environment's drain writes directly through Persistence,
+    // so that path did not expose the handler's missing shutdown support.
     let Ok(signal_type) = runtara_store_postgres::encoding::signal_type_from_str(signal_type)
     else {
         return Ok(SendSignalOutcome::UnknownSignalType {
@@ -2578,11 +2577,9 @@ mod tests {
     /// accepts.
     ///
     /// `shutdown` is the one that regressed: the handler used to match only
-    /// `cancel` and `pause`, so the graceful-drain path
-    /// (`ShutdownCoordinator::drain_executions` via
-    /// `RuntimeClient::signal_shutdown`) had its signal refused as an unknown
-    /// type on every call, logged the refusal as a warning, and then waited out
-    /// the whole grace period having asked no guest to checkpoint.
+    /// `cancel` and `pause`, rejecting shutdown requests through this handler.
+    /// Environment's drain bypasses the handler and writes through Persistence,
+    /// so retain explicit coverage of shutdown delivery here.
     #[tokio::test]
     async fn every_storable_signal_type_is_accepted() {
         use runtara_core::domain::SignalType;

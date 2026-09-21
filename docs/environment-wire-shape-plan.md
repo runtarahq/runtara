@@ -45,6 +45,8 @@ really does speak milliseconds.
 
 ### 2.1 `signal_shutdown` had never worked — confirmed
 
+Historical note (2026-09-21): the unused cancellation map, `ShutdownCoordinator::drain_executions`, and its `RuntimeClient::signal_shutdown` wrapper have since been removed. The analysis below records the earlier defect; shutdown-signal support in the handler and the active Environment drain are retained. See [the cleanup review](codebase-unused-review.md#3-p3--old-cancellation-map-infrastructure-has-no-producer).
+
 `EnvironmentClient::send_signal` mapped `SignalType::Shutdown` to the string
 `"shutdown"`. `handlers::handle_send_signal` matched only `"cancel"` and
 `"pause"`, so it returned `UnknownSignalType`, which the client turned into

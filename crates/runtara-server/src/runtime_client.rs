@@ -600,26 +600,6 @@ impl RuntimeClient {
         Ok(())
     }
 
-    /// Write a `Shutdown` signal for an in-flight execution. Unlike
-    /// [`Self::cancel_instance`], the SDK treats this as a graceful suspend:
-    /// it checkpoints and exits so the instance can be resumed post-restart.
-    ///
-    /// Accepts any identifier (UUID or string) — the management SDK speaks strings.
-    pub async fn signal_shutdown(&self, execution_id: uuid::Uuid) -> Result<(), RuntimeError> {
-        let sdk = &self.client;
-
-        sdk.send_signal(
-            &execution_id.to_string(),
-            crate::runtime_types::SignalType::Shutdown,
-            None,
-        )
-        .await
-        .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
-
-        debug!(execution_id = %execution_id, "Sent shutdown signal to workflow instance");
-        Ok(())
-    }
-
     /// Pause a running workflow instance
     ///
     /// Sends a pause signal to the instance. The instance will checkpoint its state

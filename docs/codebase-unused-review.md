@@ -1,12 +1,28 @@
 # Codebase usage review
 
-Reviewed 2026-09-20 against the current working tree, including the existing uncommitted trusted-capability changes. This is a static usage and architecture review, not a full correctness or security audit. The original review changed documentation only.
+Originally reviewed 2026-09-20; current-state reconciliation: **2026-09-21**. Scope includes the existing uncommitted trusted-capability changes. This is a usage and architecture review, not a full correctness or security audit. Finding numbers are stable across follow-ups.
 
-Follow-up: finding 4's 21 exports were rechecked and removed at the user's request, along with the newly orphaned `editReport` query wrapper and `validateFormDefinitionJson` bridge re-export. The `@lintignore` and shared-UI Knip exclusions were removed. Finding 4's inventory and line numbers below describe the pre-cleanup snapshot; the other findings remain review candidates.
+## Current status
 
-Cleanup verification with pinned Node 22.12.0: Knip passes without those exclusions; all 1,513 tests across 134 files pass; the full frontend build, including browser-WASM generation, passes; ESLint passes with 34 warnings and no errors. The last bridge edit also passed focused ESLint and Prettier checks. An initial test/Knip attempt overlapped WASM regeneration and failed on missing generated imports; both checks passed after generation completed. Existing backend and generated-client worktree changes were preserved.
+| Finding | Status | Remaining action |
+| --- | --- | --- |
+| 1 — Discarded channel session token | **Resolved** | None. The fix has channel E2E regression coverage; public HTTP token behavior is preserved. |
+| 2 — Validator fingerprint inputs | **Resolved** | None. Both fingerprint lists and their invalidation behavior were verified. |
+| 3 — Cancellation-map scaffolding | **Resolved** | None. Public Rust constructor signatures changed; in-repository callers are updated. |
+| 4 — Lint-hidden frontend exports | **Resolved and pushed**, `a8afd0ce` | None for the 21 exports and two subsequently orphaned wrappers. |
+| 5 — Test-only frontend helpers | **Open, P3** | Review/remove seven exports across four files, updating their tests while preserving live editing coverage. |
+| 6 — Rust direct dependencies | **Resolved and pushed**, `6768eb1f` | None for the 11 removed declarations. Retain the native-transport and link-only dependencies described below. |
+| Additional backend API candidates | **Open, compatibility review needed** | Review ten public functions/methods with no in-repository callers. |
 
-Rust dependency follow-up (2026-09-21): removed the ten dependency declarations listed in finding 6, plus the SDK's redundant direct `tracing-attributes` dependency. The public SDK `tracing` feature remains, and `tracing::instrument` continues to use the macro supplied through `tracing`. Retained `runtara-connections`' dev dependency on `runtara-http`, which selects the native backend for standalone tests. Cargo regenerated only the corresponding eleven lockfile dependency edges; no third-party package versions changed. No Rust implementation files were edited, and the existing trusted-capability changes were preserved.
+Remaining implementation work is finding 5 and the additional backend API candidates. The public session-token API needs a separate compatibility/product decision before any wider retirement. No whole Rust crate has been confirmed unused. All completed fixes are included on `feature/code-cleanup`; unrelated trusted-capability work remains outside this cleanup.
+
+## Completed verification by cleanup
+
+The results below belong to their respective cleanup stages; they are not a claim that every suite was rerun for this documentation refresh.
+
+Frontend cleanup verification with pinned Node 22.12.0: Knip passes without the removed exclusions; all 1,513 tests across 134 files pass; the full frontend build, including browser-WASM generation, passes; ESLint passes with 34 warnings and no errors. The last bridge edit also passed focused ESLint and Prettier checks. An initial test/Knip attempt overlapped WASM regeneration and failed on missing generated imports; both checks passed after generation completed. Existing backend and generated-client worktree changes were preserved.
+
+Rust dependency follow-up (2026-09-21): removed the ten original dependency candidates plus the SDK's redundant direct `tracing-attributes` dependency; finding 6 now lists all 11 removals. The public SDK `tracing` feature remains, and `tracing::instrument` continues to use the macro supplied through `tracing`. Retained `runtara-connections`' dev dependency on `runtara-http`, which selects the native backend for standalone tests. Cargo regenerated only the corresponding eleven lockfile dependency edges; no third-party package versions changed. That dependency cleanup did not edit Rust implementation files; the subsequent cancellation cleanup did. Existing trusted-capability changes were preserved.
 
 Rust cleanup verification with pinned Rust 1.97.0:
 
@@ -17,7 +33,7 @@ Rust cleanup verification with pinned Rust 1.97.0:
 - The first sandboxed SDK test run could not bind its local HTTP listeners. The rerun outside that restriction passed. Remaining native checks used an isolated build directory to avoid other Cargo jobs' shared build lock; all Cargo checks used offline dependency resolution and server checks used `SQLX_OFFLINE=true`.
 - Database/Valkey integration targets were compiled and linted, but not executed against services. Full-workspace tests, component runtime integration tests, and E2E tests were not rerun for this manifest-only cleanup.
 
-The workspace contains 52 Rust packages, including 27 standalone agent components. I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The clearest cleanup opportunities are leftover session-token work, inactive cancellation plumbing, stale build inputs, and unused frontend exports.
+The workspace contains 52 Rust packages, including 27 standalone agent components. I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The remaining candidates are frontend helpers used only by tests and the backend API functions listed below. Wider retirement of the public session-token API remains a separate compatibility/product decision.
 
 [Component diagram and package map](component-diagram.md)
 
@@ -25,36 +41,45 @@ The workspace contains 52 Rust packages, including 27 standalone agent component
 
 ### 1. P2 — Discarded session token can prevent channel execution
 
-**Confidence: high.** [channels/session.rs:445](../crates/runtara-server/src/channels/session.rs#L445) calls `session_token::sign`, stores the result as `_token`, and propagates an error before queuing the workflow. Nothing consumes that token. If `SESSION_TOKEN_SECRET` is unavailable and the secret has not already been initialized, an otherwise usable channel session fails for this unused operation.
+**Resolved (2026-09-21).** Removed the discarded signing call and now-unused import from [the channel session loop](../crates/runtara-server/src/channels/session.rs). The session ID, tenant/trigger checks, deterministic activity identity, execution admission, and message processing are unchanged. Public HTTP session signing and the token emitted by the SSE API remain intact.
 
-The verifier and claims type in [session_token.rs:68](../crates/runtara-server/src/api/services/session_token.rs#L68) have only local unit-test callers. Session endpoints use tenant authentication, rather than this verifier. However, the HTTP session API **does** emit signed tokens: [sessions.rs:103](../crates/runtara-server/src/api/handlers/sessions.rs#L103) and `session_event_stream` retain a client-visible contract. Do not delete the whole module based on the unused verifier.
+**Reproduced before fixing:** the channel E2E ran a fresh server with `SESSION_TOKEN_SECRET` unset and an empty local dotenv file, preventing both cached initialization and developer configuration from masking the failure. An authenticated Teams activity received HTTP 200, but no workflow instance appeared. The background task logged `Failed to sign session token: SESSION_TOKEN_SECRET environment variable is not set` and exited before queuing. The signing result had no consumer. Since the router had already returned success, the webhook caller did not receive the background failure.
 
-**Recommended change:** remove the discarded signing operation from the channel loop. Separately decide whether to implement or retire the future public-token API, preserving existing HTTP response compatibility. Validate channel intake without a signing secret in an isolated process because the secret is cached in a `OnceLock`.
+**Regression coverage:** [test_channel_reflush_provenance.sh](../e2e/test_channel_reflush_provenance.sh) now exercises this missing-secret setup and checks persisted instances and channel replies rather than HTTP acknowledgement alone. The exact same test failed before the production fix and passed after it:
+
+- First delivery produced one instance and one reply. The harness deliberately runs a failing workflow, so the expected reply confirms that execution was admitted and its result reached the channel.
+- Redelivery of the same activity after clearing its Valkey dedup reservation still left one instance and one reply; the foreign session did not re-flush the reply.
+- A distinct activity produced a second instance and reply.
+- Public HTTP session creation still returned its expected missing-secret error, confirming that the channel fix did not relax or change that signing contract.
+
+The changed server binary built successfully, and all 1,197 server unit tests passed, including the five session-token signing/verification tests. Clippy passed with all targets and warnings denied, enabling embedded UI and database/Valkey/TLS integration targets; those feature-gated service suites were compiled/linted, not run in full. Rust formatting, shell syntax, and diff whitespace checks passed. The E2E used isolated ports, a mock Teams authority/connector, dedicated Valkey, and uniquely named databases. `KEEP_DB=1` retained the test databases and logs; each run stopped only its own server, mock, and Valkey container. Other channel providers were not exercised end-to-end; they share the corrected session loop.
+
+The verifier and parsed claims remain an API-surface candidate with only local unit-test consumers. The HTTP API still emits signed tokens in [sessions.rs](../crates/runtara-server/src/api/handlers/sessions.rs); retiring that contract is a separate decision, not part of this fix.
 
 ### 2. P2 — Validator rebuild fingerprint includes unrelated components
 
-**Confidence: high.** [build-validation-wasm.mjs:49](../crates/runtara-server/frontend/scripts/build-validation-wasm.mjs#L49) and [build.rs:243](../crates/runtara-server/build.rs#L243) fingerprint `runtara-agents`, `runtara-ai`, and `runtara-http`. The validator's current normal/build dependency graph contains only `runtara-dsl`, `runtara-workflows`, and `runtara-workflow-stdlib` as first-party dependencies.
+**Resolved (2026-09-21).** Removed the six obsolete manifest/source inputs from both fingerprint lists. Focused checks using the actual Rust and JavaScript fingerprint implementations confirmed identical hashes on the repository and fixtures: edits to all ten retained manifest/source inputs invalidate the hash, edits to the six removed inputs do not, and relevant source additions/removals invalidate/restore it. The browser validation WASM build passed, and an immediate repeat reported it up-to-date. Rust formatting, JavaScript syntax, and script Prettier checks passed. Full server/frontend builds and test suites were not rerun for this build-input-only change.
 
-Editing the unrelated tracked sources changes the fingerprint and unnecessarily rebuilds browser validation WASM; the server's `embed-ui` path can also rebuild the frontend afterward. These are stale dependency edges, not unused crates.
-
-**Recommended change:** remove the six obsolete file/directory inputs from both lists together. Keep the shared fingerprint algorithm synchronized and verify that a relevant validator edit invalidates it while an unrelated HTTP/AI/host-agent source edit does not.
+The removed inputs were `Cargo.toml` and `src/` for each of `runtara-agents`, `runtara-ai`, and `runtara-http`. These crates are outside the validator's dependency graph. Both [the frontend script](../crates/runtara-server/frontend/scripts/build-validation-wasm.mjs) and [the server build script](../crates/runtara-server/build.rs) now retain the workspace manifest/lockfile and the validator, workflows, workflow-stdlib, and DSL inputs. The shared hash algorithm is unchanged.
 
 ### 3. P3 — Old cancellation-map infrastructure has no producer
 
-**Confidence: high for the shipped server.** [server.rs:1393](../crates/runtara-server/src/server.rs#L1393) creates an empty `running_executions` map. Its references only pass or retain it:
+**Resolved (2026-09-21).** Removed the map, state extractor, engine/worker arguments, `CancellationHandle` and its re-export, the empty-map shutdown phase, and its otherwise unused `RuntimeClient::signal_shutdown` wrapper. `ShutdownCoordinator` now takes only `ShutdownGrace`; its shutdown signal, intake-worker tracking, timeout/detach behavior, and execution grace remain. The server still drains intake before Environment, keeps the internal API/core alive during the Environment drain, and preserves the dev-mode bypass. These removals change public Rust constructor signatures and remove the wrapper; in-repository callers are updated. The underlying shutdown signal and normal cancel/pause APIs remain supported.
 
-- [execution_engine.rs:343](../crates/runtara-server/src/workers/execution_engine.rs#L343) stores it under `allow(dead_code)`.
-- [trigger_worker.rs:408](../crates/runtara-server/src/workers/trigger_worker.rs#L408) accepts it as `_running_executions` and never uses it.
-- [shutdown.rs:275](../crates/runtara-server/src/shutdown.rs#L275) returns immediately when it is empty.
-- [workers/mod.rs:19](../crates/runtara-server/src/workers/mod.rs#L19) defines `CancellationHandle`; no struct construction or map insertion was found in repository Rust sources.
+Git chronology (all commits are ancestors of the cleanup branch): `5c9b1ea02` (2026-04-03) introduced the map already marked unused, with an ignored trigger-worker parameter; `ab29372d` (2026-04-16) added both its shutdown consumer and the registry-backed Environment drain; `4b9706da4` (2026-04-17) retained the unused map during execution-engine consolidation. History searches found no handle construction beyond its type definition. This was unused scaffolding from introduction in this repository, rather than evidence of a previously working map-based cancellation path. Preserve the internal-API drain ordering from `1a720035` (2026-06-16) and intake-worker draining from `95520ead` (2026-09-14).
 
-Consequently, the map-based shutdown phase is inactive in normal server startup. This is **not evidence that workflow draining is broken**: [server.rs:2954](../crates/runtara-server/src/server.rs#L2954) separately calls the embedded runtime drain, which reaches Environment's active runners.
+Removal verification with pinned Rust 1.97.0:
 
-**Recommended change:** remove the redundant map, extraction implementation, constructor parameters, handle type, and obsolete drain phase together, or explicitly reconnect them if a separate caller-cancellation requirement exists. Retain and test the Environment drain. Public library constructors may have downstream consumers outside this repository.
+- The five shutdown tests and 19 execution-engine tests passed, followed by all 1,255 server and 151 Environment tests (10 pre-existing ignored doctests). Server tests ran with one test thread.
+- Clippy passed for server and Environment with all targets and warnings denied, enabling server embedded UI, database/Valkey/TLS integration targets, and Environment database integration targets. Those feature-gated service suites were compiled/linted, not run in full. Rust formatting and diff whitespace checks passed.
+- `scripts/build-agent-components.sh` passed using an isolated build directory. The existing `MODE=graceful e2e/test_recovery_environment_restart.sh` then passed against the changed server, isolated ports, a dedicated Valkey container, and uniquely named test databases. SIGTERM produced `suspended` / `shutdown_requested` with 10 checkpoints and no force-stop; after restart the workflow completed with 20 rows and 20 distinct item indices. `KEEP_DB=1` retained the test databases; the harness stopped its server and removed its Valkey container. Abrupt-restart and disabled-recovery modes were not rerun.
+- Source searches found no remaining Rust references to the removed symbols. Baseline comparisons confirmed the retained shutdown methods and unrelated existing worktree changes were unchanged.
 
 ### 4. P3 — Knip exclusions hide 21 unused frontend exports
 
-**Confidence: high within this private frontend.** The checked-in [knip.json](../crates/runtara-server/frontend/knip.json) excludes `@lintignore` exports and all shared UI primitives. The normal scan reports zero issues; a temporary configuration removing only those two exclusions finds **19 value exports and two types**, with no unused files or dependencies. Independent symbol searches confirmed the listed symbols have no consumers in frontend source.
+**Resolved and pushed in `a8afd0ce`.** Removed 19 value exports and two types, plus the subsequently orphaned `editReport` query wrapper and `validateFormDefinitionJson` bridge re-export. The `@lintignore` and shared-UI exclusions are absent from [knip.json](../crates/runtara-server/frontend/knip.json). The backend report-edit endpoint and live validation/UI functions remain.
+
+The following inventory and line numbers record the original, now-removed exports.
 
 All paths below are relative to `crates/runtara-server/frontend/src/`.
 
@@ -74,11 +99,11 @@ All paths below are relative to `crates/runtara-server/frontend/src/`.
 | `shared/queries/query-keys.ts:321` | `QueryKeys` | Unused type. |
 | `features/workflows/queries/index.ts:30` | `AgentDetailsQueryContext` | Unused type. |
 
-**Recommended change:** remove the obsolete OAuth stub first. Remove speculative application exports or attach a concrete reason to retain them. Treat the shared primitive aliases as optional library surface, not entire unused components. These are maintenance findings; bundle-size savings were not measured, and tree shaking may already eliminate the values.
+Bundle-size savings were not measured; tree shaking may already have eliminated the removed values.
 
 ### 5. P3 — Some production helpers are referenced only by tests
 
-**Confidence: high for the examples below.** A production scan explicitly rooted at `src/main.tsx` exposes additional exports that the ordinary scan considers used because their unit tests import them:
+**Status: open; source references rechecked 2026-09-21.** These seven exports still have no production consumers beyond their definitions/barrel re-exports; their callers are tests. The original production scan explicitly rooted at `src/main.tsx` exposed them even though the ordinary scan considers their test imports valid usage:
 
 | Source | Examples with test-only consumers |
 | --- | --- |
@@ -89,33 +114,32 @@ All paths below are relative to `crates/runtara-server/frontend/src/`.
 
 These are candidates to remove or connect to real UI behavior. Do not remove whole mixed-use modules: `layoutOps.ts`, for example, supplies other helpers to `GridContainer.tsx`. Tests that directly exercise retired helpers should be retired with them; keep integration coverage of the live editing paths.
 
-The production scan returned 39 value exports, three types, one test setup file, and two dependency findings before manual filtering. It also reports intentional `__*ForTests` exports, `src/test/setup.ts`, and the build-time `tailwindcss-animate` plugin; these are **not** unused-code findings. `@testing-library/dom` is test infrastructure and is a dependency-classification candidate, not an instruction to uninstall it.
+The original, pre-cleanup production scan returned 39 value exports, three types, one test setup file, and two dependency findings before manual filtering. It also reports intentional `__*ForTests` exports, `src/test/setup.ts`, and the build-time `tailwindcss-animate` plugin; these are **not** unused-code findings. `@testing-library/dom` is test infrastructure and is a dependency-classification candidate, not an instruction to uninstall it.
 
 ### 6. P3 — Rust manifests retain likely unused direct dependencies
 
-**Confidence: medium; removal builds were not run.** A scan of all package source, tests, examples, benches, and build scripts found no references to the following dependency identifiers. Macros, feature unification, and link-only dependencies require compilation after each proposed removal.
+**Resolved and pushed in `6768eb1f`; manifests rechecked 2026-09-21.** Removed 11 direct dependency declarations across six crates and their corresponding lockfile edges, with no third-party version changes.
 
-| Package and manifest | Candidate dependencies |
+| Package | Removed declarations |
 | --- | --- |
-| [runtara-core](../crates/runtara-core/Cargo.toml#L29) | `serde`, `thiserror` |
-| [runtara-environment](../crates/runtara-environment/Cargo.toml#L50) | `tracing-subscriber` |
-| [runtara-agents](../crates/runtara-agents/Cargo.toml#L53) | `strum`; dev dependencies `tempfile`, `tokio`, `wiremock`, `serial_test` |
-| [runtara-server](../crates/runtara-server/Cargo.toml#L243) | Dev dependency `testcontainers-modules` |
-| [runtara-report-dsl](../crates/runtara-report-dsl/Cargo.toml#L59) | Dev dependency `insta` |
+| [runtara-core](../crates/runtara-core/Cargo.toml) | `serde`, `thiserror` |
+| [runtara-environment](../crates/runtara-environment/Cargo.toml) | `tracing-subscriber` |
+| [runtara-agents](../crates/runtara-agents/Cargo.toml) | `strum`; dev dependencies `tempfile`, `tokio`, `wiremock`, `serial_test` |
+| [runtara-server](../crates/runtara-server/Cargo.toml) | Dev dependency `testcontainers-modules` |
+| [runtara-report-dsl](../crates/runtara-report-dsl/Cargo.toml) | Dev dependency `insta` |
+| [runtara-sdk](../crates/runtara-sdk/Cargo.toml) | Direct optional `tracing-attributes`; the public `tracing` feature remains supported through `tracing` |
 
-Two other text-scan hits need feature analysis before classification: `runtara-sdk`'s `tracing-attributes` is named in its public `tracing` feature; `runtara-connections`' test dependency on `runtara-http` enables the native transport. Keep `runtara-agents`' optional `openssl`: its manifest explicitly documents a link/feature-only role. Also keep `md-5`, whose Rust import name is `md5`.
-
-**Recommended change:** prune candidates one package at a time and run the owning package's relevant feature matrix. Do not infer that removing a direct dependency removes it from the transitive graph or guarantees a build-time improvement.
+Retained `runtara-connections`' test dependency on `runtara-http` because it enables native transport, `runtara-agents`' optional `openssl` for its link/feature-only role, and `md-5`, whose Rust import name is `md5`. The removal builds, tests, cross-target checks, and Clippy results are recorded above. Removing a direct declaration does not imply the package disappears from the transitive graph or guarantee a build-time improvement.
 
 ## Additional backend API candidates
 
-The following public functions have no callers in repository Rust sources. They are lower-priority API-surface candidates, not proof that a published library can safely break compatibility:
+**Status: open; rechecked 2026-09-21.** The following ten public functions/methods still have no callers in repository Rust sources. They are lower-priority API-surface candidates, not proof that a published library can safely break compatibility:
 
 | Source | Candidate |
 | --- | --- |
-| [runtime_client.rs:904](../crates/runtara-server/src/runtime_client.rs#L904) | `build_image_name` |
+| [runtime_client.rs:884](../crates/runtara-server/src/runtime_client.rs#L884) | `build_image_name` |
 | [core_runtime/http_server.rs:877](../crates/runtara-server/src/core_runtime/http_server.rs#L877) | Convenience `run_http_server` wrapper; the underlying HTTP server remains active. |
-| [execution_engine.rs:704](../crates/runtara-server/src/workers/execution_engine.rs#L704) | `release_durable_admission_for_instance`, `has_runtime`. Admission release itself is live through `ExecutionAdmissionLifecycleObserver` and the outbox. |
+| [execution_engine.rs:698](../crates/runtara-server/src/workers/execution_engine.rs#L698) | `release_durable_admission_for_instance`, `has_runtime`. Admission release itself is live through `ExecutionAdmissionLifecycleObserver` and the outbox. |
 | [rate_limits.rs:762](../crates/runtara-connections/src/service/rate_limits.rs#L762) | `reset_window_counters`, `cleanup_old_events`. Neither method is wired to a caller; do not assume the advertised cleanup job exists because the method exists. |
 | [runtara-text-parser/src/lib.rs:61](../crates/runtara-text-parser/src/lib.rs#L61) | `try_single_field_parse`, `is_message_schema`; the crate's parsing and collection helpers are live. |
 | [runtara-ai/src/provider.rs:70](../crates/runtara-ai/src/provider.rs#L70) | `create_openai_model`, `create_completion_model`; the `_with_connection` variants and AI crate remain live. |
@@ -131,21 +155,21 @@ The following public functions have no callers in repository Rust sources. They 
 - WIT crates, generated TypeScript clients, generated browser bindings, public SDK APIs, feature-gated integration tests, and test mocks: lack of a default-build caller is insufficient evidence of disuse.
 - `prototypes` and `spikes`: excluded from production cleanup conclusions.
 
-## Original review verification and reproducibility
+## Current-state refresh and reproducibility
 
-Completed:
+For this 2026-09-21 documentation refresh:
 
-1. Offline Cargo workspace metadata inventory (`cargo metadata --no-deps --format-version 1 --offline`): 52 packages.
-2. Offline validator dependency tree (`RUSTC_WRAPPER= cargo tree -p runtara-validation-wasm --offline --edges normal,build`): confirms the three stale fingerprint dependencies are absent. The first attempt hit a sandbox error in `sccache`; disabling only that wrapper succeeded with the pinned Rust 1.97.0 toolchain.
-3. Knip with installed dependencies and pinned Node 22.12.0: baseline zero issues; expanded and production scans as described above. The initial default-Node scan was repeated with the pinned version.
-4. Searches of Rust module declarations, package references, frontend symbols, dynamic routes, component registration/build scripts, and the CI feature matrix. A filename/module heuristic found no obvious detached Rust source files; it is not a compiler-backed reachability proof.
+- Rechecked the remaining candidates: finding 5's seven exports still have only test consumers; the ten backend API candidates still have no in-repository callers. Finding 1 was subsequently reproduced and fixed; its before/after verification is recorded above.
+- Rechecked the six manifests: all 11 removed declarations remain absent. Offline Cargo metadata still lists 52 workspace packages, including 27 standalone agents.
+- The ordinary Knip scan passed again with pinned Node 22.12.0 and the current configuration. Rechecked the commit/worktree state. The completed frontend, dependency, channel-signing, validator-input, and cancellation-map cleanups are included on `feature/code-cleanup`.
+- The verification records above are from completed implementation turns. No Rust tests, full frontend tests/build, or E2E suite was repeated solely for this documentation refresh.
 
-To reproduce the expanded frontend check, copy `frontend/knip.json` to a temporary file, remove `tags`, remove only `src/shared/components/ui/**` from `ignore`, and run from the frontend directory:
+Run the ordinary frontend usage check from `crates/runtara-server/frontend` with pinned Node 22.12.0:
 
 ```sh
-node node_modules/knip/bin/knip.js --config /tmp/review-knip.json --reporter json
+node node_modules/knip/bin/knip.js --reporter compact
 ```
 
-For the production check, use another temporary copy with `entry: ["src/main.tsx!"]` and `project: ["src/**/*.{ts,tsx}!"]`, then add `--production`. The explicit production root matters: simply adding `--production` to the repository configuration produced misleading dependency results, so those results were discarded. No repository lint configuration was edited.
+For a production-only scan, copy the current `knip.json` to a temporary config, set `entry: ["src/main.tsx!"]` and `project: ["src/**/*.{ts,tsx}!"]`, then run Knip with `--config <temporary-config> --production`. Keep the explicit production root: simply adding `--production` to the ordinary configuration produced misleading dependency results in the original review. The old step of removing lint exclusions is no longer necessary; they were removed by finding 4's cleanup. Treat test infrastructure, build plugins, and intentional test hooks separately from production removal candidates.
 
-Not run: Rust/frontend compilation, tests, Clippy, full frontend lint, component builds, database integration tests, or E2E suites. This review changes documentation only and does not claim build validation of the proposed removals. Database and external-integration checks require the isolated services and test configuration specified by CI; no credentials or environment files were inspected. `cargo-machete` was not installed, so Rust dependency findings remain source-based candidates.
+The original September 20 review was static and did not run compilation, test suites, Clippy, or E2E. Subsequent cleanup verification is recorded above and supersedes that original limitation for the completed changes. Remaining candidates have been inspected, not removed or validated by removal builds. Full-workspace and full service-backed integration coverage remain outside the checks performed here.

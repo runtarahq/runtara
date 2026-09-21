@@ -17,7 +17,8 @@
 # session_loop terminal branch sends "Sorry" via TeamsChannel -> mock connector.
 #
 # Cases:
-#   A. First delivery of activity A  -> 1 instance, 1 "Sorry" reply (owner).
+#   A. With SESSION_TOKEN_SECRET absent, first delivery of activity A
+#      -> 1 instance, 1 "Sorry" reply (owner); HTTP 200 alone is insufficient.
 #   B. RESIDUAL WINDOW: delete the Valkey dedup key, redeliver the SAME activity A
 #      -> still 1 instance (Environment dedups the deterministic id) AND still
 #      1 "Sorry" reply total (the foreign session SUPPRESSED — the fix).
@@ -85,6 +86,10 @@ cleanup() {
     [ -n "${SERVER_PID}" ] && kill "${SERVER_PID}" 2>/dev/null && wait "${SERVER_PID}" 2>/dev/null || true
     [ -n "${MOCK_PID}" ] && kill "${MOCK_PID}" 2>/dev/null && wait "${MOCK_PID}" 2>/dev/null || true
     [ -n "${VALKEY_CONTAINER}" ] && docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
+    if [ "${KEEP_DB:-0}" = "1" ]; then
+        echo "KEEP_DB=1 — leaving ${TEST_DB_SERVER}/${TEST_DB_RUNTIME} and ${TEST_DATA_DIR}"
+        return
+    fi
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
     rm -rf "${TEST_DATA_DIR}" 2>/dev/null || true
@@ -215,7 +220,13 @@ psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
 
-print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
+print_step "Starting runtara-server without SESSION_TOKEN_SECRET on :${TEST_PORT_PUBLIC}..."
+# A fresh process avoids the signing module's OnceLock. An empty local dotenv
+# file prevents the server from loading a developer's signing secret at startup.
+: > "${TEST_DATA_DIR}/.env"
+(
+cd "${TEST_DATA_DIR}"
+unset SESSION_TOKEN_SECRET
 RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
 OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
 RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
@@ -224,7 +235,6 @@ INTERNAL_PORT="${TEST_PORT_INTERNAL}" RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
 RUNTARA_ENVIRONMENT_PORT="${TEST_ENV_PORT}" RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
 RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
 DATA_DIR="${TEST_DATA_DIR}" RUST_LOG="warn,runtara_server=info" AUTH_PROVIDER=local \
-SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
 RUNTARA_ENDPOINT_REF_SECRET="reflush-e2e-secret-$$" \
 RUNTARA_CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
 RUNTARA_TEAMS_OPENID_CONFIG_URL="${MOCK_BASE}/bf/openid" \
@@ -234,7 +244,8 @@ RUNTARA_PROXY_ALLOW_HTTP_HOSTS=127.0.0.1 \
 RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS=127.0.0.1 \
 VALKEY_HOST=127.0.0.1 VALKEY_PORT="${TEST_VALKEY_PORT}" \
 OTEL_SDK_DISABLED=true RUNTARA_SDK_BACKEND=http SQLX_OFFLINE="${SQLX_OFFLINE}" \
-"${RUNTARA_SERVER_BIN}" >"${TEST_LOG}" 2>&1 &
+exec "${RUNTARA_SERVER_BIN}"
+) >"${TEST_LOG}" 2>&1 &
 SERVER_PID=$!
 for _ in {1..60}; do
     curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2" && break
@@ -342,12 +353,23 @@ wait_for_replies() {    # $1 = want ; echoes final
     local c; for _ in {1..40}; do c=$(reply_count); [ "${c}" -ge "$1" ] && break; sleep 0.5; done; echo "${c}"
 }
 
+# Public HTTP sessions still emit signed tokens; their contract is unchanged.
+# A failed attempt must not initialize the signing-secret cache.
+print_step "Public HTTP session creation still requires the signing secret..."
+HTTP_SESSION_CODE=$(curl -sS --max-time 10 -o "${TEST_DATA_DIR}/http-session.json" -w "%{http_code}" \
+    -X POST -H "Content-Type: application/json" -d '{}' "${API}/workflows/${WF_ID}/sessions")
+[ "${HTTP_SESSION_CODE}" = "500" ] || { print_error "Expected unsigned HTTP session creation to fail, got ${HTTP_SESSION_CODE}"; exit 1; }
+jq -e '.message | contains("SESSION_TOKEN_SECRET environment variable is not set")' \
+    "${TEST_DATA_DIR}/http-session.json" >/dev/null || { print_error "HTTP session failed for an unexpected reason"; exit 1; }
+
 # --- Case A: first delivery → 1 instance, 1 reply -------------------------
 print_step "Case A: first delivery of activity A → 1 instance + 1 reply (owner)..."
 CODE=$(post_activity "activity-A")
 [ "${CODE}" != "200" ] && { print_error "Expected 200, got ${CODE}"; tail -60 "${TEST_LOG}"; exit 1; }
-IC=$(wait_for_instances 1); RC=$(wait_for_replies 1)
-[ "${IC}" -lt 1 ] && { print_error "No instance started"; tail -80 "${TEST_LOG}"; exit 1; }
+echo "  Webhook acknowledged with HTTP ${CODE}; checking durable execution..."
+IC=$(wait_for_instances 1)
+[ "${IC}" -lt 1 ] && { print_error "Webhook returned ${CODE} but no instance started without SESSION_TOKEN_SECRET"; tail -80 "${TEST_LOG}"; exit 1; }
+RC=$(wait_for_replies 1)
 [ "${RC}" -lt 1 ] && { print_error "Owner did not emit the failure reply (replies=${RC})"; tail -80 "${TEST_LOG}"; exit 1; }
 # Give any stray duplicate a chance to appear, then pin exact counts.
 sleep 2

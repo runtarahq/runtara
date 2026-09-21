@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::api::dto::triggers::TriggerType;
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, parse_debug_event};
 use crate::api::repositories::triggers::TriggerRepository;
-use crate::api::services::{session_queue, session_token};
+use crate::api::services::session_queue;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 use runtara_connections::ConnectionsFacade;
@@ -441,9 +441,6 @@ async fn session_loop(
     let mut conv_id = conv_id.to_string();
 
     let session_id = Uuid::new_v4().to_string();
-
-    let _token = session_token::sign(org_id, workflow_id, &session_id)
-        .map_err(|e| anyhow::anyhow!("Failed to sign session token: {}", e))?;
 
     // Queue first execution with the full inbound message data.
     let attachments_json: Vec<Value> = initial_message
