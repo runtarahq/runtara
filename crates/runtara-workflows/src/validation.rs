@@ -2281,7 +2281,10 @@ const WAIT_ON_WAIT_SCOPE_VARIABLES: &[&str] = &["_signal_id"];
 /// `steps.__error` is the error context populated inside onError handlers.
 /// Referencing one outside its scope resolves to null at runtime, matching the
 /// other built-in bindings, so it is accepted everywhere.
-const RESERVED_IMPLICIT_STEP_IDS: &[&str] = &["__error"];
+/// Step ids the runtime injects rather than the author declaring them.
+/// `error_steps` in the direct-json runtime writes the captured envelope under
+/// both `__error` and its `error` alias, so a reference to either resolves.
+const RESERVED_IMPLICIT_STEP_IDS: &[&str] = &["__error", "error"];
 
 /// Validates references in a graph, considering inherited variables from parent scope.
 ///
@@ -2346,6 +2349,16 @@ fn validate_references_with_inherited(
                 result,
             );
         }
+
+        // Conditions and bare config values never pass through an
+        // `InputMapping`, so the walk above cannot see them. Only their step
+        // references are resolved here — the roots, variables and paths in
+        // these same references are checked against the reference roots later,
+        // and running the full mapping walk over them would report every such
+        // mistake twice.
+        for reference in collect_unmapped_step_references(step) {
+            validate_step_reference(step_id, &reference, &step_ids, &step_types, result);
+        }
     }
 
     // Recursively validate subgraphs
@@ -2384,6 +2397,17 @@ fn validate_references_with_inherited(
                     injected_vars.insert("_item".to_string());
                 }
                 validate_references_with_inherited(&while_step.subgraph, &injected_vars, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    // An onWait handler inherits no parent variables; the
+                    // runtime injects `_signal_id` and the global built-ins.
+                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    validate_references_with_inherited(on_wait, &injected_vars, result);
+                }
             }
             _ => {}
         }
@@ -2456,6 +2480,58 @@ fn validate_mapping_value_references(
     }
 }
 
+/// Resolve the `steps.<id>` part of a reference against the graph.
+///
+/// Split out of [`validate_reference`] so the references that never pass through
+/// an `InputMapping` — conditions and bare config values, see
+/// [`collect_unmapped_step_references`] — get the same step-reference checks
+/// without also re-running the variable checks that already reach them through
+/// reference-root validation, which would report each mistake twice.
+fn validate_step_reference(
+    step_id: &str,
+    ref_path: &str,
+    valid_step_ids: &HashSet<String>,
+    step_types: &HashMap<String, &'static str>,
+    result: &mut ValidationResult,
+) {
+    if ref_path == "__error" || ref_path.starts_with("__error.") {
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path: format!("steps.{ref_path}"),
+        });
+    }
+
+    let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) else {
+        return;
+    };
+
+    // Check if step references itself (warning, not error)
+    if referenced_step_id == step_id {
+        result.warnings.push(ValidationWarning::SelfReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+        });
+    }
+
+    // Check if referenced step exists (reserved implicit steps like
+    // `__error` are injected by the runtime and always allowed).
+    if !valid_step_ids.contains(&referenced_step_id)
+        && !RESERVED_IMPLICIT_STEP_IDS.contains(&referenced_step_id.as_str())
+    {
+        result.errors.push(ValidationError::InvalidStepReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            referenced_step_id: referenced_step_id.clone(),
+            available_steps: valid_step_ids.iter().cloned().collect(),
+        });
+    } else if let Some(step_type) = step_types.get(referenced_step_id.as_str()) {
+        // The step exists and its type is known: reject a mistyped tail into a
+        // statically-shaped output (e.g. `steps.split.outputs.result`).
+        validate_step_output_reference(step_id, ref_path, &referenced_step_id, step_type, result);
+    }
+}
+
 fn validate_reference(
     step_id: &str,
     ref_path: &str,
@@ -2479,47 +2555,7 @@ fn validate_reference(
     // runtime still mirrors it to the source root for back-compat (see
     // `build_source`), but the bare form bypasses step-id typo checking, so
     // steer authors to the canonical `steps.__error.*` path.
-    if ref_path == "__error" || ref_path.starts_with("__error.") {
-        result.warnings.push(ValidationWarning::BareErrorReference {
-            step_id: step_id.to_string(),
-            reference_path: ref_path.to_string(),
-            suggested_path: format!("steps.{ref_path}"),
-        });
-    }
-
-    // Check for step references
-    if let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) {
-        // Check if step references itself (warning, not error)
-        if referenced_step_id == step_id {
-            result.warnings.push(ValidationWarning::SelfReference {
-                step_id: step_id.to_string(),
-                reference_path: ref_path.to_string(),
-            });
-        }
-
-        // Check if referenced step exists (reserved implicit steps like
-        // `__error` are injected by the runtime and always allowed).
-        if !valid_step_ids.contains(&referenced_step_id)
-            && !RESERVED_IMPLICIT_STEP_IDS.contains(&referenced_step_id.as_str())
-        {
-            result.errors.push(ValidationError::InvalidStepReference {
-                step_id: step_id.to_string(),
-                reference_path: ref_path.to_string(),
-                referenced_step_id: referenced_step_id.clone(),
-                available_steps: valid_step_ids.iter().cloned().collect(),
-            });
-        } else if let Some(step_type) = step_types.get(referenced_step_id.as_str()) {
-            // The step exists and its type is known: reject a mistyped tail into a
-            // statically-shaped output (e.g. `steps.split.outputs.result`).
-            validate_step_output_reference(
-                step_id,
-                ref_path,
-                &referenced_step_id,
-                step_type,
-                result,
-            );
-        }
-    }
+    validate_step_reference(step_id, ref_path, valid_step_ids, step_types, result);
 
     // Check for variable references
     if let Some(variable_name) = extract_variable_name_from_reference(ref_path)
@@ -2730,6 +2766,88 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
     mappings
 }
 
+/// Reference strings from the places [`collect_step_mappings`] cannot reach.
+///
+/// That collector yields `&InputMapping`s, so every reference written as a bare
+/// `MappingValue` — a condition expression, a `config.value`, a prompt — never
+/// reaches step-reference checking. This is its complement.
+///
+/// `connection_ref` and `Finish::run_label` are absent on purpose: they are bare
+/// values too, but `validate_references_with_inherited` already routes them
+/// through the full mapping walk.
+///
+/// The match is exhaustive over step *variants*, so a new variant will not
+/// compile until someone has decided which collector owns its references. That
+/// is not the same as covering every reference-bearing *field*: a new
+/// `MappingValue` field on an existing variant still has to be added here by
+/// hand. Two such fields are known to be uncovered today —
+/// `WaitForSignal::action`'s `correlation`/`context` maps, and
+/// `ExecutionPlanEdge::condition`, which a `&Step` cannot reach at all.
+fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
+    let mut refs = Vec::new();
+
+    match step {
+        Step::Conditional(cond_step) => {
+            extract_references_from_condition(&cond_step.condition, &mut refs);
+        }
+        Step::While(while_step) => {
+            extract_references_from_condition(&while_step.condition, &mut refs);
+        }
+        Step::Filter(filter_step) => {
+            extract_references_from_condition(&filter_step.config.condition, &mut refs);
+            extract_references_from_mapping_value(&filter_step.config.value, &mut refs);
+        }
+        Step::Switch(switch_step) => {
+            if let Some(config) = &switch_step.config {
+                extract_references_from_mapping_value(&config.value, &mut refs);
+            }
+        }
+        Step::GroupBy(group_step) => {
+            extract_references_from_mapping_value(&group_step.config.value, &mut refs);
+        }
+        Step::Split(split_step) => {
+            if let Some(config) = &split_step.config {
+                extract_references_from_mapping_value(&config.value, &mut refs);
+            }
+        }
+        Step::Delay(delay_step) => {
+            extract_references_from_mapping_value(&delay_step.duration_ms, &mut refs);
+        }
+        Step::WaitForSignal(wait_step) => {
+            if let Some(timeout) = &wait_step.timeout_ms {
+                extract_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
+        Step::AiAgent(ai_agent_step) => {
+            if let Some(config) = &ai_agent_step.config {
+                extract_references_from_mapping_value(&config.system_prompt, &mut refs);
+                extract_references_from_mapping_value(&config.user_prompt, &mut refs);
+                if let Some(model) = &config.model {
+                    extract_references_from_mapping_value(model, &mut refs);
+                }
+                if let Some(temperature) = &config.temperature {
+                    extract_references_from_mapping_value(temperature, &mut refs);
+                }
+                if let Some(max_tokens) = &config.max_tokens {
+                    extract_references_from_mapping_value(max_tokens, &mut refs);
+                }
+                if let Some(memory) = &config.memory {
+                    extract_references_from_mapping_value(&memory.conversation_id, &mut refs);
+                }
+            }
+        }
+        // Everything below routes its references through `collect_step_mappings`
+        // or the `connection_ref` walk.
+        Step::Agent(_)
+        | Step::Finish(_)
+        | Step::EmbedWorkflow(_)
+        | Step::Log(_)
+        | Step::Error(_) => {}
+    }
+
+    refs
+}
+
 // ============================================================================
 // Phase 2.5: Execution Order Validation
 // ============================================================================
@@ -2780,6 +2898,25 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
                 }
             }
         }
+
+        // Same blind spot as the reference walk: a condition or bare config
+        // value can name a step that exists but has not run yet.
+        for reference in collect_unmapped_step_references(step) {
+            let Some(referenced_step_id) = extract_step_id_from_reference(&reference) else {
+                continue;
+            };
+            if referenced_step_id == *step_id {
+                continue;
+            }
+            if graph.steps.contains_key(&referenced_step_id)
+                && !has_path(&adjacency, &referenced_step_id, step_id)
+            {
+                result.errors.push(ValidationError::StepNotYetExecuted {
+                    step_id: step_id.clone(),
+                    referenced_step_id,
+                });
+            }
+        }
     }
 
     // Recursively validate subgraphs
@@ -2790,6 +2927,11 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
             }
             Step::While(while_step) => {
                 validate_execution_order(&while_step.subgraph, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    validate_execution_order(on_wait, result);
+                }
             }
             _ => {}
         }
@@ -4519,29 +4661,18 @@ fn extract_step_ids_from_mapping_value(value: &MappingValue) -> Vec<String> {
 
 /// Extract step ID from a reference path like "steps.my_step.outputs.foo"
 /// or "steps['my-step'].outputs.foo" (bracket notation for IDs with special chars)
+/// The step a `steps.*` reference names, or `None` for any other root.
+///
+/// Tokenized rather than split on the first `.`, so a bracketed tail belongs to
+/// the path instead of the step id: `steps.init["outputs"]` names `init`, not
+/// `init["outputs"]`. Splitting naively here reported the whole bracketed text
+/// as a step that does not exist, rejecting a reference the runtime resolves.
 fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
-    // Handle bracket notation: steps['step-id'] or steps["step-id"]
-    // Note: no dot between "steps" and bracket
-    if ref_path.starts_with("steps[") {
-        let rest = &ref_path[5..]; // Skip "steps", keep the bracket
-        if let Some(end) = rest.find(']') {
-            let inner = &rest[1..end]; // Skip opening bracket
-            // Remove quotes if present
-            let step_id = inner.trim_matches(|c| c == '\'' || c == '"');
-            return Some(step_id.to_string());
-        }
+    let mut segments = reference_segments(ref_path).into_iter();
+    if segments.next().as_deref() != Some("steps") {
+        return None;
     }
-
-    // Handle dot notation: steps.step_id.outputs
-    if let Some(rest) = ref_path.strip_prefix("steps.") {
-        if let Some(dot_pos) = rest.find('.') {
-            return Some(rest[..dot_pos].to_string());
-        } else {
-            // Reference is just "steps.step_id" (unlikely but possible)
-            return Some(rest.to_string());
-        }
-    }
-    None
+    segments.next()
 }
 
 /// Extract variable name from a reference path like "variables.my_var" or "variables.counter.value"
@@ -5265,9 +5396,17 @@ fn validate_reference_root(
             );
         }
         "steps" | "__error" | "error" => {
-            // Step existence is checked separately by `validate_reference`
-            // (`InvalidStepReference`); the bare `__error`/`error` alias
-            // already gets its own `BareErrorReference` warning there.
+            // Step existence is checked in the reference phase
+            // (`InvalidStepReference`) — through the mapping walk for anything
+            // inside an `InputMapping`, and through
+            // `collect_unmapped_step_references` for conditions and bare config
+            // values. The bare `__error`/`error` alias gets its own
+            // `BareErrorReference` warning there too.
+            //
+            // Deliberately not re-checked here: a reference that reached this
+            // arm has already been through one of those two walks, which
+            // descend into the same subgraphs this one does, so resolving it
+            // again would report each dangling step twice.
         }
         "iteration" => {
             if !iteration_allowed {
@@ -6075,7 +6214,7 @@ mod tests {
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
         // Use a real capability for the agent
         let capability_id = if agent_id == "transform" {
-            "extract".to_string() // extract has no required inputs
+            "extract".to_string() // requires `value` (array) + `property_path` (string)
         } else if agent_id == "http" {
             "http-request".to_string()
         } else {
@@ -8141,17 +8280,32 @@ mod tests {
         assert!(!subgraph_errors, "Expected no subgraph entry point errors");
     }
 
+    /// An immediate value, for fixtures that need a required input satisfied
+    /// without introducing a reference of their own.
+    fn immediate_value(value: serde_json::Value) -> MappingValue {
+        MappingValue::Immediate(runtara_dsl::ImmediateValue { value })
+    }
+
+    /// The inputs `transform:extract` declares as required in the test catalog.
+    /// Supplying them keeps a fixture's only defect the one under test, instead
+    /// of two `MissingRequiredInput` errors masking it.
+    fn extract_inputs() -> InputMapping {
+        let mut inputs = HashMap::new();
+        inputs.insert("value".to_string(), immediate_value(serde_json::json!([])));
+        inputs.insert(
+            "property_path".to_string(),
+            immediate_value(serde_json::json!("id")),
+        );
+        inputs
+    }
+
     #[test]
     fn test_while_step_invalid_reference_in_condition() {
-        // NOTE: Condition expression validation is not yet implemented.
-        // This test verifies that while steps with invalid condition references
-        // can still be parsed and don't cause panics during validation.
-        // Future work: add condition reference validation.
         let mut steps = HashMap::new();
 
         steps.insert(
             "init".to_string(),
-            create_agent_step("init", "transform", None),
+            create_agent_step("init", "transform", Some(extract_inputs())),
         );
 
         // Create condition referencing non-existent step
@@ -8186,9 +8340,383 @@ mod tests {
         ];
 
         let result = validate_workflow(&graph, &test_catalog());
-        // Condition references are currently not validated at the DSL level
-        // (they're evaluated at runtime). This test just ensures no panic.
-        assert!(result.is_ok() || !result.errors.is_empty());
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidStepReference {
+                    referenced_step_id, ..
+                } if referenced_step_id == "nonexistent"
+            )),
+            "a condition naming a step that does not exist must be an error: {:?}",
+            result.errors
+        );
+    }
+
+    /// A While condition is evaluated on the step itself against the parent
+    /// envelope — `while_condition_source` in the direct-json runtime injects
+    /// only `loop` and `iteration` — so a step inside the loop body is not
+    /// addressable from the condition and resolves to null at run time.
+    #[test]
+    fn test_while_condition_cannot_reference_its_own_subgraph_steps() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", Some(extract_inputs())),
+        );
+
+        let mut subgraph = create_simple_subgraph();
+        subgraph.steps.insert(
+            "inner".to_string(),
+            create_agent_step("inner", "transform", Some(extract_inputs())),
+        );
+
+        let condition =
+            create_lt_condition("steps.inner.outputs.value", "steps.init.outputs.value");
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(10)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![plan_edge("init", "loop"), plan_edge("loop", "finish")];
+
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidStepReference {
+                    referenced_step_id, ..
+                } if referenced_step_id == "inner"
+            )),
+            "a loop-body step is not addressable from the condition: {:?}",
+            result.errors
+        );
+    }
+
+    fn plan_edge(from: &str, to: &str) -> runtara_dsl::ExecutionPlanEdge {
+        runtara_dsl::ExecutionPlanEdge {
+            from_step: from.to_string(),
+            to_step: to.to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }
+    }
+
+    /// Build `init -> subject -> finish` where `subject` is the step under test.
+    fn graph_with_subject(subject_id: &str, subject: Step) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", Some(extract_inputs())),
+        );
+        steps.insert(subject_id.to_string(), subject);
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            plan_edge("init", subject_id),
+            plan_edge(subject_id, "finish"),
+        ];
+        graph
+    }
+
+    fn assert_dangling(result: &ValidationResult, missing: &str, what: &str) {
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidStepReference {
+                    referenced_step_id, ..
+                } if referenced_step_id == missing
+            )),
+            "{what} must report the dangling step `{missing}`: {:?}",
+            result.errors
+        );
+    }
+
+    /// A Conditional's condition never passes through an `InputMapping`, so it
+    /// escaped step-reference checking entirely.
+    #[test]
+    fn test_conditional_condition_rejects_dangling_step_reference() {
+        let subject = Step::Conditional(runtara_dsl::ConditionalStep {
+            id: "branch".to_string(),
+            name: None,
+            condition: create_lt_condition(
+                "steps.nowhere.outputs.value",
+                "steps.init.outputs.value",
+            ),
+            breakpoint: None,
+        });
+        let result = validate_workflow(&graph_with_subject("branch", subject), &test_catalog());
+        assert_dangling(&result, "nowhere", "a Conditional condition");
+
+        // Negative half: the same position with a real step stays clean.
+        let ok = Step::Conditional(runtara_dsl::ConditionalStep {
+            id: "branch".to_string(),
+            name: None,
+            condition: create_lt_condition("steps.init.outputs.value", "steps.init.outputs.value"),
+            breakpoint: None,
+        });
+        let result = validate_workflow(&graph_with_subject("branch", ok), &test_catalog());
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
+            "a condition naming a real step must stay clean: {:?}",
+            result.errors
+        );
+    }
+
+    /// Filter carries both a condition and a bare `config.value`; neither was
+    /// reachable from the mapping walk.
+    #[test]
+    fn test_filter_condition_and_value_reject_dangling_step_references() {
+        let subject = Step::Filter(runtara_dsl::FilterStep {
+            id: "pick".to_string(),
+            name: None,
+            config: runtara_dsl::FilterConfig {
+                value: ref_value("steps.absent_value.outputs.rows"),
+                condition: create_lt_condition(
+                    "steps.absent_cond.outputs.value",
+                    "steps.init.outputs.value",
+                ),
+            },
+            breakpoint: None,
+        });
+        let result = validate_workflow(&graph_with_subject("pick", subject), &test_catalog());
+        assert_dangling(&result, "absent_cond", "a Filter condition");
+        assert_dangling(&result, "absent_value", "a Filter config.value");
+    }
+
+    /// The same blind spot on bare `MappingValue` config fields that carry no
+    /// condition at all.
+    #[test]
+    fn test_bare_config_values_reject_dangling_step_references() {
+        let delay = Step::Delay(runtara_dsl::DelayStep {
+            id: "wait".to_string(),
+            name: None,
+            duration_ms: ref_value("steps.absent_delay.outputs.ms"),
+            breakpoint: None,
+            durable: None,
+        });
+        let result = validate_workflow(&graph_with_subject("wait", delay), &test_catalog());
+        assert_dangling(&result, "absent_delay", "a Delay duration_ms");
+
+        let switch = Step::Switch(runtara_dsl::SwitchStep {
+            id: "route".to_string(),
+            name: None,
+            config: Some(runtara_dsl::SwitchConfig {
+                value: ref_value("steps.absent_switch.outputs.key"),
+                cases: Vec::new(),
+                default: None,
+            }),
+            breakpoint: None,
+        });
+        let result = validate_workflow(&graph_with_subject("route", switch), &test_catalog());
+        assert_dangling(&result, "absent_switch", "a Switch config.value");
+    }
+
+    /// A condition may only name steps that have already run.
+    #[test]
+    fn test_condition_referencing_a_later_step_is_out_of_order() {
+        let subject = Step::Conditional(runtara_dsl::ConditionalStep {
+            id: "branch".to_string(),
+            name: None,
+            condition: create_lt_condition(
+                "steps.finish.outputs.value",
+                "steps.init.outputs.value",
+            ),
+            breakpoint: None,
+        });
+        let result = validate_workflow(&graph_with_subject("branch", subject), &test_catalog());
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::StepNotYetExecuted {
+                    referenced_step_id, ..
+                } if referenced_step_id == "finish"
+            )),
+            "a condition naming a downstream step must be out-of-order: {:?}",
+            result.errors
+        );
+    }
+
+    /// An `onWait` handler is a subgraph like any other, but the reference and
+    /// ordering phases used to descend only into Split/While bodies, so the
+    /// same dangling reference went unreported inside one.
+    #[test]
+    fn test_on_wait_handler_references_are_validated() {
+        let mut on_wait_steps = HashMap::new();
+        let mut context = HashMap::new();
+        context.insert(
+            "v".to_string(),
+            ref_value("steps.absent_on_wait.outputs.value"),
+        );
+        on_wait_steps.insert(
+            "notify".to_string(),
+            create_log_step("notify", Some(context)),
+        );
+        on_wait_steps.insert(
+            "branch".to_string(),
+            Step::Conditional(runtara_dsl::ConditionalStep {
+                id: "branch".to_string(),
+                name: None,
+                condition: create_lt_condition(
+                    "steps.absent_on_wait_cond.outputs.value",
+                    "steps.notify.outputs.value",
+                ),
+                breakpoint: None,
+            }),
+        );
+        let on_wait = create_basic_graph(on_wait_steps, "notify");
+
+        let subject = Step::WaitForSignal(runtara_dsl::WaitForSignalStep {
+            id: "wait".to_string(),
+            name: None,
+            on_wait: Some(Box::new(on_wait)),
+            timeout_ms: None,
+            poll_interval_ms: None,
+            response_schema: None,
+            action: None,
+            breakpoint: None,
+        });
+
+        let result = validate_workflow(&graph_with_subject("wait", subject), &test_catalog());
+        assert_dangling(
+            &result,
+            "absent_on_wait",
+            "a mapping inside an onWait handler",
+        );
+        assert_dangling(
+            &result,
+            "absent_on_wait_cond",
+            "a condition inside an onWait handler",
+        );
+    }
+
+    /// A bracketed *tail* is part of the path, not the step id. Extracting the
+    /// id by splitting on the first `.` read `steps.init["outputs"]` as a step
+    /// literally named `init["outputs"]`, so the bracket spelling of a valid
+    /// reference was rejected while its dotted twin passed.
+    #[test]
+    fn test_bracket_spelled_step_reference_is_accepted() {
+        let switch_on = |reference: &str| {
+            Step::Switch(runtara_dsl::SwitchStep {
+                id: "route".to_string(),
+                name: None,
+                config: Some(runtara_dsl::SwitchConfig {
+                    value: ref_value(reference),
+                    cases: Vec::new(),
+                    default: None,
+                }),
+                breakpoint: None,
+            })
+        };
+
+        for reference in [
+            "steps.init.outputs",
+            r#"steps.init["outputs"]"#,
+            r#"steps['init']["outputs"]"#,
+        ] {
+            let result = validate_workflow(
+                &graph_with_subject("route", switch_on(reference)),
+                &test_catalog(),
+            );
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
+                "`{reference}` names the existing step `init`: {:?}",
+                result.errors
+            );
+        }
+
+        // The discriminating half: the bracket spelling of a *missing* step is
+        // still rejected, and names the step rather than the bracket text.
+        let result = validate_workflow(
+            &graph_with_subject("route", switch_on(r#"steps.absent["outputs"]"#)),
+            &test_catalog(),
+        );
+        assert_dangling(&result, "absent", "a bracketed reference to a missing step");
+    }
+
+    /// `error_steps` in the direct-json runtime writes the captured envelope
+    /// under both `__error` and its `error` alias, so both spellings resolve and
+    /// neither may be reported as a step that does not exist.
+    #[test]
+    fn test_both_implicit_error_step_aliases_are_accepted() {
+        for reference in ["steps.__error.message", "steps.error.message"] {
+            let subject = Step::Conditional(runtara_dsl::ConditionalStep {
+                id: "branch".to_string(),
+                name: None,
+                condition: create_lt_condition(reference, "steps.init.outputs.value"),
+                breakpoint: None,
+            });
+            let result = validate_workflow(&graph_with_subject("branch", subject), &test_catalog());
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
+                "`{reference}` is injected by the runtime: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// The bare `__error` alias still earns its steer toward the canonical
+    /// spelling, from a condition as well as from a mapping.
+    #[test]
+    fn test_condition_reference_diagnostics_match_the_mapping_walk() {
+        let bare_error = Step::Conditional(runtara_dsl::ConditionalStep {
+            id: "branch".to_string(),
+            name: None,
+            condition: create_lt_condition("__error.message", "steps.init.outputs.value"),
+            breakpoint: None,
+        });
+        let result = validate_workflow(&graph_with_subject("branch", bare_error), &test_catalog());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, ValidationWarning::BareErrorReference { .. })),
+            "the bare `__error` alias must warn from a condition too: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Guard against double-reporting: an ordinary mapping reference is seen by
+    /// the mapping walk only, never by the unmapped-reference walk.
+    #[test]
+    fn test_ordinary_dangling_mapping_reference_reports_one_error() {
+        let mut inputs = extract_inputs();
+        inputs.insert(
+            "value".to_string(),
+            ref_value("steps.absent_mapping.outputs.rows"),
+        );
+        let subject = create_agent_step("work", "transform", Some(inputs));
+
+        let result = validate_workflow(&graph_with_subject("work", subject), &test_catalog());
+        let count = result
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error,
+                    ValidationError::InvalidStepReference {
+                        referenced_step_id, ..
+                    } if referenced_step_id == "absent_mapping"
+                )
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "an ordinary mapping reference must be reported exactly once: {:?}",
+            result.errors
+        );
     }
 
     #[test]
