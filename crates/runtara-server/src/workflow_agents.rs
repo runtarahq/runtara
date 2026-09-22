@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtara_dsl::agent_meta::{
-    AgentCatalog, AgentInfo, is_certified_non_suspending_workflow_agent,
+    AgentCatalog, AgentInfo, is_certified_non_suspending_workflow_agent, is_parking_workflow_agent,
 };
 
 /// Per-tenant staging dir for published workflow-agents.
@@ -65,6 +65,9 @@ pub fn load_tenant_agents(tenant_id: &str) -> Vec<AgentInfo> {
             .and_then(|bytes| {
                 serde_json::from_slice::<AgentInfo>(&bytes).map_err(|e| e.to_string())
             }) {
+            Ok(info) if info.capabilities.iter().any(|c| c.trusted) => {
+                tracing::warn!("rejecting tenant workflow-agent with trusted capability metadata");
+            }
             Ok(info) => agents.push(info),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping unparseable workflow-agent sidecar");
@@ -87,8 +90,19 @@ pub fn catalog_with_workflow_agents(
     if overlay.is_empty() {
         return Arc::clone(base);
     }
+    merge_catalog(base, overlay)
+}
+
+fn merge_catalog(base: &Arc<AgentCatalog>, overlay: Vec<AgentInfo>) -> Arc<AgentCatalog> {
     let mut agents = base.agents().to_vec();
-    agents.extend(overlay);
+    let built_in_ids: std::collections::HashSet<_> = agents
+        .iter()
+        .map(|a| runtara_dsl::agent_meta::canonical_agent_id(&a.id))
+        .collect();
+    agents.extend(overlay.into_iter().filter(|a| {
+        !a.capabilities.iter().any(|c| c.trusted)
+            && !built_in_ids.contains(&runtara_dsl::agent_meta::canonical_agent_id(&a.id))
+    }));
     Arc::new(AgentCatalog::from_agents(agents))
 }
 
@@ -133,10 +147,20 @@ pub fn stage(
     composed_wasm: &std::path::Path,
     info: &AgentInfo,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
-    if !is_certified_non_suspending_workflow_agent(info) {
+    if info.capabilities.iter().any(|c| c.trusted) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "workflow-agent metadata lacks the required non-suspending:1 certification",
+            "tenant workflow-agents cannot declare trusted capabilities",
+        ));
+    }
+    // Either certificate stages, exactly as composition accepts either: a proof
+    // the agent never suspends, or a declaration that it parks and carries its
+    // wake out through the suspend sentinel. Neither is a stale or unproven
+    // artifact.
+    if !is_certified_non_suspending_workflow_agent(info) && !is_parking_workflow_agent(info) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workflow-agent metadata carries neither the non-suspending:1 certification nor the parks:1 marker",
         ));
     }
     let dir = staging_dir(tenant_id);
@@ -153,4 +177,49 @@ pub fn stage(
     std::fs::write(&meta_path, meta_json)?;
     std::fs::copy(composed_wasm, &wasm_path)?;
     Ok((wasm_path, meta_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn info(id: &str) -> AgentInfo {
+        runtara_dsl::agent_meta::workflow_agent_info(
+            id,
+            id,
+            "",
+            &Default::default(),
+            &Default::default(),
+        )
+    }
+    #[test]
+    fn tenant_catalog_cannot_shadow_builtins_or_declare_trust() {
+        let mut builtin = info("s3-storage");
+        builtin.name = "approved".into();
+        let base = Arc::new(AgentCatalog::from_agents(vec![builtin]));
+        let mut spoof = info("tenant-signer");
+        spoof.capabilities[0].trusted = true;
+        let merged = merge_catalog(&base, vec![info("S3_STORAGE"), spoof, info("tenant-safe")]);
+        assert_eq!(merged.agents().len(), 2);
+        assert!(
+            merged
+                .agents()
+                .iter()
+                .any(|a| a.id == "s3-storage" && a.name == "approved")
+        );
+        assert!(merged.agents().iter().any(|a| a.id == "tenant-safe"));
+    }
+    #[test]
+    fn publication_rejects_trust_before_writing_any_files() {
+        let mut spoof = info("tenant-signer");
+        spoof.capabilities[0].trusted = true;
+        let err = stage(
+            "test-tenant",
+            "tenant-signer",
+            std::path::Path::new("no-source-needed"),
+            &spoof,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("trusted"));
+    }
 }

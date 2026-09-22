@@ -1,0 +1,7 @@
+{
+  "input": { "iso_date": "2001-09-09T01:46:40Z" },
+  "expect": {
+    "success": true,
+    "output_equals": 1000000000
+  }
+}

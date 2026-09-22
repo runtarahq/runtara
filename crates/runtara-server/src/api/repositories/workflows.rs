@@ -40,7 +40,7 @@ pub fn workflow_definition_checksum(definition: &Value) -> String {
 /// compiler.  Missing fields deliberately miss: legacy rows cannot safely
 /// attest that they were produced by the current template and lowering mode.
 fn compiler_provenance_matches(template_major: Option<&str>, lowering_mode: Option<&str>) -> bool {
-    let current_lowering_mode = runtara_workflows::direct_lowering_tag();
+    let current_lowering_mode = crate::config::workflow_lowering_tag();
     template_major == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && lowering_mode == Some(current_lowering_mode.as_str())
 }
@@ -128,7 +128,7 @@ impl CompilationWriteGuard<'_> {
         &mut self,
         record: &CompilationSuccessRecord<'_>,
     ) -> Result<(), sqlx::Error> {
-        let lowering_mode = runtara_workflows::direct_lowering_tag();
+        let lowering_mode = crate::config::workflow_lowering_tag();
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
@@ -179,7 +179,7 @@ impl CompilationWriteGuard<'_> {
         &mut self,
         record: &RegisteredImageRecord<'_>,
     ) -> Result<(), sqlx::Error> {
-        let lowering_mode = runtara_workflows::direct_lowering_tag();
+        let lowering_mode = crate::config::workflow_lowering_tag();
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
@@ -223,7 +223,7 @@ impl CompilationWriteGuard<'_> {
         source_checksum: &str,
         track_events: bool,
     ) -> Result<bool, sqlx::Error> {
-        let lowering_mode = runtara_workflows::direct_lowering_tag();
+        let lowering_mode = crate::config::workflow_lowering_tag();
         let result = sqlx::query(
             r#"
             INSERT INTO workflow_compilations

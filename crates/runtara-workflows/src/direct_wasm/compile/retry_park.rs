@@ -1,6 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Store-freeing retry/backoff parking for lifecycle-invoke workflows.
+//! Store-freeing retry/backoff parking.
+//!
+//! A published workflow-agent parks here too: the suspend sentinel carries the
+//! absolute deadline out to its caller, which re-raises it until the chain
+//! reaches the real instance owner. Only `wasi:cli/run`, which has no wake
+//! channel, keeps a blocking backoff.
 //!
 //! A retry cannot keep a running component Store alive while it waits.  The
 //! caller derives a distinct retry key for the *next* attempt; this helper
@@ -16,8 +21,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_at, push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load,
-    return_if_retptr_error, store_local_i64_at,
+    push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load, return_if_retptr_error,
+    store_local_i64_at,
 };
 use super::checkpoint::{
     emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
@@ -49,6 +54,7 @@ pub(super) fn emit_retry_park_until_deadline(
     retry_key_ptr_local: u32,
     retry_key_len_local: u32,
     delay_ms_local: u32,
+    deadline: Option<u32>,
 ) {
     emit_checkpoint_lookup(
         body,
@@ -68,6 +74,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::If(BlockType::Empty));
     push_i64_load_from_ptr(body, DIRECT_RETRY_PARK_STATE_PTR_LOCAL);
     body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+    clamp_deadline(body, deadline);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
     return_if_retptr_error(body, indices);
@@ -83,7 +90,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::If(BlockType::Empty));
     // An operator resume is allowed to relaunch a parked instance before its
     // timed wake.  Do not shorten the retry: return the original deadline.
-    emit_entry_suspend_at(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
+    super::abi::emit_suspend_at_return(body, indices, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     // The retry is due (or a legacy state was found).  A parked run did not
@@ -102,6 +109,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::LocalGet(delay_ms_local));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+    clamp_deadline(body, deadline);
     store_local_i64_at(
         body,
         DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
@@ -119,6 +127,19 @@ pub(super) fn emit_retry_park_until_deadline(
         DIRECT_RETRY_PARK_STATE_PTR_LOCAL,
         DIRECT_RETRY_PARK_STATE_LEN_LOCAL,
     );
-    emit_entry_suspend_at(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
+    super::abi::emit_suspend_at_return(body, indices, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL);
     body.instruction(&Instruction::End);
+}
+
+fn clamp_deadline(body: &mut WasmFunction, deadline: Option<u32>) {
+    super::loop_deadline::clamp(body, DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL, None);
+    if let Some(deadline) = deadline {
+        body.instruction(&Instruction::LocalGet(deadline));
+        body.instruction(&Instruction::LocalGet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+        body.instruction(&Instruction::I64LtU);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(deadline));
+        body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
+        body.instruction(&Instruction::End);
+    }
 }

@@ -1,0 +1,1594 @@
+//! DDL Generation for Dynamic Schema Management
+//!
+//! Generates PostgreSQL DDL statements for dynamically managing object model tables.
+
+use crate::config::StoreConfig;
+use crate::sql::sanitize::quote_identifier;
+use crate::types::{ColumnDefinition, ColumnRename, IndexDefinition};
+
+/// DDL Generator for object model tables
+pub struct DdlGenerator<'a> {
+    config: &'a StoreConfig,
+}
+
+impl<'a> DdlGenerator<'a> {
+    /// Create a new DDL generator with the given configuration
+    pub fn new(config: &'a StoreConfig) -> Self {
+        Self { config }
+    }
+
+    /// Serialize metadata bootstrap across native API and agent transactions.
+    /// The table name is a bound value, scoped to the current PostgreSQL schema.
+    pub const METADATA_LOCK_SQL: &'static str =
+        "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || $1, 0))::text";
+
+    pub fn generate_metadata_table(&self) -> String {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} (id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text, name VARCHAR(255) UNIQUE NOT NULL, description TEXT, table_name VARCHAR(255) UNIQUE NOT NULL, columns JSONB NOT NULL, indexes JSONB, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(), deleted BOOLEAN DEFAULT FALSE)",
+            quote_identifier(&self.config.metadata_table)
+        )
+    }
+
+    /// PostgreSQL keeps index names when a table is renamed. Release their
+    /// schema-wide names too, so a replacement table can recreate every index.
+    /// Callers execute this complete plan in the schema metadata transaction.
+    pub fn tombstone_table(
+        table: &str,
+        tombstone: &str,
+        indexes: &[String],
+        mut index_name: impl FnMut() -> String,
+    ) -> Vec<String> {
+        let mut statements: Vec<_> = indexes
+            .iter()
+            .map(|index| {
+                format!(
+                    "ALTER INDEX {} RENAME TO {}",
+                    quote_identifier(index),
+                    quote_identifier(&index_name())
+                )
+            })
+            .collect();
+        statements.push(format!(
+            "ALTER TABLE {} RENAME TO {}",
+            quote_identifier(table),
+            quote_identifier(tombstone)
+        ));
+        statements
+    }
+
+    /// Generate CREATE TABLE statement with auto-managed columns
+    ///
+    /// Creates a table with:
+    /// - User-defined columns
+    /// - Auto-managed columns based on config: id, created_at, updated_at
+    /// - `deleted` tombstone column (always present; the runtime soft_delete
+    ///   flag decides whether deletes flip the flag or issue a hard DELETE)
+    pub fn generate_create_table(&self, table_name: &str, columns: &[ColumnDefinition]) -> String {
+        let quoted_table = quote_identifier(table_name);
+
+        let mut column_defs = Vec::new();
+
+        // Add auto-managed id column if enabled
+        if self.config.auto_columns.id {
+            column_defs
+                .push("id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text".to_string());
+        }
+
+        // Add user-defined columns
+        for col in columns {
+            column_defs.push(Self::format_column_definition(col));
+        }
+
+        // Add auto-managed timestamp columns if enabled
+        // Use TIMESTAMPTZ to match Rust's chrono::DateTime<Utc>
+        if self.config.auto_columns.created_at {
+            column_defs.push("created_at TIMESTAMPTZ DEFAULT NOW()".to_string());
+        }
+        if self.config.auto_columns.updated_at {
+            column_defs.push("updated_at TIMESTAMPTZ DEFAULT NOW()".to_string());
+        }
+
+        column_defs.push("deleted BOOLEAN DEFAULT FALSE".to_string());
+
+        format!("CREATE TABLE {} ({})", quoted_table, column_defs.join(", "))
+    }
+
+    /// Emit partial unique indexes for columns declared with `unique = true`.
+    ///
+    /// Column-level UNIQUE constraints cannot be partial, so soft-delete-aware
+    /// uniqueness has to be represented as an index on live rows only.
+    pub fn generate_unique_column_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| c.unique)
+            .map(|c| Self::unique_column_index_create(table_name, &c.name))
+            .collect()
+    }
+
+    /// Generate ALTER TABLE statements to modify table structure.
+    ///
+    /// Diffs columns by name only, so a renamed column appears as a drop + add.
+    /// Use [`generate_alter_table_with_renames`](Self::generate_alter_table_with_renames)
+    /// to preserve data across renames.
+    pub fn generate_alter_table(
+        &self,
+        table_name: &str,
+        old_columns: &[ColumnDefinition],
+        new_columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        self.generate_alter_table_with_renames(table_name, old_columns, new_columns, &[])
+    }
+
+    /// Generate ALTER TABLE statements, honoring explicit column renames.
+    ///
+    /// Each rename emits `ALTER TABLE ... RENAME COLUMN` (and renames the
+    /// column's auto-managed indexes), and is excluded from the add/drop diff —
+    /// so a declared rename preserves the column's data instead of dropping it
+    /// and re-adding an empty column. The remaining add/drop/modify logic is
+    /// unchanged; modified-column detection matches a rename target back to its
+    /// source so a simultaneous rename + type/nullable/default change works.
+    pub fn generate_alter_table_with_renames(
+        &self,
+        table_name: &str,
+        old_columns: &[ColumnDefinition],
+        new_columns: &[ColumnDefinition],
+        renames: &[ColumnRename],
+    ) -> Vec<String> {
+        use std::collections::{HashMap, HashSet};
+        let quoted_table = quote_identifier(table_name);
+        let mut statements = Vec::new();
+
+        let rename_from: HashSet<&str> = renames.iter().map(|r| r.from.as_str()).collect();
+        let rename_to: HashSet<&str> = renames.iter().map(|r| r.to.as_str()).collect();
+        let rename_to_from: HashMap<&str, &str> = renames
+            .iter()
+            .map(|r| (r.to.as_str(), r.from.as_str()))
+            .collect();
+
+        // Renames first, so later add/drop/modify statements address the new
+        // name. The column's auto-managed indexes are renamed alongside it.
+        for r in renames {
+            if r.from == r.to {
+                continue;
+            }
+            if let Some(old_col) = old_columns.iter().find(|c| c.name == r.from) {
+                statements.extend(Self::rename_column_indexes(table_name, old_col, &r.to));
+            }
+            statements.push(format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                quoted_table,
+                quote_identifier(&r.from),
+                quote_identifier(&r.to)
+            ));
+        }
+
+        // Find added columns (a rename target is not "added").
+        for new_col in new_columns {
+            if rename_to.contains(new_col.name.as_str()) {
+                continue;
+            }
+            if !old_columns.iter().any(|c| c.name == new_col.name) {
+                statements.push(format!(
+                    "ALTER TABLE {} ADD COLUMN {}",
+                    quoted_table,
+                    Self::format_column_definition(new_col)
+                ));
+                if new_col.unique {
+                    statements.push(Self::unique_column_index_create(table_name, &new_col.name));
+                }
+                // If the new column wants a trigram index, emit the partial
+                // GIN/`gin_trgm_ops` index alongside the ADD COLUMN statement.
+                if new_col.requires_trigram_index() {
+                    statements.push(Self::trigram_index_create(table_name, &new_col.name));
+                }
+                // tsvector columns get a GIN index automatically.
+                if matches!(
+                    new_col.column_type,
+                    crate::types::ColumnType::Tsvector { .. }
+                ) {
+                    statements.push(Self::tsvector_index_create(table_name, &new_col.name));
+                }
+            }
+        }
+
+        // Find dropped columns (a rename source is not "dropped").
+        for old_col in old_columns {
+            if rename_from.contains(old_col.name.as_str()) {
+                continue;
+            }
+            if !new_columns.iter().any(|c| c.name == old_col.name) {
+                if old_col.unique {
+                    statements.push(Self::unique_column_index_drop(table_name, &old_col.name));
+                }
+                if old_col.requires_trigram_index() {
+                    statements.push(Self::trigram_index_drop(table_name, &old_col.name));
+                }
+                if matches!(
+                    old_col.column_type,
+                    crate::types::ColumnType::Tsvector { .. }
+                ) {
+                    statements.push(Self::tsvector_index_drop(table_name, &old_col.name));
+                }
+                statements.push(format!(
+                    "ALTER TABLE {} DROP COLUMN {}",
+                    quoted_table,
+                    quote_identifier(&old_col.name)
+                ));
+            }
+        }
+
+        // Find modified columns. A rename target is matched back to its source
+        // (already renamed above), so a rename combined with a type/nullable/
+        // default/unique change emits the right ALTER against the new name.
+        for new_col in new_columns {
+            let old_match = match rename_to_from.get(new_col.name.as_str()) {
+                Some(from) => old_columns.iter().find(|c| c.name == *from),
+                None => old_columns.iter().find(|c| c.name == new_col.name),
+            };
+            if let Some(old_col) = old_match {
+                // Type change
+                if old_col.column_type != new_col.column_type {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                        quoted_table,
+                        quote_identifier(&new_col.name),
+                        new_col.column_type.to_sql_type(&new_col.name)
+                    ));
+                }
+
+                // Nullable change
+                if old_col.nullable != new_col.nullable {
+                    let constraint = if new_col.nullable {
+                        "DROP NOT NULL"
+                    } else {
+                        "SET NOT NULL"
+                    };
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} {}",
+                        quoted_table,
+                        quote_identifier(&new_col.name),
+                        constraint
+                    ));
+                }
+
+                // Default value change
+                if old_col.default_value != new_col.default_value {
+                    if let Some(default) = &new_col.default_value {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                            quoted_table,
+                            quote_identifier(&new_col.name),
+                            default
+                        ));
+                    } else {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                            quoted_table,
+                            quote_identifier(&new_col.name)
+                        ));
+                    }
+                }
+
+                if old_col.unique != new_col.unique {
+                    if new_col.unique {
+                        statements
+                            .push(Self::unique_column_index_create(table_name, &new_col.name));
+                    } else {
+                        statements.push(Self::unique_column_index_drop(table_name, &new_col.name));
+                    }
+                }
+            }
+        }
+
+        statements
+    }
+
+    /// Generate DROP TABLE statement
+    pub fn generate_drop_table(&self, table_name: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        format!("DROP TABLE IF EXISTS {} CASCADE", quoted_table)
+    }
+
+    /// Generate CREATE INDEX statement
+    pub fn generate_create_index(&self, table_name: &str, index: &IndexDefinition) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_index_name = quote_identifier(&format!("{}_{}", table_name, index.name));
+
+        let quoted_columns: Vec<String> = index
+            .columns
+            .iter()
+            .map(|col| quote_identifier(col))
+            .collect();
+
+        let unique_clause = if index.unique { "UNIQUE " } else { "" };
+        let predicate = if index.unique {
+            " WHERE deleted = FALSE"
+        } else {
+            ""
+        };
+
+        format!(
+            "CREATE {}INDEX {} ON {}({})",
+            unique_clause,
+            quoted_index_name,
+            quoted_table,
+            quoted_columns.join(", ")
+        ) + predicate
+    }
+
+    /// Generate DROP INDEX statement for a user-defined schema index.
+    pub fn generate_drop_index(&self, table_name: &str, index: &IndexDefinition) -> String {
+        let quoted_index_name = quote_identifier(&format!("{}_{}", table_name, index.name));
+        format!("DROP INDEX IF EXISTS {}", quoted_index_name)
+    }
+
+    /// Generate statements to reconcile a full replacement index list.
+    ///
+    /// Index identity is the user-provided index name. If an index with the
+    /// same name changes columns or uniqueness, it is dropped and recreated.
+    pub fn generate_alter_indexes(
+        &self,
+        table_name: &str,
+        old_indexes: &[IndexDefinition],
+        new_indexes: &[IndexDefinition],
+    ) -> Vec<String> {
+        let mut statements = Vec::new();
+
+        for old_index in old_indexes {
+            match new_indexes
+                .iter()
+                .find(|new_index| new_index.name == old_index.name)
+            {
+                Some(new_index) if new_index == old_index => {}
+                _ => statements.push(self.generate_drop_index(table_name, old_index)),
+            }
+        }
+
+        for new_index in new_indexes {
+            match old_indexes
+                .iter()
+                .find(|old_index| old_index.name == new_index.name)
+            {
+                Some(old_index) if old_index == new_index => {}
+                _ => statements.push(self.generate_create_index(table_name, new_index)),
+            }
+        }
+
+        statements
+    }
+
+    /// Generate default index for efficient querying
+    ///
+    /// Partial index on created_at that excludes tombstoned rows — since reads
+    /// always filter `deleted = FALSE`, this keeps the common path fast.
+    pub fn generate_default_index(&self, table_name: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let index_name = format!("idx_{}_default", table_name);
+        let quoted_index = quote_identifier(&index_name);
+
+        format!(
+            "CREATE INDEX {} ON {}(created_at DESC) WHERE deleted = FALSE",
+            quoted_index, quoted_table
+        )
+    }
+
+    fn unique_column_index_name(table_name: &str, column: &str) -> String {
+        format!("idx_{}_{}_unique_live", table_name, column)
+    }
+
+    fn unique_column_index_create(table_name: &str, column: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        let quoted_index = quote_identifier(&Self::unique_column_index_name(table_name, column));
+        format!(
+            "CREATE UNIQUE INDEX {} ON {}({}) WHERE deleted = FALSE",
+            quoted_index, quoted_table, quoted_column
+        )
+    }
+
+    fn unique_column_index_drop(table_name: &str, column: &str) -> String {
+        let quoted_index = quote_identifier(&Self::unique_column_index_name(table_name, column));
+        format!("DROP INDEX IF EXISTS {}", quoted_index)
+    }
+
+    fn alter_index_rename(old_name: &str, new_name: &str) -> String {
+        format!(
+            "ALTER INDEX IF EXISTS {} RENAME TO {}",
+            quote_identifier(old_name),
+            quote_identifier(new_name)
+        )
+    }
+
+    /// Rename a renamed column's auto-managed indexes from the old column name
+    /// to the new one. `RENAME COLUMN` leaves these index names stale, which
+    /// would desync a later unique/index toggle (the drop targets the new-name
+    /// index), so keep them aligned with the column.
+    fn rename_column_indexes(
+        table_name: &str,
+        old_col: &ColumnDefinition,
+        to: &str,
+    ) -> Vec<String> {
+        use crate::types::{ColumnType, VectorIndexMethod};
+        let from = old_col.name.as_str();
+        let mut out = Vec::new();
+        if old_col.unique {
+            out.push(Self::alter_index_rename(
+                &Self::unique_column_index_name(table_name, from),
+                &Self::unique_column_index_name(table_name, to),
+            ));
+        }
+        if old_col.requires_trigram_index() {
+            out.push(Self::alter_index_rename(
+                &format!("idx_{}_{}_trgm", table_name, from),
+                &format!("idx_{}_{}_trgm", table_name, to),
+            ));
+        }
+        if matches!(old_col.column_type, ColumnType::Tsvector { .. }) {
+            out.push(Self::alter_index_rename(
+                &format!("idx_{}_{}_fts", table_name, from),
+                &format!("idx_{}_{}_fts", table_name, to),
+            ));
+        }
+        if let ColumnType::Vector {
+            index_method: Some(method),
+            ..
+        } = &old_col.column_type
+        {
+            let suffix = match method {
+                VectorIndexMethod::Hnsw => "hnsw",
+                VectorIndexMethod::IvfFlat { .. } => "ivf",
+            };
+            out.push(Self::alter_index_rename(
+                &format!("idx_{}_{}_{}", table_name, from, suffix),
+                &format!("idx_{}_{}_{}", table_name, to, suffix),
+            ));
+        }
+        out
+    }
+
+    /// Emit `CREATE INDEX … USING GIN … gin_trgm_ops` statements for every
+    /// column annotated with `text_index = trigram`. Empty if no column wants
+    /// trigram indexing.
+    pub fn generate_trigram_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| c.requires_trigram_index())
+            .map(|c| Self::trigram_index_create(table_name, &c.name))
+            .collect()
+    }
+
+    fn trigram_index_create(table_name: &str, column: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        let index_name = format!("idx_{}_{}_trgm", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} USING GIN ({} gin_trgm_ops) \
+             WHERE deleted = FALSE",
+            quoted_index, quoted_table, quoted_column
+        )
+    }
+
+    fn trigram_index_drop(table_name: &str, column: &str) -> String {
+        let index_name = format!("idx_{}_{}_trgm", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!("DROP INDEX IF EXISTS {}", quoted_index)
+    }
+
+    /// Emit a `CREATE INDEX … USING GIN (col)` for every `tsvector`-typed
+    /// column. tsvector columns are useless without a GIN index — full-text
+    /// queries fall back to seq scans otherwise.
+    pub fn generate_tsvector_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| matches!(c.column_type, crate::types::ColumnType::Tsvector { .. }))
+            .map(|c| Self::tsvector_index_create(table_name, &c.name))
+            .collect()
+    }
+
+    fn tsvector_index_create(table_name: &str, column: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        let index_name = format!("idx_{}_{}_fts", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} USING GIN ({}) \
+             WHERE deleted = FALSE",
+            quoted_index, quoted_table, quoted_column
+        )
+    }
+
+    fn tsvector_index_drop(table_name: &str, column: &str) -> String {
+        let index_name = format!("idx_{}_{}_fts", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!("DROP INDEX IF EXISTS {}", quoted_index)
+    }
+
+    /// Emit `CREATE INDEX ... USING hnsw|ivfflat (col vector_cosine_ops)`
+    /// statements for every `Vector` column whose declaration opts in to an
+    /// index method. Empty if no column wants a vector index. Vector
+    /// columns without an index method still work — KNN queries fall back
+    /// to a seq scan with exact distance computation.
+    pub fn generate_vector_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter_map(|c| match &c.column_type {
+                crate::types::ColumnType::Vector {
+                    index_method: Some(method),
+                    ..
+                } => Some(Self::vector_index_create(table_name, &c.name, method)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn vector_index_create(
+        table_name: &str,
+        column: &str,
+        method: &crate::types::VectorIndexMethod,
+    ) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        match method {
+            crate::types::VectorIndexMethod::Hnsw => {
+                let index_name = format!("idx_{}_{}_hnsw", table_name, column);
+                let quoted_index = quote_identifier(&index_name);
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {} USING hnsw ({} vector_cosine_ops) \
+                     WHERE deleted = FALSE",
+                    quoted_index, quoted_table, quoted_column
+                )
+            }
+            crate::types::VectorIndexMethod::IvfFlat { lists } => {
+                let index_name = format!("idx_{}_{}_ivf", table_name, column);
+                let quoted_index = quote_identifier(&index_name);
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {} USING ivfflat ({} vector_cosine_ops) \
+                     WITH (lists = {}) WHERE deleted = FALSE",
+                    quoted_index, quoted_table, quoted_column, lists
+                )
+            }
+        }
+    }
+
+    /// Format a single column definition for CREATE TABLE or ALTER TABLE ADD COLUMN
+    pub fn format_column_definition(col: &ColumnDefinition) -> String {
+        let mut parts = vec![
+            quote_identifier(&col.name),
+            col.column_type.to_sql_type(&col.name),
+        ];
+
+        // NOT NULL constraint
+        if !col.nullable {
+            parts.push("NOT NULL".to_string());
+        }
+
+        // Generated-column expression for tsvector columns. Mutually exclusive
+        // with DEFAULT (Postgres rejects both on the same column).
+        if let crate::types::ColumnType::Tsvector {
+            source_column,
+            language,
+        } = &col.column_type
+        {
+            // Single quotes inside the language config are escaped defensively.
+            let lang_lit = language.replace('\'', "''");
+            parts.push(format!(
+                "GENERATED ALWAYS AS (to_tsvector('{}', coalesce({}, ''))) STORED",
+                lang_lit,
+                quote_identifier(source_column)
+            ));
+        } else if let Some(default) = &col.default_value {
+            // DEFAULT value
+            parts.push(format!("DEFAULT {}", default));
+        }
+
+        parts.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ColumnType;
+
+    // ==================== Test Configuration Helpers ====================
+
+    fn default_config() -> StoreConfig {
+        StoreConfig::builder("postgres://localhost/test").build()
+    }
+
+    fn config_hard_delete() -> StoreConfig {
+        StoreConfig::builder("postgres://localhost/test")
+            .soft_delete(false)
+            .build()
+    }
+
+    fn config_no_auto_columns() -> StoreConfig {
+        StoreConfig::builder("postgres://localhost/test")
+            .auto_id(false)
+            .auto_created_at(false)
+            .auto_updated_at(false)
+            .build()
+    }
+
+    fn config_only_id() -> StoreConfig {
+        StoreConfig::builder("postgres://localhost/test")
+            .auto_id(true)
+            .auto_created_at(false)
+            .auto_updated_at(false)
+            .build()
+    }
+
+    fn config_only_timestamps() -> StoreConfig {
+        StoreConfig::builder("postgres://localhost/test")
+            .auto_id(false)
+            .auto_created_at(true)
+            .auto_updated_at(true)
+            .build()
+    }
+
+    // ==================== CREATE TABLE Tests ====================
+
+    #[test]
+    fn test_generate_create_table_with_defaults() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("sku", ColumnType::String)
+                .unique()
+                .not_null(),
+            ColumnDefinition::new("price", ColumnType::decimal(10, 2)).default("0.00"),
+        ];
+
+        let ddl = generator.generate_create_table("products", &columns);
+
+        assert!(ddl.contains("CREATE TABLE"));
+        assert!(ddl.contains("\"products\""));
+        assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
+        assert!(ddl.contains("\"sku\" TEXT NOT NULL"));
+        assert!(!ddl.contains("\"sku\" TEXT UNIQUE"));
+        assert!(ddl.contains("\"price\" NUMERIC(10,2) DEFAULT 0.00"));
+        assert!(ddl.contains("created_at TIMESTAMPTZ"));
+        assert!(ddl.contains("updated_at TIMESTAMPTZ"));
+        assert!(ddl.contains("deleted BOOLEAN"));
+    }
+
+    #[test]
+    fn test_generate_create_table_always_has_deleted_column() {
+        // Deleted column is always emitted — the soft_delete flag controls
+        // runtime delete behavior, not schema shape.
+        let config = config_hard_delete();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+
+        let ddl = generator.generate_create_table("items", &columns);
+
+        assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
+        assert!(ddl.contains("created_at TIMESTAMPTZ"));
+        assert!(ddl.contains("updated_at TIMESTAMPTZ"));
+        assert!(ddl.contains("deleted BOOLEAN"));
+    }
+
+    #[test]
+    fn test_generate_create_table_no_auto_columns() {
+        let config = config_no_auto_columns();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("id", ColumnType::String).not_null(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ];
+
+        let ddl = generator.generate_create_table("custom", &columns);
+
+        // Should NOT have auto-generated id
+        assert!(!ddl.contains("id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()"));
+        // Should have user-defined id
+        assert!(ddl.contains("\"id\" TEXT NOT NULL"));
+        assert!(!ddl.contains("created_at"));
+        assert!(!ddl.contains("updated_at"));
+        // `deleted` is always present
+        assert!(ddl.contains("deleted BOOLEAN"));
+    }
+
+    #[test]
+    fn test_generate_create_table_only_auto_id() {
+        let config = config_only_id();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+
+        let ddl = generator.generate_create_table("items", &columns);
+
+        assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
+        assert!(!ddl.contains("created_at"));
+        assert!(!ddl.contains("updated_at"));
+        assert!(ddl.contains("deleted BOOLEAN"));
+    }
+
+    #[test]
+    fn test_generate_create_table_only_timestamps() {
+        let config = config_only_timestamps();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+
+        let ddl = generator.generate_create_table("items", &columns);
+
+        assert!(!ddl.contains("id VARCHAR(255) PRIMARY KEY DEFAULT"));
+        assert!(ddl.contains("created_at TIMESTAMPTZ"));
+        assert!(ddl.contains("updated_at TIMESTAMPTZ"));
+        assert!(ddl.contains("deleted BOOLEAN"));
+    }
+
+    #[test]
+    fn test_generate_create_table_empty_columns() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let columns: Vec<ColumnDefinition> = vec![];
+
+        let ddl = generator.generate_create_table("empty_table", &columns);
+
+        // Should still have auto-managed columns
+        assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
+        assert!(ddl.contains("created_at TIMESTAMPTZ"));
+        assert!(ddl.contains("updated_at TIMESTAMPTZ"));
+        assert!(ddl.contains("deleted BOOLEAN"));
+    }
+
+    #[test]
+    fn test_generate_create_table_all_column_types() {
+        let config = config_no_auto_columns();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("str_col", ColumnType::String),
+            ColumnDefinition::new("int_col", ColumnType::Integer),
+            ColumnDefinition::new("bool_col", ColumnType::Boolean),
+            ColumnDefinition::new("json_col", ColumnType::Json),
+            ColumnDefinition::new("dec_col", ColumnType::decimal(18, 4)),
+            ColumnDefinition::new("ts_col", ColumnType::Timestamp),
+        ];
+
+        let ddl = generator.generate_create_table("all_types", &columns);
+
+        assert!(ddl.contains("\"str_col\" TEXT"));
+        assert!(ddl.contains("\"int_col\" BIGINT"));
+        assert!(ddl.contains("\"bool_col\" BOOLEAN"));
+        assert!(ddl.contains("\"json_col\" JSONB"));
+        assert!(ddl.contains("\"dec_col\" NUMERIC(18,4)"));
+        assert!(ddl.contains("\"ts_col\" TIMESTAMP"));
+    }
+
+    #[test]
+    fn test_generate_create_table_with_constraints() {
+        let config = config_no_auto_columns();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("email", ColumnType::String)
+                .unique()
+                .not_null(),
+            ColumnDefinition::new("status", ColumnType::String)
+                .not_null()
+                .default("'active'"),
+            ColumnDefinition::new("notes", ColumnType::String), // Nullable by default
+        ];
+
+        let ddl = generator.generate_create_table("users", &columns);
+
+        assert!(ddl.contains("\"email\" TEXT NOT NULL"));
+        assert!(!ddl.contains("\"email\" TEXT UNIQUE"));
+        assert!(ddl.contains("\"status\" TEXT NOT NULL DEFAULT 'active'"));
+        assert!(ddl.contains("\"notes\" TEXT")); // No NOT NULL
+    }
+
+    #[test]
+    fn test_generate_create_table_special_table_name() {
+        let config = config_no_auto_columns();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![ColumnDefinition::new("data", ColumnType::Json)];
+
+        // Table name with reserved word
+        let ddl = generator.generate_create_table("order", &columns);
+        assert!(ddl.contains("CREATE TABLE \"order\""));
+
+        // Table name needing quotes
+        let ddl = generator.generate_create_table("user-data", &columns);
+        assert!(ddl.contains("CREATE TABLE \"user-data\""));
+    }
+
+    // ==================== DROP TABLE Tests ====================
+
+    #[test]
+    fn test_generate_drop_table() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let ddl = generator.generate_drop_table("products");
+
+        assert_eq!(ddl, "DROP TABLE IF EXISTS \"products\" CASCADE");
+    }
+
+    #[test]
+    fn test_generate_drop_table_special_name() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let ddl = generator.generate_drop_table("user-orders");
+
+        assert_eq!(ddl, "DROP TABLE IF EXISTS \"user-orders\" CASCADE");
+    }
+
+    // ==================== CREATE INDEX Tests ====================
+
+    #[test]
+    fn test_generate_create_index() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let index = IndexDefinition::new("sku_idx", vec!["sku".to_string()]).unique();
+
+        let ddl = generator.generate_create_index("products", &index);
+
+        assert_eq!(
+            ddl,
+            "CREATE UNIQUE INDEX \"products_sku_idx\" ON \"products\"(\"sku\") WHERE deleted = FALSE"
+        );
+    }
+
+    #[test]
+    fn test_generate_create_index_non_unique() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let index = IndexDefinition::new("status_idx", vec!["status".to_string()]);
+
+        let ddl = generator.generate_create_index("orders", &index);
+
+        assert_eq!(
+            ddl,
+            "CREATE INDEX \"orders_status_idx\" ON \"orders\"(\"status\")"
+        );
+    }
+
+    #[test]
+    fn test_generate_create_index_multi_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let index = IndexDefinition::new(
+            "composite_idx",
+            vec![
+                "tenant".to_string(),
+                "status".to_string(),
+                "created_at".to_string(),
+            ],
+        );
+
+        let ddl = generator.generate_create_index("tasks", &index);
+
+        assert!(ddl.contains("CREATE INDEX"));
+        assert!(ddl.contains("\"tenant\", \"status\", \"created_at\""));
+    }
+
+    #[test]
+    fn test_generate_drop_index() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let index = IndexDefinition::new("status_idx", vec!["status".to_string()]);
+        let ddl = generator.generate_drop_index("orders", &index);
+
+        assert_eq!(ddl, "DROP INDEX IF EXISTS \"orders_status_idx\"");
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_adds_new_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            &[],
+            &[IndexDefinition::new(
+                "status_idx",
+                vec!["status".to_string()],
+            )],
+        );
+
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "CREATE INDEX \"orders_status_idx\" ON \"orders\"(\"status\")"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_drops_removed_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            &[IndexDefinition::new(
+                "status_idx",
+                vec!["status".to_string()],
+            )],
+            &[],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["DROP INDEX IF EXISTS \"orders_status_idx\""]
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_recreates_changed_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            &[IndexDefinition::new(
+                "status_idx",
+                vec!["status".to_string()],
+            )],
+            &[
+                IndexDefinition::new("status_idx", vec!["status".to_string(), "sku".to_string()])
+                    .unique(),
+            ],
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0], "DROP INDEX IF EXISTS \"orders_status_idx\"");
+        assert_eq!(
+            statements[1],
+            "CREATE UNIQUE INDEX \"orders_status_idx\" ON \"orders\"(\"status\", \"sku\") WHERE deleted = FALSE"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_indexes_keeps_unchanged_indexes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let index = IndexDefinition::new("status_idx", vec!["status".to_string()]);
+
+        let statements = generator.generate_alter_indexes(
+            "orders",
+            std::slice::from_ref(&index),
+            std::slice::from_ref(&index),
+        );
+
+        assert!(statements.is_empty());
+    }
+
+    #[test]
+    fn test_generate_default_index_is_always_partial() {
+        // Partial index always excludes tombstones, regardless of the runtime
+        // soft_delete flag — reads always filter `deleted = FALSE`.
+        for config in [default_config(), config_hard_delete()] {
+            let generator = DdlGenerator::new(&config);
+            let ddl = generator.generate_default_index("products");
+            assert_eq!(
+                ddl,
+                "CREATE INDEX \"idx_products_default\" ON \"products\"(created_at DESC) WHERE deleted = FALSE"
+            );
+        }
+    }
+
+    // ==================== ALTER TABLE Tests ====================
+
+    #[test]
+    fn test_generate_alter_table_add_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+        let new_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("description", ColumnType::String),
+        ];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("ADD COLUMN"));
+        assert!(statements[0].contains("\"description\""));
+    }
+
+    #[test]
+    fn test_generate_alter_table_add_multiple_columns() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+        let new_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("description", ColumnType::String),
+            ColumnDefinition::new("price", ColumnType::decimal(10, 2)),
+            ColumnDefinition::new("active", ColumnType::Boolean),
+        ];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 3); // 3 new columns
+        assert!(statements.iter().all(|s| s.contains("ADD COLUMN")));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drop_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("obsolete", ColumnType::String),
+        ];
+        let new_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("DROP COLUMN"));
+        assert!(statements[0].contains("\"obsolete\""));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drop_multiple_columns() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("old1", ColumnType::String),
+            ColumnDefinition::new("old2", ColumnType::Integer),
+        ];
+        let new_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements.iter().all(|s| s.contains("DROP COLUMN")));
+    }
+
+    #[test]
+    fn test_generate_alter_table_change_type() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("count", ColumnType::Integer)];
+        let new_columns = vec![ColumnDefinition::new("count", ColumnType::decimal(10, 2))];
+
+        let statements = generator.generate_alter_table("items", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("ALTER COLUMN"));
+        assert!(statements[0].contains("TYPE"));
+        assert!(statements[0].contains("NUMERIC(10,2)"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_change_nullable() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        // Make column NOT NULL
+        let old_columns = vec![ColumnDefinition::new("email", ColumnType::String)];
+        let new_columns = vec![ColumnDefinition::new("email", ColumnType::String).not_null()];
+
+        let statements = generator.generate_alter_table("users", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("SET NOT NULL"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_make_nullable() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        // Make column nullable
+        let old_columns = vec![ColumnDefinition::new("phone", ColumnType::String).not_null()];
+        let new_columns = vec![ColumnDefinition::new("phone", ColumnType::String)];
+
+        let statements = generator.generate_alter_table("users", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("DROP NOT NULL"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_add_default() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("status", ColumnType::String)];
+        let new_columns =
+            vec![ColumnDefinition::new("status", ColumnType::String).default("'pending'")];
+
+        let statements = generator.generate_alter_table("orders", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("SET DEFAULT"));
+        assert!(statements[0].contains("'pending'"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drop_default() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns =
+            vec![ColumnDefinition::new("status", ColumnType::String).default("'active'")];
+        let new_columns = vec![ColumnDefinition::new("status", ColumnType::String)];
+
+        let statements = generator.generate_alter_table("orders", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("DROP DEFAULT"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_combined_changes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("old_field", ColumnType::Integer),
+            ColumnDefinition::new("price", ColumnType::Integer), // Will change type
+        ];
+        let new_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("price", ColumnType::decimal(10, 2)), // Type changed
+            ColumnDefinition::new("new_field", ColumnType::String),     // Added
+        ];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        // Should have: 1 add, 1 drop, 1 type change
+        assert_eq!(statements.len(), 3);
+
+        let combined = statements.join(" | ");
+        assert!(combined.contains("ADD COLUMN"));
+        assert!(combined.contains("DROP COLUMN"));
+        assert!(combined.contains("TYPE"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_no_changes() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("value", ColumnType::Integer),
+        ];
+
+        let statements = generator.generate_alter_table("items", &columns, &columns);
+
+        assert!(statements.is_empty());
+    }
+
+    // ==================== Column Rename Tests (SYN-485) ====================
+
+    #[test]
+    fn test_no_rename_map_is_drop_plus_add() {
+        // Without a declared rename, a name change is still a destructive
+        // drop + add — this is the behavior the rename map exists to avoid.
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("old_name", ColumnType::String)];
+        let new_columns = vec![ColumnDefinition::new("new_name", ColumnType::String)];
+
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+
+        assert_eq!(statements.len(), 2);
+        let combined = statements.join(" | ");
+        assert!(combined.contains("ADD COLUMN"));
+        assert!(combined.contains("DROP COLUMN"));
+        assert!(!combined.contains("RENAME COLUMN"));
+    }
+
+    #[test]
+    fn test_declared_rename_preserves_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("old_name", ColumnType::String)];
+        let new_columns = vec![ColumnDefinition::new("new_name", ColumnType::String)];
+        let renames = vec![ColumnRename {
+            from: "old_name".to_string(),
+            to: "new_name".to_string(),
+        }];
+
+        let statements = generator.generate_alter_table_with_renames(
+            "products",
+            &old_columns,
+            &new_columns,
+            &renames,
+        );
+
+        assert_eq!(
+            statements,
+            vec!["ALTER TABLE \"products\" RENAME COLUMN \"old_name\" TO \"new_name\""]
+        );
+        // Crucially, no destructive DROP/ADD.
+        assert!(statements.iter().all(|s| !s.contains("DROP COLUMN")));
+        assert!(statements.iter().all(|s| !s.contains("ADD COLUMN")));
+    }
+
+    #[test]
+    fn test_rename_renames_unique_index() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("sku", ColumnType::String).unique()];
+        let new_columns = vec![ColumnDefinition::new("code", ColumnType::String).unique()];
+        let renames = vec![ColumnRename {
+            from: "sku".to_string(),
+            to: "code".to_string(),
+        }];
+
+        let statements = generator.generate_alter_table_with_renames(
+            "products",
+            &old_columns,
+            &new_columns,
+            &renames,
+        );
+
+        // Index rename precedes the column rename; no unique drop/create churn.
+        assert_eq!(
+            statements,
+            vec![
+                "ALTER INDEX IF EXISTS \"idx_products_sku_unique_live\" RENAME TO \"idx_products_code_unique_live\"",
+                "ALTER TABLE \"products\" RENAME COLUMN \"sku\" TO \"code\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rename_plus_type_change() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![ColumnDefinition::new("qty", ColumnType::Integer)];
+        let new_columns = vec![ColumnDefinition::new(
+            "quantity",
+            ColumnType::decimal(10, 2),
+        )];
+        let renames = vec![ColumnRename {
+            from: "qty".to_string(),
+            to: "quantity".to_string(),
+        }];
+
+        let statements = generator.generate_alter_table_with_renames(
+            "items",
+            &old_columns,
+            &new_columns,
+            &renames,
+        );
+
+        // Rename first, then the type change addresses the NEW name.
+        assert_eq!(statements.len(), 2);
+        assert_eq!(
+            statements[0],
+            "ALTER TABLE \"items\" RENAME COLUMN \"qty\" TO \"quantity\""
+        );
+        assert!(statements[1].contains("ALTER COLUMN \"quantity\" TYPE"));
+        assert!(statements[1].contains("NUMERIC(10,2)"));
+    }
+
+    #[test]
+    fn test_rename_alongside_genuine_add_and_drop() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let old_columns = vec![
+            ColumnDefinition::new("a", ColumnType::String),
+            ColumnDefinition::new("obsolete", ColumnType::String),
+        ];
+        let new_columns = vec![
+            ColumnDefinition::new("renamed_a", ColumnType::String),
+            ColumnDefinition::new("brand_new", ColumnType::String),
+        ];
+        let renames = vec![ColumnRename {
+            from: "a".to_string(),
+            to: "renamed_a".to_string(),
+        }];
+
+        let statements =
+            generator.generate_alter_table_with_renames("t", &old_columns, &new_columns, &renames);
+
+        let combined = statements.join(" | ");
+        // `a` is renamed (not dropped), `obsolete` is dropped, `brand_new` added.
+        assert!(combined.contains("RENAME COLUMN \"a\" TO \"renamed_a\""));
+        assert!(combined.contains("DROP COLUMN \"obsolete\""));
+        assert!(combined.contains("ADD COLUMN \"brand_new\""));
+        assert!(!combined.contains("DROP COLUMN \"a\""));
+        assert!(!combined.contains("ADD COLUMN \"renamed_a\""));
+    }
+
+    // ==================== format_column_definition Tests ====================
+
+    #[test]
+    fn test_format_column_definition_basic() {
+        let col = ColumnDefinition::new("name", ColumnType::String);
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"name\" TEXT");
+    }
+
+    #[test]
+    fn test_format_column_definition_not_null() {
+        let col = ColumnDefinition::new("email", ColumnType::String).not_null();
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"email\" TEXT NOT NULL");
+    }
+
+    #[test]
+    fn test_format_column_definition_unique() {
+        let col = ColumnDefinition::new("sku", ColumnType::String).unique();
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"sku\" TEXT");
+    }
+
+    #[test]
+    fn test_format_column_definition_unique_not_null() {
+        let col = ColumnDefinition::new("code", ColumnType::String)
+            .unique()
+            .not_null();
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"code\" TEXT NOT NULL");
+    }
+
+    #[test]
+    fn test_generate_unique_column_indexes_are_partial() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("sku", ColumnType::String).unique(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ];
+
+        let statements = generator.generate_unique_column_indexes("products", &columns);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE UNIQUE INDEX \"idx_products_sku_unique_live\" ON \"products\"(\"sku\") WHERE deleted = FALSE"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_format_column_definition_with_default() {
+        let col = ColumnDefinition::new("active", ColumnType::Boolean).default("TRUE");
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"active\" BOOLEAN DEFAULT TRUE");
+    }
+
+    #[test]
+    fn test_format_column_definition_full() {
+        let col = ColumnDefinition::new("status", ColumnType::String)
+            .not_null()
+            .default("'pending'");
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"status\" TEXT NOT NULL DEFAULT 'pending'");
+    }
+
+    #[test]
+    fn test_format_column_definition_decimal() {
+        let col = ColumnDefinition::new("amount", ColumnType::decimal(10, 2)).not_null();
+        let formatted = DdlGenerator::format_column_definition(&col);
+
+        assert_eq!(formatted, "\"amount\" NUMERIC(10,2) NOT NULL");
+    }
+
+    // ==================== Edge Cases ====================
+
+    // ==================== Tsvector Column Tests ====================
+
+    fn tsv_col(name: &str, source: &str) -> ColumnDefinition {
+        ColumnDefinition::new(
+            name,
+            ColumnType::Tsvector {
+                source_column: source.to_string(),
+                language: "english".to_string(),
+            },
+        )
+        .not_null()
+    }
+
+    #[test]
+    fn test_format_column_definition_tsvector_emits_generated_clause() {
+        let col = tsv_col("keywords_tsv", "keywords");
+        let formatted = DdlGenerator::format_column_definition(&col);
+        assert_eq!(
+            formatted,
+            "\"keywords_tsv\" TSVECTOR NOT NULL \
+             GENERATED ALWAYS AS (to_tsvector('english', coalesce(\"keywords\", ''))) STORED"
+        );
+    }
+
+    #[test]
+    fn test_format_column_definition_tsvector_skips_default_clause() {
+        // DEFAULT must not appear on a generated column — Postgres rejects both.
+        let mut col = tsv_col("keywords_tsv", "keywords");
+        col.default_value = Some("'ignored'".to_string());
+        let formatted = DdlGenerator::format_column_definition(&col);
+        assert!(!formatted.contains("DEFAULT"), "{}", formatted);
+        assert!(formatted.contains("GENERATED ALWAYS AS"));
+    }
+
+    #[test]
+    fn test_generate_tsvector_indexes_emits_partial_gin() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String),
+            tsv_col("keywords_tsv", "keywords"),
+        ];
+        let statements = generator.generate_tsvector_indexes("products", &columns);
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "CREATE INDEX IF NOT EXISTS \"idx_products_keywords_tsv_fts\" \
+             ON \"products\" USING GIN (\"keywords_tsv\") \
+             WHERE deleted = FALSE"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_table_emits_tsvector_index_for_added_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![ColumnDefinition::new("keywords", ColumnType::String)];
+        let new_columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String),
+            tsv_col("keywords_tsv", "keywords"),
+        ];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("ADD COLUMN"));
+        assert!(statements[0].contains("GENERATED ALWAYS AS"));
+        assert!(statements[1].contains("CREATE INDEX IF NOT EXISTS"));
+        assert!(statements[1].contains("USING GIN"));
+        assert!(statements[1].contains("idx_products_keywords_tsv_fts"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drops_tsvector_index_with_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String),
+            tsv_col("keywords_tsv", "keywords"),
+        ];
+        let new_columns = vec![ColumnDefinition::new("keywords", ColumnType::String)];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("DROP INDEX IF EXISTS"));
+        assert!(statements[0].contains("idx_products_keywords_tsv_fts"));
+        assert!(statements[1].contains("DROP COLUMN"));
+    }
+
+    // ==================== Trigram Index Tests ====================
+
+    #[test]
+    fn test_generate_trigram_indexes_empty_when_no_flag() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("price", ColumnType::Integer),
+        ];
+        let statements = generator.generate_trigram_indexes("products", &columns);
+        assert!(statements.is_empty());
+    }
+
+    #[test]
+    fn test_generate_trigram_indexes_emits_partial_gin() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ];
+        let statements = generator.generate_trigram_indexes("products", &columns);
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "CREATE INDEX IF NOT EXISTS \"idx_products_keywords_trgm\" \
+             ON \"products\" USING GIN (\"keywords\" gin_trgm_ops) \
+             WHERE deleted = FALSE"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_table_emits_trigram_index_for_added_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+        let new_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+        ];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("ADD COLUMN"));
+        assert!(statements[1].contains("CREATE INDEX IF NOT EXISTS"));
+        assert!(statements[1].contains("gin_trgm_ops"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drops_trigram_index_with_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+        ];
+        let new_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("DROP INDEX IF EXISTS"));
+        assert!(statements[1].contains("DROP COLUMN"));
+    }
+
+    #[test]
+    fn test_ddl_generator_with_quoted_table_name() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+
+        // Table name that needs quoting
+        let ddl = generator.generate_drop_table("my-table");
+
+        assert!(ddl.contains("\"my-table\""));
+    }
+
+    #[test]
+    fn test_ddl_generator_column_name_needs_quoting() {
+        let config = config_no_auto_columns();
+        let generator = DdlGenerator::new(&config);
+
+        let columns = vec![
+            ColumnDefinition::new("user-id", ColumnType::String),
+            ColumnDefinition::new("order", ColumnType::Integer), // Reserved word
+        ];
+
+        let ddl = generator.generate_create_table("data", &columns);
+
+        assert!(ddl.contains("\"user-id\""));
+        assert!(ddl.contains("\"order\""));
+    }
+}

@@ -3,6 +3,8 @@
 //! if the .wasm is missing — `cargo component build --release --target wasm32-wasip2 -p
 //! runtara-agent-crypto` first.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,16 +13,7 @@ use runtara_component_host::{
 };
 
 fn agent_wasm_path() -> PathBuf {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    // cargo-component drops the finalized component under wasm32-wasip2/
-    // (it also leaves a malformed intermediate under wasm32-wasip1/ — don't
-    // touch that one).
-    workspace.join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm")
+    common::bundle_dir().join("runtara_agent_crypto.wasm")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -38,9 +31,6 @@ async fn crypto_invoke_hash() -> anyhow::Result<()> {
 
     let ctx = Arc::new(CallContext::for_test(
         "tenant-test",
-        "http://localhost:9999",
-        "http://localhost:9998",
-        "http://localhost:9997",
         "http://localhost:9996",
     ));
     let state = HostState::new(ctx.clone());

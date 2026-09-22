@@ -180,16 +180,15 @@ impl ObjectStoreManager {
                     .bulk_request_limit(crate::config::object_model_bulk_request_limit())
                     .pool(pool_config)
                     .build();
-                let result = ObjectStore::new(config).await.map(Arc::new);
+                let result = ObjectStore::connect(config).await.map(Arc::new);
                 match &result {
                     Ok(_) => tracing::info!(
                         key = ?log_key,
                         elapsed_ms = start.elapsed().as_millis() as u64,
                         "built object-model store pool (cold connect)"
                     ),
-                    Err(error) => tracing::warn!(
+                    Err(_) => tracing::warn!(
                         key = ?log_key,
-                        %error,
                         "failed to build object-model store pool"
                     ),
                 }
@@ -220,8 +219,11 @@ impl ObjectStoreManager {
         }
 
         let database_url = self.database_url.replace("{tenant_id}", tenant_id);
-        self.get_or_build(StoreKey::Tenant(tenant_id.to_string()), database_url)
-            .await
+        let store = self
+            .get_or_build(StoreKey::Tenant(tenant_id.to_string()), database_url)
+            .await?;
+        store.initialize_object_model().await?;
+        Ok(store)
     }
 
     /// Remove a tenant's cached store (e.g., on tenant deletion)
@@ -237,6 +239,16 @@ impl ObjectStoreManager {
     /// This is the core method for connection-based access (a `connection_id`
     /// resolving to a customer/external database). Caches by a hash of the URL.
     pub async fn get_store_by_url(
+        &self,
+        database_url: &str,
+    ) -> Result<Arc<ObjectStore>, ObjectStoreError> {
+        let store = self.get_database_by_url(database_url).await?;
+        store.initialize_object_model().await?;
+        Ok(store)
+    }
+
+    /// Share the native pool without Object Model initialization or DDL.
+    pub async fn get_database_by_url(
         &self,
         database_url: &str,
     ) -> Result<Arc<ObjectStore>, ObjectStoreError> {

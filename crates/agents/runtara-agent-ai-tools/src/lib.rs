@@ -3,7 +3,7 @@
 //! Provider-router for deterministic AI capabilities (text completion, image
 //! generation, vision, embeddings) across multiple LLM providers (OpenAI, AWS
 //! Bedrock). Each capability routes from an explicit `provider` input; the
-//! runtara HTTP proxy validates that provider against the selected connection,
+//! outbound host service validates that provider against the selected connection,
 //! then handles credential injection and base-URL rewriting per provider (OpenAI:
 //! `https://api.openai.com`; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
 //!
@@ -27,23 +27,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-ai-tools/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim
@@ -147,7 +130,7 @@ const DEFAULT_OPENAI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MODEL;
 const DEFAULT_OPENAI_MINI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MINI_MODEL;
 const DEFAULT_BEDROCK_MODEL: &str = runtara_ai::defaults::DEFAULT_BEDROCK_MODEL;
 // Only referenced from the host-only `agent_info()`; the wasm component
-// resolves integrations at runtime via the connection proxy.
+// resolves integrations at runtime via the connection service.
 #[cfg(not(target_arch = "wasm32"))]
 const INTEGRATION_OPENAI_API_KEY: &str = "openai_api_key";
 #[cfg(not(target_arch = "wasm32"))]
@@ -212,8 +195,8 @@ pub struct LlmUsage {
 // OpenAI HTTP helper
 // ============================================================================
 
-/// POST `body` to `https://api.openai.com{path}` via the runtara proxy.
-fn openai_post(
+/// POST `body` to `https://api.openai.com{path}` via the outbound host service.
+async fn openai_post(
     connection: &RawConnection,
     path: &str,
     body: Value,
@@ -227,10 +210,11 @@ fn openai_post(
     let response = client
         .request("POST", &url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .header("X-Runtara-Ai-Provider", PROVIDER_OPENAI)
+        .connection_id(&connection.connection_id)
+        .ai_provider(PROVIDER_OPENAI)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -277,11 +261,11 @@ fn openai_post(
 // ============================================================================
 
 /// POST `body` to `https://bedrock-runtime.{region}.amazonaws.com{path}` via
-/// the runtara proxy. The proxy injects SigV4 signing and resolves the regional
+/// the outbound host service. The outbound host service injects SigV4 signing and resolves the regional
 /// base URL from the aws_credentials connection parameters. We send a relative
-/// path so the proxy constructs the regional endpoint (e.g.
+/// path so the outbound host service constructs the regional endpoint (e.g.
 /// `https://bedrock-runtime.us-east-1.amazonaws.com`).
-fn bedrock_post(
+async fn bedrock_post(
     connection: &RawConnection,
     path: &str,
     body: Value,
@@ -295,10 +279,11 @@ fn bedrock_post(
         .request("POST", path)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .header("X-Runtara-Ai-Provider", PROVIDER_BEDROCK)
+        .connection_id(&connection.connection_id)
+        .ai_provider(PROVIDER_BEDROCK)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -471,22 +456,24 @@ pub struct TextCompletionOutput {
     module_integration_ids = "openai_api_key,aws_credentials",
     module_secure = true
 )]
-pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
+pub async fn text_completion(
+    input: TextCompletionInput,
+) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
     match require_provider(&input.provider)? {
-        PROVIDER_OPENAI => text_completion_openai(&input, connection),
-        PROVIDER_BEDROCK => text_completion_bedrock(&input, connection),
+        PROVIDER_OPENAI => text_completion_openai(&input, connection).await,
+        PROVIDER_BEDROCK => text_completion_bedrock(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
 
-fn text_completion_openai(
+async fn text_completion_openai(
     input: &TextCompletionInput,
     connection: &RawConnection,
 ) -> Result<TextCompletionOutput, AgentError> {
     // If output_schema is provided, use OpenAI structured output path.
     if let Some(ref schema) = input.output_schema {
-        return text_completion_openai_structured(input, connection, schema);
+        return text_completion_openai_structured(input, connection, schema).await;
     }
 
     let mut messages = Vec::new();
@@ -529,7 +516,7 @@ fn text_completion_openai(
         body["stop"] = json!(stop);
     }
 
-    let resp = openai_post(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post(connection, "/v1/chat/completions", body, 120_000).await?;
     let text = openai_extract_content(&resp)?;
     let model_used = resp["model"].as_str().unwrap_or("unknown").to_string();
     let finish_reason = resp["choices"][0]["finish_reason"]
@@ -547,7 +534,7 @@ fn text_completion_openai(
     })
 }
 
-fn text_completion_openai_structured(
+async fn text_completion_openai_structured(
     input: &TextCompletionInput,
     connection: &RawConnection,
     schema: &Value,
@@ -574,7 +561,7 @@ fn text_completion_openai_structured(
         body["temperature"] = json!(temperature);
     }
 
-    let resp = openai_post(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post(connection, "/v1/chat/completions", body, 120_000).await?;
     let content = openai_extract_content(&resp)?;
     let structured_output: Value = serde_json::from_str(&content).map_err(|e| {
         AgentError::permanent(
@@ -595,13 +582,13 @@ fn text_completion_openai_structured(
     })
 }
 
-fn text_completion_bedrock(
+async fn text_completion_bedrock(
     input: &TextCompletionInput,
     connection: &RawConnection,
 ) -> Result<TextCompletionOutput, AgentError> {
     // If output_schema is provided, use prompt-engineering path for structured output.
     if let Some(ref schema) = input.output_schema {
-        return text_completion_bedrock_structured(input, connection, schema);
+        return text_completion_bedrock_structured(input, connection, schema).await;
     }
 
     let model = input
@@ -620,7 +607,7 @@ fn text_completion_bedrock(
     )?;
 
     let path = format!("/model/{}/invoke", model);
-    let resp = bedrock_post(connection, &path, request_body, 120_000)?;
+    let resp = bedrock_post(connection, &path, request_body, 120_000).await?;
 
     let (text, prompt_tokens, completion_tokens, finish_reason) =
         extract_bedrock_text_response(&resp, is_claude)?;
@@ -638,7 +625,7 @@ fn text_completion_bedrock(
     })
 }
 
-fn text_completion_bedrock_structured(
+async fn text_completion_bedrock_structured(
     input: &TextCompletionInput,
     connection: &RawConnection,
     schema: &Value,
@@ -665,7 +652,7 @@ fn text_completion_bedrock_structured(
     )?;
 
     let path = format!("/model/{}/invoke", model);
-    let resp = bedrock_post(connection, &path, request_body, 120_000)?;
+    let resp = bedrock_post(connection, &path, request_body, 120_000).await?;
     let (text, prompt_tokens, completion_tokens, _finish_reason) =
         extract_bedrock_text_response(&resp, is_claude)?;
 
@@ -813,7 +800,9 @@ pub struct ChatCompletionOutput {
     module_integration_ids = "openai_api_key,aws_credentials",
     module_secure = true
 )]
-pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutput, AgentError> {
+pub async fn chat_completion(
+    input: ChatCompletionInput,
+) -> Result<ChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
     let provider = require_provider_for_connection(connection)?;
 
@@ -845,7 +834,8 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
         timeout_ms: input.timeout_ms,
     };
 
-    let response = runtara_ai::run_completion(req)
+    let response = runtara_ai::run_completion_async(req)
+        .await
         .map_err(|e| AgentError::transient("AI_CHAT_COMPLETION_FAILED", e))?;
 
     let choice = serde_json::to_value(&response.choice).map_err(|e| {
@@ -1023,7 +1013,7 @@ pub struct ChatTurnOutput {
     module_integration_ids = "openai_api_key,aws_credentials",
     module_secure = true
 )]
-pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
+pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
     use runtara_ai::OneOrMany;
     use runtara_ai::message::{AssistantContent, Message, ToolResultContent, UserContent};
 
@@ -1093,7 +1083,8 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
         // DEFAULT_STEP_TIMEOUT_MS in run_completion.
         timeout_ms: input.timeout_ms,
     };
-    let response = runtara_ai::run_completion(req)
+    let response = runtara_ai::run_completion_async(req)
+        .await
         .map_err(|e| AgentError::transient("AI_TURN_COMPLETION_FAILED", e))?;
 
     // Record the user message (first turn only) then the assistant message.
@@ -1231,7 +1222,9 @@ pub struct SummarizeMemoryOutput {
     module_integration_ids = "openai_api_key,aws_credentials",
     module_secure = true
 )]
-pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOutput, AgentError> {
+pub async fn summarize_memory(
+    input: SummarizeMemoryInput,
+) -> Result<SummarizeMemoryOutput, AgentError> {
     use runtara_ai::message::Message;
 
     let connection = require_connection(input._connection.as_ref())?;
@@ -1277,7 +1270,7 @@ pub fn summarize_memory(input: SummarizeMemoryInput) -> Result<SummarizeMemoryOu
 
     // A summarization failure degrades like the generated path: keep the most
     // recent messages (sliding window) without an inserted summary.
-    let summary_text = match runtara_ai::run_completion(req) {
+    let summary_text = match runtara_ai::run_completion_async(req).await {
         Ok(response) => response
             .choice
             .iter()
@@ -1420,16 +1413,18 @@ pub struct ImageGenerationOutput {
     rate_limited = true,
     tags = "ai,llm"
 )]
-pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
+pub async fn image_generation(
+    input: ImageGenerationInput,
+) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
     match require_provider(&input.provider)? {
-        PROVIDER_OPENAI => image_generation_openai(&input, connection),
-        PROVIDER_BEDROCK => image_generation_bedrock(&input, connection),
+        PROVIDER_OPENAI => image_generation_openai(&input, connection).await,
+        PROVIDER_BEDROCK => image_generation_bedrock(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
 
-fn image_generation_openai(
+async fn image_generation_openai(
     input: &ImageGenerationInput,
     connection: &RawConnection,
 ) -> Result<ImageGenerationOutput, AgentError> {
@@ -1470,7 +1465,8 @@ fn image_generation_openai(
         "/v1/images/generations",
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1495,7 +1491,7 @@ fn image_generation_openai(
     })
 }
 
-fn image_generation_bedrock(
+async fn image_generation_bedrock(
     input: &ImageGenerationInput,
     connection: &RawConnection,
 ) -> Result<ImageGenerationOutput, AgentError> {
@@ -1524,7 +1520,8 @@ fn image_generation_bedrock(
         &path,
         request_body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
@@ -1653,16 +1650,16 @@ pub struct VisionToTextOutput {
     rate_limited = true,
     tags = "ai,llm"
 )]
-pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
+pub async fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
     match require_provider(&input.provider)? {
-        PROVIDER_OPENAI => vision_to_text_openai(&input, connection),
-        PROVIDER_BEDROCK => vision_to_text_bedrock(&input, connection),
+        PROVIDER_OPENAI => vision_to_text_openai(&input, connection).await,
+        PROVIDER_BEDROCK => vision_to_text_bedrock(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
 
-fn vision_to_text_openai(
+async fn vision_to_text_openai(
     input: &VisionToTextInput,
     connection: &RawConnection,
 ) -> Result<VisionToTextOutput, AgentError> {
@@ -1706,7 +1703,7 @@ fn vision_to_text_openai(
         body["temperature"] = json!(temperature);
     }
 
-    let resp = openai_post(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post(connection, "/v1/chat/completions", body, 120_000).await?;
     let text = openai_extract_content(&resp)?;
     let model_used = resp["model"].as_str().unwrap_or("unknown").to_string();
     let usage = extract_openai_usage(&resp);
@@ -1724,7 +1721,7 @@ fn vision_to_text_openai(
     })
 }
 
-fn vision_to_text_bedrock(
+async fn vision_to_text_bedrock(
     input: &VisionToTextInput,
     connection: &RawConnection,
 ) -> Result<VisionToTextOutput, AgentError> {
@@ -1775,7 +1772,7 @@ fn vision_to_text_bedrock(
     }
 
     let path = format!("/model/{}/invoke", model);
-    let resp = bedrock_post(connection, &path, request_body, 120_000)?;
+    let resp = bedrock_post(connection, &path, request_body, 120_000).await?;
 
     let text = resp["content"][0]["text"]
         .as_str()
@@ -1913,24 +1910,22 @@ pub struct VisionToImageOutput {
     rate_limited = true,
     tags = "ai,llm"
 )]
-pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
+pub async fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
     match require_provider(&input.provider)? {
-        PROVIDER_OPENAI => vision_to_image_openai(&input, connection),
-        PROVIDER_BEDROCK => vision_to_image_bedrock(&input, connection),
+        PROVIDER_OPENAI => vision_to_image_openai(&input, connection).await,
+        PROVIDER_BEDROCK => vision_to_image_bedrock(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
 
-fn vision_to_image_openai(
+async fn vision_to_image_openai(
     input: &VisionToImageInput,
     connection: &RawConnection,
 ) -> Result<VisionToImageOutput, AgentError> {
-    // NOTE: OpenAI images/edits and images/variations endpoints require
-    // multipart/form-data with binary PNG payloads. The proxy currently only
-    // supports JSON bodies. This sends a JSON body as best-effort; it will
-    // likely return 415/400 from OpenAI until proxy-side multipart support lands.
-    // TODO: add multipart support to the runtara proxy and update this handler.
+    // These endpoints require multipart/form-data with binary PNG payloads.
+    // The host transport accepts raw bytes, but this agent still builds JSON.
+    // TODO: encode the multipart request here; JSON may receive a 415/400.
     let endpoint = if input.mask_data.is_some() {
         "images/edits"
     } else {
@@ -1949,7 +1944,8 @@ fn vision_to_image_openai(
         &format!("/v1/{endpoint}"),
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1974,7 +1970,7 @@ fn vision_to_image_openai(
     })
 }
 
-fn vision_to_image_bedrock(
+async fn vision_to_image_bedrock(
     input: &VisionToImageInput,
     connection: &RawConnection,
 ) -> Result<VisionToImageOutput, AgentError> {
@@ -1999,7 +1995,8 @@ fn vision_to_image_bedrock(
         &path,
         request_body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
@@ -2100,7 +2097,7 @@ pub struct EmbedTextOutput {
     rate_limited = true,
     tags = "ai,llm"
 )]
-pub fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentError> {
+pub async fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
     let provider = require_provider(&input.provider)?;
 
@@ -2139,13 +2136,13 @@ pub fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentError> 
     }
 
     match provider {
-        PROVIDER_OPENAI => embed_text_openai(&input, connection),
-        PROVIDER_BEDROCK => embed_text_bedrock(&input, connection),
+        PROVIDER_OPENAI => embed_text_openai(&input, connection).await,
+        PROVIDER_BEDROCK => embed_text_bedrock(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
 
-fn embed_text_openai(
+async fn embed_text_openai(
     input: &EmbedTextInput,
     connection: &RawConnection,
 ) -> Result<EmbedTextOutput, AgentError> {
@@ -2162,7 +2159,7 @@ fn embed_text_openai(
         body["dimensions"] = json!(dim);
     }
 
-    let resp = openai_post(connection, "/v1/embeddings", body, 60_000)?;
+    let resp = openai_post(connection, "/v1/embeddings", body, 60_000).await?;
 
     let data = resp["data"].as_array().ok_or_else(|| {
         AgentError::permanent(
@@ -2203,7 +2200,7 @@ fn embed_text_openai(
     })
 }
 
-fn embed_text_bedrock(
+async fn embed_text_bedrock(
     input: &EmbedTextInput,
     connection: &RawConnection,
 ) -> Result<EmbedTextOutput, AgentError> {
@@ -2231,7 +2228,7 @@ fn embed_text_bedrock(
         }
 
         let path = format!("/model/{}/invoke", model);
-        let resp = bedrock_post(connection, &path, body, 60_000)?;
+        let resp = bedrock_post(connection, &path, body, 60_000).await?;
 
         let arr = resp["embedding"].as_array().ok_or_else(|| {
             AgentError::permanent(
@@ -2599,108 +2596,20 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_ai_tools::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "ai-tools",
+    capabilities = [
+        text_completion,
+        chat_completion,
+        chat_turn,
+        summarize_memory,
+        image_generation,
+        vision_to_text,
+        vision_to_image,
+        embed_text,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "text-completion" => __executor_text_completion(value),
-            "chat-completion" => __executor_chat_completion(value),
-            "chat-turn" => __executor_chat_turn(value),
-            "summarize-memory" => __executor_summarize_memory(value),
-            "image-generation" => __executor_image_generation(value),
-            "vision-to-text" => __executor_vision_to_text(value),
-            "vision-to-image" => __executor_vision_to_image(value),
-            "embed-text" => __executor_embed_text(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("ai-tools agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2821,8 +2730,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn embed_text_rejects_missing_connection() {
+    #[tokio::test]
+    async fn embed_text_rejects_missing_connection() {
         let input = EmbedTextInput {
             _connection: None,
             provider: PROVIDER_OPENAI.into(),
@@ -2830,7 +2739,7 @@ mod tests {
             model: None,
             dimension: None,
         };
-        let err = embed_text(input).unwrap_err();
+        let err = embed_text(input).await.unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_MISSING_CONNECTION");
     }
 
@@ -2852,8 +2761,8 @@ mod tests {
         assert_eq!(err.code, "AI_TOOLS_UNSUPPORTED_CONNECTION");
     }
 
-    #[test]
-    fn embed_text_rejects_empty_batch() {
+    #[tokio::test]
+    async fn embed_text_rejects_empty_batch() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
             provider: PROVIDER_OPENAI.into(),
@@ -2861,13 +2770,13 @@ mod tests {
             model: None,
             dimension: None,
         };
-        let err = embed_text(input).unwrap_err();
+        let err = embed_text(input).await.unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
         assert!(err.message.contains("at least one"), "{}", err.message);
     }
 
-    #[test]
-    fn embed_text_rejects_empty_text_entry() {
+    #[tokio::test]
+    async fn embed_text_rejects_empty_text_entry() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
             provider: PROVIDER_OPENAI.into(),
@@ -2875,13 +2784,13 @@ mod tests {
             model: None,
             dimension: None,
         };
-        let err = embed_text(input).unwrap_err();
+        let err = embed_text(input).await.unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
         assert!(err.message.contains("non-empty"), "{}", err.message);
     }
 
-    #[test]
-    fn embed_text_rejects_oversize_dimension() {
+    #[tokio::test]
+    async fn embed_text_rejects_oversize_dimension() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
             provider: PROVIDER_OPENAI.into(),
@@ -2889,13 +2798,13 @@ mod tests {
             model: None,
             dimension: Some(99_999),
         };
-        let err = embed_text(input).unwrap_err();
+        let err = embed_text(input).await.unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
         assert!(err.message.contains("dimension"), "{}", err.message);
     }
 
-    #[test]
-    fn embed_text_rejects_zero_dimension() {
+    #[tokio::test]
+    async fn embed_text_rejects_zero_dimension() {
         let input = EmbedTextInput {
             _connection: Some(fake_connection("openai_api_key")),
             provider: PROVIDER_OPENAI.into(),
@@ -2903,12 +2812,12 @@ mod tests {
             model: None,
             dimension: Some(0),
         };
-        let err = embed_text(input).unwrap_err();
+        let err = embed_text(input).await.unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
     }
 
-    #[test]
-    fn embed_text_rejects_oversize_batch() {
+    #[tokio::test]
+    async fn embed_text_rejects_oversize_batch() {
         let texts = (0..AI_EMBED_TEXT_BATCH_CAP + 1)
             .map(|i| format!("t-{}", i))
             .collect();
@@ -2919,7 +2828,7 @@ mod tests {
             model: None,
             dimension: None,
         };
-        let err = embed_text(input).unwrap_err();
+        let err = embed_text(input).await.unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_BATCH_TOO_LARGE");
     }
 
@@ -2937,9 +2846,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn vision_to_text_bedrock_rejects_non_anthropic_model() {
-        let err = vision_to_text(vision_input(Some("qwen.qwen3-32b-v1:0".into()))).unwrap_err();
+    #[tokio::test]
+    async fn vision_to_text_bedrock_rejects_non_anthropic_model() {
+        let err = vision_to_text(vision_input(Some("qwen.qwen3-32b-v1:0".into())))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "AI_TOOLS_UNSUPPORTED_MODEL");
     }
 

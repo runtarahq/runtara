@@ -33,23 +33,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use strum::VariantNames;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-transform/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
-
 // -----------------------------------------------------------------------------
 // Local AgentError shim — preserves the legacy `with_attr` chain shape so the
 // macro-generated executor receives a JSON-string error that the host
@@ -696,6 +679,11 @@ pub fn get_value_by_path(input: GetValueByPathInput) -> Result<Value, String> {
 pub fn set_value_by_path(input: SetValueByPathInput) -> Result<Value, String> {
     let result = match (input.target, input.property_path, input.value) {
         (Some(target), Some(path), value) if !path.is_empty() => {
+            if path.split('.').count() > MAX_PATH_SEGMENTS {
+                return Err(format!(
+                    "Property path exceeds the supported depth of {MAX_PATH_SEGMENTS} segments"
+                ));
+            }
             set_property_value(target, &path, value.unwrap_or(Value::Null))
         }
         (Some(target), _, _) => target,
@@ -1244,26 +1232,38 @@ fn set_property_value(obj: Value, property_path: &str, value: Value) -> Value {
     obj
 }
 
+/// Deepest dotted path `set-value-by-path` will build.
+///
+/// A path segment becomes one level of nesting, and `serde_json` recurses to
+/// drop and to serialize a `Value`, so an unbounded path lets a data-supplied
+/// string exhaust the guest stack — a trap rather than a step failure. This is
+/// serde_json's own default deserialization depth, so anything this agent
+/// builds can still be read back by an ordinary consumer.
+const MAX_PATH_SEGMENTS: usize = 128;
+
+/// Insert `value` at a dotted path, creating intermediate objects.
+///
+/// Descends iteratively: one recursive frame per path segment would let a
+/// long data-supplied path exhaust the guest stack, and a stack overflow traps
+/// the component rather than failing the step. As before, a segment that
+/// already holds a non-object stops the descent and writes nothing.
 fn set_nested_value(map: &mut serde_json::Map<String, Value>, parts: &[&str], value: Value) {
-    if parts.is_empty() {
+    let Some((last, prefix)) = parts.split_last() else {
         return;
+    };
+
+    let mut current = map;
+    for key in prefix {
+        let next = current
+            .entry((*key).to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        match next {
+            Value::Object(nested_map) => current = nested_map,
+            _ => return,
+        }
     }
 
-    if parts.len() == 1 {
-        map.insert(parts[0].to_string(), value);
-        return;
-    }
-
-    let key = parts[0];
-    let rest = &parts[1..];
-
-    let next = map
-        .entry(key.to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-
-    if let Value::Object(nested_map) = next {
-        set_nested_value(nested_map, rest, value);
-    }
+    current.insert(last.to_string(), value);
 }
 
 fn matches_filter_values(property_value: &Value, filter_values: &[Value]) -> bool {
@@ -1427,113 +1427,28 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // -----------------------------------------------------------------------------
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_transform::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "transform",
+    capabilities = [
+        extract,
+        get_value_by_path,
+        set_value_by_path,
+        filter_non_values,
+        select_first,
+        coalesce,
+        from_json_string,
+        to_json_string,
+        filter,
+        sort,
+        map_fields,
+        group_by,
+        append,
+        flat_map,
+        array_length,
+        ensure_array,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-        let executor_result = match capability_id.as_str() {
-            "extract" => __executor_extract(value),
-            "get-value-by-path" => __executor_get_value_by_path(value),
-            "set-value-by-path" => __executor_set_value_by_path(value),
-            "filter-non-values" => __executor_filter_non_values(value),
-            "select-first" => __executor_select_first(value),
-            "coalesce" => __executor_coalesce(value),
-            "from-json-string" => __executor_from_json_string(value),
-            "to-json-string" => __executor_to_json_string(value),
-            "filter" => __executor_filter(value),
-            "sort" => __executor_sort(value),
-            "map-fields" => __executor_map_fields(value),
-            "group-by" => __executor_group_by(value),
-            "append" => __executor_append(value),
-            "flat-map" => __executor_flat_map(value),
-            "array-length" => __executor_array_length(value),
-            "ensure-array" => __executor_ensure_array(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("transform agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category: value
-                .get("category")
-                .and_then(|v| v.as_str())
-                .unwrap_or("permanent")
-                .into(),
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable: value
-                .get("retryable")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1586,6 +1501,48 @@ mod tests {
 
         let result = set_value_by_path(input).unwrap();
         assert_eq!(result, json!({"user": {"name": "Alice", "age": 30}}));
+    }
+
+    #[test]
+    fn test_set_value_by_path_stops_at_a_non_object_segment() {
+        let input = SetValueByPathInput {
+            target: Some(json!({"user": "Alice"})),
+            property_path: Some("user.name.first".to_string()),
+            value: Some(json!("A")),
+        };
+        assert_eq!(set_value_by_path(input).unwrap(), json!({"user": "Alice"}));
+    }
+
+    fn path_of(segments: usize) -> SetValueByPathInput {
+        SetValueByPathInput {
+            target: Some(json!({})),
+            property_path: Some(
+                (0..segments)
+                    .map(|i| format!("k{i}"))
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+            value: Some(json!("deep")),
+        }
+    }
+
+    #[test]
+    fn test_set_value_by_path_builds_the_deepest_supported_path() {
+        let result = set_value_by_path(path_of(MAX_PATH_SEGMENTS)).unwrap();
+        let mut current = &result;
+        for i in 0..MAX_PATH_SEGMENTS {
+            current = &current[format!("k{i}")];
+        }
+        assert_eq!(current, &json!("deep"));
+    }
+
+    #[test]
+    fn test_set_value_by_path_rejects_a_path_past_the_limit() {
+        // Descending per segment, dropping the result and serializing it all
+        // recurse, so an unbounded path exhausts the guest stack and traps the
+        // component instead of failing the step.
+        let error = set_value_by_path(path_of(MAX_PATH_SEGMENTS + 1)).unwrap_err();
+        assert!(error.contains("supported depth"), "{error}");
     }
 
     #[test]

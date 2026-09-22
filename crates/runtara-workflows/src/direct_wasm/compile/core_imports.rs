@@ -31,6 +31,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_breakpoint_pause: Option<u32>,
     runtime_heartbeat: Option<u32>,
     runtime_instance_id: Option<u32>,
+    runtime_poll_signal: Option<u32>,
     runtime_is_cancelled: Option<u32>,
     runtime_check_signals: Option<u32>,
     runtime_poll_custom_signal: Option<u32>,
@@ -42,7 +43,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_durable_sleep: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
     runtime_durable_sleep_checkpoint: Option<u32>,
-    connection_resolver_describe: Option<u32>,
+    pub(super) connection_resolver_describe_async: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
     stdlib_value_store_scope: Option<u32>,
@@ -112,10 +113,11 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_tool_count: Option<u32>,
     stdlib_ai_turn_tool_args: Option<u32>,
     stdlib_ai_turn_tool_index: Option<u32>,
-    stdlib_ai_tool_args_with_timeout: Option<u32>,
     stdlib_ai_turn_add_result: Option<u32>,
     stdlib_wait_timeout_error_envelope: Option<u32>,
     stdlib_ai_turn_cache_key: Option<u32>,
+    stdlib_ai_turn_response_key: Option<u32>,
+    stdlib_ai_turn_response_validate: Option<u32>,
     stdlib_ai_turn_snapshot: Option<u32>,
     stdlib_ai_turn_snapshot_part: Option<u32>,
     stdlib_ai_turn_snapshot_tool_calls: Option<u32>,
@@ -135,6 +137,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_agent_connection_input: Option<u32>,
     stdlib_agent_scope_input: Option<u32>,
     stdlib_agent_tool_scope_input: Option<u32>,
+    stdlib_tool_scope_source: Option<u32>,
+    stdlib_agent_aux_scope_source: Option<u32>,
     stdlib_agent_cache_key: Option<u32>,
     stdlib_agent_retry_sleep_key: Option<u32>,
     stdlib_agent_attempt_result_key: Option<u32>,
@@ -152,12 +156,17 @@ pub(super) struct DirectCoreImportIndices {
     // Parallel-split surface (Phase 3): the CM-async
     // builtins and per-agent async-lowered invokes, populated directly by
     // `core_module` (they are extra CORE imports, not WIT world functions).
+    pub(super) thread_yield: Option<u32>,
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
+    pub(super) waitable_set_poll: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
+    pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
+    pub(super) timer_abort_async: Option<u32>,
+    pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -172,11 +181,13 @@ impl DirectCoreImportIndices {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
+            cooperative_helpers: [None; super::cooperative_wait::HELPER_COUNT],
+            cooperative_helper_body: false,
             abi,
             omit_runtime,
             has_run_label,
-            connection_resolver_describe: require_connection_resolver(
-                self.connection_resolver_describe,
+            connection_resolver_describe_async: require_connection_resolver(
+                self.connection_resolver_describe_async,
                 has_connections,
             )?,
             runtime_load_input: require_runtime(
@@ -218,6 +229,11 @@ impl DirectCoreImportIndices {
             runtime_instance_id: require_runtime(
                 self.runtime_instance_id,
                 "runtime.instance-id",
+                omit_runtime,
+            )?,
+            runtime_poll_signal: require_runtime(
+                self.runtime_poll_signal,
+                "runtime.poll-signal",
                 omit_runtime,
             )?,
             runtime_is_cancelled: require_runtime(
@@ -496,10 +512,6 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_turn_tool_index,
                 "stdlib.ai-turn-tool-index",
             )?,
-            stdlib_ai_tool_args_with_timeout: require_import(
-                self.stdlib_ai_tool_args_with_timeout,
-                "stdlib.ai-tool-args-with-timeout",
-            )?,
             stdlib_ai_turn_add_result: require_import(
                 self.stdlib_ai_turn_add_result,
                 "stdlib.ai-turn-add-result",
@@ -511,6 +523,14 @@ impl DirectCoreImportIndices {
             stdlib_ai_turn_cache_key: require_import(
                 self.stdlib_ai_turn_cache_key,
                 "stdlib.ai-turn-cache-key",
+            )?,
+            stdlib_ai_turn_response_key: require_import(
+                self.stdlib_ai_turn_response_key,
+                "stdlib.ai-turn-response-key",
+            )?,
+            stdlib_ai_turn_response_validate: require_import(
+                self.stdlib_ai_turn_response_validate,
+                "stdlib.ai-turn-response-validate",
             )?,
             stdlib_ai_turn_snapshot: require_import(
                 self.stdlib_ai_turn_snapshot,
@@ -584,6 +604,14 @@ impl DirectCoreImportIndices {
                 self.stdlib_agent_scope_input,
                 "stdlib.agent-scope-input",
             )?,
+            stdlib_agent_aux_scope_source: require_import(
+                self.stdlib_agent_aux_scope_source,
+                "stdlib.agent-aux-scope-source",
+            )?,
+            stdlib_tool_scope_source: require_import(
+                self.stdlib_tool_scope_source,
+                "stdlib.tool-scope-source",
+            )?,
             stdlib_agent_tool_scope_input: require_import(
                 self.stdlib_agent_tool_scope_input,
                 "stdlib.agent-tool-scope-input",
@@ -634,12 +662,17 @@ impl DirectCoreImportIndices {
                 "stdlib.step-debug-error",
             )?,
             agent_invokes: self.agent_invokes,
+            thread_yield: self.thread_yield,
             waitable_set_new: self.waitable_set_new,
             waitable_set_wait: self.waitable_set_wait,
+            waitable_set_poll: self.waitable_set_poll,
             waitable_set_drop: self.waitable_set_drop,
             waitable_join: self.waitable_join,
+            subtask_cancel: self.subtask_cancel,
             subtask_drop: self.subtask_drop,
             timer_sleep_async: self.timer_sleep_async,
+            timer_abort_async: self.timer_abort_async,
+            monotonic_now: self.monotonic_now,
             agent_invokes_async: self.agent_invokes_async,
         })
     }
@@ -647,6 +680,10 @@ impl DirectCoreImportIndices {
 
 #[derive(Debug, Clone)]
 pub(super) struct DirectCoreFunctionIndices {
+    /// Internal core-Wasm functions, not additional component imports.
+    pub(super) cooperative_helpers: [Option<u32>; super::cooperative_wait::HELPER_COUNT],
+    /// Shared helper bodies return a control outcome instead of an entry ABI result.
+    pub(super) cooperative_helper_body: bool,
     /// The top-level export shape the module is emitted against. Threaded
     /// through the indices because every lowerer already receives them, and
     /// the return convention at fail sites depends on it (tag under
@@ -658,7 +695,7 @@ pub(super) struct DirectCoreFunctionIndices {
     /// be called (see [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) has_run_label: bool,
-    pub(super) connection_resolver_describe: u32,
+    pub(super) connection_resolver_describe_async: u32,
     pub(super) runtime_load_input: u32,
     // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
@@ -669,6 +706,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_breakpoint_pause: u32,
     pub(super) runtime_heartbeat: u32,
     pub(super) runtime_instance_id: u32,
+    pub(super) runtime_poll_signal: u32,
     pub(super) runtime_is_cancelled: u32,
     pub(super) runtime_check_signals: u32,
     pub(super) runtime_poll_custom_signal: u32,
@@ -749,10 +787,11 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_tool_count: u32,
     pub(super) stdlib_ai_turn_tool_args: u32,
     pub(super) stdlib_ai_turn_tool_index: u32,
-    pub(super) stdlib_ai_tool_args_with_timeout: u32,
     pub(super) stdlib_ai_turn_add_result: u32,
     pub(super) stdlib_wait_timeout_error_envelope: u32,
     pub(super) stdlib_ai_turn_cache_key: u32,
+    pub(super) stdlib_ai_turn_response_key: u32,
+    pub(super) stdlib_ai_turn_response_validate: u32,
     pub(super) stdlib_ai_turn_snapshot: u32,
     pub(super) stdlib_ai_turn_snapshot_part: u32,
     pub(super) stdlib_ai_turn_snapshot_tool_calls: u32,
@@ -772,6 +811,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_agent_connection_input: u32,
     pub(super) stdlib_agent_scope_input: u32,
     pub(super) stdlib_agent_tool_scope_input: u32,
+    pub(super) stdlib_tool_scope_source: u32,
+    pub(super) stdlib_agent_aux_scope_source: u32,
     pub(super) stdlib_agent_cache_key: u32,
     pub(super) stdlib_agent_retry_sleep_key: u32,
     pub(super) stdlib_agent_attempt_result_key: u32,
@@ -785,15 +826,19 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
-    /// CM-async builtins — present only when the plan contains an eligible
-    /// parallel Split (kept `Option` so sequential-only workflows emit
-    /// byte-identical import sections).
+    /// Canonical yield, including runtime-free workflow-agent loop boundaries.
+    pub(super) thread_yield: Option<u32>,
+    /// Wait/subtask builtins, present when the workflow invokes Agents.
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
+    pub(super) waitable_set_poll: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
+    pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
+    pub(super) timer_abort_async: Option<u32>,
+    pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
 }
 
@@ -820,6 +865,13 @@ impl DirectCoreFunctionIndices {
 pub(super) struct DirectAgentInvokeImport {
     pub(super) function_index: u32,
     pub(super) params: Vec<WasmType>,
+}
+
+impl DirectAgentInvokeImport {
+    /// Private scoped-capabilities has nine flattened arguments plus retptr.
+    pub(super) fn is_scoped(&self) -> bool {
+        self.params.len() == 10
+    }
 }
 
 fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {
@@ -885,7 +937,7 @@ fn is_stdlib_import(
             .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
 }
 
-fn is_connection_resolver_import(
+pub(super) fn is_connection_resolver_import(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
     function: &WitFunction,
@@ -970,8 +1022,12 @@ pub(super) fn import_core_function(
     );
     imports.import(&module, &name, EntityType::Function(type_index));
 
-    if is_connection_resolver_import(resolve, interface, function, "describe") {
-        import_indices.connection_resolver_describe = Some(function_index);
+    if function.name == "now"
+        && interface.is_some_and(|key| {
+            resolve.name_world_key(key) == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+        })
+    {
+        import_indices.monotonic_now = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "load-input") {
         import_indices.runtime_load_input = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "complete-with-label") {
@@ -990,6 +1046,8 @@ pub(super) fn import_core_function(
         import_indices.runtime_heartbeat = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "instance-id") {
         import_indices.runtime_instance_id = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "poll-signal") {
+        import_indices.runtime_poll_signal = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "is-cancelled") {
         import_indices.runtime_is_cancelled = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "check-signals") {
@@ -1160,14 +1218,16 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_turn_tool_args = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-tool-index") {
         import_indices.stdlib_ai_turn_tool_index = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "ai-tool-args-with-timeout") {
-        import_indices.stdlib_ai_tool_args_with_timeout = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-add-result") {
         import_indices.stdlib_ai_turn_add_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-timeout-error-envelope") {
         import_indices.stdlib_wait_timeout_error_envelope = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-cache-key") {
         import_indices.stdlib_ai_turn_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-response-key") {
+        import_indices.stdlib_ai_turn_response_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-response-validate") {
+        import_indices.stdlib_ai_turn_response_validate = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot") {
         import_indices.stdlib_ai_turn_snapshot = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot-part") {
@@ -1204,6 +1264,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_connection_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-scope-input") {
         import_indices.stdlib_agent_scope_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-aux-scope-source") {
+        import_indices.stdlib_agent_aux_scope_source = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "tool-scope-source") {
+        import_indices.stdlib_tool_scope_source = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-tool-scope-input") {
         import_indices.stdlib_agent_tool_scope_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-cache-key") {

@@ -426,6 +426,7 @@ pub struct TelegramBotParams {
 #[derive(Debug, Deserialize, ConnectionParams)]
 #[connection(
     integration_id = "slack_bot",
+    named_endpoint(name = "files", url = "https://files.slack.com/files-pri"),
     display_name = "Slack Bot",
     description = "Connect a Slack Bot for conversational channel triggers",
     category = "messaging",
@@ -637,6 +638,34 @@ impl HttpConnectionExtractor for MicrosoftEntraClientCredentialsExtractor {
 #[derive(Debug, Deserialize, ConnectionParams)]
 #[connection(
     integration_id = "mailgun",
+    named_endpoint(
+        name = "messages-us",
+        url = "https://api.mailgun.net/v3/domains/{domain}/messages"
+    ),
+    named_endpoint(
+        name = "messages-eu",
+        url = "https://api.eu.mailgun.net/v3/domains/{domain}/messages"
+    ),
+    named_endpoint(
+        name = "storage-us-west1",
+        url = "https://storage-us-west1.api.mailgun.net/v3/domains/{domain}/messages"
+    ),
+    named_endpoint(
+        name = "storage-us-east4",
+        url = "https://storage-us-east4.api.mailgun.net/v3/domains/{domain}/messages"
+    ),
+    named_endpoint(
+        name = "storage-europe-west1",
+        url = "https://storage-europe-west1.api.mailgun.net/v3/domains/{domain}/messages"
+    ),
+    named_endpoint(
+        name = "storage-us",
+        url = "https://storage.api.mailgun.net/v3/domains/{domain}/messages"
+    ),
+    named_endpoint(
+        name = "storage-eu",
+        url = "https://storage.eu.mailgun.net/v3/domains/{domain}/messages"
+    ),
     display_name = "Mailgun",
     description = "Connect to Mailgun for sending and receiving emails",
     category = "email",

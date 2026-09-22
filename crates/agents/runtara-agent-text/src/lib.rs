@@ -30,23 +30,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use strum::VariantNames;
 
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-text/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
-
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -1640,41 +1623,52 @@ pub fn wrap_text(input: WrapTextInput) -> Result<String, String> {
     } else {
         vec![&text]
     };
+    // Width is a column count, so every comparison and split below counts
+    // characters. Byte indices would slice through a multi-byte character and
+    // panic, which traps the whole component instead of returning an error.
+    let width = input.width;
     let mut result = Vec::new();
     for line in lines {
-        if line.len() <= input.width {
+        if line.chars().count() <= width {
             result.push(line.to_string());
             continue;
         }
         let words: Vec<&str> = line.split_whitespace().collect();
         let mut current_line = String::new();
+        let mut current_width = 0usize;
         for word in words {
-            if current_line.is_empty() {
-                if word.len() > input.width {
-                    let mut remaining = word;
-                    while remaining.len() > input.width {
-                        result.push(remaining[..input.width].to_string());
-                        remaining = &remaining[input.width..];
-                    }
-                    current_line = remaining.to_string();
-                } else {
-                    current_line = word.to_string();
-                }
-            } else if current_line.len() + 1 + word.len() <= input.width {
+            let word_width = word.chars().count();
+            if !current_line.is_empty() && current_width + 1 + word_width <= width {
                 current_line.push(' ');
                 current_line.push_str(word);
-            } else {
-                result.push(current_line);
-                if word.len() > input.width {
-                    let mut remaining = word;
-                    while remaining.len() > input.width {
-                        result.push(remaining[..input.width].to_string());
-                        remaining = &remaining[input.width..];
+                current_width += 1 + word_width;
+                continue;
+            }
+            if !current_line.is_empty() {
+                result.push(std::mem::take(&mut current_line));
+            }
+            if word_width > width {
+                let mut chars = word.chars().peekable();
+                let mut chunk = String::new();
+                let mut chunk_width = 0usize;
+                while chars.peek().is_some() {
+                    chunk.clear();
+                    chunk_width = 0;
+                    while chunk_width < width
+                        && let Some(character) = chars.next()
+                    {
+                        chunk.push(character);
+                        chunk_width += 1;
                     }
-                    current_line = remaining.to_string();
-                } else {
-                    current_line = word.to_string();
+                    if chars.peek().is_some() {
+                        result.push(std::mem::take(&mut chunk));
+                    }
                 }
+                current_line = chunk;
+                current_width = chunk_width;
+            } else {
+                current_line = word.to_string();
+                current_width = word_width;
             }
         }
         if !current_line.is_empty() {
@@ -2143,126 +2137,41 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_text::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "text",
+    capabilities = [
+        render_template,
+        trim_normalize,
+        case_conversion,
+        find_replace,
+        extract_first_line,
+        extract_first_word,
+        split_join,
+        split,
+        remove_characters,
+        substring_extraction,
+        collapse_expand_lines,
+        slugify,
+        hash_text,
+        as_byte_array,
+        from_base64,
+        detect_encoding,
+        to_base64,
+        regex_replace,
+        regex_match,
+        regex_test,
+        regex_split,
+        pad_text,
+        truncate_text,
+        wrap_text,
+        extract_numbers,
+        extract_emails,
+        extract_urls,
+        compare_text,
+        count_occurrences,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-        let executor_result = match capability_id.as_str() {
-            "render-template" => __executor_render_template(value),
-            "trim-normalize" => __executor_trim_normalize(value),
-            "case-conversion" => __executor_case_conversion(value),
-            "find-replace" => __executor_find_replace(value),
-            "extract-first-line" => __executor_extract_first_line(value),
-            "extract-first-word" => __executor_extract_first_word(value),
-            "split-join" => __executor_split_join(value),
-            "split" => __executor_split(value),
-            "remove-characters" => __executor_remove_characters(value),
-            "substring-extraction" => __executor_substring_extraction(value),
-            "collapse-expand-lines" => __executor_collapse_expand_lines(value),
-            "slugify" => __executor_slugify(value),
-            "hash-text" => __executor_hash_text(value),
-            "as-byte-array" => __executor_as_byte_array(value),
-            "from-base64" => __executor_from_base64(value),
-            "detect-encoding" => __executor_detect_encoding(value),
-            "to-base64" => __executor_to_base64(value),
-            "regex-replace" => __executor_regex_replace(value),
-            "regex-match" => __executor_regex_match(value),
-            "regex-test" => __executor_regex_test(value),
-            "regex-split" => __executor_regex_split(value),
-            "pad-text" => __executor_pad_text(value),
-            "truncate-text" => __executor_truncate_text(value),
-            "wrap-text" => __executor_wrap_text(value),
-            "extract-numbers" => __executor_extract_numbers(value),
-            "extract-emails" => __executor_extract_emails(value),
-            "extract-urls" => __executor_extract_urls(value),
-            "compare-text" => __executor_compare_text(value),
-            "count-occurrences" => __executor_count_occurrences(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("text agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category: value
-                .get("category")
-                .and_then(|v| v.as_str())
-                .unwrap_or("permanent")
-                .into(),
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable: value
-                .get("retryable")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3131,6 +3040,45 @@ mod tests {
         for line in result.lines() {
             assert!(line.len() <= 10);
         }
+    }
+
+    #[test]
+    fn test_wrap_text_splits_long_multibyte_words_on_character_boundaries() {
+        // Byte slicing used to cut through a multi-byte character here and
+        // panic, which traps the component rather than returning an error.
+        let input = WrapTextInput {
+            text: Some("ééééé".to_string()),
+            width: 2,
+            preserve_newlines: true,
+        };
+        assert_eq!(wrap_text(input).unwrap(), "éé\néé\né");
+    }
+
+    #[test]
+    fn test_wrap_text_measures_width_in_characters() {
+        let input = WrapTextInput {
+            text: Some("日本語 テキスト".to_string()),
+            width: 3,
+            preserve_newlines: true,
+        };
+        let result = wrap_text(input).unwrap();
+        assert_eq!(result, "日本語\nテキス\nト");
+        for line in result.lines() {
+            assert!(line.chars().count() <= 3, "{line}");
+        }
+    }
+
+    #[test]
+    fn test_wrap_text_keeps_ascii_behaviour() {
+        let input = WrapTextInput {
+            text: Some("alpha beta gammagammagamma delta".to_string()),
+            width: 10,
+            preserve_newlines: true,
+        };
+        assert_eq!(
+            wrap_text(input).unwrap(),
+            "alpha beta\ngammagamma\ngamma\ndelta"
+        );
     }
 
     #[test]

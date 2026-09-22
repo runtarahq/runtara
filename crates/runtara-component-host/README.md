@@ -3,13 +3,14 @@
 [![Crates.io](https://img.shields.io/crates/v/runtara-component-host.svg)](https://crates.io/crates/runtara-component-host)
 [![Docs.rs](https://docs.rs/runtara-component-host/badge.svg)](https://docs.rs/runtara-component-host)
 
-Embedded wasmtime host for runtara agent components. Loads `runtara_agent_*.wasm` files from disk, instantiates them via the WIT `runtara:agent@0.1.0` contract, and dispatches `test_capability` calls in sub-millisecond time.
+Embedded Wasmtime host for Runtara agents and compiled workflows. The dispatcher
+loads agent components and invokes capabilities; `WorkflowExecutor` executes
+composed workflows and scoped child components. Both reuse compiled components
+and create invocation-specific Stores.
 
-## What it is
-
-A small library (`Engine` + `Linker` + `Store` + dispatcher service) that replaces the legacy "compile a Rust binary, register it as an OCI image, spawn `wasmtime run` per call" model. Per-call cost drops from ~600 ms (image-registry round-trip + container spawn) to <1 ms (`pre.instantiate_async` + `invoke`).
-
-The crate exposes one user-facing service: `ComponentDispatcherService`. Internally it shares a process-wide `wasmtime::Engine` (component-model + async + epoch-interruption on) and a single `Linker` configured with `wasmtime_wasi::p2::add_to_linker_async` + `wasmtime_wasi_http::p2::add_only_http_to_linker_async` to satisfy WASI imports each guest agent declares.
+Runtime, connection resolution, database and outbound HTTP behavior are injected
+host services. The component host does not own credential storage or a network
+proxy. Its concurrent imports let sibling guest tasks continue while I/O waits.
 
 ## Quick start
 
@@ -24,14 +25,11 @@ use runtara_component_host::{
 };
 
 let env = DispatcherEnv {
-    proxy_url: "http://127.0.0.1:7002/api/internal/proxy".into(),
-    agent_service_url: "http://127.0.0.1:7002/api/internal/agents".into(),
-    object_model_url: "http://127.0.0.1:7002/api/internal/object-model".into(),
     core_http_url: "http://127.0.0.1:7002".into(),
 };
 
 let dispatcher = ComponentDispatcherService::from_dir(
-    std::path::Path::new("./target/wasm32-wasip1/release"),
+    std::path::Path::new("./target/wasm32-wasip2/release"),
     env,
 ).await?;
 
@@ -52,11 +50,25 @@ println!("{}", result.output.unwrap());  // {"hash":"2cf24...","algorithm":"sha2
 
 ## Security posture
 
-`HostState::send_request` (in `host_state.rs`) intercepts every outbound HTTP request from a guest and:
+Raw WASI HTTP is denied. Guest HTTP uses
+`runtara:outbound-http/client@0.1.0`, with explicit connection IDs or public URLs,
+raw body bytes, bounded responses and the invocation's active deadline.
+`OutboundHttpHost` receives tenant and instance identity from host-owned context;
+guest headers and environment cannot override it. Missing services fail explicitly.
 
-- Forces `X-Org-Id: <tenant_id>` from the host — overrides any value the guest set, closing the "tampered SDK could spoof tenancy" hole.
-- Strips `Authorization` and `Cookie` headers from requests that don't target the configured proxy host — credentials must flow through the proxy that injects them, never directly from the agent.
+The server supplies credential resolution, OAuth refresh, request signing,
+connection ownership, destination checks, mTLS and rate limiting. Ordinary agents
+receive no stored credentials. Approved trusted capabilities run in fresh,
+restricted instances that deny outbound requests before credential lookup or I/O.
+
+Inject an outbound service with `dispatcher.set_outbound_http(service)` or
+`executor.set_outbound_http(service)` before invoking network capabilities. Pure
+capabilities such as the example above need no outbound service.
+
+The old `runtara:host-io/http@0.1.0` import is removed; rebuild host, agent and
+workflow artifacts together. The separate `runtara:host-io/timers@0.1.0` contract
+is unchanged.
 
 ## Where it slots in
 
-`runtara-server` builds a `ComponentDispatcherService` at boot when `RUNTARA_AGENT_COMPONENTS_DIR` is set, plugs it into `AgentTestingService`, and routes `POST /api/runtime/agents/{name}/capabilities/{cap}/test?engine=components` through this crate.
+`runtara-server` builds a `ComponentDispatcherService` at boot when `RUNTARA_AGENT_COMPONENTS_DIR` is set, plugs it into `AgentTestingService`, and routes `POST /api/runtime/agents/{name}/capabilities/{cap}/test` through this crate.

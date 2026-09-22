@@ -21,6 +21,9 @@ use wasmtime::{Engine, component::Component};
 
 use crate::{EngineConfig, build_engine};
 
+mod compiled_package;
+pub use compiled_package::CompiledWorkflowPackage;
+
 /// Exact byte length of a request nonce and source digest.
 pub const PRECOMPILE_NONCE_BYTES: usize = 32;
 
@@ -485,9 +488,29 @@ pub fn precompile_artifact(request: &PrecompileRequest) -> Result<PrecompiledCom
     let source_digest = digest(&component);
     let engine =
         build_engine(&EngineConfig::default()).context("build precompile worker engine")?;
-    let serialized_component = engine
-        .precompile_component(&component)
-        .map_err(|error| anyhow::anyhow!("precompile workflow component: {error:#}"))?;
+    precompile_source(request, &engine, &component, source_digest)
+}
+
+/// Read, hash and precompile with an explicitly configured engine. This uses
+/// the same bounded artifact/package encoding and integrity fields as the worker,
+/// while allowing controlled cache settings and a reused engine in measurements.
+/// It is synchronous; callers needing cancellation must still use a worker process.
+pub fn precompile_artifact_with_engine(
+    request: &PrecompileRequest,
+    engine: &Engine,
+) -> Result<PrecompiledComponent> {
+    let component = read_bounded_artifact(request.artifact_path())?;
+    let source_digest = digest(&component);
+    precompile_source(request, engine, &component, source_digest)
+}
+
+fn precompile_source(
+    request: &PrecompileRequest,
+    engine: &Engine,
+    component: &[u8],
+    source_digest: [u8; PRECOMPILE_NONCE_BYTES],
+) -> Result<PrecompiledComponent> {
+    let serialized_component = compiled_package::precompile(engine, component)?;
     ensure!(
         !serialized_component.is_empty(),
         "wasmtime returned an empty serialized component"
@@ -501,7 +524,7 @@ pub fn precompile_artifact(request: &PrecompileRequest) -> Result<PrecompiledCom
     Ok(PrecompiledComponent {
         nonce: request.nonce(),
         source_digest,
-        engine_fingerprint: precompile_engine_fingerprint(&engine),
+        engine_fingerprint: precompile_engine_fingerprint(engine),
         serialized_digest: digest(&serialized_component),
         serialized_component,
     })
@@ -592,12 +615,36 @@ pub unsafe fn deserialize_trusted_precompiled_component(
 ) -> Result<Component> {
     let success = validate_precompile_response(request, response)?;
     ensure_precompile_engine_compatible(engine, success)?;
+    ensure!(
+        !compiled_package::is_bundle(success.serialized_component()),
+        "isolated package requires package-aware preparation"
+    );
     // SAFETY: upheld by this function's caller contract. The child side only
     // returns `Engine::precompile_component` output and the parent must keep
     // the stdout pipe private from untrusted writers.
     unsafe { Component::deserialize(engine, success.serialized_component()) }.map_err(|error| {
         anyhow::anyhow!("deserialize trusted precompiled workflow component: {error:#}")
     })
+}
+
+/// Deserialize the root and all isolated dependencies from one verified worker
+/// response. Legacy responses produce a root with an empty child catalog.
+///
+/// # Safety
+///
+/// The same process-private provenance requirement as
+/// [`deserialize_trusted_precompiled_component`] applies to the entire response.
+/// Hashes and framing do not make arbitrary native machine code safe to load.
+pub unsafe fn deserialize_trusted_precompiled_package(
+    engine: &Engine,
+    request: &PrecompileRequest,
+    response: &PrecompileResponse,
+) -> Result<CompiledWorkflowPackage> {
+    let success = validate_precompile_response(request, response)?;
+    ensure_precompile_engine_compatible(engine, success)?;
+    // SAFETY: this function requires the exact trusted worker response; every
+    // native member was emitted by Wasmtime under that worker's engine.
+    unsafe { compiled_package::deserialize(engine, success.serialized_component()) }
 }
 
 fn read_bounded_artifact(path: &Path) -> Result<Vec<u8>> {
@@ -914,6 +961,36 @@ mod tests {
         // `run_precompile_worker` through in-memory private buffers.
         unsafe { deserialize_trusted_precompiled_component(&engine, &request, &response) }
             .expect("deserialize trusted precompile output");
+    }
+
+    #[test]
+    fn explicit_precompile_engine_controls_configuration_and_keeps_integrity_checks() {
+        let (_dir, path, source) = component_file();
+        let request = PrecompileRequest::for_artifact(test_nonce(), &path).unwrap();
+        let engine = build_engine(&EngineConfig {
+            cache_dir: None,
+            enable_epoch_interruption: false,
+        })
+        .unwrap();
+        let compiled = precompile_artifact_with_engine(&request, &engine).unwrap();
+        assert_eq!(compiled.source_digest(), digest(&source));
+        assert_eq!(
+            compiled.engine_fingerprint(),
+            precompile_engine_fingerprint(&engine)
+        );
+        let response = PrecompileResponse::Success(compiled);
+        // SAFETY: this response was produced in this process by the function above.
+        unsafe { deserialize_trusted_precompiled_package(&engine, &request, &response) }.unwrap();
+        let other = build_engine(&EngineConfig {
+            cache_dir: None,
+            enable_epoch_interruption: true,
+        })
+        .unwrap();
+        // SAFETY: same trusted response; incompatible engine must be rejected.
+        assert!(
+            unsafe { deserialize_trusted_precompiled_package(&other, &request, &response) }
+                .is_err()
+        );
     }
 
     #[test]

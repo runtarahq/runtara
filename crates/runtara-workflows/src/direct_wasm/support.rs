@@ -18,8 +18,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runtara_dsl::{
-    AgentStep, AiAgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step,
-    WaitForSignalStep, WhileStep,
+    AiAgentStep, DelayStep, EmbedWorkflowStep, ExecutionGraph, SplitStep, Step, WaitForSignalStep,
+    WhileStep,
 };
 
 use crate::compile::ChildWorkflowInput;
@@ -54,19 +54,24 @@ pub struct DirectWorkflowSupportReport {
     pub feature_summary: WorkflowFeatureSummary,
 }
 
-/// Static proof that a workflow is safe to publish through the synchronous
-/// workflow-as-agent capability ABI.
-///
-/// That ABI has no way to return a durable suspension to its parent. A report
-/// therefore treats every path that can wait, sleep, retry, or pause as
-/// unsafe, even when it is not the graph's happy path.
+/// Static proof that a workflow is safe to publish through the workflow-agent
+/// capability ABI. Guest-local cancellable I/O and non-durable Agent/Split backoff
+/// can remain inside the invocation. Durable suspension and lifecycle ownership
+/// still cannot be delegated to a child through this result type.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAgentSafetyReport {
-    /// Whether any statically reachable path can suspend or sleep.
+    /// Whether a path requires durable suspension or unsupported runtime
+    /// ownership. Guest-local cancellable I/O/backoff does not set this flag.
     pub may_suspend_or_sleep: bool,
     /// Deterministic reasons that the graph cannot be published as an agent.
     pub violations: Vec<WorkflowAgentSafetyViolation>,
+    /// Every site that parks when published: the path and step behind
+    /// `may_suspend_or_sleep`. These publish under `parks:1`, so they are
+    /// findings rather than refusals, and kept so a caller can say exactly where
+    /// an agent may park instead of only that it might.
+    #[serde(default)]
+    pub parking_sites: Vec<WorkflowAgentSafetyViolation>,
 }
 
 /// One stable path that prevents a workflow from being published as an agent.
@@ -100,7 +105,16 @@ pub fn analyze_workflow_agent_safety(
     let children = DirectSupportChildWorkflows::from_child_workflows(child_workflows);
     let mut violations = Vec::new();
     let mut child_stack = Vec::new();
-    collect_workflow_agent_safety(graph, "root", &children, &mut child_stack, &mut violations);
+    let cooperative_waits_supported =
+        !workflow_agent_requires_runtime(graph, child_workflows, false);
+    collect_workflow_agent_safety(
+        graph,
+        "root",
+        &children,
+        &mut child_stack,
+        &mut violations,
+        cooperative_waits_supported,
+    );
     violations.sort_by(|left, right| {
         (
             left.path.as_str(),
@@ -114,10 +128,86 @@ pub fn analyze_workflow_agent_safety(
             ))
     });
 
+    // A path that PARKS is not a publication hazard any more. Waits, sleeps and
+    // durable retry backoff all park under the capability ABI: the suspend
+    // sentinel carries the wake out to the caller, which parks in the child's
+    // place, so a published agent never holds a runner slot for them. They set
+    // `may_suspend_or_sleep`, which selects the `parks:1` certificate, and stay
+    // out of `violations`.
+    //
+    // What remains a violation is what is unverified or genuinely unsound: an
+    // AiAgent's model-call retry has not been shown to park, and a child closure
+    // the compiler cannot see can hide anything.
+    let (parking, violations): (Vec<_>, Vec<_>) =
+        violations.into_iter().partition(parks_under_capability_abi);
+
     WorkflowAgentSafetyReport {
-        may_suspend_or_sleep: !violations.is_empty(),
+        may_suspend_or_sleep: !parking.is_empty(),
         violations,
+        parking_sites: parking,
     }
+}
+
+/// Whether a recorded site is a wait-shaped construct that now parks in a
+/// published agent rather than one that must still refuse publication.
+///
+/// Classified by step type as well as feature, because `AiAgent` and `Agent`
+/// share the `retry-or-rate-limit-backoff` feature: the plain Agent retry is
+/// proven to park, the AiAgent model-call retry is not.
+fn parks_under_capability_abi(violation: &WorkflowAgentSafetyViolation) -> bool {
+    matches!(
+        (violation.step_type.as_str(), violation.feature.as_str()),
+        ("Delay", "delay")
+            | ("WaitForSignal", "wait-for-signal")
+            | ("Agent", "retry-or-rate-limit-backoff")
+            | ("EmbedWorkflow", "retry-backoff")
+            | ("Split", "retry-backoff")
+    )
+}
+
+/// Embed children execute inline. Inspect the same complete supplied closure
+/// for publication and import omission, including children without Agent calls.
+pub(crate) fn workflow_agent_requires_runtime(
+    graph: &ExecutionGraph,
+    children: &[ChildWorkflowInput],
+    track_events: bool,
+) -> bool {
+    std::iter::once(graph)
+        .chain(children.iter().map(|child| &child.execution_graph))
+        .any(|graph| {
+            analyze_workflow_features(graph)
+                .needs_agent_runtime(track_events, has_runtime_timeout(graph))
+        })
+}
+
+/// The coarse Timeout feature includes guest-only Agent/Embed budgets. Keep
+/// loop/signal deadline ownership explicit so publication cannot drop required
+/// runtime imports when both kinds of timeout appear in one graph or closure.
+fn has_runtime_timeout(graph: &ExecutionGraph) -> bool {
+    graph.steps.values().any(|step| match step {
+        Step::Split(step) => {
+            step.config
+                .as_ref()
+                .and_then(|config| config.timeout)
+                .is_some()
+                || has_runtime_timeout(&step.subgraph)
+        }
+        Step::While(step) => {
+            step.config
+                .as_ref()
+                .and_then(|config| config.timeout)
+                .is_some()
+                || has_runtime_timeout(&step.subgraph)
+        }
+        Step::WaitForSignal(step) => {
+            step.timeout_ms.is_some()
+                || step
+                    .on_wait
+                    .as_ref()
+                    .is_some_and(|graph| has_runtime_timeout(graph))
+        }
+        _ => false,
+    })
 }
 
 fn collect_workflow_agent_safety(
@@ -126,6 +216,7 @@ fn collect_workflow_agent_safety(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
+    cooperative_waits_supported: bool,
 ) {
     // ExecutionGraph.steps is a HashMap. Sorting on its authored key makes
     // diagnostics stable across process hash seeds and therefore suitable for
@@ -141,6 +232,7 @@ fn collect_workflow_agent_safety(
             child_workflows,
             child_stack,
             violations,
+            cooperative_waits_supported,
         );
     }
 }
@@ -151,16 +243,12 @@ fn collect_workflow_agent_step_safety(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
+    cooperative_waits_supported: bool,
 ) {
-    if step_has_breakpoint(step) {
-        push_workflow_agent_safety_violation(
-            violations,
-            path,
-            step,
-            "breakpoint-pause",
-            "breakpoints can pause an invocation; run this workflow as a top-level workflow or remove the breakpoint before publishing it as an agent",
-        );
-    }
+    // A breakpoint is not a publication hazard: the capability lowering strips
+    // it, so a published agent carries no breakpoint import and cannot pause.
+    // Refusing here would reject a workflow over a debugging aid that does not
+    // survive the compile.
 
     match step {
         Step::Delay(_) => push_workflow_agent_safety_violation(
@@ -168,7 +256,7 @@ fn collect_workflow_agent_step_safety(
             path,
             step,
             "delay",
-            "Delay can sleep; run this workflow as a top-level workflow or remove the delay before publishing it as an agent",
+            "Delay sleeps; published as an agent it parks in its caller's place rather than holding a runner",
         ),
         Step::WaitForSignal(wait) => {
             push_workflow_agent_safety_violation(
@@ -176,7 +264,7 @@ fn collect_workflow_agent_step_safety(
                 path,
                 step,
                 "wait-for-signal",
-                "WaitForSignal can suspend; run this workflow as a top-level workflow or remove the wait before publishing it as an agent",
+                "WaitForSignal suspends; published as an agent it parks in its caller's place until the signal or its timeout",
             );
             if let Some(on_wait) = &wait.on_wait {
                 collect_workflow_agent_safety(
@@ -185,18 +273,19 @@ fn collect_workflow_agent_step_safety(
                     child_workflows,
                     child_stack,
                     violations,
+                    cooperative_waits_supported,
                 );
             }
         }
-        // Agent retry handling also sleeps for a rate-limit response, even if
-        // maxRetries is set to zero. The current capability ABI cannot bubble
-        // that wait to a parent, so every Agent is conservatively unsafe.
+        // Only workflows with no root runtime ownership can keep non-durable
+        // retry/rate-limit waits local and unwind them on parent cancellation.
+        Step::Agent(_) if cooperative_waits_supported => {}
         Step::Agent(_) => push_workflow_agent_safety_violation(
             violations,
             path,
             step,
             "retry-or-rate-limit-backoff",
-            "Agent calls can retry or wait for rate limiting; run this workflow as a top-level workflow before publishing it as an agent",
+            "Agent retry backoff in a runtime-owning workflow parks in its caller's place rather than holding a runner",
         ),
         // AiAgent uses the same outbound retry/rate-limit machinery as Agent
         // for its model call and may dispatch any declared tool path.
@@ -214,13 +303,14 @@ fn collect_workflow_agent_step_safety(
                 .and_then(|config| config.max_retries)
                 .unwrap_or(0)
                 > 0
+                && !cooperative_waits_supported
             {
                 push_workflow_agent_safety_violation(
                     violations,
                     path,
                     step,
                     "retry-backoff",
-                    "Split retries can sleep between attempts; run this workflow as a top-level workflow or remove the retry policy before publishing it as an agent",
+                    "Split retry backoff in a runtime-owning workflow parks in its caller's place rather than holding a runner",
                 );
             }
             collect_workflow_agent_safety(
@@ -229,6 +319,7 @@ fn collect_workflow_agent_step_safety(
                 child_workflows,
                 child_stack,
                 violations,
+                cooperative_waits_supported,
             );
         }
         Step::While(while_step) => collect_workflow_agent_safety(
@@ -237,15 +328,16 @@ fn collect_workflow_agent_step_safety(
             child_workflows,
             child_stack,
             violations,
+            cooperative_waits_supported,
         ),
         Step::EmbedWorkflow(embed) => {
-            if embed.max_retries.unwrap_or(3) > 0 {
+            if embed.max_retries.unwrap_or(3) > 0 && !cooperative_waits_supported {
                 push_workflow_agent_safety_violation(
                     violations,
                     path,
                     step,
                     "retry-backoff",
-                    "EmbedWorkflow retries can sleep between attempts; run this workflow as a top-level workflow or remove the retry policy before publishing it as an agent",
+                    "EmbedWorkflow retry backoff across a runtime-owning closure parks in its caller's place rather than holding a runner",
                 );
             }
 
@@ -288,6 +380,7 @@ fn collect_workflow_agent_step_safety(
                 child_workflows,
                 child_stack,
                 violations,
+                cooperative_waits_supported,
             );
             child_stack.pop();
         }
@@ -315,25 +408,6 @@ fn push_workflow_agent_safety_violation(
         feature: feature.to_string(),
         reason: reason.to_string(),
     });
-}
-
-fn step_has_breakpoint(step: &Step) -> bool {
-    match step {
-        Step::Finish(step) => step.breakpoint == Some(true),
-        Step::Agent(step) => step.breakpoint == Some(true),
-        Step::Conditional(step) => step.breakpoint == Some(true),
-        Step::Split(step) => step.breakpoint == Some(true),
-        Step::Switch(step) => step.breakpoint == Some(true),
-        Step::EmbedWorkflow(step) => step.breakpoint == Some(true),
-        Step::While(step) => step.breakpoint == Some(true),
-        Step::Log(step) => step.breakpoint == Some(true),
-        Step::Error(step) => step.breakpoint == Some(true),
-        Step::Filter(step) => step.breakpoint == Some(true),
-        Step::GroupBy(step) => step.breakpoint == Some(true),
-        Step::Delay(step) => step.breakpoint == Some(true),
-        Step::WaitForSignal(step) => step.breakpoint == Some(true),
-        Step::AiAgent(step) => step.breakpoint == Some(true),
-    }
 }
 
 /// Analyze whether the current production direct emitter can compile `graph`.
@@ -518,6 +592,23 @@ fn collect_graph_support_inner(
 ) {
     let graph_durable = graph.durable.unwrap_or(inherited_durable);
     let direct_control = supports_direct_control_graph(graph, child_workflows);
+
+    // An advertised synthetic name must never dispatch to an ordinary edge.
+    // The public compiler also accepts graphs without catalog validation.
+    for (step_id, step) in &graph.steps {
+        if matches!(step, Step::AiAgent(_)) {
+            for name in crate::validation::ai_agent_mcp_tool_name_collisions(graph, step_id) {
+                unsupported.push(UnsupportedWorkflowFeature {
+                    step_id: Some(step_id.clone()),
+                    step_type: Some("AiAgent".into()),
+                    feature: "ai-agent-tool-name-collision".into(),
+                    reason: format!(
+                        "AI Agent tool label '{name}' collides with a generated MCP tool name; rename the ordinary tool label or the MCP toolset"
+                    ),
+                });
+            }
+        }
+    }
 
     // Dangling edges — an endpoint naming no step in `steps` — are the real
     // cause of a coverage-invariant failure: the edge can never be consumed, or
@@ -1017,28 +1108,26 @@ fn supports_direct_control_step_inner(
                 include_on_error,
             )
         }
-        Step::Agent(step) => {
-            supports_agent_step_baseline(graph, step)
-                && supports_normal_flow_step(
-                    graph,
-                    child_workflows,
-                    step_id,
-                    reachable,
-                    used_edges,
-                    stack,
-                    child_stack,
-                    include_on_error,
-                )
-                && on_error_supported_or_inert(
-                    graph,
-                    child_workflows,
-                    step_id,
-                    reachable,
-                    used_edges,
-                    stack,
-                    child_stack,
-                    include_on_error,
-                )
+        Step::Agent(_) => {
+            supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) && on_error_supported_or_inert(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            )
         }
         Step::AiAgent(step) if supports_ai_agent_step_baseline(graph, step, child_workflows) => {
             // The AiAgent loop consumes its tool edges directly (it dispatches
@@ -1131,14 +1220,6 @@ fn mark_inert_on_error_edges(
             mark_dead_subgraph_reachable(graph, &edge.to_step, reachable, used_edges);
         }
     }
-}
-
-fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
-    // A running capabilities.invoke cannot be interrupted by the synchronous
-    // component host. Never lower a claimed Agent deadline as a best-effort
-    // hint: validation and this compiler gate reject it until host-owned
-    // cancellation exists.
-    step.timeout.is_none()
 }
 
 /// AiAgent baseline: single-shot completions (optionally with structured
@@ -1261,13 +1342,6 @@ fn supports_embed_workflow_step_baseline(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
-    // A child runs inline and has no host-owned cancellation boundary. Do not
-    // silently treat `timeout` as a hint; reject it with the same rule as an
-    // Agent call.
-    if step.timeout.is_some() {
-        return false;
-    }
-
     if child_stack.iter().any(|visited| visited == &step.id) {
         return false;
     }
@@ -1461,7 +1535,7 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
         // Split / While / EmbedWorkflow stay excluded: their successor
         // handling owns next/error-plan interplay and needs its own analysis.
         Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
-        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Agent(_) => {}
         Step::Delay(_) | Step::WaitForSignal(_) => {}
         Step::Switch(step)
             if !step
@@ -1502,7 +1576,7 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         return false;
     };
     match step {
-        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
+        Step::Agent(_) => {}
         Step::EmbedWorkflow(_) => {}
         Step::Split(step) if supports_split_step_baseline(step) => {}
         Step::While(step) if supports_while_step_baseline(step) => {}
@@ -1701,8 +1775,7 @@ fn collect_step_support(
     }
     match step {
         Step::Finish(_) => {}
-        Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
-        Step::Agent(step) => collect_agent_step_unsupported(graph, step, unsupported),
+        Step::Agent(_) => {}
         Step::Conditional(_) if direct_control => {}
         Step::Conditional(_) => unsupported_step(
             step,
@@ -1867,13 +1940,6 @@ fn collect_embed_workflow_step_unsupported(
         });
     };
 
-    if step.timeout.is_some() {
-        push(
-            "embed-workflow-timeout",
-            "EmbedWorkflow timeout is unsupported because an inline child invocation cannot be interrupted; remove the timeout field",
-        );
-    }
-
     let Some(child) = child_workflows.get(&step.id) else {
         push(
             "embed-workflow-missing-child",
@@ -1899,21 +1965,6 @@ fn collect_embed_workflow_step_unsupported(
              compile the child workflow directly to see its specific failure — this is not a problem \
              with the parent's EmbedWorkflow step",
         );
-    }
-}
-
-fn collect_agent_step_unsupported(
-    _graph: &ExecutionGraph,
-    step: &AgentStep,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
-) {
-    if step.timeout.is_some() {
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(step.id.clone()),
-            step_type: Some("Agent".to_string()),
-            feature: "agent-timeout".to_string(),
-            reason: "Agent timeout is unsupported because a running capability invocation cannot be interrupted; remove the timeout field".to_string(),
-        });
     }
 }
 
@@ -2101,7 +2152,252 @@ mod tests {
     }
 
     #[test]
-    fn workflow_agent_safety_rejects_a_breakpoint_even_on_a_finish() {
+    fn workflow_agent_safety_accepts_local_agent_backoff_but_not_root_runtime_ownership() {
+        for retries in [0, 3] {
+            let mut graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+                "durable": false, "entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": "http",
+                        "capabilityId": "http-request", "maxRetries": retries,
+                        "connectionId": "fixture", "retryDelay": 1000},
+                    "finish": {"id": "finish", "stepType": "Finish"}
+                }, "executionPlan": [{"fromStep": "call", "toStep": "finish"}]
+            }))
+            .unwrap();
+            let report = analyze_workflow_agent_safety(&graph, &[]);
+            assert!(!report.may_suspend_or_sleep, "{report:?}");
+            let features = analyze_workflow_features(&graph);
+            assert!(
+                features.needs_runtime(false),
+                "top-level owns its lifecycle"
+            );
+            assert!(!workflow_agent_requires_runtime(&graph, &[], false));
+            assert!(
+                workflow_agent_requires_runtime(&graph, &[], true),
+                "debug events require runtime"
+            );
+
+            graph.durable = Some(true);
+            assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            graph.durable = Some(false);
+            // An error path requiring root runtime ownership must be considered
+            // even when the HTTP call itself is non-durable.
+            graph.steps.insert(
+                "log".into(),
+                serde_json::from_value(serde_json::json!({
+                    "id": "log", "stepType": "Log", "message": "fixture"
+                }))
+                .unwrap(),
+            );
+            assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+        }
+    }
+
+    #[test]
+    fn workflow_agent_safety_accepts_split_backoff_only_without_root_runtime_ownership() {
+        let base = serde_json::json!({
+            "durable": false, "entryPoint": "scope", "steps": {
+                "scope": {"id": "scope", "stepType": "Split", "config": {
+                    "value": {"valueType": "immediate", "value": [1, 2]},
+                    "maxRetries": 2, "retryDelay": 1000, "parallelism": 2
+                }, "subgraph": {"entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": "http",
+                        "capabilityId": "http-request", "maxRetries": 0},
+                    "finish": {"id": "finish", "stepType": "Finish"}
+                }, "executionPlan": [{"fromStep": "call", "toStep": "finish"}]}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }, "executionPlan": [{"fromStep": "scope", "toStep": "finish"}]
+        });
+        for sequential in [false, true] {
+            let mut value = base.clone();
+            value["steps"]["scope"]["config"]["sequential"] = sequential.into();
+            let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
+            assert!(!analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            assert!(!workflow_agent_requires_runtime(&graph, &[], false));
+        }
+        // The full declared closure matters, including otherwise unreachable
+        // recovery steps. A wait must not acquire the parent's lifecycle runtime.
+        for case in [
+            "durable-root",
+            "durable-child",
+            "root-log",
+            "child-log",
+            "child-error",
+            "child-wait",
+            "split-timeout",
+            "nested-split-timeout",
+            "breakpoint",
+        ] {
+            let mut value = base.clone();
+            match case {
+                "durable-root" => value["durable"] = true.into(),
+                "durable-child" => value["steps"]["scope"]["subgraph"]["durable"] = true.into(),
+                "root-log" => {
+                    value["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Log", "message": "fixture"})
+                }
+                "child-log" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Log", "message": "fixture"})
+                }
+                "child-error" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Error", "code": "FIXTURE",
+                    "category": "transient", "severity": "error", "message": "fixture"})
+                }
+                "child-wait" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "WaitForSignal"})
+                }
+                "split-timeout" => value["steps"]["scope"]["config"]["timeout"] = 1000.into(),
+                "nested-split-timeout" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Split", "config": {
+                        "timeout": 1000, "value": {"valueType": "immediate", "value": []}},
+                    "subgraph": {"entryPoint": "finish", "steps": {
+                        "finish": {"id": "finish", "stepType": "Finish"}}, "executionPlan": []}})
+                }
+                "breakpoint" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["finish"]["breakpoint"] =
+                        true.into()
+                }
+                _ => unreachable!(),
+            }
+            let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
+            let features = analyze_workflow_features(&graph);
+            assert!(
+                workflow_agent_requires_runtime(&graph, &[], false),
+                "{case}: {features:?}"
+            );
+            let report = analyze_workflow_agent_safety(&graph, &[]);
+            // Split backoff in a runtime-owning workflow parks now, so it is a
+            // parking site rather than a refusal — found at the same path.
+            assert!(report.violations.is_empty(), "{case}: {report:?}");
+            assert!(
+                report
+                    .parking_sites
+                    .iter()
+                    .any(|violation| violation.path == "root/steps/scope"
+                        && violation.feature == "retry-backoff"),
+                "{case}: {report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_agent_embed_backoff_checks_the_complete_runtime_closure() {
+        let root = serde_json::json!({"durable":false,"entryPoint":"embed","steps":{
+            "embed":{"id":"embed","stepType":"EmbedWorkflow","childWorkflowId":"child",
+                "childVersion":1},
+            "finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[{"fromStep":"embed","toStep":"finish"}]});
+        let middle = serde_json::json!({"durable":false,"entryPoint":"inner","steps":{
+            "inner":{"id":"inner","stepType":"EmbedWorkflow","childWorkflowId":"leaf",
+                "childVersion":1,"maxRetries":0},
+            "finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[{"fromStep":"inner","toStep":"finish"}]});
+        let leaf = serde_json::json!({"durable":false,"entryPoint":"finish","steps":{
+            "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]});
+        let make_children = |middle: serde_json::Value, leaf: serde_json::Value| {
+            vec![
+                ChildWorkflowInput {
+                    step_id: "embed".into(),
+                    workflow_id: "child".into(),
+                    version_requested: "1".into(),
+                    version_resolved: 1,
+                    execution_graph: serde_json::from_value(middle).unwrap(),
+                },
+                ChildWorkflowInput {
+                    step_id: "inner".into(),
+                    workflow_id: "leaf".into(),
+                    version_requested: "1".into(),
+                    version_resolved: 1,
+                    execution_graph: serde_json::from_value(leaf).unwrap(),
+                },
+            ]
+        };
+        // Default retries are covered as well as explicit zero/nonzero policies.
+        for retries in [None, Some(0), Some(2)] {
+            let mut root = root.clone();
+            if let Some(retries) = retries {
+                root["steps"]["embed"]["maxRetries"] = retries.into();
+            }
+            let graph = serde_json::from_value(root).unwrap();
+            let children = make_children(middle.clone(), leaf.clone());
+            assert!(!workflow_agent_requires_runtime(&graph, &children, false));
+            assert!(!analyze_workflow_agent_safety(&graph, &children).may_suspend_or_sleep);
+            assert!(workflow_agent_requires_runtime(&graph, &children, true));
+        }
+        for location in 0..3 {
+            for case in [
+                "durable",
+                "default-durable",
+                "log",
+                "error",
+                "wait",
+                "timeout",
+                "breakpoint",
+            ] {
+                let mut graphs = [root.clone(), middle.clone(), leaf.clone()];
+                let graph = &mut graphs[location];
+                match case {
+                    "durable" => graph["durable"] = true.into(),
+                    "default-durable" => {
+                        graph.as_object_mut().unwrap().remove("durable");
+                    }
+                    "log" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"Log","message":"fixture"})
+                    }
+                    "error" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"Error","code":"FIXTURE","category":"transient",
+                        "severity":"error","message":"fixture"})
+                    }
+                    "wait" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"WaitForSignal"})
+                    }
+                    "timeout" => {
+                        graph["steps"]["extra"] = serde_json::json!({"id":"extra",
+                        "stepType":"Split","config":{"timeout":0,
+                            "value":{"valueType":"immediate","value":[]}},"subgraph":leaf})
+                    }
+                    "breakpoint" => graph["steps"]["finish"]["breakpoint"] = true.into(),
+                    _ => unreachable!(),
+                }
+                let parent = serde_json::from_value(graphs[0].clone()).unwrap();
+                let children = make_children(graphs[1].clone(), graphs[2].clone());
+                assert!(
+                    workflow_agent_requires_runtime(&parent, &children, false),
+                    "{location}/{case}"
+                );
+                let safety = analyze_workflow_agent_safety(&parent, &children);
+                // Embed backoff across a runtime-owning closure parks now: the
+                // site is still found at the same path, as a parking site.
+                assert!(
+                    safety.violations.is_empty(),
+                    "{location}/{case}: {safety:?}"
+                );
+                assert!(
+                    safety
+                        .parking_sites
+                        .iter()
+                        .any(|violation| violation.path == "root/steps/embed"
+                            && violation.feature == "retry-backoff"),
+                    "{location}/{case}: {safety:?}"
+                );
+            }
+        }
+    }
+
+    /// A breakpoint used to refuse publication. It no longer does, because the
+    /// capability lowering strips breakpoints entirely: a published agent
+    /// carries no breakpoint import and cannot pause its caller. Refusing here
+    /// would reject a workflow over a debugging aid that cannot survive the
+    /// compile. The artifact-level proof lives in
+    /// `a_published_agent_carries_no_breakpoint`.
+    #[test]
+    fn workflow_agent_safety_allows_a_breakpoint_because_publishing_strips_it() {
         let mut graph = fixture("simple");
         let Some(Step::Finish(finish)) = graph.steps.get_mut("finish") else {
             panic!("expected Finish fixture step");
@@ -2111,9 +2407,10 @@ mod tests {
         let report = analyze_workflow_agent_safety(&graph, &[]);
 
         assert!(
-            report.violations.iter().any(|violation| {
-                violation.path == "root/steps/finish" && violation.feature == "breakpoint-pause"
-            }),
+            !report
+                .violations
+                .iter()
+                .any(|violation| violation.feature == "breakpoint-pause"),
             "{report:?}"
         );
     }
@@ -2140,8 +2437,9 @@ mod tests {
         );
 
         assert!(report.may_suspend_or_sleep);
+        assert!(report.violations.is_empty(), "a wait publishes: {report:?}");
         assert!(
-            report.violations.iter().any(|violation| {
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/call_child/embedded/steps/wait"
                     && violation.feature == "wait-for-signal"
             }),
@@ -2207,21 +2505,25 @@ mod tests {
         let report = analyze_workflow_agent_safety(&graph, &[]);
 
         assert!(
-            report.violations.iter().any(|violation| {
+            report.violations.is_empty(),
+            "waits and sleeps publish: {report:?}"
+        );
+        assert!(
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/approval/on-wait/steps/short_delay"
                     && violation.feature == "delay"
             }),
             "{report:?}"
         );
         assert!(
-            report.violations.iter().any(|violation| {
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/parallel/split/steps/retrying_agent"
                     && violation.feature == "retry-or-rate-limit-backoff"
             }),
             "{report:?}"
         );
         assert!(
-            report.violations.iter().any(|violation| {
+            report.parking_sites.iter().any(|violation| {
                 violation.path == "root/steps/parallel" && violation.feature == "retry-backoff"
             }),
             "{report:?}"
@@ -2385,7 +2687,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_workflow_timeout_is_rejected_by_child_aware_check() {
+    fn embed_workflow_timeout_is_supported_by_child_aware_check() {
         let mut graph = fixture("embed_workflow");
         let Some(Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
             panic!("expected EmbedWorkflow fixture step");
@@ -2403,12 +2705,7 @@ mod tests {
             }],
         );
 
-        assert!(!report.supported, "{:?}", report.unsupported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("call_child")
-                && feature.step_type.as_deref() == Some("EmbedWorkflow")
-                && feature.feature == "embed-workflow-timeout"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]
@@ -3722,7 +4019,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_timeout_is_rejected_instead_of_injected_as_a_hint() {
+    fn agent_timeout_is_supported_as_a_guest_deadline() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
@@ -3730,14 +4027,7 @@ mod tests {
         agent.timeout = Some(1_000);
 
         let report = analyze_direct_wasm_support(&graph);
-        assert!(!report.supported, "{:?}", report.unsupported);
-        assert!(
-            report
-                .unsupported
-                .iter()
-                .any(|feature| feature.feature == "agent-timeout"),
-            "timeout must have a precise unsupported feature"
-        );
+        assert!(report.supported, "{:?}", report.unsupported);
     }
 
     #[test]

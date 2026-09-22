@@ -13,6 +13,8 @@ categories = ["development-tools"]
 default = ["compiler"]
 compiler = [
     "dep:runtara-workflow-wit",
+    "dep:runtara-agent-wit",
+    "runtara-workflow-wit/isolation-package",
     "dep:wasm-encoder",
     "dep:wit-component",
     "dep:wit-parser",
@@ -38,6 +40,7 @@ path = "src/bin/compile.rs"
 required-features = ["compiler"]
 
 [dependencies]
+runtara-agent-wit = { path = "../runtara-agent-wit", version = "8.9", optional = true }
 runtara-dsl = { path = "../runtara-dsl", version = "8.9" }
 # Reference-path tokenization (`reference_path`), so validation splits a path
 # into exactly the segments the runtime will resolve. `default-features = false`
@@ -59,6 +62,11 @@ wac-graph = { version = "0.10", optional = true }
 wasmparser = { version = "0.247", optional = true }
 
 [dev-dependencies]
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+runtara-database-contract = { path = "../runtara-database-contract" }
+wat = "1.253"
+anyhow = "1"
+runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Execute emitted retry predicates at u32 boundaries without billions of invocations.
 wasmtime = { version = "46", default-features = false, features = ["std", "runtime", "cranelift"] }
 async-trait = "0.1"
@@ -70,3 +78,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # must behave identically under the in-process WorkflowExecutor.
 runtara-component-host = { path = "../runtara-component-host" }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+# Precompile fixtures draw per-launch nonces the way the embedded runner does.
+getrandom = "0.3"

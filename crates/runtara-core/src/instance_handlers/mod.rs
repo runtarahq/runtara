@@ -36,7 +36,9 @@ mod types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_persistence;
 
-pub use self::checkpoint::{handle_checkpoint, handle_get_checkpoint, handle_sleep};
+pub use self::checkpoint::{
+    SLEEP_POLL_INTERVAL, handle_checkpoint, handle_get_checkpoint, handle_sleep,
+};
 pub use self::event::{
     handle_instance_event, handle_instance_event_with_run_label, handle_retry_attempt,
 };

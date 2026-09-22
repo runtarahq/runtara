@@ -179,9 +179,9 @@ Server-side, you'll see one `WARN entitlement denial code=AGENT_NOT_ENABLED agen
 
 ### Tenant says "my workflow used to run, now it errors"
 
-Same root cause as above, different surface. A workflow compiled while the agent was allowed keeps its cached binary; when the binary runs and hits `/api/internal/agents/<module>/<capability>`, the entitlement gate denies. The response stays HTTP 200 (by design — preserves the WASM runtime's existing failure envelope) but the body carries `{"success": false, "code": "AGENT_NOT_ENABLED"}`. The execution log will show that error string.
-
-Restoring the agent to the allowlist and restarting the server clears the state — no workflow mutation needed.
+Inspect the execution error and the current agent catalog. Entitlements cannot
+restore a removed agent. SFTP and the native-capability bridge have been removed;
+see [the removal upgrade guide](sftp-removal.md) for affected workflows and instances.
 
 ### "Reports is hidden in the SPA but the env says it should be enabled"
 

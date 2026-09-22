@@ -18,20 +18,12 @@
 //! `runtara_agent_http.meta.json` next to the `.wasm` — the JSON is a build
 //! artifact, never hand-edited.
 //!
-//! Routing model:
-//! - Every request goes through the proxy via `runtara-http`'s `call_agent()`,
-//!   which reads `RUNTARA_HTTP_PROXY_URL` and forwards the request as a JSON
-//!   envelope. Routing through the proxy — connection or not — lets the host
-//!   apply its egress filtering uniformly: SSRF/private-IP block, the
-//!   DNS-rebinding guard, and no-redirect-follow.
-//! - If a connection is attached, the `X-Runtara-Connection-Id` header
-//!   additionally causes the proxy to inject credentials server-side and pin
-//!   the request to the connection's base URL. Connectionless requests get the
-//!   same egress filtering minus the base-URL pin.
-//! - When no proxy is configured (SDK/local, no `RUNTARA_HTTP_PROXY_URL`),
-//!   `call_agent()` falls back to a direct call.
-//!
-//! The component itself never sees secrets either way.
+//! Routing model: all WASM requests use the typed outbound host service.
+//! Connection destinations select host-side credentials and base URL pinning;
+//! public destinations apply the same egress policy without stored credentials.
+//! Tenant identity comes from host execution context. Native connection-aware
+//! requests require a host service and fail explicitly in the ordinary SDK.
+
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -41,23 +33,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use strum::VariantNames;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-http/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim
@@ -430,36 +405,15 @@ pub enum HttpResponseBody {
     module_supports_connections = true,
     module_secure = true
 )]
-pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError> {
-    let mut headers = input.headers.clone();
+pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError> {
+    let request = prepare_http_request(&input);
+    finish_http_request(&input, request.call_agent_async().await)
+}
+
+fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilder {
+    let headers = input.headers.clone();
     let mut url = input.url.clone();
     let query_parameters = input.query_parameters.clone();
-
-    // Forward the connection id so the proxy can attach credentials. The
-    // wasm build never resolves the connection locally — credential
-    // injection and URL-prefix handling happen server-side via the proxy.
-    if let Some(ref raw) = input._connection
-        && !raw.connection_id.is_empty()
-    {
-        headers
-            .entry("X-Runtara-Connection-Id".to_string())
-            .or_insert_with(|| raw.connection_id.clone());
-
-        // Name an alternate endpoint the connection type declares. Only the
-        // selector is sent — the proxy owns the URL set, so this cannot point a
-        // credentialed request at a host the descriptor did not declare. Only
-        // meaningful alongside a connection, hence the nesting.
-        if let Some(endpoint) = input
-            .connection_endpoint
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            headers
-                .entry("X-Runtara-Connection-Endpoint".to_string())
-                .or_insert_with(|| endpoint.to_string());
-        }
-    }
 
     // Append query parameters.
     if !query_parameters.is_empty() {
@@ -478,6 +432,22 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError>
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(input.timeout_ms));
     let method_str = input.method.as_str();
     let mut request = client.request(method_str, &url);
+
+    if let Some(connection) = input
+        ._connection
+        .as_ref()
+        .filter(|c| !c.connection_id.is_empty())
+    {
+        request = request.connection_id(&connection.connection_id);
+        if let Some(endpoint) = input
+            .connection_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            request = request.endpoint(endpoint);
+        }
+    }
 
     for (key, value) in &headers {
         request = request.header(key, value);
@@ -500,15 +470,13 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError>
         }
     };
 
-    // Every request goes through the proxy (`call_agent`) so the host applies
-    // its egress filtering (SSRF/private-IP block, DNS-rebinding guard,
-    // no-redirect-follow) uniformly. Connection-bound requests additionally get
-    // credential injection and base-URL pinning server-side (keyed on the
-    // `X-Runtara-Connection-Id` header); connectionless requests get the same
-    // filtering minus the base-URL pin. When no proxy is configured (SDK/local),
-    // `call_agent` falls back to a direct call.
-    let response_result = request.call_agent();
+    request
+}
 
+fn finish_http_request(
+    input: &HttpRequestInput,
+    response_result: Result<runtara_http::HttpResponse, runtara_http::HttpError>,
+) -> Result<HttpResponse, AgentError> {
     let response = match response_result {
         Ok(r) => r,
         Err(e) => {
@@ -679,101 +647,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_http::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(agent = "http", capabilities = [http_request,],);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "http-request" => __executor_http_request(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("http agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,7 +676,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -838,7 +713,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -872,7 +747,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -901,7 +776,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -923,7 +798,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -953,7 +828,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -986,7 +861,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -1007,7 +882,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 204);
     }
@@ -1031,7 +906,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -1055,7 +930,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("404"));
     }
@@ -1079,7 +954,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1107,7 +982,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1136,7 +1011,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1166,7 +1041,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1191,7 +1066,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1217,7 +1092,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();

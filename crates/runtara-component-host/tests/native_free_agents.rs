@@ -1,5 +1,5 @@
 //! Proves the compression and xlsx agents do their real work *inside* the wasm
-//! sandbox — no `$RUNTARA_AGENT_SERVICE_URL`, no host handler, no network.
+//! sandbox — no host handler or network.
 //!
 //! Both agents used to be thin forwarders to a native host implementation
 //! (`runtara_agents::{compression,xlsx}`) because their dependencies were
@@ -8,10 +8,12 @@
 //! C-backed backends (which these capabilities never used), and `calamine` is
 //! pure Rust already.
 //!
-//! The dispatcher below is configured with unroutable agent-service and proxy
+//! The dispatcher below is configured with unroutable service and proxy
 //! URLs on purpose: if any capability still tried to forward, it would fail.
 //!
 //! Requires the components to be built — run `scripts/build-agent-components.sh`.
+
+mod common;
 
 use std::path::PathBuf;
 
@@ -19,17 +21,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
 use serde_json::{Value, json};
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
 fn wasm_path(stem: &str) -> PathBuf {
-    let p = workspace_root().join(format!("target/wasm32-wasip2/release/{stem}.wasm"));
+    let p = common::bundle_dir().join(format!("{stem}.wasm"));
     assert!(
         p.exists(),
         "requires {}; run scripts/build-agent-components.sh",
@@ -66,9 +59,6 @@ fn build_bundle() -> tempfile::TempDir {
 /// than silently succeeding against a real host.
 fn env() -> DispatcherEnv {
     DispatcherEnv {
-        proxy_url: "http://127.0.0.1:1/unroutable".into(),
-        agent_service_url: "http://127.0.0.1:1/unroutable".into(),
-        object_model_url: "http://127.0.0.1:1/unroutable".into(),
         core_http_url: "http://127.0.0.1:1/unroutable".into(),
     }
 }

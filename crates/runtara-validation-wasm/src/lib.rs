@@ -653,6 +653,62 @@ mod tests {
         assert!(response.valid, "{:?}", response.errors);
     }
 
+    fn timeout_graph() -> Value {
+        json!({"entryPoint":"call", "steps":{
+            "call":{"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request",
+                "inputMapping":{"url":{"valueType":"immediate","value":"https://fixture.invalid"}}},
+            "embed":{"id":"embed","stepType":"EmbedWorkflow","childWorkflowId":"child","childVersion":"latest"},
+            "finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[{"fromStep":"call","toStep":"embed"},{"fromStep":"embed","toStep":"finish"}]})
+    }
+
+    #[test]
+    fn browser_validator_accepts_cooperative_agent_and_embed_timeouts() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
+        let init: Value = serde_json::from_str(&init_agent_catalog(SAMPLE_CATALOG_JSON)).unwrap();
+        assert_eq!(init["success"], true);
+        for budget in [None, Some(0), Some(1), Some(u64::MAX)] {
+            let mut graph = timeout_graph();
+            if let Some(budget) = budget {
+                for step in ["call", "embed"] {
+                    graph["steps"][step]["timeout"] = budget.into();
+                }
+            }
+            let result: Value =
+                serde_json::from_str(&validate_execution_graph_json(&graph.to_string())).unwrap();
+            assert_eq!(result["success"], true, "{budget:?}: {result}");
+            assert_eq!(result["valid"], true, "{budget:?}: {result}");
+        }
+    }
+
+    #[test]
+    fn browser_validator_rejects_malformed_cooperative_timeouts() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
+        let init: Value = serde_json::from_str(&init_agent_catalog(SAMPLE_CATALOG_JSON)).unwrap();
+        assert_eq!(init["success"], true);
+        for step in ["call", "embed"] {
+            for invalid in ["-1", "1.5", "18446744073709551616", "\"1000\""] {
+                let mut graph = timeout_graph();
+                graph["steps"][step]["timeout"] = serde_json::from_str(invalid).unwrap();
+                let result: Value =
+                    serde_json::from_str(&validate_execution_graph_json(&graph.to_string()))
+                        .unwrap();
+                assert_eq!(result["success"], true, "{step}/{invalid}: {result}");
+                assert_eq!(result["valid"], false, "{step}/{invalid}: {result}");
+                assert!(
+                    result["errors"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|error| error
+                            .as_str()
+                            .is_some_and(|message| message.contains("expected u64"))),
+                    "{step}/{invalid}: {result}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn validates_empty_graph_with_backend_validator() {
         let response = validate_execution_graph_json_impl("{}");
@@ -717,7 +773,7 @@ mod tests {
                 json!({"auth_mode": "bearer"}),
             ),
             (
-                "sftp-private-key",
+                "conditional-private-key",
                 r#"{
                     "fields": {
                         "auth_mode": {"type":"string","required":true},

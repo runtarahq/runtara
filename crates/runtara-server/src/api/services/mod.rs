@@ -6,7 +6,6 @@ pub mod agent_testing;
 pub mod compilation;
 pub mod csv_import_export;
 pub mod endpoint_ref;
-pub mod file_storage;
 pub mod input_validation;
 pub mod object_model;
 pub mod operators;
@@ -19,3 +18,10 @@ pub mod webhook_manager;
 pub mod webhook_verification;
 pub mod workflow_runtime;
 pub mod workflows;
+
+pub mod trusted;
+
+pub mod connection_resolver;
+pub mod database;
+
+pub mod outbound_http;

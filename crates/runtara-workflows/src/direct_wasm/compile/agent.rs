@@ -210,6 +210,34 @@ pub(super) fn emit_agent_plan(
         body.instruction(&Instruction::Else);
     }
 
+    let timeout_ms = static_data.agent_timeout(agent_id);
+    if let Some(timeout) = timeout_ms {
+        // A launched parallel call already owns its original budget and result.
+        // Do not create a fresh budget while assembling its memoized outcome.
+        if let Some(slot) = memo_slot_ptr_local {
+            body.instruction(&Instruction::LocalGet(slot));
+            body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I32Eqz);
+            body.instruction(&Instruction::If(BlockType::Empty));
+        }
+        super::agent_deadline::enter(
+            body,
+            indices,
+            &static_data.agent_deadline_state_error,
+            static_data.step_id(step_id).expect("planned Agent"),
+            (source_ptr_local, source_len_local),
+            timeout,
+            durable_checkpoint,
+        );
+        if memo_slot_ptr_local.is_some() {
+            body.instruction(&Instruction::End);
+        }
+    }
+
     let invoke = indices
         .agent_invokes
         .get(agent_component_id)
@@ -247,8 +275,7 @@ pub(super) fn emit_agent_plan(
             // 2. Read-only lookup of this attempt's checkpoint -> HIT_FLAG.
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.runtime_get_checkpoint));
+            super::checkpoint::emit_get_checkpoint(body, indices);
             emit_get_checkpoint_has_value(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
 
@@ -309,10 +336,20 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
             }
+            super::deadline_scope::propagate(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(4)),
+            );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -349,18 +386,15 @@ pub(super) fn emit_agent_plan(
                 DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
                 DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL,
             );
-            // Bare `checkpoint` (not `emit_checkpoint_save`): a durability point,
-            // not a suspend point — `handle_checkpoint` is load-first idempotent,
-            // and the following backoff sleep is where a pending cancel/pause parks
-            // the instance. Its `checkpoint-result` (found / pending-signal) is
-            // intentionally ignored here.
+            // Preserve signals delivered with the failed attempt. Cancel stops
+            // before retry/terminal routing; Pause stays deferred until the
+            // backoff deadline is persisted, preserving its clock on replay.
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.runtime_checkpoint));
-            return_if_retptr_error(body, indices);
+            super::checkpoint::emit_checkpoint(body, indices);
+            super::cooperative_wait::emit_retry_checkpoint_signal(body, indices);
             body.instruction(&Instruction::End); // fresh-failure If
             body.instruction(&Instruction::End); // hit/miss If
         } else {
@@ -412,10 +446,20 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
             }
+            super::deadline_scope::propagate(
+                body,
+                indices,
+                failure_target.map(|target| target.nested(2 + u32::from(durable_checkpoint))),
+            );
             load_retptr_tag(body);
             body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
@@ -440,9 +484,10 @@ pub(super) fn emit_agent_plan(
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_advance_retry_attempt(body);
         if durable_checkpoint
-            && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+            && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp
         {
-            // A lifecycle invocation must never hold its Store across backoff.
+            // No invocation may hold its Store across backoff — a published agent
+            // would otherwise retain the parent's runner slot for the whole delay.
             // Recompute the delay for checkpoint-replayed failures as well: if a
             // process died after persisting the failure envelope but before it
             // scheduled the wake, this is the first pass that can mint it.
@@ -453,6 +498,9 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
+            if indices.monotonic_now.is_some() {
+                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
+            }
             // Retry audit is keyed by attempt number and upserts in core, so it
             // remains idempotent across a crash/replay. Recording before the
             // park also makes the impending retry visible while it is queued.
@@ -464,7 +512,13 @@ pub(super) fn emit_agent_plan(
                 DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
                 DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
             );
-            emit_agent_retry_park(body, indices, route_ptr_local, route_len_local);
+            emit_agent_retry_park(
+                body,
+                indices,
+                route_ptr_local,
+                route_len_local,
+                timeout_ms.map(|_| super::agent_deadline::DEADLINE),
+            );
         } else if durable_checkpoint {
             // A replayed (HIT) attempt already slept its backoff and recorded its
             // audit row on the original run; skip both. Core `handle_sleep`
@@ -480,6 +534,9 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
+            if indices.monotonic_now.is_some() {
+                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
+            }
             emit_agent_retry_sleep(
                 body,
                 indices,
@@ -507,6 +564,9 @@ pub(super) fn emit_agent_plan(
                 retry_delay_ms,
                 rate_limit_budget_ms,
             );
+            if indices.monotonic_now.is_some() {
+                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
+            }
             emit_agent_retry_sleep(
                 body,
                 indices,
@@ -543,8 +603,8 @@ pub(super) fn emit_agent_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target.map(|target| target.nested(3)),
-            handled_target.map(|target| target.nested(3)),
+            failure_target.map(|target| target.nested(3 + u32::from(durable_checkpoint))),
+            handled_target.map(|target| target.nested(3 + u32::from(durable_checkpoint))),
         );
         body.instruction(&Instruction::End);
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
@@ -599,6 +659,11 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
             body.instruction(&Instruction::End);
         } else {
@@ -613,8 +678,18 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
         }
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(u32::from(durable_checkpoint))),
+        );
         emit_agent_invoke_error_branch(
             body,
             indices,
@@ -636,8 +711,8 @@ pub(super) fn emit_agent_plan(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target,
-            handled_target,
+            failure_target.map(|target| target.nested(u32::from(durable_checkpoint))),
+            handled_target.map(|target| target.nested(u32::from(durable_checkpoint))),
         );
         load_agent_retptr_list(body, output_ptr_local, output_len_local);
     }

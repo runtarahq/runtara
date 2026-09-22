@@ -7,7 +7,13 @@ Blocking HTTP client that runs identically on native and WASI (wasm32-wasip2).
 
 ## What it is
 
-A thin HTTP client abstraction with a single `HttpClient` / `RequestBuilder` / `HttpResponse` surface that compiles on both targets Runtara supports. The backend is a cargo feature, and exactly one must be enabled: `native` uses [`ureq`] (with TLS), `wasi` uses [`wasi:http/outgoing-handler`] via the `wasi` crate pinned to `=0.14.1` (WASI 0.2.3, matching the wit-component preview1 adapter). There is deliberately no default — a `cfg(target_family)` choice would still land `ureq` and the whole TLS stack in every transitive consumer's lockfile, so enabling neither feature fails the build rather than guessing. On top of direct `call()`, `call_agent()` will transparently forward a request through a proxy endpoint when `RUNTARA_HTTP_PROXY_URL` is set, serialising the request as JSON and letting the proxy inject credentials based on `X-Runtara-Connection-Id`. Non-2xx responses are returned as `Ok`; only transport failures produce `Err`.
+One `HttpClient` / `RequestBuilder` / `HttpResponse` API supports native SDK calls
+through `ureq` and WASM calls through `runtara:outbound-http/client@0.1.0`.
+Enable exactly one backend feature: `native` or `wasi`.
+
+All WASM entry points (`call`, `call_async`, `call_agent`, `call_agent_async`) use
+the injected native outbound service. Async calls suspend only the calling guest
+task and propagate cancellation. HTTP statuses are returned as responses.
 
 ## Using it standalone
 
@@ -34,15 +40,40 @@ The same code compiles for `cargo build --target wasm32-wasip2` with `features =
 
 ## Inside Runtara
 
-- Declared as a `[workspace.dependencies]` entry (`runtara-http = { path = "crates/runtara-http", version = "8.7" }`) and consumed directly by `runtara-sdk`, `runtara-agents`, `runtara-ai`, and each integration agent crate.
-- `runtara-sdk` wraps it in `backend::http` as the transport for all SDK-side calls into the Runtara control plane; agent crates use `call_agent()` so credentialed outbound HTTP flows through the capability proxy.
-- Depends only on `ureq` (native, TLS+JSON features) and a pinned `wasi = "=0.14.1"` (WASI 0.2.3 — see the manifest comment on why single-version pinning is load-bearing for component composition) plus `serde`, `serde_json`, `base64`, and `thiserror`.
-- Runs in every process shape Runtara targets: the server/SDK on native x86_64 and aarch64 Linux, and agent WASM components executed inside the Wasmtime-backed runtime on `wasm32-wasip2`.
-- Proxy protocol (`call_agent` + `RUNTARA_HTTP_PROXY_URL`) is the integration point with the connection-manager / agent HTTP proxy: `X-Runtara-Connection-Id` is stripped from the forwarded headers, `X-Org-Id` is forwarded (or taken from `RUNTARA_TENANT_ID`), and binary bodies round-trip as base64.
+```rust,ignore
+let response = HttpClient::new()
+    .request("POST", "/items")
+    .connection_id("opaque-connection-id")
+    .body_json(&serde_json::json!({"name": "example"}))
+    .call_agent_async()
+    .await?;
+```
+
+The host resolves credentials and applies existing OAuth, signing, destination,
+mTLS, and rate-limit behavior. Connection IDs, endpoint names/references, AI
+providers, and AWS services are explicit builder fields. Tenant and instance
+identity come from host context. A request without a connection ID is a public
+request, including requests to provider-issued signed URLs.
+
+The typed boundary carries raw bytes, with no JSON/base64 transport envelope or
+internal HTTP listener. JSON bodies are serialized once before signing. The
+host default deadline is 30 seconds, capped at 120 seconds and the execution's
+remaining time. It covers credential lookup through response consumption.
+Request and response budgets are 64 MiB and 8 MiB including metadata; download
+helpers retain their 5 MiB limit. These budgets count raw bytes, so removing the
+old encoded envelopes increases effective payload capacity.
+
+The native SDK retains direct ordinary HTTP. A native connection-aware request
+fails explicitly because that SDK has no injected credential service. Missing
+WASM services also fail explicitly; there is no direct-network fallback.
+
+Rebuild agents and composed workflows when upgrading from the old HTTP import.
+Deploy and roll back matching host/component bundles together. Drain older
+running or suspended artifacts on their matching release, or restart them
+explicitly. Timer imports remain unchanged.
 
 ## License
 
 AGPL-3.0-or-later.
 
 [`ureq`]: https://docs.rs/ureq
-[`wasi:http/outgoing-handler`]: https://github.com/WebAssembly/wasi-http

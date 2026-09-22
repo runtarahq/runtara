@@ -1,3 +1,4 @@
+pub mod isolation;
 mod runtime;
 
 pub use runtime::{RuntimeOverrides, RuntimePoolConfig, ShutdownGrace};
@@ -69,16 +70,6 @@ pub struct Config {
     pub object_model_pool_cache_ttl_secs: u64,
     /// Internal HTTP port (used to derive default service URLs).
     pub internal_port: u16,
-    /// HTTP proxy URL forwarded to workflow processes for outbound HTTP.
-    pub http_proxy_url: String,
-    /// Object-model internal API URL forwarded to workflow processes.
-    pub object_model_url: String,
-    /// Agent service URL forwarded to workflow processes for native-only capabilities.
-    pub agent_service_url: String,
-    /// Base URL workflows use to resolve connections. Served by the internal
-    /// listener, so it tracks `INTERNAL_PORT` unless `CONNECTION_SERVICE_URL`
-    /// overrides it.
-    pub connection_service_url: String,
     /// Directory containing per-agent WASM components (`runtara_agent_*.wasm`).
     /// When set, `AgentTestingService` routes known agents through the
     /// embedded wasmtime path instead of the legacy dispatcher image.
@@ -86,6 +77,8 @@ pub struct Config {
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
+    /// Runtime approvals retained solely for previously compiled isolation artifacts.
+    pub isolation_policy: Option<std::sync::Arc<isolation::IsolationPolicy>>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -218,27 +211,6 @@ impl Config {
             .parse()
             .map_err(|_| ConfigError::Invalid("INTERNAL_PORT", "must be a valid port number"))?;
 
-        let http_proxy_url = std::env::var("RUNTARA_HTTP_PROXY_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/proxy", internal_port));
-
-        let object_model_url = std::env::var("RUNTARA_OBJECT_MODEL_URL").unwrap_or_else(|_| {
-            format!(
-                "http://127.0.0.1:{}/api/internal/object-model",
-                internal_port
-            )
-        });
-
-        let agent_service_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/agents", internal_port));
-
-        // Derived from `internal_port` like the three above, because
-        // `/api/connections` is nested on the very same internal listener.
-        // Leaving it undderived meant a server on any non-default INTERNAL_PORT
-        // handed workflows a connection endpoint pointing at 7002 — either
-        // nothing, or somebody else's server.
-        let connection_service_url = std::env::var("CONNECTION_SERVICE_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/connections", internal_port));
-
         let agent_components_dir = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -252,6 +224,7 @@ impl Config {
             agent_components_dir.as_deref(),
         );
 
+        let isolation_policy = isolation::IsolationPolicy::from_env()?;
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
         );
@@ -316,12 +289,9 @@ impl Config {
             object_model_pool_cache_max,
             object_model_pool_cache_ttl_secs,
             internal_port,
-            http_proxy_url,
-            object_model_url,
-            agent_service_url,
-            connection_service_url,
             agent_components_dir,
             direct_wasm_components_dir,
+            isolation_policy,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,
@@ -571,6 +541,17 @@ pub fn get() -> &'static Config {
     CONFIG.get().expect("Config must be initialized before use")
 }
 
+/// Legacy artifact runtime approvals. Never rereads the file.
+pub fn isolation_policy() -> Option<std::sync::Arc<isolation::IsolationPolicy>> {
+    try_get().and_then(|config| config.isolation_policy.clone())
+}
+
+/// New compilation always uses standard component composition. Legacy runtime
+/// approvals cannot change cache identity or select another compiler backend.
+pub fn workflow_lowering_tag() -> String {
+    runtara_workflows::direct_lowering_tag()
+}
+
 /// Initialize the global configuration for a unit test, if nothing has yet.
 ///
 /// The global is a `OnceLock` shared by every test in this binary, so this
@@ -804,6 +785,14 @@ pub fn valkey_admission_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_lowering_identity_uses_standard_composition() {
+        let actual = workflow_lowering_tag();
+        assert_eq!(actual, runtara_workflows::direct_lowering_tag());
+        assert!(actual.contains("agent-composition=standard-v1"));
+        assert!(!actual.contains("isolation=v1-"));
+    }
 
     /// The admission ceiling exists to bound work the runner will execute, so
     /// it must stay anchored to the runner's own bound. These drifted apart

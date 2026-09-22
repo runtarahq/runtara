@@ -35,7 +35,7 @@
 #
 # The positive path (a 2xx from the GraphQL endpoint) needs live Intuit
 # credentials and is therefore NOT covered here; it is covered offline by
-# `internal_proxy::tests::named_endpoint_round_trips_through_the_pin`, which
+# `outbound_http::tests::named_endpoint_round_trips_through_the_pin`, which
 # runs the same decision function against the same real descriptor.
 #
 # Prerequisites: Postgres + docker (for an isolated Valkey) and the agent /
@@ -216,7 +216,6 @@ RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
 DATA_DIR="${TEST_DATA_DIR}" \
 RUST_LOG="warn,runtara_server=info" \
 AUTH_PROVIDER=local \
-RUNTARA_CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
 VALKEY_HOST=127.0.0.1 \
 VALKEY_PORT="${TEST_VALKEY_PORT}" \
 OTEL_SDK_DISABLED=true \

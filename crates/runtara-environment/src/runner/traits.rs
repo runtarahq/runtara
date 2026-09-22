@@ -470,9 +470,12 @@ pub struct LaunchOptions {
 /// Handle for a launched instance (detached execution).
 #[derive(Debug, Clone)]
 pub struct RunnerHandle {
-    /// Immutable identifier for this physical launch attempt.
+    /// Durable launch queue identity. Pre-start recovery may reuse it for
+    /// another physical execution.
     pub launch_id: String,
-    /// Unique identifier for this launch.
+    /// Opaque identity of this physical execution, unique across runner
+    /// handoffs even when `launch_id` is reused. Runner control and monitoring
+    /// must use this identity so stale handles cannot target a replacement.
     pub handle_id: String,
     /// Instance ID
     pub instance_id: String,
@@ -648,8 +651,22 @@ pub trait Runner: Send + Sync {
     /// Check if an instance is still running.
     async fn is_running(&self, handle: &RunnerHandle) -> bool;
 
-    /// Stop a running instance.
+    /// Immediately abort the whole running execution.
     async fn stop(&self, handle: &RunnerHandle) -> Result<()>;
+
+    /// Arm whole-execution abort at an absolute monotonic deadline. This does
+    /// not deliver cooperative cancellation; the caller uses lifecycle signals.
+    /// Repeated requests may shorten but never extend grace. False means this
+    /// runner no longer owns the execution. Implementations must not wait here.
+    async fn schedule_abort(
+        &self,
+        _handle: &RunnerHandle,
+        _deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        Err(RunnerError::Other(
+            "runner does not support a cancellation grace deadline".into(),
+        ))
+    }
 
     /// Collect metrics and cleanup after instance has finished.
     ///

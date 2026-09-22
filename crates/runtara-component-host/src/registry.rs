@@ -34,16 +34,19 @@ pub struct LoadedAgent {
 /// Build a shared `Linker` configured to satisfy every WASI import an agent
 /// component might pull in via its own guest world — `wasi:cli/command`
 /// (env, stdio, clocks, random, filesystem, sockets) and `wasi:http/proxy`
-/// for outbound HTTP.
+/// for compatibility. Raw WASI HTTP is denied by HostHooks.
 pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     let mut linker = Linker::<HostState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     // `add_only_http_to_linker_async` is the slim version that skips
     // re-adding wasi:io (which wasi::p2::add_to_linker_async already added).
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
-    // Concurrent host-io HTTP hop for agents' proxied requests (wasip3 route
-    // (b)) — agents built against runtara:host-io import it unconditionally.
+    // Timers retain their interface; HTTP uses the injected outbound service.
     crate::host_io::add_host_io_to_linker(&mut linker)?;
+    crate::outbound_http::add_to_linker(&mut linker)?;
+    crate::trusted::add_to_linker(&mut linker)?;
+    crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
+    crate::database_host::add_database_to_linker(&mut linker)?;
     Ok(linker)
 }
 
@@ -57,10 +60,21 @@ pub fn load_agent(
     agent_id: impl Into<String>,
 ) -> Result<Arc<LoadedAgent>> {
     let wasm_path = wasm_path.as_ref();
+    load_agent_bytes(engine, linker, &std::fs::read(wasm_path)?, agent_id)
+        .with_context(|| format!("agent component at {}", wasm_path.display()))
+}
+
+/// Load exactly the bytes that the built-in loader registered and hashed.
+pub(crate) fn load_agent_bytes(
+    engine: &Engine,
+    linker: &Linker<HostState>,
+    wasm: &[u8],
+    agent_id: impl Into<String>,
+) -> Result<Arc<LoadedAgent>> {
     let agent_id = agent_id.into();
-    let component = Component::from_file(engine, wasm_path)?;
+    let component = Component::new(engine, wasm)?;
     let capabilities_iface = find_capabilities_iface(engine, &component)
-        .with_context(|| format!("agent `{agent_id}` at {}", wasm_path.display()))?;
+        .with_context(|| format!("agent `{agent_id}`"))?;
     let pre = linker.instantiate_pre(&component)?;
     Ok(Arc::new(LoadedAgent {
         agent_id,

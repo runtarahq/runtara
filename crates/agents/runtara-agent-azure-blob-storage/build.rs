@@ -10,7 +10,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-const WIT_TEMPLATE: &str = include_str!("../../runtara-agent-wit/templates/agent.wit.in");
+const WIT_TEMPLATE: &str = include_str!("../../runtara-agent-wit/templates/trusted-agent.wit.in");
 
 fn main() {
     let pkg_name = env::var("CARGO_PKG_NAME").expect("CARGO_PKG_NAME unset");
@@ -36,6 +36,6 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../runtara-agent-wit/templates/agent.wit.in");
+    println!("cargo:rerun-if-changed=../../runtara-agent-wit/templates/trusted-agent.wit.in");
     println!("cargo:rerun-if-env-changed=CARGO_PKG_NAME");
 }

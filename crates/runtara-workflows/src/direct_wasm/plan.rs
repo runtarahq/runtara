@@ -110,6 +110,7 @@ pub(super) enum DirectRunPlan {
         breakpoint: bool,
         max_retries: u32,
         retry_delay_ms: u64,
+        timeout_ms: Option<u64>,
         child_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
@@ -242,13 +243,14 @@ pub(super) enum DirectAiToolPlan {
     Agent {
         agent_id: u32,
         agent_component_id: String,
+        step_id: String,
+        durable: bool,
         /// The advertised tool name (the edge label; the synthetic
         /// `<toolset>_search`/`_invoke` name for MCP meta-tools). Names the
         /// per-CALL checkpoint scope `{ai_step}.tool.{label}.{call}` when the
         /// target is a workflow-agent.
         label: String,
-        /// Legacy tool Agent timeout. Supported artifacts always leave this
-        /// unset because Agent per-step timeouts are rejected before compile.
+        /// Guest-owned budget for one replay-stable model tool call.
         timeout_ms: Option<u64>,
     },
     /// Run a composed child workflow with the LLM-provided arguments as its input
@@ -258,6 +260,10 @@ pub(super) enum DirectAiToolPlan {
         /// The EmbedWorkflow step id that owns the preloaded child graph; used to
         /// build the child variables/scope and debug events.
         step_id: String,
+        input_mapping_id: u32,
+        label: String,
+        durable: bool,
+        timeout_ms: Option<u64>,
         /// The composed child workflow run plan (built from the preloaded graph).
         child_plan: Box<DirectRunPlan>,
     },
@@ -280,6 +286,9 @@ pub(super) enum DirectAiToolPlan {
 /// mapping used to build the load/save inputs.
 #[derive(Debug, Clone)]
 pub(super) struct DirectAiMemoryPlan {
+    pub(super) step_id: String,
+    pub(super) durable: bool,
+    pub(super) timeout_ms: Option<u64>,
     pub(super) load_agent_id: u32,
     pub(super) save_agent_id: u32,
     pub(super) agent_component_id: String,
@@ -801,6 +810,7 @@ fn step_run_plan_inner(
                 breakpoint: step_breakpoint_enabled(graph, step),
                 max_retries: embed_workflow_effective_max_retries(step),
                 retry_delay_ms: embed_workflow_effective_retry_delay_ms(step),
+                timeout_ms: step.body.get("timeout").and_then(serde_json::Value::as_u64),
                 child_plan: Box::new(child_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
@@ -998,9 +1008,10 @@ fn step_run_plan_inner(
                 if let Some(edge) = tool_edge {
                     // An EmbedWorkflow tool target has a preloaded child graph;
                     // run it as the tool, feeding its output back to the model.
-                    if child_workflows
+                    if let Some(step) = graph
+                        .steps
                         .iter()
-                        .any(|child| child.step_id == edge.to_step)
+                        .find(|step| step.id == edge.to_step && step.step_type == "EmbedWorkflow")
                     {
                         let child = child_workflow_graph(child_workflows, &edge.to_step)?;
                         let child_plan = step_run_plan(
@@ -1011,6 +1022,21 @@ fn step_run_plan_inner(
                         )?;
                         tools.push(DirectAiToolPlan::Embed {
                             step_id: edge.to_step.clone(),
+                            input_mapping_id: embed_workflow_input_mapping_id(
+                                graph,
+                                &edge.to_step,
+                            )?,
+                            label: name.clone(),
+                            durable: graph.durable
+                                && step
+                                    .body
+                                    .get("durable")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(true),
+                            timeout_ms: step
+                                .body
+                                .get("timeout")
+                                .and_then(serde_json::Value::as_u64),
                             child_plan: Box::new(child_plan),
                         });
                         continue;
@@ -1043,6 +1069,12 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        step_id: tool_agent
+                            .timeout_step_id
+                            .as_ref()
+                            .unwrap_or(&tool_agent.step_id)
+                            .clone(),
+                        durable: tool_agent.durable,
                         label: name.clone(),
                         timeout_ms: tool_agent.timeout,
                     });
@@ -1063,9 +1095,15 @@ fn step_run_plan_inner(
                     tools.push(DirectAiToolPlan::Agent {
                         agent_id: tool_agent.id,
                         agent_component_id: canonicalize_direct_agent_id(&tool_agent.agent_id),
+                        step_id: tool_agent
+                            .timeout_step_id
+                            .as_ref()
+                            .unwrap_or(&tool_agent.step_id)
+                            .clone(),
+                        durable: tool_agent.durable,
                         label: name.clone(),
-                        // MCP tool providers carry their own transport timeout;
-                        // this is typically None (no per-call override).
+                        // The referenced Agent owns this workflow budget;
+                        // capability transport timeouts retain their own meaning.
                         timeout_ms: tool_agent.timeout,
                     });
                 }
@@ -1121,6 +1159,13 @@ fn step_run_plan_inner(
                             agent_component_id: canonicalize_direct_agent_id(&agent.agent_id),
                         });
                     Some(DirectAiMemoryPlan {
+                        step_id: load
+                            .timeout_step_id
+                            .as_ref()
+                            .unwrap_or(&load.step_id)
+                            .clone(),
+                        durable: load.durable,
+                        timeout_ms: load.timeout,
                         load_agent_id: load.id,
                         save_agent_id: save.id,
                         agent_component_id: canonicalize_direct_agent_id(&load.agent_id),
@@ -2883,6 +2928,47 @@ fn agent_effective_retry_delay_ms(agent: &DirectAgentManifest) -> u64 {
         .unwrap_or(if agent.rate_limited { 2_000 } else { 1_000 })
 }
 
+/// Derive timer imports from the manifest, including inline children and every
+/// nested graph. Keep retry defaults shared with plan lowering. This is an
+/// artifact requirement, not a selectable cancellation mode.
+pub(super) fn needs_cooperative_timers(manifest: &DirectWorkflowManifest) -> bool {
+    if !manifest.feature_summary.agent_ids.is_empty()
+        || super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows)
+    {
+        return true;
+    }
+    let mut graphs = vec![&manifest.graph];
+    graphs.extend(manifest.child_workflows.iter().map(|child| &child.graph));
+    while let Some(graph) = graphs.pop() {
+        if graph
+            .splits
+            .iter()
+            .any(|split| !split.durable && split_effective_max_retries(split) > 0)
+        {
+            return true;
+        }
+        for step in &graph.steps {
+            if step.step_type == "EmbedWorkflow"
+                && !(graph.durable
+                    && step
+                        .body
+                        .get("durable")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true))
+                && embed_workflow_effective_max_retries(step) > 0
+            {
+                return true;
+            }
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    false
+}
+
 fn embed_workflow_effective_max_retries(step: &DirectStepManifest) -> u32 {
     step.body
         .get("maxRetries")
@@ -3557,6 +3643,8 @@ mod tests {
         let agent_tool = DirectAiToolPlan::Agent {
             agent_id: 1,
             agent_component_id: "utils".into(),
+            step_id: "lookup".into(),
+            durable: true,
             label: "lookup".into(),
             timeout_ms: None,
         };
@@ -3752,6 +3840,7 @@ mod tests {
             max_retries,
             retry_delay,
             timeout: None,
+            timeout_step_id: None,
         }
     }
 

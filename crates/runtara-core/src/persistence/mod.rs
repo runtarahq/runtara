@@ -13,6 +13,9 @@ pub mod conformance;
 
 pub mod vocabulary;
 
+/// Atomic optional ownership for isolated invocation persistence.
+pub mod invocations;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -472,6 +475,13 @@ impl<'a> CompleteInstanceParams<'a> {
 /// Persistence interface used by core handlers.
 #[async_trait]
 pub trait Persistence: Send + Sync {
+    /// Optional atomic invocation fencing. Callers requiring durable fences must
+    /// reject absence rather than use check-then-write persistence. Legacy calls
+    /// are unchanged.
+    fn invocation_fences(&self) -> Option<&dyn invocations::InvocationFences> {
+        None
+    }
+
     /// Insert a new instance row for `instance_id`, owned by `tenant_id`, in
     /// its initial pending state.
     ///
@@ -742,8 +752,8 @@ pub trait Persistence: Send + Sync {
     /// transition and suspension event. Shutdown also schedules immediate wake.
     /// Returns false for a replaced/missing command, a type mismatch, or a transition
     /// that would revive a terminal instance. Repeating an accepted acknowledgment
-    /// returns true without applying its transition again. Cancel may override a
-    /// completed/failed run when the runner discovers an unhandled cancellation.
+    /// returns true without applying its transition again. No new receipt may
+    /// overwrite an accepted terminal outcome, including cancellation receipts.
     async fn acknowledge_signal(
         &self,
         instance_id: &str,

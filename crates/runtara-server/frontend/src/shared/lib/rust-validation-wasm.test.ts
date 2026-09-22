@@ -60,14 +60,14 @@ describe('shared Rust validation initialization', () => {
 
   it('hydrates workflow validation from full agent detail payloads', async () => {
     const details = [
-      { id: 'sftp', hasSideEffects: true, capabilities: [] },
+      { id: 'mcp', hasSideEffects: true, capabilities: [] },
       { id: 'http', hasSideEffects: true, capabilities: [] },
     ];
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ agents: [{ id: 'sftp' }, { id: 'http' }] }),
+          JSON.stringify({ agents: [{ id: 'mcp' }, { id: 'http' }] }),
           { status: 200 }
         )
       )
@@ -86,7 +86,7 @@ describe('shared Rust validation initialization', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'http://runtime.test/api/runtime/agents/sftp',
+      'http://runtime.test/api/runtime/agents/mcp',
       expect.any(Object)
     );
     expect(wasm.initAgentCatalog).toHaveBeenCalledWith(JSON.stringify(details));

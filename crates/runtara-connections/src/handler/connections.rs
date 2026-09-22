@@ -19,7 +19,6 @@ use crate::facade::ConnectionsFacade;
 use crate::integration_compatibility::IntegrationCompatibility;
 use crate::repository::connections::ConnectionRepository;
 use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
-use crate::resource_resolver::resources_for_integration;
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
@@ -430,7 +429,7 @@ pub async fn delete_connection_handler(
     get,
     path = "/api/runtime/connections/operator/{operatorName}",
     params(
-        ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'SFTP')"),
+        ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'MCP')"),
         ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)")
     ),
     responses(
@@ -635,114 +634,6 @@ pub async fn get_connection_type_handler(
     }
 }
 
-// ============================================================================
-// Runtime Connection Handler (Internal API for runtara-workflows)
-// ============================================================================
-
-/// Get connection for runtara-workflows runtime
-///
-/// INTERNAL ENDPOINT: Returns connection with decrypted parameters and rate limit state.
-/// This endpoint is called by runtara-workflows at runtime to fetch credentials.
-///
-/// Path format: /api/connections/{tenant_id}/{connection_id}
-/// This matches the CONNECTION_SERVICE_URL format expected by runtara-workflows.
-// No OpenAPI annotation — this is an internal-only endpoint (not exposed via gateway)
-pub async fn get_connection_for_runtime_handler(
-    State(state): State<ConnectionsState>,
-    Path((tenant_id, connection_id)): Path<(String, String)>,
-    Query(query): Query<RuntimeConnectionQuery>,
-) -> Result<Json<RuntimeConnectionResponse>, (StatusCode, Json<Value>)> {
-    // Build metadata from query params (tag, stepId, workflowId, instanceId)
-    let metadata = {
-        let mut map = serde_json::Map::new();
-        if let Some(ref tag) = query.tag {
-            map.insert("tag".to_string(), json!(tag));
-        }
-        if let Some(ref step_id) = query.step_id {
-            map.insert("stepId".to_string(), json!(step_id));
-        }
-        if let Some(ref workflow_id) = query.workflow_id {
-            map.insert("workflowId".to_string(), json!(workflow_id));
-        }
-        if let Some(ref instance_id) = query.instance_id {
-            map.insert("instanceId".to_string(), json!(instance_id));
-        }
-        if map.is_empty() {
-            None
-        } else {
-            Some(Value::Object(map))
-        }
-    };
-
-    // Create services with Redis for live state and db pool for event tracking
-    let repository = Arc::new(ConnectionRepository::new(
-        state.db_pool.clone(),
-        state.cipher.clone(),
-    ));
-    let rate_limit_service = Arc::new(RateLimitService::with_redis_manager_and_db_pool(
-        repository.clone(),
-        state.redis_manager.clone(),
-        state.db_pool,
-    ));
-    let service = ConnectionService::with_rate_limit_service(
-        repository,
-        state.compatibility.clone(),
-        rate_limit_service,
-    );
-
-    match service
-        .get_for_runtime(&connection_id, &tenant_id, metadata)
-        .await
-    {
-        Ok(response) => Ok(Json(response)),
-        Err(ServiceError::NotFound(msg)) => Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "success": false,
-                "error": "CONNECTION_NOT_FOUND",
-                "message": msg
-            })),
-        )),
-        Err(ServiceError::DatabaseError(msg)) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "success": false,
-                "error": "DATABASE_ERROR",
-                "message": msg
-            })),
-        )),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "success": false,
-                "error": "INTERNAL_ERROR",
-                "message": "An unexpected error occurred"
-            })),
-        )),
-    }
-}
-
-/// Internal metadata-only counterpart of [`get_connection_for_runtime_handler`].
-/// Unlike the credential endpoint, this response is safe to inject into a
-/// workflow component and never decrypts connection parameters.
-pub async fn get_connection_metadata_for_runtime_handler(
-    State(state): State<ConnectionsState>,
-    Path((tenant_id, connection_id)): Path<(String, String)>,
-) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
-    describe_connection(&state, &tenant_id, &connection_id).await
-}
-
-/// Internal resource-discovery counterpart of
-/// [`resolve_connection_resource_handler`]. The tenant comes from the trusted
-/// runtime path rather than authenticated request extensions.
-pub async fn resolve_connection_resource_for_runtime_handler(
-    State(state): State<ConnectionsState>,
-    Path((tenant_id, connection_id)): Path<(String, String)>,
-    Json(request): Json<ConnectionResourceRequest>,
-) -> Result<Json<ConnectionResourcePage>, (StatusCode, Json<Value>)> {
-    resolve_connection_resource(&state, &tenant_id, &connection_id, &request).await
-}
-
 async fn resolve_connection_resource(
     state: &ConnectionsState,
     tenant_id: &str,
@@ -784,38 +675,12 @@ async fn describe_connection(
     tenant_id: &str,
     connection_id: &str,
 ) -> Result<Json<ConnectionDescriptor>, (StatusCode, Json<Value>)> {
-    let repository = ConnectionRepository::new(state.db_pool.clone(), state.cipher.clone());
-    let connection = repository
-        .get_by_id(connection_id, tenant_id)
+    ConnectionsFacade::new(state.clone())
+        .describe_connection(connection_id, tenant_id)
         .await
-        .map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "success": false,
-                    "error": "DATABASE_ERROR",
-                    "message": error.to_string()
-                })),
-            )
-        })?
+        .map_err(connection_resource_error)?
+        .map(Json)
         .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "success": false,
-                    "error": "CONNECTION_NOT_FOUND",
-                    "message": format!("Connection '{}' not found", connection_id)
-                })),
-            )
-        })?;
-
-    let integration_id = connection.integration_id.unwrap_or_default();
-    Ok(Json(ConnectionDescriptor {
-        connection_id: connection.id,
-        integration_id: integration_id.clone(),
-        connection_subtype: connection.connection_subtype,
-        status: connection.status,
-        resources: resources_for_integration(&integration_id),
-        metadata: Value::Null,
-    }))
+            connection_resource_error(ConnectionsError::NotFound("Connection not found".into()))
+        })
 }

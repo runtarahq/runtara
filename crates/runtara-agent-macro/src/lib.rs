@@ -19,6 +19,15 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, ItemFn, Type, parse_macro_input};
 
+mod component;
+
+/// Generate a built-in Agent's callback bindings, dispatch, and error envelope.
+/// Capability IDs come from existing `#[capability]` annotations.
+#[proc_macro]
+pub fn agent_component(input: TokenStream) -> TokenStream {
+    component::expand(input)
+}
+
 /// A known error specification for a capability
 #[derive(Debug, Clone)]
 struct KnownErrorSpec {
@@ -161,6 +170,9 @@ struct CapabilityArgs {
     /// Whether this capability requires rate limiting (external API calls)
     #[darling(default)]
     rate_limited: bool,
+    /// Run in a fresh restricted instance with host-authorized credentials.
+    #[darling(default)]
+    trusted: bool,
 
     // === Error introspection attributes ===
     /// Known errors this capability can return.
@@ -261,7 +273,12 @@ struct OutputContainerArgs {
     description: Option<String>,
 }
 
-/// Attribute macro for marking agent capability functions
+/// Attribute macro for marking agent capability functions.
+///
+/// An authored `async fn` generates an async dispatcher with the same coercion
+/// and error contract as a synchronous capability. Its descriptor stores a
+/// standard Rust future; the macro does not spawn work or own an executor.
+/// Guest bindings can await the dispatcher directly without boxing it.
 ///
 /// # Example
 /// ```ignore
@@ -293,6 +310,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Derive capability_id from function name if not provided (snake_case -> kebab-case)
     let capability_id = args.id.unwrap_or_else(|| fn_name_str.replace('_', "-"));
+    let capability_id_ident = format_ident!("__CAPABILITY_ID_{}", fn_name_str.to_uppercase());
 
     // Extract input type from first parameter
     let input_type = input_fn
@@ -317,22 +335,20 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let side_effects = args.side_effects;
     let idempotent = args.idempotent.unwrap_or(!side_effects);
     let rate_limited = args.rate_limited;
+    let trusted = args.trusted;
+    if let Err(error) = validate_capability_signature(&input_fn.sig, trusted) {
+        return error.to_compile_error().into();
+    }
     let module = args.module;
+    let module_str = module.as_deref().unwrap_or("");
 
     // Generate metadata registration
     let meta_ident = format_ident!("__CAPABILITY_META_{}", fn_name.to_string().to_uppercase());
-    let executor_ident = format_ident!(
-        "__CAPABILITY_EXECUTOR_{}",
-        fn_name.to_string().to_uppercase()
-    );
     let executor_fn_ident = format_ident!("__executor_{}", fn_name);
 
     let display_name_token = option_to_tokens(&display_name);
     let description_token = option_to_tokens(&description);
     let module_token = option_to_tokens(&module);
-
-    // For executor, module must be provided
-    let module_str = module.clone().unwrap_or_else(|| "unknown".to_string());
 
     // Parse the input type as an identifier for the executor function
     let input_type_ident = format_ident!("{}", input_type);
@@ -389,10 +405,22 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // This follows the naming convention: __INPUT_META_{StructName}
     let input_meta_ident = format_ident!("__INPUT_META_{}", input_type);
 
-    // Generate synchronous executor wrapper
+    // Preserve the authored function's asyncness. Both wrappers share exactly
+    // the same coercion and error envelope; guest dispatch awaits directly.
+    let asyncness = input_fn.sig.asyncness;
+    let await_result = asyncness.map(|_| quote! { .await });
+    let invoke_fn_ident = format_ident!("__invoke_{}", fn_name);
     let executor_wrapper = quote! {
+        // A uniform, directly awaited adapter for component dispatch. Crate
+        // visible so `agent_component!` can dispatch a capability declared in
+        // a child module.
         #[doc(hidden)]
-        fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+        pub(crate) async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+            #executor_fn_ident(input)#await_result
+        }
+
+        #[doc(hidden)]
+        #asyncness fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
             // Helper to create JSON-structured errors matching AgentError format.
             // All capability errors must be parseable JSON so the #[resilient] macro
             // can check error category for retry decisions.
@@ -410,7 +438,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
                 .map_err(|e| __to_json_error("INPUT_DESERIALIZATION_ERROR",
                     format!("Invalid input for {}: {}", #capability_id, e)))?;
-            let result = #fn_name(typed_input).map_err(|e| {
+            let result = #fn_name(typed_input)#await_result.map_err(|e| {
                 let s: String = e.into();
                 // Pass through existing JSON errors (from AgentError), wrap plain strings
                 if s.starts_with('{') { s } else {
@@ -421,6 +449,37 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .map_err(|e| __to_json_error("OUTPUT_SERIALIZATION_ERROR",
                     format!("Failed to serialize result for {}: {}", #capability_id, e)))
         }
+    };
+
+    let executor_wrapper = if trusted {
+        let trusted_executor = format_ident!("__trusted_executor_{}", fn_name);
+        // Only this separate wrapper accepts host credentials. The ordinary
+        // executor forwards public input and an opaque ID across the host ABI.
+        quote! {
+            #[doc(hidden)]
+            pub(crate) async fn #invoke_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+                #executor_fn_ident(input).await
+            }
+            #[doc(hidden)]
+            async fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+                runtara_agent_trusted::invoke(#module_str, #capability_id, input).await
+            }
+            #[doc(hidden)]
+            async fn #trusted_executor(mut input: serde_json::Value, context: &runtara_agent_trusted::TrustedContext)
+                -> Result<serde_json::Value, String>
+            {
+                // Connection authority comes exclusively from the separate host
+                // context. Ignore the ordinary guest's routing metadata here.
+                if let Some(fields) = input.as_object_mut() { fields.remove("_connection"); }
+                let input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
+                let typed_input: #input_type_ident = serde_json::from_value(input)
+                    .map_err(|_| runtara_agent_trusted::error("INVALID_INPUT", "Invalid trusted capability input"))?;
+                let result = #fn_name(typed_input, context)#await_result.map_err(|e| -> String { e.into() })?;
+                serde_json::to_value(result).map_err(|_| runtara_agent_trusted::error("INVALID_OUTPUT", "Invalid trusted capability output"))
+            }
+        }
+    } else {
+        executor_wrapper
     };
 
     // Generate known_errors array from errors attribute
@@ -482,11 +541,14 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #known_errors_static
 
+        #[doc(hidden)]
+        pub const #capability_id_ident: &str = #capability_id;
+
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         pub static #meta_ident: runtara_dsl::agent_meta::CapabilityMeta = runtara_dsl::agent_meta::CapabilityMeta {
             module: #module_token,
-            capability_id: #capability_id,
+            capability_id: #capability_id_ident,
             function_name: #fn_name_str,
             input_type: #input_type,
             output_type: #output_type,
@@ -495,19 +557,13 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             has_side_effects: #side_effects,
             is_idempotent: #idempotent,
             rate_limited: #rate_limited,
+            trusted: #trusted,
             known_errors: #known_errors_token,
             tags: #tags_token,
         };
 
         #executor_wrapper
 
-        #[allow(non_upper_case_globals)]
-        #[doc(hidden)]
-        pub static #executor_ident: runtara_dsl::agent_meta::CapabilityExecutor = runtara_dsl::agent_meta::CapabilityExecutor {
-            module: #module_str,
-            capability_id: #capability_id,
-            execute: #executor_fn_ident,
-        };
 
         #module_registration
     };
@@ -1821,10 +1877,57 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+fn validate_capability_signature(signature: &syn::Signature, trusted: bool) -> syn::Result<()> {
+    let valid_count = signature.inputs.len() == if trusted { 2 } else { 1 };
+    let valid_context = !trusted || signature.inputs.last().is_some_and(|arg| {
+        matches!(arg, syn::FnArg::Typed(arg) if matches!(arg.ty.as_ref(),
+            syn::Type::Reference(reference) if reference.mutability.is_none()
+                && matches!(reference.elem.as_ref(), syn::Type::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == "TrustedContext"))))
+    });
+    if !valid_count || !valid_context {
+        return Err(syn::Error::new_spanned(
+            signature,
+            "capabilities take one input; trusted capabilities also take an immutable &TrustedContext",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use syn::parse_quote;
+
+    #[test]
+    fn trusted_signatures_require_separate_immutable_context() {
+        let valid: syn::ItemFn = parse_quote!(
+            fn sign(
+                input: Input,
+                context: &runtara_agent_trusted::TrustedContext,
+            ) -> Result<Output, Error> {
+            }
+        );
+        assert!(validate_capability_signature(&valid.sig, true).is_ok());
+        assert!(validate_capability_signature(&valid.sig, false).is_err());
+        for function in [
+            parse_quote!(
+                fn sign(input: Input) {}
+            ),
+            parse_quote!(
+                fn sign(input: Input, context: TrustedContext) {}
+            ),
+            parse_quote!(
+                fn sign(input: Input, context: &mut TrustedContext) {}
+            ),
+            parse_quote!(
+                fn sign(input: Input, context: &Value) {}
+            ),
+        ] {
+            let function: syn::ItemFn = function;
+            assert!(validate_capability_signature(&function.sig, true).is_err());
+        }
+    }
 
     // ========================================================================
     // Tests for unwrap_option_type

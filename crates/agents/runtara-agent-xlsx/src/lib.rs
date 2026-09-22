@@ -1,13 +1,8 @@
 //! XLSX agent — WebAssembly component.
 //!
 //! Excel / OpenDocument spreadsheet parsing (XLSX, XLS, XLSB, ODS), executed
-//! entirely inside the wasm sandbox. This agent used to be a thin forwarder to
-//! a native host handler at `$RUNTARA_AGENT_SERVICE_URL/xlsx/{capability}`;
-//! that hop is gone. `calamine` is pure Rust and builds for wasm32-wasip2 with
-//! its default features, and these capabilities only ever used its in-memory
-//! reader (`open_workbook_auto_from_rs`) — no filesystem access is involved.
-//! `rust_xlsxwriter`, named in the old header as the other blocker, was never
-//! actually a dependency: there is no write capability.
+//! entirely inside the wasm sandbox. `calamine` is pure Rust; capabilities use
+//! its in-memory reader (`open_workbook_auto_from_rs`) without filesystem access.
 //!
 //! Capability metadata travels through `#[capability_input]` / `#[capability]`
 //! / `#[capability_output]` annotations on the same Rust types and functions
@@ -23,23 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Cursor;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-xlsx/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim
@@ -113,11 +91,8 @@ impl From<AgentError> for String {
 // ============================================================================
 //
 // The xlsx agent itself doesn't use connections (`supports_connections: false`),
-// but the macro-derived dispatcher path still pipes the optional `_connection`
-// field through input deserialization, and `forward_to_native` re-serializes it
-// when shipping the request to the host. We keep the shape consistent with the
-// other migrated HTTP agents so any future capability that does take a
-// connection slots in without surgery.
+// but its input structs retain the optional `_connection` field for schema
+// compatibility. Keep this shape consistent with the other component agents.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawConnection {
@@ -136,10 +111,8 @@ pub struct RawConnection {
 // ============================================================================
 //
 // The wasm component has no filesystem access, so spreadsheet bytes always
-// arrive base64-encoded inside the input JSON. We mirror the legacy shapes from
-// `crates/runtara-agents/src/agents/xlsx.rs` so the host's native handler — which
-// reuses the same legacy struct definitions — deserializes our forwarded body
-// unchanged.
+// arrive inside the input JSON. These shapes preserve compatibility with
+// existing workflows while spreadsheet processing runs inside the component.
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileData {
@@ -557,102 +530,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_xlsx::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "from-xlsx" => __executor_from_xlsx(value),
-            "get-sheets" => __executor_get_sheets(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("xlsx agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(agent = "xlsx", capabilities = [from_xlsx, get_sheets,],);
 
 // ============================================================================
 // Tests

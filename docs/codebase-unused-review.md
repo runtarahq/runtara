@@ -1,6 +1,6 @@
 # Codebase usage review
 
-Originally reviewed 2026-09-20; current-state reconciliation: **2026-09-22**. Scope includes the existing uncommitted trusted-capability changes. This is a usage and architecture review, not a full correctness or security audit. Finding numbers are stable across follow-ups.
+Originally reviewed 2026-09-20; current-state reconciliation: **2026-09-22**. Current state includes main through `6ba6bdde`; the historical cleanup checks below ran with an older local trusted-capability copy. This is a usage and architecture review, not a full correctness or security audit. Finding numbers are stable across follow-ups.
 
 ## Current status
 
@@ -11,10 +11,10 @@ Originally reviewed 2026-09-20; current-state reconciliation: **2026-09-22**. Sc
 | 3 — Cancellation-map scaffolding | **Resolved** | None. Public Rust constructor signatures changed; in-repository callers are updated. |
 | 4 — Lint-hidden frontend exports | **Resolved and pushed**, `a8afd0ce` | None for the 21 exports and two subsequently orphaned wrappers. |
 | 5 — Test-only frontend helpers | **Resolved in this cleanup** | None. Removed seven exports plus two newly orphaned exports; live editing coverage remains. |
-| 6 — Rust direct dependencies | **Resolved and pushed**, `6768eb1f` | None for the 11 removed declarations. Retain the native-transport and link-only dependencies described below. |
+| 6 — Rust direct dependencies | **Resolved and pushed**, `6768eb1f` | Ten removals remain; main now requires core `thiserror`, which was restored during reconciliation. Retain the native-transport dependency described below; upstream SFTP removal also retired its link-only dependency. |
 | Additional backend API candidates | **Resolved in this cleanup** | Removed all ten functions/methods following explicit approval. External Rust callers must migrate if they used these APIs. |
 
-All six findings and the ten additional backend API candidates are resolved. The public session-token field has also been retired following explicit approval; session endpoints and their existing authentication remain. No whole Rust crate has been confirmed unused. Findings 1–4 and 6 were committed previously; finding 5 and the additional backend API removals are included in this cleanup on `feature/code-cleanup`. Unrelated trusted-capability work remains outside this cleanup.
+All six findings and the ten additional backend API candidates are resolved. The public session-token field has also been retired following explicit approval; session endpoints and their existing authentication remain. No whole Rust crate has been confirmed unused. Findings 1–4 and 6 were committed previously; finding 5 and the additional backend API removals are included in this cleanup on `feature/code-cleanup`. The stale local trusted-capability copy was backed up and removed before merging its newer upstream implementation; it was not committed a second time.
 
 ## Completed verification by cleanup
 
@@ -35,7 +35,7 @@ Rust cleanup verification with pinned Rust 1.97.0:
 - The first sandboxed SDK test run could not bind its local HTTP listeners. The rerun outside that restriction passed. Remaining native checks used an isolated build directory to avoid other Cargo jobs' shared build lock; all Cargo checks used offline dependency resolution and server checks used `SQLX_OFFLINE=true`.
 - Database/Valkey integration targets were compiled and linted, but not executed against services. Full-workspace tests, component runtime integration tests, and E2E tests were not rerun for this manifest-only cleanup.
 
-The workspace contains 52 Rust packages, including 27 standalone agent components. I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The ten backend API candidates listed below have also been removed. HTTP session-token retirement is recorded under finding 1 below.
+After merging main, the workspace contains 53 Rust packages, including 26 standalone agent components (SFTP was removed upstream). I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The ten backend API candidates listed below have also been removed. HTTP session-token retirement is recorded under finding 1 below.
 
 [Component diagram and package map](component-diagram.md)
 
@@ -56,7 +56,7 @@ The workspace contains 52 Rust packages, including 27 standalone agent component
 
 The changed server binary built successfully, and all 1,197 server unit tests passed, including the five session-token signing/verification tests. Clippy passed with all targets and warnings denied, enabling embedded UI and database/Valkey/TLS integration targets; those feature-gated service suites were compiled/linted, not run in full. Rust formatting, shell syntax, and diff whitespace checks passed. The E2E used isolated ports, a mock Teams authority/connector, dedicated Valkey, and uniquely named databases. `KEEP_DB=1` retained the test databases and logs; each run stopped only its own server, mock, and Valkey container. Other channel providers were not exercised end-to-end; they share the corrected session loop.
 
-**HTTP session-token retirement (2026-09-22; current working tree).** Following explicit approval, removed both HTTP signing calls, the SSE `token` field and stream plumbing, and the signing/verifying module with its five now-obsolete tests. Session creation and reconnection continue to emit `sessionId` and `instanceId`; messaging, tenant scoping, ordinary HTTP authentication/authorization, and channel-specific credentials/signatures remain. The frontend already ignored the emitted token and uses the user's OIDC access token; its API comment now reflects the response. Removed obsolete secret setup from 22 E2E launchers and the pipeline playground. Cryptographic dependencies remain in use by other signing/authentication code, including endpoint references and webhook verification.
+**HTTP session-token retirement (2026-09-22; committed in `024fc2d7`).** Following explicit approval, removed both HTTP signing calls, the SSE `token` field and stream plumbing, and the signing/verifying module with its five now-obsolete tests. Session creation and reconnection continue to emit `sessionId` and `instanceId`; messaging, tenant scoping, ordinary HTTP authentication/authorization, and channel-specific credentials/signatures remain. The frontend already ignored the emitted token and uses the user's OIDC access token; its API comment now reflects the response. Removed obsolete secret setup from 22 E2E launchers and the pipeline playground. Cryptographic dependencies remain in use by other signing/authentication code, including endpoint references and webhook verification.
 
 This intentionally changes the externally visible `session_created` event: consumers expecting `token` must stop requiring it. No repository production code verified or used that value. Session creation no longer requires `SESSION_TOKEN_SECRET`; reconnect no longer attempts signing or substitutes an empty token. AWS session credentials and Teams endpoint-reference signing are separate mechanisms and remain.
 
@@ -128,18 +128,18 @@ The original, pre-cleanup production scan returned 39 value exports, three types
 
 ### 6. P3 — Rust manifests retain likely unused direct dependencies
 
-**Resolved and pushed in `6768eb1f`; manifests rechecked 2026-09-21.** Removed 11 direct dependency declarations across six crates and their corresponding lockfile edges, with no third-party version changes.
+**Resolved and pushed in `6768eb1f`; manifests rechecked 2026-09-21.** Originally removed 11 direct dependency declarations across six crates and their corresponding lockfile edges, with no third-party version changes. Main reconciliation restored core `thiserror` for its new invocation-fence error; ten removals remain.
 
 | Package | Removed declarations |
 | --- | --- |
-| [runtara-core](../crates/runtara-core/Cargo.toml) | `serde`, `thiserror` |
+| [runtara-core](../crates/runtara-core/Cargo.toml) | `serde`; `thiserror` was subsequently restored for new upstream code |
 | [runtara-environment](../crates/runtara-environment/Cargo.toml) | `tracing-subscriber` |
 | [runtara-agents](../crates/runtara-agents/Cargo.toml) | `strum`; dev dependencies `tempfile`, `tokio`, `wiremock`, `serial_test` |
 | [runtara-server](../crates/runtara-server/Cargo.toml) | Dev dependency `testcontainers-modules` |
 | [runtara-report-dsl](../crates/runtara-report-dsl/Cargo.toml) | Dev dependency `insta` |
 | [runtara-sdk](../crates/runtara-sdk/Cargo.toml) | Direct optional `tracing-attributes`; the public `tracing` feature remains supported through `tracing` |
 
-Retained `runtara-connections`' test dependency on `runtara-http` because it enables native transport, `runtara-agents`' optional `openssl` for its link/feature-only role, and `md-5`, whose Rust import name is `md5`. The removal builds, tests, cross-target checks, and Clippy results are recorded above. Removing a direct declaration does not imply the package disappears from the transitive graph or guarantee a build-time improvement.
+Retained `runtara-connections`' test dependency on `runtara-http` because it enables native transport, and `md-5`, whose Rust import name is `md5`. The initial cleanup retained the agent crate's link-only `openssl` dependency; upstream SFTP removal subsequently retired it. The removal builds, tests, cross-target checks, and Clippy results are recorded above. Removing a direct declaration does not imply the package disappears from the transitive graph or guarantee a build-time improvement.
 
 ## Additional backend API candidates
 
@@ -168,11 +168,23 @@ Removal verification with pinned Rust 1.97.0:
 - `runtara-validation-wasm`: built by the frontend script and loaded by the browser, despite having no incoming Cargo dependency.
 - `runtara-workflow-runtime`: built and composed as a WASM artifact, including the explicitly supported composed-runtime compatibility path.
 - `runtara-agent-bundle-emit`: invoked by `scripts/build-agent-components.sh` to generate agent metadata.
-- All 27 agent crates: discovered through the workspace build script and metadata/artifact registry. No static Rust call site is needed for dynamic capability dispatch.
-- `runtara-agents`: still provides native SFTP execution, connection schemas, and the host S3 client. Its registry is partly legacy, but `execute_capability` and connection metadata are live.
-- `runtara-agent-trusted`: used by current uncommitted host/compiler/provider work; it is not an orphan.
+- All 26 current agent crates: discovered through the workspace build script and metadata/artifact registry. No static Rust call site is needed for dynamic capability dispatch.
+- `runtara-agents`: provides host-side connection descriptors and extraction. Main removed SFTP, the native capability bridge, and the standalone host S3 client.
+- `runtara-agent-trusted`: the trusted-execution contract is part of merged host/compiler/provider support; provider signing now lives in the S3/Azure component crates.
 - WIT crates, generated TypeScript clients, generated browser bindings, public SDK APIs, feature-gated integration tests, and test mocks: lack of a default-build caller is insufficient evidence of disuse.
 - `prototypes` and `spikes`: excluded from production cleanup conclusions.
+
+## Main reconciliation (2026-09-22)
+
+The remaining 40 modified and 13 untracked files were an older local version of the trusted-capability feature already included in main's `6ba6bdde` (PR #256). They were preserved in a verified archive and Git stash before merging main. The merge retains the cleanup commits and main's later async execution, native host interfaces, agent-owned presigning, SFTP removal, and dependency fixes. Packaging conflicts take main's newer Cargo-metadata-based staging implementation; its declared-component filtering preserves the original packaging fix. The merged build revealed that main's new invocation-fence error uses `thiserror`, so `runtara-core` now retains that dependency; the other ten removed declarations remain absent. Cargo regenerated the lockfile without changing package versions relative to main.
+
+Reconciliation verification:
+
+- The component build produced 26 agents plus both shared workflow components; all three staging tests passed. A prior staging directory containing retired SFTP artifacts was preserved under a new name before rerunning the build into a fresh directory.
+- The affected Rust suites passed **1,854 tests** (22 existing ignored doctests), including the Environment launch-lease integration target with isolated PostgreSQL containers. All **255 component-host tests** passed (one ignored manual test), including trusted S3/Azure execution and emulator checks. The trusted fixture hardcodes the workspace artifact directory; its initial missing-file failures were resolved by staging the rebuilt artifacts there with the repository tool. Compiled workflow integration passed **400 tests**, with three manual benchmarks ignored.
+- All **1,482 frontend tests** passed; frontend build and Knip passed; ESLint reported no errors and the existing 34 warnings. Full-workspace Clippy passed with all targets and the complete CI feature-gate list. Rust formatting, shell syntax, and diff whitespace checks passed.
+- The parallel deadline suite passed 118 tests and failed `agent_deadline_covers_later_attempt_without_resetting_budget` on its wall-clock assertion (3.90 seconds). That test passed all three subsequent isolated reruns. Its code and the relevant runtime/compiler code match `main`; the result suggests sensitivity to parallel load, but the original suite run remains a recorded failure.
+- The merged server built and the HTTP-session/Teams E2E passed again without a session signing secret. This reconfirmed token-free HTTP creation/reconnection and channel ownership/dedup behavior. The uniquely named E2E databases/logs were retained; the test stopped its own services. Full service-backed CI suites and every other channel's E2E were not run.
 
 ## Current-state refresh and reproducibility
 

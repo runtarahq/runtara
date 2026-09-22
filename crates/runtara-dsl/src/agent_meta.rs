@@ -16,31 +16,6 @@ pub trait EnumVariants {
 /// Function pointer type for getting enum variant names
 pub type EnumVariantsFn = fn() -> &'static [&'static str];
 
-/// Synchronous executor function type for agent capabilities.
-pub type CapabilityExecutorFn = fn(serde_json::Value) -> Result<serde_json::Value, String>;
-
-/// Executor for an agent capability.
-pub struct CapabilityExecutor {
-    /// The agent module name (e.g., "utils", "transform")
-    pub module: &'static str,
-    /// Capability ID in kebab-case (e.g., "random-double")
-    pub capability_id: &'static str,
-    /// The executor function
-    pub execute: CapabilityExecutorFn,
-}
-
-/// Execute a capability by module and capability_id.
-///
-/// Agent execution is provided by `runtara-agents::registry`. This fallback
-/// remains for older callers that still compile against `runtara-dsl` directly.
-pub fn execute_capability(
-    module: &str,
-    capability_id: &str,
-    _input: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    Err(format!("Unknown capability: {}:{}", module, capability_id))
-}
-
 /// Metadata for an agent capability
 #[derive(Debug, Clone)]
 pub struct CapabilityMeta {
@@ -64,6 +39,8 @@ pub struct CapabilityMeta {
     pub is_idempotent: bool,
     /// Whether this capability requires rate limiting (external API calls)
     pub rate_limited: bool,
+    /// Requires isolated, credential-bearing execution by an approved built-in.
+    pub trusted: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
     pub known_errors: &'static [KnownError],
@@ -97,6 +74,19 @@ pub mod capability_tags {
     /// capability ABI cannot propagate a durable suspension to its parent, so
     /// staged workflow agents without this proof are never composable.
     pub const WORKFLOW_AGENT_NON_SUSPENDING: &str = "non-suspending:1";
+    /// Marker for a published workflow-agent that CAN park: on a wait, a sleep,
+    /// or a retry backoff. It carries its wake out through the suspend sentinel
+    /// — an absolute deadline in the numeric `retry-after` field, or the signal
+    /// route in the message — so its caller parks and is woken in its place.
+    ///
+    /// This is deliberately an alternative to `non-suspending:1`, never an
+    /// addition. Every composer built before parking existed requires
+    /// `non-suspending:1` on every staged workflow-agent, so a child tagged
+    /// this way is refused outright by an older parent rather than composed by
+    /// one that would re-raise its suspend without the deadline and silently
+    /// drop the timeout. Delays still block, so a child that sleeps is not
+    /// covered by this marker.
+    pub const WORKFLOW_AGENT_PARKS: &str = "parks:1";
 }
 
 /// Error category for capability errors
@@ -121,7 +111,7 @@ impl ErrorKind {
 /// Used for compile-time introspection and tooling.
 #[derive(Debug, Clone)]
 pub struct KnownError {
-    /// Machine-readable error code (e.g., "HTTP_TIMEOUT", "SFTP_AUTH_ERROR")
+    /// Machine-readable error code (e.g., "HTTP_TIMEOUT", "HTTP_AUTH_ERROR")
     pub code: &'static str,
     /// Human-readable description of when this error occurs
     pub description: &'static str,
@@ -309,6 +299,9 @@ pub struct CapabilityInfo {
     pub is_idempotent: bool,
     #[serde(rename = "rateLimited")]
     pub rate_limited: bool,
+    /// Host-enforced execution mode; never a workflow-controlled permission.
+    #[serde(default)]
+    pub trusted: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
     #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
@@ -421,7 +414,7 @@ pub struct AgentModuleConfig {
     pub supports_connections: bool,
     pub integration_ids: &'static [&'static str],
     /// Whether this agent can receive sensitive connection data from Connection steps.
-    /// Only secure agents (http, sftp) should have this set to true.
+    /// Only secure agents (http) should have this set to true.
     /// This prevents connection credentials from leaking through non-secure agents.
     pub secure: bool,
 }
@@ -505,15 +498,6 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: true,
     },
     AgentModuleConfig {
-        id: "sftp",
-        name: "Sftp",
-        description: "SFTP capabilities for secure file transfer operations - list, download, upload, and delete files on remote servers (has side effects)",
-        has_side_effects: true,
-        supports_connections: true,
-        integration_ids: &["sftp"],
-        secure: true,
-    },
-    AgentModuleConfig {
         id: "compression",
         name: "Compression",
         description: "Archive capabilities for creating and extracting ZIP archives, listing contents, and extracting individual files",
@@ -535,7 +519,7 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
 
 /// Get built-in agent modules.
 ///
-/// Full agent registries are provided by `runtara-agents::registry`.
+/// Full agent catalogs are loaded from WASM component metadata.
 pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
     BUILTIN_AGENT_MODULES.iter().collect()
 }
@@ -726,7 +710,7 @@ pub enum ConnectionAuthType {
     Oauth2ClientCredentials,
     /// Credential pair authentication (login + password)
     UsernamePassword,
-    /// Private key authentication (e.g. SSH, SFTP)
+    /// SSH private key authentication
     SshKey,
     /// IAM-style key pair (key ID + secret key)
     AccessKey,
@@ -1022,9 +1006,9 @@ pub struct NamedEndpoint {
 /// Metadata for a connection type.
 #[derive(Debug, Clone)]
 pub struct ConnectionTypeMeta {
-    /// Unique identifier for this connection type (e.g., "bearer", "sftp")
+    /// Unique identifier for this connection type (e.g., "bearer", "mcp")
     pub integration_id: &'static str,
-    /// Display name for UI (e.g., "Bearer Token", "SFTP")
+    /// Display name for UI (e.g., "Bearer Token", "MCP Server")
     pub display_name: &'static str,
     /// Description of this connection type
     pub description: Option<&'static str>,
@@ -1530,6 +1514,7 @@ pub fn capability_to_api_with_types(
         has_side_effects: cap.has_side_effects,
         is_idempotent: cap.is_idempotent,
         rate_limited: cap.rate_limited,
+        trusted: cap.trusted,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
     }
@@ -1970,6 +1955,50 @@ pub const WORKFLOW_AGENT_CAPABILITY_ID: &str = "run";
 /// schema synthesis cannot establish execution safety. Production publishing
 /// must first inspect the complete workflow/embedded-child closure, then call
 /// this helper immediately before staging the sidecar.
+/// Mark every workflow-agent capability in this sidecar as able to park.
+/// Mutually exclusive with [`certify_workflow_agent_non_suspending`]: carrying
+/// both would let an older composer accept a parking child.
+pub fn certify_workflow_agent_parks(info: &mut AgentInfo) {
+    for capability in &mut info.capabilities {
+        let tags = &mut capability.tags;
+        if tags
+            .iter()
+            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+        {
+            tags.retain(|tag| tag != capability_tags::WORKFLOW_AGENT_NON_SUSPENDING);
+            if !tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_PARKS)
+            {
+                tags.push(capability_tags::WORKFLOW_AGENT_PARKS.to_string());
+            }
+        }
+    }
+}
+
+/// Whether every workflow-agent capability here is marked as able to park.
+/// `false` also covers metadata that is not a workflow-agent at all.
+pub fn is_parking_workflow_agent(info: &AgentInfo) -> bool {
+    let mut has_workflow_capability = false;
+    for capability in &info.capabilities {
+        if capability
+            .tags
+            .iter()
+            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+        {
+            has_workflow_capability = true;
+            if !capability
+                .tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_PARKS)
+            {
+                return false;
+            }
+        }
+    }
+    has_workflow_capability
+}
+
 pub fn certify_workflow_agent_non_suspending(info: &mut AgentInfo) {
     for capability in &mut info.capabilities {
         if capability
@@ -2112,6 +2141,7 @@ pub fn workflow_agent_info(
             has_side_effects: true,
             is_idempotent: false,
             rate_limited: false,
+            trusted: false,
             known_errors: Vec::new(),
             tags: vec![
                 capability_tags::WORKFLOW_AGENT.to_string(),
@@ -2560,6 +2590,7 @@ mod output_schema_tests {
             has_side_effects: false,
             is_idempotent: true,
             rate_limited: false,
+            trusted: false,
             known_errors: &[],
             tags: &[],
         }
@@ -2633,6 +2664,7 @@ mod catalog_tests {
                 has_side_effects: false,
                 is_idempotent: true,
                 rate_limited: false,
+                trusted: false,
                 known_errors: vec![],
                 tags: vec![],
             }],
@@ -2988,6 +3020,15 @@ mod slug_tests {
     }
 }
 
+/// Content-bound import used to pin a workflow's privileged built-in dependency.
+/// The host only provides this marker for its approved installed artifact.
+pub fn trusted_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
+    format!(
+        "runtara:trusted-artifacts/{}-h{wasm_sha256}-h{metadata_sha256}@0.1.0",
+        canonical_agent_id(agent_id)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2997,8 +3038,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            11,
-            "Expected 11 built-in agent modules"
+            10,
+            "Expected 10 built-in agent modules"
         );
     }
 
@@ -3014,7 +3055,10 @@ mod tests {
         assert!(ids.contains(&"datetime"), "Missing datetime module");
         assert!(ids.contains(&"http"), "Missing http module");
         assert!(ids.contains(&"compression"), "Missing compression module");
-        assert!(ids.contains(&"sftp"), "Missing sftp module");
+        assert!(
+            !ids.contains(&"sftp"),
+            "Removed SFTP module must not be advertised"
+        );
         assert!(ids.contains(&"object-model"), "Missing object-model module");
     }
 
@@ -3089,10 +3133,10 @@ mod tests {
 
     #[test]
     fn test_secure_modules() {
-        // Only http and sftp should be secure
+        // Only http should be secure
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" => {
+                "http" => {
                     assert!(module.secure, "{} module should be secure", module.id);
                 }
                 _ => {
@@ -3113,10 +3157,10 @@ mod tests {
 
     #[test]
     fn test_side_effects_modules() {
-        // http, sftp, and object-model have side effects
+        // http and object-model have side effects
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object-model" => {
+                "http" | "object-model" => {
                     assert!(
                         module.has_side_effects,
                         "{} module should have side effects",
@@ -3136,10 +3180,10 @@ mod tests {
 
     #[test]
     fn test_connection_supporting_modules() {
-        // http, sftp, and object-model support connections
+        // http and object-model support connections
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object-model" => {
+                "http" | "object-model" => {
                     assert!(
                         module.supports_connections,
                         "{} module should support connections",
@@ -3178,14 +3222,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sftp_integration_ids() {
-        let sftp_module = find_agent_module("sftp").unwrap();
-        let integration_ids = sftp_module.integration_ids;
-
-        assert!(
-            integration_ids.contains(&"sftp"),
-            "sftp should support sftp integration"
-        );
+    fn removed_sftp_module_is_not_resolvable() {
+        assert!(find_agent_module("sftp").is_none());
     }
 
     // ========================================================================
@@ -3353,6 +3391,7 @@ mod tests {
             has_side_effects: true,
             is_idempotent: false,
             rate_limited: false,
+            trusted: false,
             known_errors: vec![
                 KnownErrorInfo {
                     code: "NETWORK_ERROR".to_string(),
@@ -3404,6 +3443,7 @@ mod tests {
             has_side_effects: false,
             is_idempotent: true,
             rate_limited: false,
+            trusted: false,
             known_errors: vec![],
             tags: vec![],
         };
@@ -3411,5 +3451,32 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         // Empty knownErrors should be skipped due to skip_serializing_if
         assert!(json.get("knownErrors").is_none());
+    }
+}
+
+#[cfg(test)]
+mod trusted_metadata_tests {
+    use super::*;
+    #[test]
+    fn old_metadata_defaults_false_and_explicit_trust_round_trips() {
+        let info = workflow_agent_info(
+            "workflow",
+            "Workflow",
+            "",
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(!info.capabilities[0].trusted);
+        let mut value = serde_json::to_value(&info.capabilities[0]).unwrap();
+        value.as_object_mut().unwrap().remove("trusted");
+        assert!(
+            !serde_json::from_value::<CapabilityInfo>(value.clone())
+                .unwrap()
+                .trusted
+        );
+        value["trusted"] = serde_json::Value::Bool(true);
+        let trusted: CapabilityInfo = serde_json::from_value(value).unwrap();
+        assert!(trusted.trusted);
+        assert_eq!(serde_json::to_value(trusted).unwrap()["trusted"], true);
     }
 }

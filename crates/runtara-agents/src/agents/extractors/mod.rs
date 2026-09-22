@@ -15,7 +15,6 @@ pub mod connection_types;
 pub(crate) mod http_api_key;
 pub(crate) mod http_bearer;
 pub(crate) mod http_mtls;
-pub(crate) mod sftp;
 
 #[cfg(test)]
 mod tests;
@@ -24,10 +23,6 @@ mod tests;
 pub use http_api_key::HttpApiKeyExtractor;
 pub use http_bearer::HttpBearerExtractor;
 pub use http_mtls::HttpMtlsExtractor;
-
-// SFTP connection type is registered for schema purposes (doesn't implement HttpConnectionExtractor)
-#[allow(unused_imports)]
-use sftp::SftpParams;
 
 /// Configuration extracted from a connection for HTTP requests
 #[derive(Debug, Clone, Default)]

@@ -15,7 +15,11 @@ class ComponentStagingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/agents/runtara-agent-http"]\n')
+        (self.root / "Cargo.toml").write_text('[workspace]\nresolver = "3"\nmembers = ["crates/agents/runtara-agent-http"]\n')
+        agent = self.root / "crates/agents/runtara-agent-http"
+        (agent / "src").mkdir(parents=True)
+        (agent / "Cargo.toml").write_text('[package]\nname = "runtara-agent-http"\nversion = "0.0.0"\nedition = "2024"\n')
+        (agent / "src/lib.rs").write_text("")
         self.source = self.root / "source"
         self.destination = self.root / "staged"
         self.source.mkdir()

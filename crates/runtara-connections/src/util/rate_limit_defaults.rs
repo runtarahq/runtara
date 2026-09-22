@@ -43,7 +43,7 @@ pub const RATE_LIMIT_OPT_OUT: &[&str] = &[
 ///
 /// Returns `None` for connection types where rate limiting doesn't apply
 /// (e.g., database connections), where egress does not traverse the proxy
-/// (e.g., native SFTP/postgres, presigned S3/Azure), or where the target API's
+/// (e.g., postgres, presigned S3/Azure), or where the target API's
 /// limits are unknown (see [`RATE_LIMIT_OPT_OUT`]).
 pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitConfigDto> {
     match integration_id {
@@ -185,7 +185,7 @@ mod tests {
     fn test_no_defaults_for_non_proxy_types() {
         // Native socket / presigned egress never traverses the proxy, so a
         // rate_limit_config could not be enforced even if set.
-        assert!(get_default_rate_limit_config("sftp").is_none());
+        assert!(get_default_rate_limit_config("unknown-integration").is_none());
         assert!(get_default_rate_limit_config("postgres").is_none());
     }
 

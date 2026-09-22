@@ -108,8 +108,7 @@ pub fn validate_connections_with_candidates(
 /// (`ComponentDispatcherService::catalog()`) — the same source of truth the
 /// dynamic workflow validator and `GET /api/runtime/agents` use.
 ///
-/// This used to consult the statically-compiled
-/// `runtara_agents::registry::get_agents()`, which only lists agents with
+/// This used to consult the former host capability registry, which only lists agents with
 /// compiled-in capability registrations. Every integration that now runs as
 /// a WASM component (shopify, hubspot, stripe, slack, …) was absent from
 /// that list, so this check silently passed steps with no connection
@@ -498,7 +497,7 @@ mod tests {
     }
 
     /// Regression test for the connection guard being blind to agents that
-    /// only exist in the dynamic catalog (i.e. every non-`http`/`sftp`
+    /// only exist in the dynamic catalog (i.e. every non-`http`
     /// integration after native-agent deletion). Before threading the
     /// catalog through, `agent_requires_connection` always fell back to
     /// `false` for `shopify` because it wasn't in the compiled-in registry,

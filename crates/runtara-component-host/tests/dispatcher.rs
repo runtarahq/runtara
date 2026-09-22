@@ -3,25 +3,17 @@
 //! Builds a tmp `bundles/` directory by copying the freshly-built
 //! `runtara_agent_crypto.wasm` and the source `meta.json` together, then runs
 //! the dispatcher against it. The explicit component integration suite fails
-//! closed if the .wasm is missing — run
-//! `cargo component build --release --target wasm32-wasip2 -p
-//! runtara-agent-crypto` first.
+//! closed if the .wasm is missing — run `scripts/build-agent-components.sh`
+//! first. `RUNTARA_AGENT_COMPONENTS_DIR` selects an isolated component build.
+
+mod common;
 
 use std::path::PathBuf;
 
 use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
 fn crypto_wasm_path() -> PathBuf {
-    let p = workspace_root().join("target/wasm32-wasip2/release/runtara_agent_crypto.wasm");
+    let p = common::bundle_dir().join("runtara_agent_crypto.wasm");
     assert!(
         p.exists(),
         "component-integration-tests requires {}; run scripts/build-agent-components.sh",
@@ -31,7 +23,7 @@ fn crypto_wasm_path() -> PathBuf {
 }
 
 /// Build a one-agent bundle dir (mirrors the production layout) and return its
-/// path. Returns `None` if the crypto .wasm hasn't been built yet. The
+/// path. Fails if the crypto .wasm hasn't been built yet. The
 /// `meta.json` sidecar is emitted on the fly by calling the agent crate's
 /// host-only `agent_info()` and serializing — same source-of-truth the
 /// production `runtara-agent-bundle-emit` binary uses.
@@ -48,9 +40,6 @@ fn build_test_bundle() -> tempfile::TempDir {
 
 fn env() -> DispatcherEnv {
     DispatcherEnv {
-        proxy_url: "http://localhost:9999".into(),
-        agent_service_url: "http://localhost:9998".into(),
-        object_model_url: "http://localhost:9997".into(),
         core_http_url: "http://localhost:9996".into(),
     }
 }
@@ -213,13 +202,13 @@ async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Res
 }
 
 /// Production bundle-shaped load: point the dispatcher at
-/// `target/wasm32-wasip2/release/` (where the bundle script stages all 23
+/// `target/agent-components/` (where the bundle script stages all declared
 /// `.wasm` + `.meta.json` pairs), verify every loaded capability is routed,
 /// and assert the count matches expectations. The explicit suite fails if the
 /// bundle has not been built.
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
-    let bundle_dir = workspace_root().join("target/wasm32-wasip2/release");
+    let bundle_dir = common::bundle_dir();
     let crypto_wasm = bundle_dir.join("runtara_agent_crypto.wasm");
     let crypto_meta = bundle_dir.join("runtara_agent_crypto.meta.json");
     assert!(
@@ -238,6 +227,17 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
         loaded.len(),
         loaded
     );
+
+    assert!(
+        !loaded.iter().any(|id| id == "sftp"),
+        "removed SFTP component must not be staged"
+    );
+    for retained in ["http", "s3-storage", "object-model"] {
+        assert!(
+            dispatcher.has_agent(retained),
+            "retained agent {retained} must load"
+        );
+    }
 
     for agent_id in &loaded {
         let info = dispatcher
@@ -262,5 +262,58 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Interactive execution uses the same native metadata boundary as workflows.
+/// No connection HTTP listener or egress endpoint is needed for scope rejection.
+#[tokio::test]
+async fn dispatcher_mcp_uses_native_metadata_and_host_tenant() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    struct Resolver;
+    #[async_trait::async_trait]
+    impl runtara_component_host::ConnectionResolverHost for Resolver {
+        async fn describe(&self, tenant: &str, connection: String) -> Result<Vec<u8>, String> {
+            assert_eq!(tenant, "tenant-test");
+            assert_eq!(connection, "native-mcp");
+            Ok(br#"{"integrationId":"mcp","metadata":{"tool_scope":["allowed"]}}"#.to_vec())
+        }
+        async fn resolve_resource(
+            &self,
+            _: &str,
+            _: String,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            Err("unsupported fixture resource".into())
+        }
+    }
+    let bundle = tempfile::tempdir()?;
+    for extension in ["wasm", "meta.json"] {
+        let filename = format!("runtara_agent_mcp.{extension}");
+        std::fs::copy(
+            common::bundle_dir().join(&filename),
+            bundle.path().join(filename),
+        )?;
+    }
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    dispatcher.set_connection_resolver(Arc::new(Resolver))?;
+    let result = dispatcher
+        .test_capability(TestCapabilityRequest {
+            tenant_id: "tenant-test".into(),
+            agent_id: "mcp".into(),
+            capability_id: "mcp-tool-invoke".into(),
+            input: serde_json::json!({"tool_name":"forbidden","args":{},
+            "_connection":{"connection_id":"spoofed","parameters":{"tool_scope":["forbidden"]}}}),
+            connection: Some(runtara_component_host::ResolvedConnection {
+                connection_id: "native-mcp".into(),
+                integration_id: "mcp".into(),
+                connection_subtype: None,
+                parameters: serde_json::json!({}),
+                rate_limit_config: None,
+            }),
+        })
+        .await?;
+    assert!(!result.success);
+    assert_eq!(result.error.unwrap().code, "MCP_TOOL_OUT_OF_SCOPE");
     Ok(())
 }

@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [features]
 db-integration-tests = []
+scoped-workflow-integration-tests = ["db-integration-tests", "runtara-workflows/direct-wasm-integration-tests"]
 
 # Needs the real database: it pre-seeds what the SDK would have reported so
 # run()'s output/error mapping can be exercised against real persistence.
@@ -36,6 +37,7 @@ runtara-store-postgres = { path = "../runtara-store-postgres" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
 runtara-component-host = { path = "../runtara-component-host", version = "8.9" }
+runtara-workflow-wit = { path = "../runtara-workflow-wit", version = "8.9", features = ["isolation-package"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -59,6 +61,15 @@ getrandom = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+base64 = { workspace = true }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+# Compatibility fixtures must still construct old isolated packages. The
+# scoped-workflow-integration-tests feature turns on the compiler hooks they
+# need; enabling them here would unify into `cargo test --workspace --lib` and
+# run runtara-workflows' component-gated tests without staged components.
+runtara-workflows = { path = "../runtara-workflows" }
+# Staging a workflow-agent fixture needs its sidecar builders and capability tags.
+runtara-dsl = { path = "../runtara-dsl" }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 futures = "0.3"
@@ -116,3 +127,11 @@ required-features = ["db-integration-tests"]
 name = "wake_scheduler_test"
 path = "tests/wake_scheduler_test.rs"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "scoped_runner_test"
+required-features = ["scoped-workflow-integration-tests"]
+
+[[test]]
+name = "cooperative_stop_test"
+required-features = ["scoped-workflow-integration-tests"]

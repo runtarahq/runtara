@@ -62,7 +62,7 @@ pub async fn slack_webhook(
         return StatusCode::OK.into_response();
     }
 
-    let Some(mut msg) = normalize_slack_event(&payload) else {
+    let Some(msg) = normalize_slack_event(&payload) else {
         return StatusCode::OK.into_response();
     };
 
@@ -72,10 +72,6 @@ pub async fn slack_webhook(
     {
         debug!(connection_id = %connection_id, event_id, "Dropping duplicate Slack event");
         return StatusCode::OK.into_response();
-    }
-
-    if !msg.attachments.is_empty() {
-        upload_slack_attachments_to_storage(&router, &connection_id, &mut msg.attachments).await;
     }
 
     let event_type = payload["event"]["type"].as_str().unwrap_or("unknown");
@@ -125,12 +121,13 @@ fn normalize_text_event(payload: &Value, event: &Value) -> Option<InboundMessage
     }
 
     let channel_id = event.get("channel").and_then(Value::as_str)?;
-    let text = event.get("text").and_then(Value::as_str)?;
+    let text = event.get("text").and_then(Value::as_str).unwrap_or("");
+    let attachments = extract_slack_files(event);
 
     // Users type "@BotName hello" but Slack sends "<@U12345> hello".
     let clean_text = strip_slack_mentions(text);
     let clean_text = clean_text.trim();
-    if clean_text.is_empty() {
+    if clean_text.is_empty() && attachments.is_empty() {
         return None;
     }
 
@@ -146,7 +143,7 @@ fn normalize_text_event(payload: &Value, event: &Value) -> Option<InboundMessage
         sender_id,
         conv_id,
         channel: "slack".into(),
-        attachments: extract_slack_files(event),
+        attachments,
         original_message: payload.clone(),
         target: None,
         // Slack redelivers the SAME event_id (with an X-Slack-Retry-Num header)
@@ -359,155 +356,31 @@ fn extract_slack_files(event: &Value) -> Vec<Attachment> {
                 size,
                 url: url.map(|u| u.to_string()),
                 data: None,
-                storage_bucket: None,
-                storage_key: None,
+                id: file.get("id").and_then(Value::as_str).map(str::to_string),
             }
         })
         .collect()
 }
 
-const ATTACHMENT_BUCKET: &str = "attachments";
-
-/// Upload Slack file attachments to the tenant's internal S3 storage.
-///
-/// Downloads each file from Slack using the bot token for auth, then uploads
-/// to the tenant's S3-compatible storage. On success, replaces the Slack URL
-/// with internal `storage_bucket`/`storage_key`.
-async fn upload_slack_attachments_to_storage(
-    router: &ChannelRouter,
-    connection_id: &str,
-    attachments: &mut [Attachment],
-) {
-    if attachments.is_empty() {
-        return;
-    }
-
-    let expected_tenant = crate::config::tenant_id();
-
-    // Resolve S3 client from tenant's default s3_compatible connection.
-    let s3_client =
-        match crate::api::services::file_storage::FileStorageService::resolve_default_s3_client(
-            router.connections(),
-            expected_tenant,
-        )
-        .await
-        {
-            Ok(client) => client,
-            Err(e) => {
-                warn!(
-                    connection_id = %connection_id,
-                    error = ?e,
-                    "No S3 storage configured — Slack attachments will not be persisted"
-                );
-                return;
-            }
-        };
-
-    if let Err(e) = s3_client.create_bucket(ATTACHMENT_BUCKET) {
-        warn!(error = %e, "Failed to create attachments bucket");
-        return;
-    }
-
-    // Load bot_token for downloading files from Slack.
-    let bot_token = load_bot_token(router, connection_id).await;
-
-    let date_prefix = chrono::Utc::now().format("%Y-%m-%d").to_string();
-
-    for attachment in attachments.iter_mut() {
-        let Some(url) = &attachment.url else {
-            continue;
-        };
-
-        let data = match download_slack_file(router, url, bot_token.as_deref()).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!(
-                    name = %attachment.name,
-                    url = %url,
-                    error = %e,
-                    "Failed to download Slack file"
-                );
-                continue;
-            }
-        };
-
-        let sanitized_name = attachment.name.replace(['/', '\\', '\0'], "_");
-        let key = format!(
-            "{}/{}/{}_{}",
-            connection_id,
-            date_prefix,
-            uuid::Uuid::new_v4().as_simple(),
-            sanitized_name
-        );
-
-        let content_type = Some(attachment.content_type.as_str());
-        match s3_client.put_object(ATTACHMENT_BUCKET, &key, data.clone(), content_type) {
-            Ok(()) => {
-                attachment.size = data.len() as u64;
-                attachment.storage_bucket = Some(ATTACHMENT_BUCKET.to_string());
-                attachment.storage_key = Some(key.clone());
-                attachment.url = None;
-                debug!(
-                    name = %attachment.name,
-                    storage_key = %key,
-                    "Slack attachment uploaded to internal storage"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    name = %attachment.name,
-                    error = %e,
-                    "Failed to upload Slack attachment to S3 — keeping original URL"
-                );
-            }
-        }
-    }
-}
-
-/// Download a file from Slack using Bearer token auth.
-async fn download_slack_file(
-    router: &ChannelRouter,
-    url: &str,
-    bot_token: Option<&str>,
-) -> anyhow::Result<Vec<u8>> {
-    let token = bot_token.ok_or_else(|| anyhow::anyhow!("No Slack bot_token available"))?;
-    let resp = router
-        .http_client()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "HTTP {} {}",
-            resp.status().as_u16(),
-            resp.status().canonical_reason().unwrap_or("")
-        );
-    }
-    Ok(resp.bytes().await?.to_vec())
-}
-
-/// Load the bot_token from the Slack connection's parameters.
-async fn load_bot_token(router: &ChannelRouter, connection_id: &str) -> Option<String> {
-    let expected_tenant = crate::config::tenant_id();
-    let conn = match router
-        .connections()
-        .get_with_parameters(connection_id, expected_tenant)
-        .await
-    {
-        Ok(Some(c)) => c,
-        _ => return None,
-    };
-    conn.connection_parameters
-        .as_ref()
-        .and_then(|p| p.get("bot_token"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_only_event_preserves_provider_reference_without_downloading() {
+        let event = json!({"type": "event_callback", "event_id": "E-file", "event": {
+            "type": "message", "subtype": "file_share", "channel": "C-test", "user": "U-test",
+            "files": [{"id": "F-test", "name": "invoice.pdf", "mimetype": "application/pdf", "url_private": "https://files.slack.com/files-pri/T-F/invoice.pdf", "size": 20}]
+        }});
+        let message = normalize_slack_event(&event).unwrap();
+        assert_eq!(message.text, "");
+        assert_eq!(message.original_message, event);
+        let attachment = serde_json::to_value(&message.attachments[0]).unwrap();
+        assert_eq!(attachment["id"], "F-test");
+        assert!(attachment.get("url").is_some());
+        assert!(attachment.get("data").is_none());
+        assert!(attachment.get("storage_key").is_none());
+    }
 
     #[test]
     fn normalizes_threaded_message_event() {

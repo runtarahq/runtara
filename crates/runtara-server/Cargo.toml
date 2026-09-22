@@ -29,6 +29,7 @@ path = "src/bin/dump_openapi.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
+component-integration-tests = []
 valkey-integration-tests = []
 valkey-tls-integration-tests = ["valkey-integration-tests"]
 
@@ -72,8 +73,8 @@ path = "tests/object_model_connection_e2e.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
-name = "internal_proxy_mtls"
-path = "tests/internal_proxy_mtls.rs"
+name = "outbound_http"
+path = "tests/outbound_http.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
@@ -102,10 +103,13 @@ path = "tests/valkey_tls.rs"
 required-features = ["valkey-tls-integration-tests"]
 
 [dependencies]
+runtara-database-contract = { path = "../runtara-database-contract" }
+runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }
+runtara-workflow-wit = { path = "../runtara-workflow-wit", features = ["isolation-package"] }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
-runtara-agents = { path = "../runtara-agents", default-features = false, features = ["native"] }
+runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }

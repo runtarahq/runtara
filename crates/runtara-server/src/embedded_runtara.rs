@@ -45,6 +45,8 @@ pub struct EmbeddedRuntaraConfig {
     /// Bounded active-execution timeout policy shared with the server runtime
     /// client and Environment lifecycle handlers.
     pub execution_timeout_policy: ExecutionTimeoutPolicy,
+    /// Runtime approvals for previously compiled isolation artifacts.
+    pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -65,6 +67,10 @@ impl EmbeddedRuntara {
     /// Note: Migrations should be run before calling this via `run_migrations()`.
     pub async fn start(
         config: EmbeddedRuntaraConfig,
+        trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
+        connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
+        database: Arc<dyn runtara_component_host::DatabaseHost>,
+        outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
         event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
@@ -97,10 +103,20 @@ impl EmbeddedRuntara {
         // bind address: it is the endpoint a guest is meant to reach.
         let core_http_url = format!("http://{}", config.core_client_addr);
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::build_runner_with_core_http_url(
+            runtara_environment::runner::build_runner_configured(
                 persistence.clone(),
                 event_observer,
                 Some(core_http_url),
+                config
+                    .isolation_policy
+                    .as_ref()
+                    .map(|policy| policy.runner_config()),
+                runtara_environment::runner::HostServices {
+                    trusted,
+                    connections: Some(connections),
+                    database: Some(database),
+                    outbound_http: Some(outbound_http),
+                },
             )
             .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
@@ -276,6 +292,10 @@ pub async fn create_runtara_pool(
 /// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
 /// already parsed at startup. It applies only to the pool this process opens.
 pub async fn maybe_start_embedded(
+    trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
+    connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
+    database: Arc<dyn runtara_component_host::DatabaseHost>,
+    outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
 ) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
@@ -344,8 +364,17 @@ pub async fn maybe_start_embedded(
         core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
         core_overrides,
         execution_timeout_policy,
+        isolation_policy: crate::config::isolation_policy(),
     };
 
-    let runtara = EmbeddedRuntara::start(config, event_observer).await?;
+    let runtara = EmbeddedRuntara::start(
+        config,
+        trusted,
+        connections,
+        database,
+        outbound_http,
+        event_observer,
+    )
+    .await?;
     Ok(Some(runtara))
 }

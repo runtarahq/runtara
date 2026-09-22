@@ -7,11 +7,9 @@
 //! the host architecture and writes `runtara_agent_openai.meta.json` next to
 //! the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to attach
-//! `Authorization: Bearer <api_key>` from the stored connection — the
-//! component never sees secrets.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -25,23 +23,6 @@ use std::time::Duration;
 // cannot reference consts).
 const DEFAULT_OPENAI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MODEL;
 const DEFAULT_OPENAI_MINI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MINI_MODEL;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-openai/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim
@@ -182,10 +163,10 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
     })
 }
 
-/// POST `body` to `https://api.openai.com{path}` via the runtara proxy. The
+/// POST `body` to `https://api.openai.com{path}` via the outbound host service. The
 /// proxy attaches `Authorization: Bearer <api_key>` based on the connection
 /// id header so the component never sees the secret.
-fn openai_post_json(
+async fn openai_post_json(
     connection: &RawConnection,
     path: &str,
     body: Value,
@@ -201,9 +182,10 @@ fn openai_post_json(
     let response = client
         .request("POST", &url)
         .header("Content-Type", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -394,7 +376,9 @@ pub struct TextCompletionOutput {
     module_integration_ids = "openai_api_key",
     module_secure = true
 )]
-pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
+pub async fn text_completion(
+    input: TextCompletionInput,
+) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let mut messages = Vec::new();
@@ -436,7 +420,7 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
         body["stop"] = json!(stop);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let text = resp["choices"][0]["message"]["content"]
         .as_str()
@@ -576,7 +560,9 @@ pub struct ImageGenerationOutput {
     display_name = "Image Generation (OpenAI)",
     description = "Generate images using OpenAI DALL-E models"
 )]
-pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
+pub async fn image_generation(
+    input: ImageGenerationInput,
+) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let model = input.model.unwrap_or_else(|| "dall-e-3".to_string());
@@ -615,7 +601,8 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         "/v1/images/generations",
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -715,7 +702,7 @@ pub struct StructuredOutputOutput {
     display_name = "Structured Output (OpenAI)",
     description = "Generate structured JSON output using OpenAI models with schema validation"
 )]
-pub fn structured_output(
+pub async fn structured_output(
     input: StructuredOutputInput,
 ) -> Result<StructuredOutputOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -742,7 +729,7 @@ pub fn structured_output(
         body["temperature"] = json!(temperature);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let content = resp["choices"][0]["message"]["content"]
         .as_str()
@@ -851,7 +838,7 @@ pub struct VisionToTextOutput {
     display_name = "Vision to Text (OpenAI)",
     description = "Analyze images and generate text descriptions using OpenAI vision models"
 )]
-pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
+pub async fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     if input.image_data.is_none() && input.image_url.is_none() {
@@ -894,7 +881,7 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, Ag
         body["temperature"] = json!(temperature);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let text = resp["choices"][0]["message"]["content"]
         .as_str()
@@ -1012,7 +999,7 @@ pub struct VisionToImageOutput {
     display_name = "Vision to Image (OpenAI)",
     description = "Edit and manipulate images using OpenAI DALL-E models"
 )]
-pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
+pub async fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let endpoint = if input.mask_data.is_some() {
@@ -1021,13 +1008,9 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         "images/variations"
     };
 
-    // NOTE: The OpenAI images/edits and images/variations endpoints require
-    // multipart/form-data with binary PNG payloads, which cannot be satisfied
-    // by a simple JSON POST. The proxy currently only supports JSON bodies.
-    // We call the JSON-compatible path here; full multipart support requires
-    // proxy-side changes. The body below is best-effort and will likely return
-    // a 415/400 from OpenAI until multipart proxy support lands.
-    // TODO: add multipart support to the runtara proxy and update this handler.
+    // These endpoints require multipart/form-data with binary PNG payloads.
+    // The host transport accepts raw bytes, but this agent still builds JSON.
+    // TODO: encode the multipart request here; JSON may receive a 415/400.
     let body = json!({
         "prompt": input.prompt,
         "n": 1,
@@ -1040,7 +1023,8 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         &format!("/v1/{endpoint}"),
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1183,7 +1167,7 @@ pub struct OpenaiChatCompletionOutput {
     display_name = "Chat Completion",
     description = "OpenAI chat completion with full control over messages, tools, and parameters"
 )]
-pub fn openai_chat_completion(
+pub async fn openai_chat_completion(
     input: OpenaiChatCompletionInput,
 ) -> Result<OpenaiChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1237,7 +1221,7 @@ pub fn openai_chat_completion(
         body["tool_choice"] = json!(tool_choice);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let choices = resp["choices"]
         .as_array()
@@ -1313,7 +1297,7 @@ pub struct OpenaiCreateEmbeddingOutput {
     display_name = "Create Embedding",
     description = "Generate embeddings for text using OpenAI embedding models"
 )]
-pub fn openai_create_embedding(
+pub async fn openai_create_embedding(
     input: OpenaiCreateEmbeddingInput,
 ) -> Result<OpenaiCreateEmbeddingOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1323,7 +1307,7 @@ pub fn openai_create_embedding(
         "input": input.input,
     });
 
-    let resp = openai_post_json(connection, "/v1/embeddings", body, 60_000)?;
+    let resp = openai_post_json(connection, "/v1/embeddings", body, 60_000).await?;
 
     let data = resp["data"]
         .as_array()
@@ -1389,7 +1373,7 @@ pub struct OpenaiModerateContentOutput {
     display_name = "Moderate Content",
     description = "Check content for policy violations using OpenAI moderation API"
 )]
-pub fn openai_moderate_content(
+pub async fn openai_moderate_content(
     input: OpenaiModerateContentInput,
 ) -> Result<OpenaiModerateContentOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1399,7 +1383,7 @@ pub fn openai_moderate_content(
         "model": input.model.unwrap_or_else(|| "text-moderation-latest".to_string()),
     });
 
-    let resp = openai_post_json(connection, "/v1/moderations", body, 30_000)?;
+    let resp = openai_post_json(connection, "/v1/moderations", body, 30_000).await?;
 
     let results = resp["results"]
         .as_array()
@@ -1545,105 +1529,19 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_openai::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "text-completion" => __executor_text_completion(value),
-            "image-generation" => __executor_image_generation(value),
-            "structured-output" => __executor_structured_output(value),
-            "vision-to-text" => __executor_vision_to_text(value),
-            "vision-to-image" => __executor_vision_to_image(value),
-            "openai-chat-completion" => __executor_openai_chat_completion(value),
-            "openai-create-embedding" => __executor_openai_create_embedding(value),
-            "openai-moderate-content" => __executor_openai_moderate_content(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("openai agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
+runtara_agent_macro::agent_component!(
+    agent = "openai",
+    capabilities = [
+        text_completion,
+        image_generation,
+        structured_output,
+        vision_to_text,
+        vision_to_image,
+        openai_chat_completion,
+        openai_create_embedding,
+        openai_moderate_content,
+    ],
+);
 
 #[cfg(test)]
 mod tests {
@@ -1687,6 +1585,3 @@ mod tests {
         assert_eq!(structured.example, Some(DEFAULT_OPENAI_MINI_MODEL));
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);

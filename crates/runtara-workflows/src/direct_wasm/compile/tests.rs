@@ -712,6 +712,55 @@ fn direct_core_imports_and_run_calls(core: &[u8]) -> (HashMap<String, u32>, Vec<
     (imports, run_calls)
 }
 
+/// Expand calls to defined core helpers for structural ordering assertions.
+/// Only entry returns are retained: a helper return does not end the workflow.
+fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
+    let mut imported = 0;
+    let mut bodies = Vec::new();
+    for payload in Parser::new(0).parse_all(core) {
+        match payload.expect("core payload") {
+            Payload::ImportSection(reader) => {
+                imported += reader
+                    .into_imports()
+                    .filter(|import| {
+                        matches!(import.as_ref().expect("import").ty, TypeRef::Func(_))
+                    })
+                    .count();
+            }
+            Payload::CodeSectionEntry(body) => bodies.push(
+                body.get_operators_reader()
+                    .expect("operators")
+                    .into_iter()
+                    .map(|op| op.expect("operator"))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => {}
+        }
+    }
+    fn expand<'a>(
+        body: usize,
+        imported: usize,
+        bodies: &[Vec<Operator<'a>>],
+        depth: usize,
+        out: &mut Vec<Operator<'a>>,
+    ) {
+        assert!(depth < 16, "unexpected recursive core helper");
+        for op in &bodies[body] {
+            if depth == 0 || !matches!(op, Operator::Return) {
+                out.push(op.clone());
+            }
+            if let Operator::Call { function_index } = op
+                && let Some(index) = (*function_index as usize).checked_sub(imported)
+            {
+                expand(index, imported, bodies, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    expand(0, imported, &bodies, 0, &mut out);
+    out
+}
+
 fn direct_core_import(imports: &HashMap<String, u32>, module: &str, name: &str) -> u32 {
     *imports
         .get(&format!("{module}::{name}"))
@@ -773,7 +822,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "debug-mode-enabled",
         ),
     );
@@ -789,7 +838,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "checkpoint",
         ),
         breakpoint_key_position,
@@ -807,7 +856,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "custom-event",
         ),
         breakpoint_event_position,
@@ -816,7 +865,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "breakpoint-pause",
         ),
         custom_event_position,
@@ -1218,7 +1267,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
                     saw_runtime_import |= import
                         .name
                         .0
-                        .contains("runtara:workflow-runtime/runtime@0.3.0");
+                        .contains("runtara:workflow-runtime/runtime@0.4.0");
                 }
             }
             Payload::ComponentExportSection(reader) => {
@@ -1449,22 +1498,22 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
                                 stdlib_build_source_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
                             (
@@ -2117,7 +2166,18 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
-        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let (resolve, world) = build_direct_component_resolve_scoped(
+            &[],
+            super::super::component::WorkflowAbi::CliRunHttp,
+            false,
+            None,
+            &Default::default(),
+            false,
+            &Default::default(),
+            true,
+            core_config.static_data.needs_monotonic_clock(),
+        )
+        .expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
         Parser::new(0).parse_all(&core).any(|payload| {
             matches!(payload, Ok(Payload::CodeSectionEntry(ref body))
@@ -2162,7 +2222,18 @@ fn direct_core_emits_value_store_retain_for_loops() {
         let manifest_json = manifest.to_canonical_json().expect("manifest json");
         let core_config =
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
-        let (resolve, world) = build_direct_component_resolve().expect("resolve");
+        let (resolve, world) = build_direct_component_resolve_scoped(
+            &[],
+            super::super::component::WorkflowAbi::CliRunHttp,
+            false,
+            None,
+            &Default::default(),
+            false,
+            &Default::default(),
+            true,
+            core_config.static_data.needs_monotonic_clock(),
+        )
+        .expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
         let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
         let index = direct_core_import(&imports, STDLIB_MODULE, "value-store-retain-scoped");
@@ -3073,39 +3144,27 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
 }
 
 #[test]
-fn direct_compile_rejects_ai_agent_tool_step_timeout() {
-    // An Agent tool is still an Agent step. Its `timeout` cannot interrupt a
-    // running capability call, so compilation must reject the graph rather
-    // than inject a best-effort timeout_ms hint into the tool payload.
+fn direct_compile_accepts_ai_agent_tool_guest_timeout() {
     let mut graph = fixture("ai_agent_multi_tool");
     let Some(runtara_dsl::Step::Agent(tool)) = graph.steps.get_mut("echo") else {
         panic!("expected Agent tool step 'echo'");
     };
     tool.timeout = Some(2_000);
-
     let temp = tempfile::tempdir().expect("tempdir");
-    let error = compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "ai-agent-multi-tool-timeout".to_string(),
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "ai-agent-multi-tool-timeout".into(),
         version: 1,
         source_checksum: None,
         execution_graph: graph,
         child_workflows: vec![],
-        output_dir: temp.path().to_path_buf(),
+        output_dir: temp.path().into(),
         track_events: false,
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect_err("Agent tool timeout must be rejected before compilation");
-
-    let DirectCompileError::Unsupported { report } = error else {
-        panic!("expected unsupported report, got {error}");
-    };
-    assert!(
-        report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("echo") && feature.feature == "agent-timeout"
-        }),
-        "{report:?}"
-    );
+    .expect("Agent tool timeout compiles publicly");
+    assert!(result.support_report.supported);
+    assert!(result.component_artifacts.needs_monotonic_clock);
 }
 
 #[test]
@@ -4469,7 +4528,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "runtime.load-input",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "load-input",
             vec![WasmType::Pointer],
         ),
@@ -4664,21 +4723,21 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "runtime.complete",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "complete",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "runtime.fail",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "fail",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "runtime.custom-event",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "custom-event",
             vec![
                 WasmType::Pointer,
@@ -4771,7 +4830,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "load-input") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "load-input") => {
                                 load_input_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
@@ -4798,13 +4857,13 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -4962,25 +5021,25 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
                                 stdlib_apply_mapping_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
                                 runtime_complete_index = Some(next_function_index)
                             }
                             _ => {}
@@ -5188,7 +5247,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "debug-mode-enabled",
         ),
     );
@@ -5204,7 +5263,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "checkpoint",
         ),
     );
@@ -5224,7 +5283,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
     // static occurrence.
     let custom_event_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.3",
+        "cm32p2|runtara:workflow-runtime/runtime@0.4",
         "custom-event",
     );
     let custom_event_position =
@@ -5233,7 +5292,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.3",
+            "cm32p2|runtara:workflow-runtime/runtime@0.4",
             "breakpoint-pause",
         ),
     );
@@ -5418,7 +5477,7 @@ fn direct_core_lowers_non_durable_agent_call() {
         .expect("Agent core module validates");
 
     let (actual_module, actual_name) = resolve.wasm_import_name(
-        ManglingAndAbi::Standard32,
+        ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
         WasmImport::Func {
             interface: Some(interface_key),
             func: function,
@@ -5577,6 +5636,8 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
     let mut durable_sleep_index = None;
     let mut durable_sleep_checkpoint_index = None;
     let mut blocking_sleep_index = None;
+    let mut timer_sleep_index = None;
+    let mut saw_blocking_sleep_call = false;
     let mut agent_retry_sleep_key_index = None;
     let mut agent_retry_delay_index = None;
     let mut agent_retry_error_info_index = None;
@@ -5601,7 +5662,7 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
     let mut saw_invoke = false;
     let mut saw_retry_info_after_invoke = false;
     let mut saw_retry_delay_after_retry_info = false;
-    let mut saw_blocking_sleep_after_retry_delay = false;
+    let mut saw_timer_sleep_after_retry_delay = false;
     let mut saw_error_from_info_after_retry_info = false;
     let mut saw_get_checkpoint_call = false;
     let mut saw_checkpoint_call = false;
@@ -5638,6 +5699,9 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             {
                                 durable_sleep_checkpoint_index = Some(next_function_index);
                             }
+                            ("runtara:host-io/timers@0.1.0", "[async-lower]sleep") => {
+                                timer_sleep_index = Some(next_function_index);
+                            }
                             (module, "blocking-sleep")
                                 if module.contains("runtara:workflow-runtime/runtime") =>
                             {
@@ -5672,7 +5736,7 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             {
                                 record_retry_attempt_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -5741,7 +5805,12 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             Operator::Call { function_index }
                                 if Some(function_index) == blocking_sleep_index =>
                             {
-                                saw_blocking_sleep_after_retry_delay = saw_retry_delay_call;
+                                saw_blocking_sleep_call = true;
+                            }
+                            Operator::Call { function_index }
+                                if Some(function_index) == timer_sleep_index =>
+                            {
+                                saw_timer_sleep_after_retry_delay = saw_retry_delay_call;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_error_from_info_index =>
@@ -5844,8 +5913,12 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
         "retry delay should be computed from preserved retry payload"
     );
     assert!(
-        saw_blocking_sleep_after_retry_delay,
-        "non-durable retries should use runtime.blocking-sleep after delay calculation"
+        !saw_blocking_sleep_call,
+        "non-durable retry must remain cooperative"
+    );
+    assert!(
+        saw_timer_sleep_after_retry_delay,
+        "non-durable retries should await the host I/O timer after delay calculation"
     );
     assert!(
         saw_error_from_info_after_retry_info,
@@ -5945,7 +6018,7 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                                 saw_handle_checkpoint_signal_import = true;
                                 handle_checkpoint_signal_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -5956,7 +6029,7 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                     }
                 }
             }
-            Payload::CodeSectionEntry(body) => {
+            Payload::CodeSectionEntry(_body) => {
                 if code_body_index == 0 {
                     let mut saw_cache_key_call = false;
                     let mut saw_lookup_call = false;
@@ -5964,8 +6037,8 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                     let mut saw_checkpoint_call = false;
                     let mut saw_handle_checkpoint_signal_call = false;
                     let mut last_i32_const_after_signal_handler = None;
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
+                    for operator in entry_operators_with_helpers(&core) {
+                        match operator {
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_cache_key_index =>
                             {
@@ -6100,6 +6173,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
         CallAgentInvoke,
         CallCheckpoint,
         If,
+        Block,
         Else,
         End,
         LoadCachedPtr,
@@ -6117,7 +6191,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
             let mut else_index = None;
             for (index, op) in ops.iter().enumerate().skip(if_index + 1) {
                 match op {
-                    ReplayOp::If => depth += 1,
+                    ReplayOp::If | ReplayOp::Block => depth += 1,
                     ReplayOp::Else if depth == 1 => else_index = Some(index),
                     ReplayOp::End => {
                         depth -= 1;
@@ -6171,7 +6245,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
                             {
                                 checkpoint_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -6202,6 +6276,9 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
                                 ops.push(ReplayOp::CallCheckpoint);
                             }
                             Operator::If { .. } => ops.push(ReplayOp::If),
+                            Operator::Block { .. } | Operator::Loop { .. } => {
+                                ops.push(ReplayOp::Block)
+                            }
                             Operator::Else => ops.push(ReplayOp::Else),
                             Operator::End => ops.push(ReplayOp::End),
                             Operator::I32Load { memarg }
@@ -6405,7 +6482,7 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                                 saw_record_retry_attempt_import = true;
                                 record_retry_attempt_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -6416,7 +6493,7 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                     }
                 }
             }
-            Payload::CodeSectionEntry(body) => {
+            Payload::CodeSectionEntry(_body) => {
                 if code_body_index == 0 {
                     let mut saw_lookup_call = false;
                     let mut saw_invoke_call = false;
@@ -6426,8 +6503,8 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                     let mut saw_durable_sleep_call = false;
                     let mut saw_generic_sleep_call = false;
                     let mut saw_checkpoint_call = false;
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
+                    for operator in entry_operators_with_helpers(&core) {
+                        match operator {
                             Operator::Call { function_index }
                                 if Some(function_index) == get_checkpoint_index =>
                             {
@@ -6841,10 +6918,23 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
         "invoke",
     );
     let (actual_module, actual_name) = resolve.wasm_import_name(
-        ManglingAndAbi::Standard32,
+        ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
         WasmImport::Func {
             interface: Some(interface_key),
             func: function,
+        },
+    );
+    let (resolver_interface, describe) = imported_wit_function(
+        &resolve,
+        world,
+        "runtara:connection-resolver/resolver",
+        "describe",
+    );
+    let (resolver_module, resolver_name) = resolve.wasm_import_name(
+        ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
+        WasmImport::Func {
+            interface: Some(resolver_interface),
+            func: describe,
         },
     );
     let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
@@ -6873,11 +6963,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                     {
                         agent_connection_id_index = Some(next_function_index);
                     }
-                    if import
-                        .module
-                        .contains("runtara:connection-resolver/resolver")
-                        && import.name == "describe"
-                    {
+                    if import.module == resolver_module && import.name == resolver_name {
                         connection_describe_index = Some(next_function_index);
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
@@ -7086,7 +7172,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "load-input") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "load-input") => {
                                 load_input_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
@@ -7095,13 +7181,13 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-start") => {
@@ -7782,17 +7868,17 @@ fn direct_core_run_lowers_split_retry_helpers() {
     );
     let blocking_sleep_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.3",
+        "cm32p2|runtara:workflow-runtime/runtime@0.4",
         "blocking-sleep",
     );
     let durable_sleep_checkpoint_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.3",
+        "cm32p2|runtara:workflow-runtime/runtime@0.4",
         "durable-sleep-checkpoint",
     );
     let record_retry_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.3",
+        "cm32p2|runtara:workflow-runtime/runtime@0.4",
         "record-retry-attempt",
     );
 
@@ -7995,9 +8081,16 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
         .iter()
         .position(|op| *op == SplitCheckpointOp::CallGetCheckpoint)
         .expect("checkpoint lookup");
+    // Error reporting can also load offset 8 (the error string length).
+    // Select the cached option's pointer/length pair, not that error-arm load.
     let cached_ptr_index = ops[lookup_index + 1..]
-        .iter()
-        .position(|op| *op == SplitCheckpointOp::LoadCachedPtr)
+        .windows(2)
+        .position(|pair| {
+            pair == [
+                SplitCheckpointOp::LoadCachedPtr,
+                SplitCheckpointOp::LoadCachedLen,
+            ]
+        })
         .map(|offset| lookup_index + 1 + offset)
         .expect("cached Split payload pointer load");
     let replay_else_index = ops[cached_ptr_index + 1..]
@@ -8549,7 +8642,7 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
                                 delay_duration_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "durable-sleep-checkpoint",
                             ) => durable_sleep_checkpoint_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
@@ -8690,29 +8783,29 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
                                 stdlib_build_source_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay-duration-ms") => {
                                 stdlib_delay_duration_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "durable-sleep-checkpoint",
                             ) => runtime_durable_sleep_checkpoint_index = Some(next_function_index),
                             _ => {}
@@ -8833,10 +8926,10 @@ fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
                                 delay_duration_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "durable-sleep-checkpoint",
                             ) => durable_sleep_checkpoint_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "blocking-sleep") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "blocking-sleep") => {
                                 blocking_sleep_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
@@ -9005,29 +9098,29 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "instance-id") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "instance-id") => {
                                 runtime_instance_id_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "now-ms") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "now-ms") => {
                                 runtime_now_ms_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
                                 runtime_fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "check-signals") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "check-signals") => {
                                 runtime_check_signals_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "poll-custom-signal",
                             ) => runtime_poll_custom_signal_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "heartbeat") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "heartbeat") => {
                                 runtime_heartbeat_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "blocking-sleep") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "blocking-sleep") => {
                                 runtime_blocking_sleep_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9154,7 +9247,7 @@ fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9271,25 +9364,25 @@ fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.3",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "instance-id") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "instance-id") => {
                                 runtime_instance_id_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9528,7 +9621,7 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-on-wait-error") => {
                                 wait_on_wait_error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
                                 runtime_fail_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10024,7 +10117,7 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
                                 log_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
@@ -10173,13 +10266,13 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.3", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10447,7 +10540,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(world_wit, result.component_artifacts.world_wit);
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
-    assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.3.0;"));
+    assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.4.0;"));
     assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.2.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
@@ -10962,10 +11055,10 @@ fn direct_compile_parallel_split_emits_async_lowered_invoke() {
     assert!(has("[async-lower]invoke"), "async-lowered invoke missing");
 }
 
-/// The SAME graph without `parallelism` stays on the sequential lowering:
-/// no CM-async imports appear (byte-preservation of the sequential path).
+/// Sequential scheduling also uses standard async calls so an individual
+/// operation can cooperate with cancellation.
 #[test]
-fn direct_compile_sequential_split_has_no_async_imports() {
+fn direct_compile_sequential_split_uses_standard_cancellable_calls() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut graph = fixture("split_parallel");
     let Some(runtara_dsl::Step::Split(split)) = graph.steps.get_mut("split") else {
@@ -10990,13 +11083,10 @@ fn direct_compile_sequential_split_has_no_async_imports() {
         wasm.windows(needle.len())
             .any(|window| window == needle.as_bytes())
     };
+    assert!(has("[waitable-set-new]"), "sequential waitable set missing");
     assert!(
-        !has("[waitable-set-new]"),
-        "sequential compile grew async imports"
-    );
-    assert!(
-        !has("[async-lower]invoke"),
-        "sequential compile grew async lowers"
+        has("[async-lower]invoke"),
+        "sequential async invoke missing"
     );
 }
 
@@ -11027,6 +11117,16 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
+        tag.contains("cooperative-waits=shared-v24"),
+        "recompilation must preserve breakpoint checkpoint signals: {tag}"
+    );
+    assert!(tag.contains("agent-composition=standard-v1"));
+    assert!(tag.contains("parent-cancel=v1"));
+    assert!(tag.contains("loop-cooperation=v1"));
+    assert!(tag.contains("retry-cooperation=v4"));
+    assert!(tag.contains("structured-agent-errors=v1"));
+    assert!(tag.contains("plain-child-errors=v1"));
+    assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"
     );
@@ -11041,4 +11141,243 @@ fn runtime_omit_stays_opt_in() {
     assert!(!super::omit_runtime_from_raw(Some("on")));
     assert!(super::omit_runtime_from_raw(Some("1")));
     assert!(super::omit_runtime_from_raw(Some("true")));
+}
+
+/// Bound emitted code growth independently of compression, native JIT choices,
+/// or machine timing. A hundred Agent sites must share cooperative machinery.
+#[test]
+fn cooperative_helpers_bound_per_step_code_growth() {
+    use super::super::component::WorkflowAbi;
+    fn emit(count: usize, abi: WorkflowAbi, omit_runtime: bool) -> Vec<u8> {
+        let mut steps = serde_json::Map::new();
+        let mut edges = Vec::new();
+        for i in 0..count {
+            let id = format!("r{i}");
+            steps.insert(
+                id.clone(),
+                serde_json::json!({
+                    "stepType":"Agent", "id":id, "agentId":"utils",
+                    "capabilityId":"random-double", "inputMapping":{}, "maxRetries":0
+                }),
+            );
+            edges.push(serde_json::json!({"fromStep":id,
+                "toStep":if i + 1 == count {"finish".into()} else {format!("r{}", i + 1)}}));
+        }
+        steps.insert(
+            "finish".into(),
+            serde_json::json!({
+                "stepType":"Finish", "id":"finish", "inputMapping":{}
+            }),
+        );
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "name":"Shared waits", "durable":false, "steps":steps,
+            "entryPoint":"r0", "executionPlan":edges, "variables":{}
+        }))
+        .unwrap();
+        let manifest = build_direct_workflow_manifest(&graph).unwrap();
+        let config =
+            DirectCoreConfig::new(&manifest, &manifest.to_canonical_json().unwrap(), false)
+                .unwrap()
+                .with_abi(abi)
+                .with_omit_runtime(omit_runtime);
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .unwrap();
+        let core = emit_direct_core_module(&resolve, world, &config).unwrap();
+        Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&core)
+            .unwrap();
+        core
+    }
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+    for (abi, omit_runtime) in [
+        (WorkflowAbi::CliRunHttp, false),
+        (WorkflowAbi::InvokeHostImports, false),
+        (WorkflowAbi::AgentCapabilities, false),
+        (WorkflowAbi::AgentCapabilities, true),
+    ] {
+        let one = emit(1, abi, omit_runtime);
+        let hundred = emit(100, abi, omit_runtime);
+        let growth = hundred.len() - one.len();
+        assert!(
+            growth < 3300 * 99,
+            "cooperative code grew {growth} bytes for 99 extra sites ({abi:?}, omit={omit_runtime})"
+        );
+    }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
+    use super::super::component::WorkflowAbi;
+    for abi in [
+        WorkflowAbi::InvokeHostImports,
+        WorkflowAbi::AgentCapabilities,
+    ] {
+        for timeout in [0, 1_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let graph = serde_json::from_value(serde_json::json!({
+                "durable": false, "entryPoint": "scope", "steps": {
+                    "scope": {"id": "scope", "stepType": "Split", "config": {
+                        "value": {"valueType": "immediate", "value": [1]}, "timeout": timeout
+                    }, "subgraph": {"entryPoint": "finish", "steps": {
+                        "finish": {"id": "finish", "stepType": "Finish"}}, "executionPlan": []}},
+                    "finish": {"id": "finish", "stepType": "Finish"}
+                }, "executionPlan": [{"fromStep": "scope", "toStep": "finish"}]
+            }))
+            .unwrap();
+            // The lower-level callable compiler retains legacy runtime-using
+            // exports; the publication safety report is a separate boundary.
+            let compiled = compile_direct_workflow_with_abi(
+                DirectCompilationInput {
+                    workflow_id: "split-timeout-runtime".into(),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: graph,
+                    child_workflows: vec![],
+                    output_dir: dir.path().into(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                },
+                abi,
+                true,
+            )
+            .unwrap();
+            assert!(!compiled.omit_runtime, "{abi:?}, timeout={timeout}");
+            assert!(
+                compiled
+                    .component_artifacts
+                    .world_wit
+                    .contains("workflow-runtime/runtime")
+            );
+            Validator::new_with_features(wasmparser::WasmFeatures::all())
+                .validate_all(&fs::read(compiled.wasm_path).unwrap())
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
+    use super::super::component::WorkflowAbi;
+    for retries in [0, 2] {
+        for (case, own_timeout) in [
+            "pure",
+            "agent-timeout",
+            "durable",
+            "log",
+            "error",
+            "wait",
+            "timeout",
+            "breakpoint",
+        ]
+        .into_iter()
+        .flat_map(|case| {
+            [None, Some(0), Some(u64::MAX)]
+                .into_iter()
+                .map(move |budget| (case, budget))
+        }) {
+            let mut root = serde_json::json!({"durable":false,"entryPoint":"embed","steps":{
+                "embed":{"id":"embed","stepType":"EmbedWorkflow","childWorkflowId":"child",
+                    "childVersion":1,"maxRetries":retries,"retryDelay":50},
+                "finish":{"id":"finish","stepType":"Finish"}},
+                "executionPlan":[{"fromStep":"embed","toStep":"finish"}]});
+            root["steps"]["embed"]["timeout"] = serde_json::json!(own_timeout);
+            let leaf = serde_json::json!({"durable":false,"entryPoint":"finish","steps":{
+                "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]});
+            let mut child = leaf.clone();
+            let extra = match case {
+                "pure" => None,
+                "agent-timeout" => Some(serde_json::json!({"id":"extra","stepType":"Agent",
+                    "agentId":"utils","capabilityId":"return-input","maxRetries":0,
+                    "timeout":u64::MAX,"inputMapping":{"value":{"valueType":"immediate","value":7}}})),
+                "durable" => {
+                    child["durable"] = true.into();
+                    None
+                }
+                "breakpoint" => {
+                    child["steps"]["finish"]["breakpoint"] = true.into();
+                    None
+                }
+                "log" => {
+                    Some(serde_json::json!({"id":"extra","stepType":"Log","message":"fixture"}))
+                }
+                "error" => Some(
+                    serde_json::json!({"id":"extra","stepType":"Error","code":"FIXTURE",
+                    "category":"transient","severity":"error","message":"fixture"}),
+                ),
+                "wait" => {
+                    child["durable"] = true.into();
+                    Some(serde_json::json!({"id":"extra","stepType":"WaitForSignal"}))
+                }
+                "timeout" => Some(serde_json::json!({"id":"extra","stepType":"Split",
+                    "config":{"timeout":0,"value":{"valueType":"immediate","value":[]}},"subgraph":leaf})),
+                _ => unreachable!(),
+            };
+            if let Some(extra) = extra {
+                child["steps"]["extra"] = extra;
+                child["entryPoint"] = "extra".into();
+                if case == "error" {
+                    child["steps"].as_object_mut().unwrap().remove("finish");
+                } else {
+                    child["executionPlan"] =
+                        serde_json::json!([{"fromStep":"extra","toStep":"finish"}]);
+                }
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let compiled = compile_direct_workflow_with_abi(
+                DirectCompilationInput {
+                    workflow_id: format!("embed-runtime-{case}-{retries}"),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: serde_json::from_value(root).unwrap(),
+                    child_workflows: vec![crate::compile::ChildWorkflowInput {
+                        step_id: "embed".into(),
+                        workflow_id: "child".into(),
+                        version_requested: "1".into(),
+                        version_resolved: 1,
+                        execution_graph: serde_json::from_value(child).unwrap(),
+                    }],
+                    output_dir: dir.path().into(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                },
+                WorkflowAbi::AgentCapabilities,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{case}/{retries}: {error}"));
+            let runtime_free = matches!(case, "pure" | "agent-timeout");
+            assert_eq!(
+                compiled.omit_runtime, runtime_free,
+                "{case}/{retries}/{own_timeout:?}"
+            );
+            assert_eq!(
+                compiled
+                    .component_artifacts
+                    .world_wit
+                    .contains("workflow-runtime/runtime"),
+                !runtime_free,
+                "{case}/{retries}"
+            );
+            if case == "pure" {
+                assert_eq!(
+                    compiled.component_artifacts.has_timers,
+                    retries > 0 || own_timeout.is_some()
+                );
+            }
+            if own_timeout.is_some() || case == "agent-timeout" {
+                assert!(compiled.component_artifacts.needs_monotonic_clock);
+            }
+            Validator::new_with_features(wasmparser::WasmFeatures::all())
+                .validate_all(&fs::read(compiled.wasm_path).unwrap())
+                .unwrap();
+        }
+    }
 }

@@ -406,7 +406,7 @@ export interface AgentInfo {
 
 /** Executes an agent capability */
 export interface AgentStep {
-  /** Agent name (e.g., "utils", "transform", "http", "sftp") */
+  /** Agent name (e.g., "utils", "transform", "http", "mcp") */
   agentId: string;
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
@@ -1207,6 +1207,8 @@ export interface CapabilityInfo {
    * Well-known tags: "memory:read", "memory:write".
    */
   tags?: string[];
+  /** Host-enforced execution mode; never a workflow-controlled permission. */
+  trusted?: boolean;
 }
 
 /** Request body for starting a chat session with an initial message */
@@ -1237,6 +1239,7 @@ export interface ChatStartRequest {
   version?: number | null;
 }
 
+/** One row of a checkpoint page. */
 export interface CheckpointMetadataDto {
   operation: string;
   /**
@@ -1246,6 +1249,14 @@ export interface CheckpointMetadataDto {
   resultSize: number;
   resultType: string;
   /**
+   * Position in the full ordered list, not within this page: with
+   * `size=20`, `page=2` starts at `seq` 40.
+   *
+   * Derived from the offset that was asked for rather than from the row
+   * itself, so it identifies a row only within one request. Checkpoints
+   * written or removed between two requests shift the list under the
+   * offset, and a row can then repeat or be missed across pages — a
+   * property of offset pagination, not of this field.
    * @format int64
    * @min 0
    */
@@ -1527,7 +1538,7 @@ export interface ConnectionDto {
   grantState?: null | ConnectionGrantState;
   id: string;
   integrationId?: string | null;
-  /** When true, this connection is the default S3 storage for webhook attachments */
+  /** Legacy alias for the object_storage default; does not persist webhook attachments. */
   isDefaultFileStorage: boolean;
   rateLimitConfig?: null | RateLimitConfigDto;
   /** Rate limit statistics for the requested time period (only included when requested) */
@@ -1714,7 +1725,7 @@ export interface CreateConnectionRequest {
   connectionParameters?: any;
   connectionSubtype?: string | null;
   defaultFor?: string[] | null;
-  /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, sftp) */
+  /** Connection type identifier that maps to a connection schema (e.g., shopify_access_token, bearer, mcp) */
   integrationId?: string | null;
   isDefaultFileStorage?: boolean | null;
   rateLimitConfig?: null | RateLimitConfigDto;
@@ -6493,12 +6504,13 @@ export interface ApiConfig<SecurityDataType = unknown>
   format?: ResponseType;
 }
 
-export type ContentType =
-  | "application/json"
-  | "application/vnd.api+json"
-  | "multipart/form-data"
-  | "application/x-www-form-urlencoded"
-  | "text/plain";
+export enum ContentType {
+  Json = "application/json",
+  JsonApi = "application/vnd.api+json",
+  FormData = "multipart/form-data",
+  UrlEncoded = "application/x-www-form-urlencoded",
+  Text = "text/plain",
+}
 
 export class HttpClient<SecurityDataType = unknown> {
   public instance: AxiosInstance;
@@ -6595,7 +6607,7 @@ export class HttpClient<SecurityDataType = unknown> {
     const responseFormat = format || this.format || undefined;
 
     if (
-      type === "multipart/form-data" &&
+      type === ContentType.FormData &&
       body &&
       body !== null &&
       typeof body === "object"
@@ -6604,7 +6616,7 @@ export class HttpClient<SecurityDataType = unknown> {
     }
 
     if (
-      type === "text/plain" &&
+      type === ContentType.Text &&
       body &&
       body !== null &&
       typeof body !== "string"
@@ -6741,7 +6753,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -6844,7 +6856,7 @@ export class Api<
         method: "POST",
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -6911,7 +6923,7 @@ export class Api<
         path: `/api/runtime/connections`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7040,7 +7052,7 @@ export class Api<
         path: `/api/runtime/connections/${id}`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7197,7 +7209,7 @@ export class Api<
         path: `/api/runtime/connections/${id}/resources`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7453,7 +7465,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7514,7 +7526,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7541,7 +7553,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -7567,7 +7579,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7678,7 +7690,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7707,7 +7719,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7736,7 +7748,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7793,7 +7805,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7881,7 +7893,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7956,7 +7968,7 @@ export class Api<
         method: "PUT",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8006,7 +8018,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8032,7 +8044,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8058,7 +8070,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8084,7 +8096,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8130,7 +8142,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/blocks/${blockId}/workflow-actions/${actionId}/execute`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8152,7 +8164,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/edit`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8301,7 +8313,7 @@ export class Api<
         path: `/api/runtime/triggers`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8339,7 +8351,7 @@ export class Api<
         path: `/api/runtime/triggers/${id}`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8412,7 +8424,7 @@ export class Api<
         path: `/api/runtime/workflows/create`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8449,7 +8461,7 @@ export class Api<
         path: `/api/runtime/workflows/folders/rename`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8467,7 +8479,7 @@ export class Api<
         path: `/api/runtime/workflows/graph/validate`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8613,7 +8625,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8634,7 +8646,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat/start`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8655,7 +8667,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/clone`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8701,7 +8713,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8723,7 +8735,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/move`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8761,7 +8773,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/schedule`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8782,7 +8794,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/slug`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8804,7 +8816,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/update`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8931,7 +8943,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/versions/${version}/track-events`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -9100,7 +9112,7 @@ export class Api<
       }),
 
     /**
-     * No description
+     * @description Checkpoints come back in the store's order — `(created_at, checkpoint_id)` descending, so newest first — and `page` walks that one order rather than re-ordering the rows on the way out. Each row's `seq` is its position in that full ordered list, not in the page it happened to arrive on.
      *
      * @tags workflow-controller
      * @name ListInstanceCheckpointsHandler

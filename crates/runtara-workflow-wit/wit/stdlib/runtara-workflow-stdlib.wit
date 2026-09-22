@@ -464,6 +464,9 @@ interface json {
         iteration: u32,
         source: list<u8>,
     ) -> result<string, string>;
+    // Persisted model decision, before tools, separate from completed turns.
+    ai-turn-response-key: func(step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
+    ai-turn-response-validate: func(response: list<u8>) -> result<_, string>;
     // Per-turn durability: wrap the post-turn loop state
     // ({state, pending, toolCalls, complete}) for the turn checkpoint.
     ai-turn-snapshot: func(
@@ -605,6 +608,20 @@ interface json {
         label: string,
         call-counter: u32,
         input: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Inline tool source with the same per-call identity as workflow-agent tools.
+    tool-scope-source: func(
+        ai-step-id: string,
+        label: string,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Memory activation scope, distinct from model-selected tool calls.
+    agent-aux-scope-source: func(
+        agent-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 

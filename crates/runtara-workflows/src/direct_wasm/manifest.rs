@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use runtara_dsl::agent_meta::{AgentCatalog, capability_tags};
-use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, MappingValue, Step};
+use runtara_dsl::{AgentStep, ExecutionGraph, ExecutionPlanEdge, MappingValue, Step};
 use sha2::{Digest, Sha256};
 
 use crate::compile::TEMPLATE_MAJOR_VERSION;
@@ -432,12 +432,14 @@ pub struct DirectAgentManifest {
     /// Base retry delay configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
-    /// Legacy Agent-step timeout retained only for manifest decode compatibility.
-    ///
-    /// Supported artifacts always leave this unset: Agent `timeout` is rejected
-    /// before compilation because the host cannot interrupt an active invoke.
+    /// Total Agent-step budget, retained for deadline lowering. The public
+    /// support gate still rejects it until the complete timeout contract passes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Referenced Agent definition for a synthetic invocation's budget. Its
+    /// owning `step_id` still identifies the AI caller for configuration lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_step_id: Option<String>,
 }
 
 /// Required Agent capability input metadata used by direct runtime validation.
@@ -1032,10 +1034,9 @@ fn step_manifest(
                 ),
                 max_retries: step.max_retries,
                 retry_delay: step.retry_delay,
-                // Agent `timeout` is deliberately not lowered as a best-effort
-                // capability hint. The direct support gate rejects it before
-                // an artifact can be emitted.
-                timeout: None,
+                // A workflow-owned budget, never a capability input hint.
+                timeout: step.timeout,
+                timeout_step_id: None,
             });
         }
         Step::AiAgent(step) => {
@@ -1126,7 +1127,7 @@ fn step_manifest(
                 // MCP toolsets each advertise two synthetic meta-tools, appended
                 // after the Agent tools (the LLM's tool_index resolves by this
                 // order, which the run plan's tool list mirrors exactly).
-                for (toolset, _target, _conn, _conn_ref) in &mcp_edges {
+                for (toolset, _) in &mcp_edges {
                     tool_defs.extend(ai_agent_mcp_tool_defs(toolset));
                 }
                 mapping.insert(
@@ -1136,7 +1137,7 @@ fn step_manifest(
                 if has_mcp {
                     let toolsets = mcp_edges
                         .iter()
-                        .map(|(toolset, _, _, _)| toolset.clone())
+                        .map(|(toolset, _)| toolset.clone())
                         .collect::<Vec<_>>();
                     mapping.insert(
                         "system_prompt_suffix".to_string(),
@@ -1180,12 +1181,12 @@ fn step_manifest(
                 max_retries: step.config.as_ref().and_then(|config| config.max_retries),
                 retry_delay: step.config.as_ref().and_then(|config| config.retry_delay),
                 timeout: None,
+                timeout_step_id: None,
             });
             // Conversation memory: record the provider agent's load-memory and
             // save-memory entries plus a conversation-id mapping. The loop loads
             // history before the turns and saves the final history after.
-            if let (true, Some((mem_agent, mem_conn, mem_conn_ref))) =
-                (has_memory, ai_agent_memory_provider(graph, &step.id))
+            if let (true, Some(provider)) = (has_memory, ai_agent_memory_provider(graph, &step.id))
             {
                 let memory = step.config.as_ref().and_then(|c| c.memory.as_ref());
                 let mut conversation = serde_json::Map::new();
@@ -1203,7 +1204,7 @@ fn step_manifest(
                     purpose: "memory.conversation".to_string(),
                     value: serde_json::Value::Object(conversation),
                 });
-                let mem_agent = canonicalize_direct_agent_id(&mem_agent);
+                let mem_agent = canonicalize_direct_agent_id(&provider.agent_id);
                 for (purpose, capability) in [
                     ("memory.load", "load-memory"),
                     ("memory.save", "save-memory"),
@@ -1216,16 +1217,22 @@ fn step_manifest(
                         purpose: purpose.to_string(),
                         agent_id: mem_agent.clone(),
                         capability_id: capability.to_string(),
-                        connection_id: mem_conn.clone(),
-                        connection_ref: connection_ref_json(mem_conn_ref.as_ref())?,
-                        durable: inherited_durable && step.durable.unwrap_or(true),
+                        connection_id: provider.connection_id.clone(),
+                        connection_ref: connection_ref_json(provider.connection_ref.as_ref())?,
+                        durable: inherited_durable
+                            && if provider.timeout.is_some() {
+                                provider.durable.unwrap_or(true)
+                            } else {
+                                step.durable.unwrap_or(true)
+                            },
                         rate_limited: false,
                         is_workflow_agent: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
                         retry_delay: None,
-                        timeout: None,
+                        timeout: provider.timeout,
+                        timeout_step_id: provider.timeout.map(|_| provider.id.clone()),
                     });
                 }
                 // Summarize-strategy compaction runs the `ai-tools`
@@ -1266,6 +1273,7 @@ fn step_manifest(
                         max_retries: None,
                         retry_delay: None,
                         timeout: None,
+                        timeout_step_id: None,
                     });
                 }
             }
@@ -1274,7 +1282,7 @@ fn step_manifest(
             // mcp-tool-invoke capabilities), named after the synthetic tools so
             // the run plan can resolve each advertised tool to its provider.
             // Order matches `ai_agent_mcp_tool_defs`: search then invoke.
-            for (toolset, _target, connection_id, connection_ref) in &mcp_edges {
+            for (toolset, provider) in &mcp_edges {
                 for (role, capability) in
                     [("search", "mcp-tool-search"), ("invoke", "mcp-tool-invoke")]
                 {
@@ -1286,9 +1294,14 @@ fn step_manifest(
                         purpose: "agent.tool.mcp".to_string(),
                         agent_id: "mcp".to_string(),
                         capability_id: capability.to_string(),
-                        connection_id: connection_id.clone(),
-                        connection_ref: connection_ref_json(connection_ref.as_ref())?,
-                        durable: inherited_durable && step.durable.unwrap_or(true),
+                        connection_id: provider.connection_id.clone(),
+                        connection_ref: connection_ref_json(provider.connection_ref.as_ref())?,
+                        durable: inherited_durable
+                            && if provider.timeout.is_some() {
+                                provider.durable.unwrap_or(true)
+                            } else {
+                                step.durable.unwrap_or(true)
+                            },
                         rate_limited: agent_capability_rate_limited(
                             agent_catalog,
                             "mcp",
@@ -1299,7 +1312,8 @@ fn step_manifest(
                         required_inputs: Vec::new(),
                         max_retries: None,
                         retry_delay: None,
-                        timeout: None,
+                        timeout: provider.timeout,
+                        timeout_step_id: provider.timeout.map(|_| provider.id.clone()),
                     });
                 }
             }
@@ -1405,35 +1419,25 @@ fn connection_ref_json(
     connection_ref.map(canonical_json).transpose()
 }
 
-/// The AiAgent's memory provider: the agent id, literal connection id, and
-/// resolvable `connection_ref` of the Agent step on the `memory`-labelled edge,
-/// if any. Both connection forms are carried so a memory-storage connection can
-/// be a caller-supplied / rotated ref, not only a compile-time literal.
-type MemoryProvider = (String, Option<String>, Option<MappingValue>);
-
-fn ai_agent_memory_provider(graph: &ExecutionGraph, step_id: &str) -> Option<MemoryProvider> {
+/// The Agent definition on the AI step's memory edge. Retain its identity,
+/// budget, durability and connection together, as for synthetic MCP tools.
+fn ai_agent_memory_provider<'a>(graph: &'a ExecutionGraph, step_id: &str) -> Option<&'a AgentStep> {
     let edge = graph
         .execution_plan
         .iter()
         .find(|edge| edge.from_step == step_id && edge.label.as_deref() == Some("memory"))?;
     match graph.steps.get(&edge.to_step) {
-        Some(Step::Agent(agent)) => Some((
-            agent.agent_id.clone(),
-            agent.connection_id.clone(),
-            agent.connection_ref.clone(),
-        )),
+        Some(Step::Agent(agent)) => Some(agent),
         _ => None,
     }
 }
 
-/// The AiAgent's MCP tool edges as `(toolset_id, target_step_id, connection_id,
-/// connection_ref)`. An `mcp.<toolset>` edge targets an Agent step with
-/// `agent_id == "mcp"`; each becomes two synthetic LLM tools
-/// (`<toolset>_search` / `<toolset>_invoke`). The provider's connection may be a
-/// literal or a resolvable ref.
-type McpEdge = (String, String, Option<String>, Option<MappingValue>);
-
-fn ai_agent_mcp_edges(graph: &ExecutionGraph, step_id: &str) -> Vec<McpEdge> {
+/// MCP toolset labels paired with their Agent definitions. Keep the complete
+/// provider so synthetic calls inherit its workflow budget and connection.
+fn ai_agent_mcp_edges<'a>(
+    graph: &'a ExecutionGraph,
+    step_id: &str,
+) -> Vec<(String, &'a AgentStep)> {
     graph
         .execution_plan
         .iter()
@@ -1441,18 +1445,10 @@ fn ai_agent_mcp_edges(graph: &ExecutionGraph, step_id: &str) -> Vec<McpEdge> {
         .filter_map(|edge| {
             let label = edge.label.as_deref()?;
             let toolset = label.strip_prefix("mcp.").filter(|s| !s.is_empty())?;
-            let (connection_id, connection_ref) = match graph.steps.get(&edge.to_step) {
-                Some(Step::Agent(agent)) => {
-                    (agent.connection_id.clone(), agent.connection_ref.clone())
-                }
-                _ => return None,
-            };
-            Some((
-                toolset.to_string(),
-                edge.to_step.clone(),
-                connection_id,
-                connection_ref,
-            ))
+            match graph.steps.get(&edge.to_step) {
+                Some(Step::Agent(agent)) => Some((toolset.to_string(), agent)),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -1647,6 +1643,106 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::WaitForSignal(_) => "WaitForSignal",
         Step::AiAgent(_) => "AiAgent",
     }
+}
+
+/// Live deadlines need the standard clock, including inline and supplied graphs.
+pub(super) fn needs_monotonic_clock(
+    root: &DirectGraphManifest,
+    children: &[DirectChildWorkflowGraphManifest],
+) -> bool {
+    let mut graphs = vec![root];
+    graphs.extend(children.iter().map(|child| &child.graph));
+    while let Some(graph) = graphs.pop() {
+        if graph.agents.iter().any(|agent| agent.timeout.is_some())
+            || graph.steps.iter().any(|step| {
+                step.step_type == "EmbedWorkflow"
+                    && step
+                        .body
+                        .get("timeout")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some()
+            })
+            || graph.whiles.iter().any(|value| {
+                value
+                    .value
+                    .get("timeout")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|timeout| timeout > 0)
+            })
+            || graph.splits.iter().any(|value| {
+                value
+                    .value
+                    .get("timeout")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|timeout| timeout > 0)
+            })
+        {
+            return true;
+        }
+        for step in &graph.steps {
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    false
+}
+
+/// Whether the artifact contains an Embed-owned budget, including nested definitions.
+pub(super) fn has_embed_timeout(
+    root: &DirectGraphManifest,
+    children: &[DirectChildWorkflowGraphManifest],
+) -> bool {
+    let mut graphs = vec![root];
+    graphs.extend(children.iter().map(|child| &child.graph));
+    while let Some(graph) = graphs.pop() {
+        for step in &graph.steps {
+            if step.step_type == "EmbedWorkflow"
+                && step
+                    .body
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+            {
+                return true;
+            }
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    false
+}
+
+/// Agent budgets across the complete definition tree, including inline loop
+/// graphs and supplied child workflows. IDs are allocated manifest-wide.
+pub(super) fn agent_timeouts(
+    root: &DirectGraphManifest,
+    children: &[DirectChildWorkflowGraphManifest],
+) -> std::collections::BTreeMap<u32, u64> {
+    let mut graphs = vec![root];
+    graphs.extend(children.iter().map(|child| &child.graph));
+    let mut budgets = std::collections::BTreeMap::new();
+    while let Some(graph) = graphs.pop() {
+        budgets.extend(
+            graph
+                .agents
+                .iter()
+                .filter_map(|agent| agent.timeout.map(|ms| (agent.id, ms))),
+        );
+        for step in &graph.steps {
+            graphs.extend(
+                step.nested_graphs
+                    .iter()
+                    .map(|nested| nested.graph.as_ref()),
+            );
+        }
+    }
+    budgets
 }
 
 #[cfg(test)]
@@ -2451,5 +2547,121 @@ mod tests {
         assert_eq!(ref_value("memory.summarize"), "data.llm");
         // …and each MCP tool provider resolves the MCP provider's ref.
         assert_eq!(ref_value("agent.tool.mcp"), "data.mcpconn");
+    }
+
+    #[test]
+    fn synthetic_mcp_budget_uses_provider_definition_and_effective_durability() {
+        for graph_durable in [false, true] {
+            for provider_durable in [false, true] {
+                let mut graph: ExecutionGraph =
+                    serde_json::from_str(include_str!("../../tests/fixtures/ai_agent_mcp.json"))
+                        .unwrap();
+                graph.durable = Some(graph_durable);
+                let Some(Step::AiAgent(ai)) = graph.steps.get_mut("ai") else {
+                    panic!("AI")
+                };
+                ai.durable = Some(!provider_durable);
+                let Some(Step::Agent(provider)) = graph.steps.get_mut("mcp_github") else {
+                    panic!("provider")
+                };
+                provider.timeout = Some(123);
+                provider.durable = Some(provider_durable);
+                provider.connection_ref = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "valueType":"reference","value":"data.providerConnection"
+                    }))
+                    .unwrap(),
+                );
+                let manifest = build_direct_workflow_manifest(&graph).unwrap();
+                let synthetic = manifest
+                    .graph
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.purpose == "agent.tool.mcp")
+                    .collect::<Vec<_>>();
+                assert_eq!(synthetic.len(), 2);
+                for agent in synthetic {
+                    assert_eq!(
+                        agent.step_id, "ai",
+                        "caller config identity must remain intact"
+                    );
+                    assert_eq!(agent.timeout_step_id.as_deref(), Some("mcp_github"));
+                    assert_eq!(agent.timeout, Some(123));
+                    assert_eq!(agent.durable, graph_durable && provider_durable);
+                    assert_eq!(
+                        agent.connection_ref.as_ref().unwrap()["value"],
+                        "data.providerConnection"
+                    );
+                }
+                // Optional metadata is absent for accepted untimed inputs and
+                // remains readable in manifests from earlier compiler versions.
+                let Some(Step::Agent(provider)) = graph.steps.get_mut("mcp_github") else {
+                    unreachable!()
+                };
+                provider.timeout = None;
+                let untimed = build_direct_workflow_manifest(&graph).unwrap();
+                let bytes = untimed.to_canonical_json().unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("timeoutStepId"));
+                let decoded: DirectWorkflowManifest = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(decoded, untimed);
+            }
+        }
+    }
+
+    #[test]
+    fn memory_budget_belongs_to_storage_provider_not_summarization() {
+        for graph_durable in [false, true] {
+            for provider_durable in [false, true] {
+                let mut graph: ExecutionGraph =
+                    serde_json::from_str(include_str!("../../tests/fixtures/ai_agent_memory.json"))
+                        .unwrap();
+                graph.durable = Some(graph_durable);
+                let Some(Step::Agent(provider)) = graph.steps.get_mut("mem") else {
+                    panic!("memory")
+                };
+                provider.timeout = Some(400);
+                provider.durable = Some(provider_durable);
+                provider.connection_ref = Some(serde_json::from_value(serde_json::json!({"valueType":"reference","value":"data.memoryConnection"})).unwrap());
+                let Some(Step::AiAgent(ai)) = graph.steps.get_mut("ai") else {
+                    panic!("AI")
+                };
+                ai.durable = Some(!provider_durable);
+                let config = ai.config.as_mut().unwrap();
+                config.memory.as_mut().unwrap().compaction = Some(
+                    serde_json::from_value(
+                        serde_json::json!({"maxMessages":2,"strategy":"summarize"}),
+                    )
+                    .unwrap(),
+                );
+                let manifest = build_direct_workflow_manifest(&graph).unwrap();
+                let storage = manifest
+                    .graph
+                    .agents
+                    .iter()
+                    .filter(|agent| matches!(agent.purpose.as_str(), "memory.load" | "memory.save"))
+                    .collect::<Vec<_>>();
+                assert_eq!(storage.len(), 2);
+                for agent in storage {
+                    assert_eq!(agent.step_id, "ai");
+                    assert_eq!(agent.timeout_step_id.as_deref(), Some("mem"));
+                    assert_eq!(agent.timeout, Some(400));
+                    assert_eq!(agent.durable, graph_durable && provider_durable);
+                    assert_eq!(
+                        agent.connection_ref.as_ref().unwrap()["value"],
+                        "data.memoryConnection"
+                    );
+                }
+                let summarize = manifest
+                    .graph
+                    .agents
+                    .iter()
+                    .find(|agent| agent.purpose == "memory.summarize")
+                    .unwrap();
+                assert_eq!(summarize.agent_id, "ai-tools");
+                assert_eq!(summarize.timeout, None);
+                assert_eq!(summarize.timeout_step_id, None);
+                assert_eq!(summarize.connection_id.as_deref(), Some("openai-conn"));
+            }
+        }
     }
 }

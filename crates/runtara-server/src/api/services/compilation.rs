@@ -131,7 +131,7 @@ fn image_cache_hits(
     image_source_checksum(image) == Some(source_checksum)
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && image_compiler_mode(image) == Some(compiler_mode.as_str())
-        && image_lowering_mode(image) == Some(runtara_workflows::direct_lowering_tag().as_str())
+        && image_lowering_mode(image) == Some(crate::config::workflow_lowering_tag().as_str())
         && image_track_events(image) == Some(track_events)
 }
 
@@ -158,7 +158,7 @@ fn workflow_compilation_fingerprint(
     compiler_mode: WorkflowCompilerMode,
     track_events: bool,
 ) -> String {
-    let lowering_mode = runtara_workflows::direct_lowering_tag();
+    let lowering_mode = crate::config::workflow_lowering_tag();
     let mut fingerprint = Sha256::new();
 
     for field in [
@@ -217,7 +217,7 @@ fn workflow_image_metadata(
         "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
         "compilerMode": compilation_result.compiler_mode.as_str(),
         // Part of cache identity: see `image_cache_hits`.
-        "loweringMode": runtara_workflows::direct_lowering_tag(),
+        "loweringMode": crate::config::workflow_lowering_tag(),
         // Part of cache identity: step-debug instrumentation changes the
         // generated workflow component.
         "trackEvents": track_events,
@@ -314,24 +314,32 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     }
 }
 
-/// The workflow-agent capability ABI is synchronous. Refuse every graph whose
-/// complete static closure could wait, sleep, retry, or pause before any
-/// artifact or sidecar is staged.
-fn require_non_suspending_workflow_agent(
+/// Refuse graphs requiring durable suspension or unsupported runtime ownership
+/// before any artifact or sidecar is staged. Non-durable Agent backoff can stay
+/// inside a callable workflow using cancellable guest waits.
+/// Refuse a workflow that cannot be published as an agent, and report whether
+/// the one that can will park.
+///
+/// A wait, a sleep or a durable retry backoff is not a refusal: each parks under
+/// the capability ABI, so the caller parks in the child's place and no runner
+/// slot is held. Those graphs publish under `parks:1` rather than
+/// `non-suspending:1`. What still refuses is what cannot be shown sound — an
+/// AiAgent model-call retry, or a child closure the compiler cannot see.
+fn require_publishable_workflow_agent(
     execution_graph: &runtara_dsl::ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
-) -> Result<(), ServiceError> {
+) -> Result<bool, ServiceError> {
     let workflow_agent_safety = runtara_workflows::direct_wasm::analyze_workflow_agent_safety(
         execution_graph,
         child_workflows,
     );
     if let Some(violation) = workflow_agent_safety.violations.first() {
         return Err(ServiceError::CompilationError(format!(
-            "workflow cannot be published as an agent because it may suspend or sleep at {} ({}/{}): {}; run it as a top-level workflow or remove that path",
+            "workflow cannot be published as an agent at {} ({}/{}): {}; run it as a top-level workflow or remove that path",
             violation.path, violation.step_type, violation.feature, violation.reason,
         )));
     }
-    Ok(())
+    Ok(workflow_agent_safety.may_suspend_or_sleep)
 }
 
 fn compile_workflow_direct_only(
@@ -414,7 +422,6 @@ fn data_dir() -> PathBuf {
 /// Service for workflow compilation operations
 pub struct CompilationService {
     repository: Arc<WorkflowRepository>,
-    connection_service_url: Option<String>,
     /// Runtime client for registering images with runtara-environment
     runtime_client: Option<Arc<RuntimeClient>>,
     /// Runtime agent metadata catalog (snapshot of every `<agent>.meta.json`
@@ -455,12 +462,10 @@ impl CompilationService {
 
     pub fn new(
         repository: Arc<WorkflowRepository>,
-        connection_service_url: Option<String>,
         runtime_client: Option<Arc<RuntimeClient>>,
     ) -> Self {
         Self {
             repository,
-            connection_service_url,
             runtime_client,
             agent_catalog: None,
             redis_manager: None,
@@ -664,7 +669,6 @@ impl CompilationService {
             execution_graph,
             track_events,
             child_workflows,
-            connection_service_url: self.connection_service_url.clone(),
             // When configured, the compile uses the runtime catalog from
             // the component dispatcher so the compiled view of agents
             // matches what the runtime can actually invoke — merged with the
@@ -1119,7 +1123,7 @@ impl CompilationService {
             .load_child_workflows_as_input(tenant_id, workflow_id, version, &definition)
             .await?;
 
-        require_non_suspending_workflow_agent(&execution_graph, &child_workflows)?;
+        let parks = require_publishable_workflow_agent(&execution_graph, &child_workflows)?;
 
         let name = execution_graph.name.clone().unwrap_or_else(|| slug.clone());
         let description = execution_graph.description.clone().unwrap_or_default();
@@ -1130,7 +1134,15 @@ impl CompilationService {
             &execution_graph.input_schema,
             &execution_graph.output_schema,
         );
-        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+        // The two certificates are mutually exclusive by construction. A composer
+        // built before parking existed demands `non-suspending:1`, so it refuses a
+        // parking child outright instead of re-raising its suspend without the
+        // wake it carries.
+        if parks {
+            runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
+        } else {
+            runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+        }
 
         // 2. Compile with the AgentCapabilities ABI + compose. Same catalog
         //    overlay as a normal compile so a workflow-agent may itself invoke
@@ -1167,8 +1179,8 @@ impl CompilationService {
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
                 runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-                // The static preflight above has proved this graph has no
-                // suspension path, so its capability invoke is synchronous.
+                // Static preflight excludes durable suspension. Callable Agent
+                // waits retain their guest stack and cooperate with parent cancellation.
                 true,
             )?;
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -1437,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_agent_publish_preflight_rejects_a_delay_with_a_stable_path() {
+    fn workflow_agent_publish_preflight_accepts_a_delay_as_a_parking_agent() {
         let graph = parse_execution_graph(&serde_json::json!({
             "steps": {
                 "delay": {
@@ -1454,12 +1466,69 @@ mod tests {
         }))
         .expect("graph parses");
 
-        let error = require_non_suspending_workflow_agent(&graph, &[])
-            .expect_err("a workflow-agent cannot sleep");
-
+        // A sleep parks in a published agent, so it publishes — under `parks:1`,
+        // which is what the `true` selects.
         assert!(
-            error.to_string().contains("root/steps/delay (Delay/delay)"),
+            require_publishable_workflow_agent(&graph, &[])
+                .expect("a sleeping workflow-agent parks rather than holding a runner"),
+            "a Delay must be reported as parking"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_publish_preflight_refuses_an_unloaded_child_with_a_stable_path() {
+        let graph = parse_execution_graph(&serde_json::json!({
+            "steps": {
+                "child": {
+                    "stepType": "EmbedWorkflow",
+                    "id": "child",
+                    "childWorkflowId": "unloaded",
+                    "childVersion": 1,
+                    "maxRetries": 0
+                }
+            },
+            "entryPoint": "child",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        // A child closure the compiler cannot see can hide anything, so this
+        // still refuses, and names the exact step it refused on.
+        let error = require_publishable_workflow_agent(&graph, &[])
+            .expect_err("an unseen child closure cannot be proven sound");
+        assert!(
+            error
+                .to_string()
+                .contains("root/steps/child (EmbedWorkflow/missing-child-closure)"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_publish_preflight_certifies_agent_waits_by_durability() {
+        let mut graph = parse_execution_graph(&serde_json::json!({
+            "durable": false, "entryPoint": "call", "steps": {
+                "call": {"id":"call", "stepType":"Agent", "agentId":"http",
+                    "capabilityId":"http-request", "maxRetries":3, "retryDelay":1000},
+                "finish":{"id":"finish", "stepType":"Finish"}
+            }, "executionPlan":[{"fromStep":"call", "toStep":"finish"}]
+        }))
+        .expect("graph parses");
+        assert!(
+            !require_publishable_workflow_agent(&graph, &[])
+                .expect("guest-local Agent waits publish"),
+            "a non-durable Agent retry waits in the guest and never parks"
+        );
+        // Durable backoff used to be refused; it parks now, so it publishes as a
+        // parking agent rather than being turned away.
+        graph.durable = Some(true);
+        assert!(
+            require_publishable_workflow_agent(&graph, &[])
+                .expect("durable Agent backoff parks rather than holding a runner"),
+            "a durable Agent retry must be reported as parking"
         );
     }
 
@@ -1475,8 +1544,11 @@ mod tests {
         }))
         .expect("graph parses");
 
-        require_non_suspending_workflow_agent(&graph, &[])
-            .expect("a pure finish is safe as a workflow-agent");
+        assert!(
+            !require_publishable_workflow_agent(&graph, &[])
+                .expect("a pure finish is safe as a workflow-agent"),
+            "a pure finish never parks, so it keeps the non-suspending certificate"
+        );
     }
 
     #[test]
@@ -1486,7 +1558,7 @@ mod tests {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": runtara_workflows::direct_lowering_tag(),
+                "loweringMode": crate::config::workflow_lowering_tag(),
                 "trackEvents": true
             }
         });
@@ -1615,7 +1687,7 @@ mod tests {
                 "source-sha256",
                 WorkflowCompilerMode::DirectWasm,
                 true,
-            ) || runtara_workflows::direct_lowering_tag()
+            ) || crate::config::workflow_lowering_tag()
                 == "store_freeing_sleep=false,omit_runtime=false",
             "an image built with other lowering must not be reused"
         );
@@ -1625,7 +1697,7 @@ mod tests {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": runtara_workflows::direct_lowering_tag(),
+                "loweringMode": crate::config::workflow_lowering_tag(),
                 "trackEvents": true
             }
         }));
@@ -1675,7 +1747,7 @@ mod tests {
             workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", true, None);
         assert_eq!(
             metadata["workflow"]["loweringMode"],
-            serde_json::json!(runtara_workflows::direct_lowering_tag()),
+            serde_json::json!(crate::config::workflow_lowering_tag()),
             "provenance must record the lowering the artifact was built with"
         );
     }
@@ -1831,6 +1903,8 @@ mod tests {
             support_report_checksum: "support-sha256".to_string(),
             workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
             composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
+            isolation: None,
+            isolation_selection: None,
             shared_components: vec![DirectComponentDependencyMetadata {
                 kind: "shared".to_string(),
                 agent_id: None,

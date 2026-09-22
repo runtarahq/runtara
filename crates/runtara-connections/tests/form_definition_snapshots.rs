@@ -50,39 +50,6 @@ fn assert_snapshot(relative_path: &str, actual: &str, expected: &str, context: &
     assert_eq!(actual, expected.trim(), "{context} snapshot changed");
 }
 
-fn sftp_pilot_snapshot(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Value {
-    let definition = runtara_dsl::form::connection_form_definition(meta);
-    let scenario = |data: Value| {
-        let analysis = runtara_dsl::form::analyze_form(&definition, &data);
-        serde_json::json!({
-            "valid": analysis.valid,
-            "password": analysis.fields["password"],
-            "privateKey": analysis.fields["private_key"],
-            "passphrase": analysis.fields["passphrase"]
-        })
-    };
-    canonicalize(serde_json::json!({
-        "authMode": definition.fields["auth_mode"],
-        "secretBehavior": meta.fields.iter().filter(|field| field.is_secret).map(|field| {
-            (field.name, field.behavior)
-        }).collect::<std::collections::BTreeMap<_, _>>(),
-        "scenarios": {
-            "passwordMissing": scenario(serde_json::json!({
-                "host": "sftp.example.com", "port": 22, "username": "demo",
-                "auth_mode": "password"
-            })),
-            "privateKeyConfigured": scenario(serde_json::json!({
-                "host": "sftp.example.com", "port": 22, "username": "demo",
-                "auth_mode": "private_key", "private_key": "key"
-            })),
-            "legacyPrivateKey": scenario(serde_json::json!({
-                "host": "sftp.example.com", "port": 22, "username": "demo",
-                "private_key": "key"
-            }))
-        }
-    }))
-}
-
 #[test]
 fn every_registered_connection_form_matches_the_stable_snapshot() {
     let mut metadata = runtara_agents::registry::get_all_connection_types().collect::<Vec<_>>();
@@ -110,25 +77,13 @@ fn every_registered_connection_form_matches_the_stable_snapshot() {
 }
 
 #[test]
-fn condition_heavy_pilot_forms_have_readable_snapshots() {
-    for integration_id in ["mcp", "sftp"] {
-        let meta = runtara_agents::registry::find_connection_type(integration_id).unwrap();
-        let snapshot = if integration_id == "sftp" {
-            sftp_pilot_snapshot(meta)
-        } else {
-            normalized_descriptor(meta)
-        };
-        let actual = serde_json::to_string_pretty(&snapshot).unwrap();
-        let expected = match integration_id {
-            "mcp" => include_str!("fixtures/connection_form_mcp.json"),
-            "sftp" => include_str!("fixtures/connection_form_sftp.json"),
-            _ => unreachable!(),
-        };
-        assert_snapshot(
-            &format!("tests/fixtures/connection_form_{integration_id}.json"),
-            &actual,
-            expected,
-            integration_id,
-        );
-    }
+fn mcp_condition_heavy_form_has_a_readable_snapshot() {
+    let meta = runtara_agents::registry::find_connection_type("mcp").unwrap();
+    let actual = serde_json::to_string_pretty(&normalized_descriptor(meta)).unwrap();
+    assert_snapshot(
+        "tests/fixtures/connection_form_mcp.json",
+        &actual,
+        include_str!("fixtures/connection_form_mcp.json"),
+        "mcp",
+    );
 }

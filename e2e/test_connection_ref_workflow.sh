@@ -9,12 +9,12 @@
 # instead of a compile-time-pinned `connectionId`. The concrete id is supplied
 # by the caller in `data` at execute time and resolved at runtime.
 #
-# The observable is the internal proxy's own error: the `http` agent forwards
-# `_connection.connection_id` as `X-Runtara-Connection-Id`, and the proxy
+# The observable is the native outbound service's error: the `http` agent forwards
+# `_connection.connection_id` through the typed host import, and the service
 # fail-closes an unknown id with `Connection '<id>' not found`. Feeding a
-# DISTINCTIVE id in `data.conn` and asserting the proxy error names EXACTLY
+# DISTINCTIVE id in `data.conn` and asserting the service error names EXACTLY
 # that id proves the ref resolved from the runtime input and threaded through
-# the whole pipeline (save+validate → compile → resolve → agent → proxy). A
+# the whole pipeline (save+validate → compile → resolve → agent → host). A
 # second run with a different id confirms the id tracks the input, not a baked
 # value.
 #

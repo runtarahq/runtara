@@ -9,7 +9,7 @@
 //! the Canonical-ABI-mandated realloc/initialize/post-return intrinsics, one linear
 //! memory sized to the static-data layout, the seeded heap-base global, and the
 //! data segments. The shape must match exactly what `wac compose` expects, while
-//! all real logic stays in the one `run` body.
+//! workflow logic and shared cooperative waits stay in the same core module.
 
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection,
@@ -167,6 +167,12 @@ pub(super) fn emit_direct_core_module(
             }
             WorldItem::Interface { id, .. } => {
                 for function in resolve.interfaces[*id].functions.values() {
+                    if resolve.name_world_key(name)
+                        == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+                        && function.name != "now"
+                    {
+                        continue;
+                    }
                     import_core_function(
                         resolve,
                         mangling,
@@ -185,16 +191,34 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    // Parallel-Split extra CORE imports (Phase 3):
-    // the CM-async waitable builtins from the legacy `$root` module, plus an
-    // `[async-lower]invoke` per agent referenced by an eligible parallel
-    // window. Emitted only when such a window exists, so sequential-only
-    // workflows keep a byte-identical import section. wit-component's legacy
-    // name mangling turns these into `canon lower ... async` / the waitable
-    // canon builtins at encode time.
-    let parallel_pools =
-        super::split_parallel::parallel_agent_pools(&config.static_data, &config.run_plan);
-    if !parallel_pools.is_empty() {
+    // A pure callable workflow can cooperate between CPU loop iterations
+    // without a runtime or I/O import. This is a canonical intrinsic, not a
+    // host scheduler API, and works with the existing synchronous lift.
+    if config.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+        types.ty().function([], [ValType::I32]);
+        imports.import(
+            "$root",
+            "[cancellable][thread-yield]",
+            wasm_encoder::EntityType::Function(type_count),
+        );
+        type_count += 1;
+        import_indices.thread_yield = Some(imported_function_count);
+        imported_function_count += 1;
+    }
+
+    // Standard async calls for Agents and in-run retry timers. Timer-only
+    // graphs need the same wait/cleanup helpers even without Agent imports.
+    // Pools continue to determine component instance count.
+    let has_agents = world
+        .imports
+        .keys()
+        .any(|name| agent_id_for_import(resolve, Some(name)).is_some());
+    let has_async_calls = has_agents
+        || world
+            .imports
+            .keys()
+            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0");
+    if has_async_calls {
         let builtin = |field: &str,
                        params: &[ValType],
                        results: &[ValType],
@@ -229,8 +253,24 @@ pub(super) fn emit_direct_core_module(
             &mut imports,
             &mut imported_function_count,
         ));
+        import_indices.waitable_set_poll = Some(builtin(
+            "[waitable-set-poll]",
+            &[ValType::I32, ValType::I32],
+            &[ValType::I32],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
         import_indices.waitable_set_wait = Some(builtin(
-            "[waitable-set-wait]",
+            if matches!(
+                config.abi,
+                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+            ) {
+                "[cancellable][waitable-set-wait]"
+            } else {
+                "[waitable-set-wait]"
+            },
             &[ValType::I32, ValType::I32],
             &[ValType::I32],
             &mut types,
@@ -256,6 +296,15 @@ pub(super) fn emit_direct_core_module(
             &mut imports,
             &mut imported_function_count,
         ));
+        import_indices.subtask_cancel = Some(builtin(
+            "[subtask-cancel]",
+            &[ValType::I32],
+            &[ValType::I32],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
         import_indices.subtask_drop = Some(builtin(
             "[subtask-drop]",
             &[ValType::I32],
@@ -266,9 +315,13 @@ pub(super) fn emit_direct_core_module(
             &mut imported_function_count,
         ));
 
-        // Concurrent backoff timer (§3.4): async-lowered `sleep` from the
+        // Concurrent polling/backoff timer: async-lowered `sleep` from the
         // host-io timers interface. Params ≤4 flats, empty result → no retptr;
         // returns the packed subtask status.
+        if world
+            .imports
+            .keys()
+            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0")
         {
             let type_index = {
                 let index = type_count;
@@ -283,32 +336,29 @@ pub(super) fn emit_direct_core_module(
             );
             import_indices.timer_sleep_async = Some(imported_function_count);
             imported_function_count += 1;
+            imports.import(
+                "runtara:host-io/timers@0.1.0",
+                "[async-lower]abort-after",
+                wasm_encoder::EntityType::Function(type_index),
+            );
+            import_indices.timer_abort_async = Some(imported_function_count);
+            imported_function_count += 1;
         }
 
-        let is_pool_member = |agent_id: &str| -> bool {
-            if parallel_pools.contains_key(agent_id) {
-                return true;
-            }
-            // "<base>-par<n>" phantom member of a pooled base?
-            agent_id.rfind("-par").is_some_and(|split_at| {
-                let (base, suffix) = agent_id.split_at(split_at);
-                suffix[4..].parse::<u32>().ok().is_some_and(|member| {
-                    parallel_pools.get(base).is_some_and(|pool| member < *pool)
-                })
-            })
-        };
         for (name, import) in &world.imports {
             let WorldItem::Interface { id, .. } = import else {
                 continue;
             };
-            let Some(agent_id) = agent_id_for_import(resolve, Some(name)) else {
-                continue;
-            };
-            if !is_pool_member(&agent_id) {
-                continue;
-            }
+            let agent_id = agent_id_for_import(resolve, Some(name));
             for function in resolve.interfaces[*id].functions.values() {
-                if function.name != "invoke" {
+                let agent_invoke = agent_id.is_some() && function.name == "invoke";
+                let describe = super::core_imports::is_connection_resolver_import(
+                    resolve,
+                    Some(name),
+                    function,
+                    "describe",
+                );
+                if !agent_invoke && !describe {
                     continue;
                 }
                 let async_mangling =
@@ -332,24 +382,143 @@ pub(super) fn emit_direct_core_module(
                     &field,
                     wasm_encoder::EntityType::Function(type_index),
                 );
-                import_indices.agent_invokes_async.insert(
-                    agent_id.clone(),
-                    super::DirectAgentInvokeImport {
-                        function_index: imported_function_count,
-                        params: signature.params.clone(),
-                    },
-                );
+                if let Some(agent_id) = &agent_id {
+                    import_indices.agent_invokes_async.insert(
+                        agent_id.clone(),
+                        super::DirectAgentInvokeImport {
+                            function_index: imported_function_count,
+                            params: signature.params.clone(),
+                        },
+                    );
+                } else {
+                    import_indices.connection_resolver_describe_async =
+                        Some(imported_function_count);
+                }
                 imported_function_count += 1;
             }
         }
     }
 
-    let import_indices = import_indices.require_all(
+    let mut import_indices = import_indices.require_all(
         config.abi,
         config.omit_runtime,
         config.static_data.has_connections(),
         config.has_run_label,
     )?;
+
+    // Async canonical lowering permits fewer flat params than sync lowering.
+    // Scoped invokes therefore use an indirect 40-byte argument record. A core
+    // shim keeps lowerers uniform and owns its record in the same arena as the
+    // input buffers (never rewound while subtasks are live).
+    let scoped_async = import_indices
+        .agent_invokes_async
+        .keys()
+        .filter(|agent| {
+            import_indices
+                .agent_invokes
+                .get(*agent)
+                .is_some_and(|invoke| invoke.is_scoped())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let early_realloc = !scoped_async.is_empty();
+    if early_realloc {
+        let realloc_index = imported_function_count + next_defined_function;
+        export_realloc(
+            resolve,
+            mangling,
+            &mut types,
+            &mut type_count,
+            &mut functions,
+            &mut exports,
+            &mut code,
+            imported_function_count,
+            &mut next_defined_function,
+        );
+        for agent in scoped_async {
+            let params = import_indices.agent_invokes[&agent].params.clone();
+            let invoke = import_indices.agent_invokes_async.get_mut(&agent).unwrap();
+            if invoke.params != [WasmType::Pointer, WasmType::Pointer] {
+                return Err(super::component_error(
+                    "unexpected scoped async invoke canonical signature",
+                ));
+            }
+            functions.function(push_core_type(
+                &mut types,
+                &mut type_count,
+                &params,
+                &[WasmType::I32],
+            ));
+            let mut body = WasmFunction::new([(1, ValType::I32)]);
+            // The legacy allocator adds in i32. Reject wrap before reserving
+            // our argument record; failed memory growth then traps on stores.
+            body.instruction(&Instruction::GlobalGet(0));
+            body.instruction(&Instruction::I32Const(-49)); // u32::MAX - 48
+            body.instruction(&Instruction::I32GtU);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            body.instruction(&Instruction::Unreachable);
+            body.instruction(&Instruction::End);
+            for arg in [0, 0, 8, 48] {
+                body.instruction(&Instruction::I32Const(arg));
+            }
+            body.instruction(&Instruction::Call(realloc_index));
+            // The shared legacy bump allocator does not promise alignment.
+            body.instruction(&Instruction::I32Const(7));
+            body.instruction(&Instruction::I32Add);
+            body.instruction(&Instruction::I32Const(-8));
+            body.instruction(&Instruction::I32And);
+            body.instruction(&Instruction::LocalSet(10));
+            for local in 0..9 {
+                body.instruction(&Instruction::LocalGet(10));
+                body.instruction(&Instruction::LocalGet(local));
+                let mem = wasm_encoder::MemArg {
+                    offset: u64::from(local) * 4,
+                    align: 2,
+                    memory_index: 0,
+                };
+                body.instruction(&if local == 8 {
+                    Instruction::I64Store(mem)
+                } else {
+                    Instruction::I32Store(mem)
+                });
+            }
+            body.instruction(&Instruction::LocalGet(10));
+            body.instruction(&Instruction::LocalGet(9));
+            body.instruction(&Instruction::Call(invoke.function_index));
+            body.instruction(&Instruction::End);
+            code.function(&body);
+            invoke.function_index = imported_function_count + next_defined_function;
+            invoke.params = params;
+            next_defined_function += 1;
+        }
+    }
+
+    // Reserve forward references so the entry and its post-return retain their
+    // existing positions. Each WIT function adds an export and a post-return;
+    // realloc (unless already emitted) and initialize follow them.
+    if has_async_calls {
+        let export_count: u32 = world
+            .exports
+            .values()
+            .map(|item| match item {
+                WorldItem::Function(_) => 1,
+                WorldItem::Interface { id, .. } => resolve.interfaces[*id].functions.len() as u32,
+                WorldItem::Type { .. } => 0,
+            })
+            .sum();
+        let mut next_helper = imported_function_count
+            + next_defined_function
+            + 2 * export_count
+            + u32::from(!early_realloc)
+            + 1;
+        for helper in super::cooperative_wait::Helper::ALL {
+            if config.omit_runtime && helper.needs_runtime() {
+                continue;
+            }
+            import_indices.cooperative_helpers[helper as usize] = Some(next_helper);
+            next_helper += 1;
+        }
+    }
 
     for (name, export) in &world.exports {
         match export {
@@ -414,17 +583,19 @@ pub(super) fn emit_direct_core_module(
         &ConstExpr::i32_const(config.static_data.heap_base),
     );
 
-    export_realloc(
-        resolve,
-        mangling,
-        &mut types,
-        &mut type_count,
-        &mut functions,
-        &mut exports,
-        &mut code,
-        imported_function_count,
-        &mut next_defined_function,
-    );
+    if !early_realloc {
+        export_realloc(
+            resolve,
+            mangling,
+            &mut types,
+            &mut type_count,
+            &mut functions,
+            &mut exports,
+            &mut code,
+            imported_function_count,
+            &mut next_defined_function,
+        );
+    }
     export_initialize(
         resolve,
         mangling,
@@ -436,6 +607,24 @@ pub(super) fn emit_direct_core_module(
         imported_function_count,
         &mut next_defined_function,
     );
+
+    if has_async_calls {
+        use super::cooperative_wait::{HELPER_PARAMS, Helper, helper_body};
+        let helper_type = type_count;
+        types.ty().function(
+            vec![ValType::I32; HELPER_PARAMS],
+            vec![ValType::I32; HELPER_PARAMS + 1],
+        );
+        for helper in Helper::ALL {
+            let Some(index) = import_indices.cooperative_helpers[helper as usize] else {
+                continue;
+            };
+            assert_eq!(index, imported_function_count + next_defined_function);
+            next_defined_function += 1;
+            functions.function(helper_type);
+            code.function(&helper_body(helper, &import_indices));
+        }
+    }
 
     let mut data = DataSection::new();
     for segment in config.static_data.data_segments() {
@@ -656,14 +845,46 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     (2, ValType::I32),
     (2, ValType::I64),
-    // 142-143: resolved terminal run label JSON, separate from workflow output.
+    // 142-145: sequential cooperative wait handle, set, timer, packed status.
+    (4, ValType::I32),
+    // 146-157: cooperative window bounds/handles and retained lifecycle receipt.
+    (12, ValType::I32),
+    // 158: owned deadline packed status; 159: last await selected timeout.
+    (2, ValType::I32),
+    // 160-161: durable Agent deadline and remaining-duration scratch.
+    (2, ValType::I64),
+    // 162-163: monotonic start instant (ns) and initial live budget (ms).
+    (2, ValType::I64),
+    // 164-173: enclosing scope owner, clock, payload, selected unwind and scratch.
+    (3, ValType::I64),
+    (2, ValType::I32),
+    (1, ValType::I64),
+    (2, ValType::I32),
+    (2, ValType::I64),
+    // 174-178: enclosing deadline saved for Split aggregation.
+    (3, ValType::I64),
+    (2, ValType::I32),
+    // 179-181: timed-window flag, selected slot and owned timer status.
+    (3, ValType::I32),
+    // 182: safety alarm owned by the current deadline wait.
+    (1, ValType::I32),
+    // 183: effective enclosing-scope alarm; 184/185: restoration/budget scratch.
+    (1, ValType::I32),
+    (2, ValType::I64),
+    // 186-187: resolved terminal run label JSON, separate from workflow output.
+    (2, ValType::I32),
+    // 188: absolute deadline a nested workflow-agent child asked to park until,
+    // carried out of its capability call by the suspend sentinel.
+    (1, ValType::I64),
+    // 189-190: the signal route that child is parked on, so the caller re-raises
+    // an on-signal wake rather than a bare resume the waker would ignore.
     (2, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
 /// group the drop lands in so every surviving slot keeps its absolute index and
 /// type. Used to fold export params onto the front of [`CANONICAL_LOCAL_GROUPS`].
-fn drop_leading_locals(groups: &[(u32, ValType)], n: u32) -> Vec<(u32, ValType)> {
+pub(super) fn drop_leading_locals(groups: &[(u32, ValType)], n: u32) -> Vec<(u32, ValType)> {
     let mut remaining = n;
     let mut out = Vec::new();
     for &(count, ty) in groups {
@@ -794,6 +1015,7 @@ fn direct_run_function(
     if !config.omit_runtime && !matches!(config.abi, WorkflowAbi::AgentCapabilities) {
         emit_complete(&mut body, indices, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
     }
+    super::deadline_scope::close_alarm(&mut body, indices);
     match config.abi {
         WorkflowAbi::CliRunHttp => {
             load_retptr_tag(&mut body);
@@ -813,8 +1035,15 @@ fn direct_run_function(
 }
 
 /// Locals live in the invocation frame; child/loop scratch cannot overwrite them.
-pub(super) const RUN_LABEL_PTR_LOCAL: u32 = 142;
-pub(super) const RUN_LABEL_LEN_LOCAL: u32 = 143;
+/// Where a re-raised child suspend stashes the deadline it wants to park until.
+/// The parent needs its own slot: the child's is inside the callee.
+pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
+/// The nested child's signal route, re-raised so the park is `on-signal`.
+pub(super) const NESTED_SUSPEND_SIGNAL_PTR_LOCAL: u32 = 189;
+pub(super) const NESTED_SUSPEND_SIGNAL_LEN_LOCAL: u32 = 190;
+
+pub(super) const RUN_LABEL_PTR_LOCAL: u32 = 186;
+pub(super) const RUN_LABEL_LEN_LOCAL: u32 = 187;
 
 /// Both normal and handled-error terminal paths use the same completion API.
 pub(super) fn emit_complete(

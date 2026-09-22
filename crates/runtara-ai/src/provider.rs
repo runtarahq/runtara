@@ -59,7 +59,7 @@ pub fn provider_for_integration(integration_id: &str) -> Option<&'static str> {
 ///
 /// Supports two modes:
 /// - **Proxy** (preferred): if `connection_id` is provided, uses the proxy pattern
-///   with relative paths and `X-Runtara-Connection-Id` header
+///   with relative paths and an explicit connection ID
 /// - **Direct** (fallback): extracts `api_key` and optional `base_url` from parameters
 ///
 /// # Arguments

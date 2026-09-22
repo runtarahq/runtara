@@ -9,25 +9,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::config::{
-    DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, DEFAULT_FILTER_RESULT_ROW_LIMIT, StoreConfig,
-};
+use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
 use crate::error::{ObjectStoreError, Result};
-use crate::instance::{
-    Condition, FilterRequest, Instance, OrderByEntry, OrderByTarget, SimpleFilter,
-};
+use crate::instance::{Condition, FilterRequest, Instance, SimpleFilter};
 use crate::schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 use crate::sql::aggregate::{
     AggregateRequest, AggregateResult, build_aggregate_query_with_subqueries,
 };
-use crate::sql::condition::{
-    build_condition_clause_with_subqueries, build_order_by_clause,
-    collect_condition_subquery_schema_names, field_to_sql,
-};
+use crate::sql::condition::collect_condition_subquery_schema_names;
 use crate::sql::ddl::DdlGenerator;
-use crate::sql::expr::{ExprNode, render_row_expression, validate_row_expression};
 use crate::sql::sanitize::quote_identifier;
 use crate::types::{ColumnDefinition, ColumnType, IndexDefinition};
+use runtara_object_model_core::bulk::{
+    Slot, classify_slot, live_conflict_target, update_signature,
+};
 
 /// A validated row destined for bulk insert: (generated id, payload map).
 type ValidatedRow = (String, serde_json::Map<String, serde_json::Value>);
@@ -59,6 +54,7 @@ pub struct ObjectStore {
     schema_cache_by_name: RwLock<HashMap<String, CachedSchema>>,
     /// Short-TTL cache of schema metadata keyed by id.
     schema_cache_by_id: RwLock<HashMap<String, CachedSchema>>,
+    metadata_ready: tokio::sync::OnceCell<()>,
 }
 
 impl ObjectStore {
@@ -74,6 +70,14 @@ impl ObjectStore {
     /// superuser/`CREATE EXTENSION` privilege from application roles, so doing
     /// it at runtime fails even when a DBA has already installed them.
     pub async fn new(config: StoreConfig) -> Result<Self> {
+        let store = Self::connect(config).await?;
+        store.initialize_object_model().await?;
+        Ok(store)
+    }
+
+    /// Open a native SQL pool without creating Object Model tables or running DDL.
+    /// Object Model clients explicitly initialize their own metadata.
+    pub async fn connect(config: StoreConfig) -> Result<Self> {
         let connect_options = config
             .database_url
             .parse::<PgConnectOptions>()
@@ -99,9 +103,8 @@ impl ObjectStore {
             config,
             schema_cache_by_name: RwLock::new(HashMap::new()),
             schema_cache_by_id: RwLock::new(HashMap::new()),
+            metadata_ready: tokio::sync::OnceCell::new(),
         };
-        store.ensure_metadata_table().await?;
-
         Ok(store)
     }
 
@@ -115,8 +118,9 @@ impl ObjectStore {
             config,
             schema_cache_by_name: RwLock::new(HashMap::new()),
             schema_cache_by_id: RwLock::new(HashMap::new()),
+            metadata_ready: tokio::sync::OnceCell::new(),
         };
-        store.ensure_metadata_table().await?;
+        store.initialize_object_model().await?;
         Ok(store)
     }
 
@@ -130,29 +134,23 @@ impl ObjectStore {
         &self.config
     }
 
-    /// Ensures the metadata table exists
-    async fn ensure_metadata_table(&self) -> Result<()> {
-        let metadata_table = quote_identifier(&self.config.metadata_table);
-
-        let create_sql = format!(
-            r#"
-            CREATE TABLE IF NOT EXISTS {} (
-                id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
-                name VARCHAR(255) UNIQUE NOT NULL,
-                description TEXT,
-                table_name VARCHAR(255) UNIQUE NOT NULL,
-                columns JSONB NOT NULL,
-                indexes JSONB,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
-                deleted BOOLEAN DEFAULT FALSE
-            )
-            "#,
-            metadata_table
-        );
-
-        sqlx::query(&create_sql).execute(&self.pool).await?;
-
+    /// Initialize metadata only for native public Object Model clients.
+    /// The generic SQL host uses `connect` and never calls this method.
+    pub async fn initialize_object_model(&self) -> Result<()> {
+        self.metadata_ready
+            .get_or_try_init(|| async {
+                let mut transaction = self.pool.begin().await?;
+                sqlx::query(DdlGenerator::METADATA_LOCK_SQL)
+                    .bind(&self.config.metadata_table)
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query(&DdlGenerator::new(&self.config).generate_metadata_table())
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<(), ObjectStoreError>(())
+            })
+            .await?;
         Ok(())
     }
 
@@ -664,64 +662,14 @@ impl ObjectStore {
 
         let instance_id = uuid::Uuid::new_v4().to_string();
 
-        // Build column names and placeholders
-        let mut column_names = Vec::new();
-        let mut placeholders = Vec::new();
-        let mut param_idx = 1;
-
-        // Add auto-managed id if enabled
-        if self.config.auto_columns.id {
-            column_names.push("id".to_string());
-            placeholders.push(format!("${}", param_idx));
-            param_idx += 1;
-        }
-
-        // Validate and collect columns
-        for col in &schema.columns {
-            if col.column_type.is_generated() {
-                if let Some(v) = properties_obj.get(&col.name)
-                    && !v.is_null()
-                {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Column '{}' is generated and cannot be set",
-                        col.name
-                    )));
-                }
-                continue;
-            }
-            if let Some(value) = properties_obj.get(&col.name) {
-                // Validate type
-                if let Err(e) = col.column_type.validate_value(value) {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Invalid value for column '{}': {}",
-                        col.name, e
-                    )));
-                }
-
-                if !col.nullable && value.is_null() {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Column '{}' does not allow NULL values",
-                        col.name
-                    )));
-                }
-
-                column_names.push(quote_identifier(&col.name));
-                placeholders.push(format!("${}", param_idx));
-                param_idx += 1;
-            } else if !col.nullable && col.default_value.is_none() {
-                return Err(ObjectStoreError::validation(format!(
-                    "Required column '{}' is missing",
-                    col.name
-                )));
-            }
-        }
-
-        let insert_sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            quote_identifier(&schema.table_name),
-            column_names.join(", "),
-            placeholders.join(", ")
-        );
+        let plan = runtara_object_model_core::planning::plan_insert(
+            &self.config,
+            &schema,
+            &properties,
+            &instance_id,
+        )
+        .map_err(ObjectStoreError::validation)?;
+        let insert_sql = plan.sql;
 
         // Build query with type-aware bindings
         let mut query = sqlx::query(&insert_sql);
@@ -933,49 +881,17 @@ impl ObjectStore {
             .as_object()
             .ok_or_else(|| ObjectStoreError::validation("Properties must be a JSON object"))?;
 
-        let mut set_clauses = Vec::new();
-        let mut param_idx = 2; // $1 = instance_id
-
-        if self.config.auto_columns.updated_at {
-            set_clauses.push("updated_at = NOW()".to_string());
-        }
-
-        for col in &schema.columns {
-            if col.column_type.is_generated() {
-                if let Some(v) = properties_obj.get(&col.name)
-                    && !v.is_null()
-                {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Column '{}' is generated and cannot be set",
-                        col.name
-                    )));
-                }
-                continue;
-            }
-            if let Some(value) = properties_obj.get(&col.name) {
-                // Validate type
-                if let Err(e) = col.column_type.validate_value(value) {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Invalid value for column '{}': {}",
-                        col.name, e
-                    )));
-                }
-
-                set_clauses.push(format!("{} = ${}", quote_identifier(&col.name), param_idx));
-                param_idx += 1;
-            }
-        }
-
-        if set_clauses.is_empty() || (set_clauses.len() == 1 && self.config.auto_columns.updated_at)
-        {
-            return Ok(()); // Nothing to update
-        }
-
-        let update_sql = format!(
-            "UPDATE {} SET {} WHERE id = $1 AND deleted = FALSE",
-            quote_identifier(&schema.table_name),
-            set_clauses.join(", "),
-        );
+        let Some(plan) = runtara_object_model_core::planning::plan_update(
+            &self.config,
+            &schema,
+            &properties,
+            instance_id,
+        )
+        .map_err(ObjectStoreError::validation)?
+        else {
+            return Ok(());
+        };
+        let update_sql = plan.sql;
 
         let mut query = sqlx::query(&update_sql).bind(instance_id);
 
@@ -1007,34 +923,12 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
-        let result = if self.config.soft_delete {
-            let update_set = if self.config.auto_columns.updated_at {
-                "deleted = TRUE, updated_at = NOW()"
-            } else {
-                "deleted = TRUE"
-            };
-
-            let delete_sql = format!(
-                "UPDATE {} SET {} WHERE id = $1 AND deleted = FALSE",
-                quote_identifier(&schema.table_name),
-                update_set
-            );
-
-            sqlx::query(&delete_sql)
-                .bind(instance_id)
-                .execute(&self.pool)
-                .await?
-        } else {
-            let delete_sql = format!(
-                "DELETE FROM {} WHERE id = $1",
-                quote_identifier(&schema.table_name)
-            );
-
-            sqlx::query(&delete_sql)
-                .bind(instance_id)
-                .execute(&self.pool)
-                .await?
-        };
+        let plan =
+            runtara_object_model_core::planning::plan_delete(&self.config, &schema, instance_id);
+        let result = sqlx::query(&plan.sql)
+            .bind(instance_id)
+            .execute(&self.pool)
+            .await?;
 
         if result.rows_affected() == 0 {
             return Err(ObjectStoreError::instance_not_found(instance_id));
@@ -1070,89 +964,26 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
-        let properties_obj = properties
-            .as_object()
-            .ok_or_else(|| ObjectStoreError::validation("Properties must be a JSON object"))?;
-
-        // Build SET clause
-        let mut set_clauses = Vec::new();
-        let mut set_values: Vec<(&ColumnDefinition, &serde_json::Value)> = Vec::new();
-        let mut param_idx = 1i32;
-
-        if self.config.auto_columns.updated_at {
-            set_clauses.push("updated_at = NOW()".to_string());
-        }
-
-        for col in &schema.columns {
-            if col.column_type.is_generated() {
-                continue;
-            }
-            if let Some(value) = properties_obj.get(&col.name) {
-                // Validate type
-                if let Err(e) = col.column_type.validate_value(value) {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Invalid value for column '{}': {}",
-                        col.name, e
-                    )));
-                }
-
-                set_clauses.push(format!("{} = ${}", quote_identifier(&col.name), param_idx));
-                set_values.push((col, value));
-                param_idx += 1;
-            }
-        }
-
-        if set_clauses.is_empty() || (set_clauses.len() == 1 && self.config.auto_columns.updated_at)
-        {
-            return Ok(0); // Nothing to update
-        }
-
-        let subquery_schemas = self
+        let subqueries = self
             .resolve_condition_subquery_schemas(Some(&condition))
             .await?;
-
-        // Build WHERE clause from condition
-        let (where_clause, condition_params) = build_condition_clause_with_subqueries(
-            &condition,
-            &mut param_idx,
+        let Some(plan) = runtara_object_model_core::planning::plan_update_where(
+            &self.config,
             &schema,
-            &subquery_schemas,
+            &properties,
+            &condition,
+            &subqueries,
         )
-        .map_err(ObjectStoreError::InvalidCondition)?;
-
-        let base_where = format!("deleted = FALSE AND ({})", where_clause);
-
-        let update_sql = format!(
-            "UPDATE {} SET {} WHERE {}",
-            quote_identifier(&schema.table_name),
-            set_clauses.join(", "),
-            base_where
-        );
-
-        // Start transaction
+        .map_err(ObjectStoreError::validation)?
+        else {
+            return Ok(0);
+        };
         let mut tx = self.pool.begin().await?;
-
-        // Build and execute query
-        let mut query = sqlx::query(&update_sql);
-
-        // Bind SET values
-        for (col, value) in &set_values {
-            query = Self::bind_value(query, &col.column_type, &col.name, value)?;
-        }
-
-        // Bind condition params
-        for param in &condition_params {
-            let param_str = match param {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            query = query.bind(param_str);
-        }
-
-        let result = query.execute(&mut *tx).await?;
+        let query = crate::database::bind(sqlx::query(&plan.sql), &plan.params)
+            .map_err(|error| ObjectStoreError::validation(error.to_string()))?;
+        let affected = query.execute(&mut *tx).await?.rows_affected() as i64;
         tx.commit().await?;
-
-        Ok(result.rows_affected() as i64)
+        Ok(affected)
     }
 
     /// Delete multiple instances matching a condition
@@ -1175,68 +1006,22 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
-        let subquery_schemas = self
+        let subqueries = self
             .resolve_condition_subquery_schemas(Some(&condition))
             .await?;
-
-        // Build WHERE clause from condition
-        let mut param_offset = 1i32;
-        let (where_clause, condition_params) = build_condition_clause_with_subqueries(
-            &condition,
-            &mut param_offset,
+        let plan = runtara_object_model_core::planning::plan_delete_where(
+            &self.config,
             &schema,
-            &subquery_schemas,
+            &condition,
+            &subqueries,
         )
         .map_err(ObjectStoreError::InvalidCondition)?;
-
         let mut tx = self.pool.begin().await?;
-
-        let result = if self.config.soft_delete {
-            let update_set = if self.config.auto_columns.updated_at {
-                "deleted = TRUE, updated_at = NOW()"
-            } else {
-                "deleted = TRUE"
-            };
-
-            let base_where = format!("deleted = FALSE AND ({})", where_clause);
-
-            let delete_sql = format!(
-                "UPDATE {} SET {} WHERE {}",
-                quote_identifier(&schema.table_name),
-                update_set,
-                base_where
-            );
-
-            let mut query = sqlx::query(&delete_sql);
-            for param in &condition_params {
-                let param_str = match param {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                query = query.bind(param_str);
-            }
-            query.execute(&mut *tx).await?
-        } else {
-            let delete_sql = format!(
-                "DELETE FROM {} WHERE ({})",
-                quote_identifier(&schema.table_name),
-                where_clause
-            );
-
-            let mut query = sqlx::query(&delete_sql);
-            for param in &condition_params {
-                let param_str = match param {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                query = query.bind(param_str);
-            }
-            query.execute(&mut *tx).await?
-        };
-
+        let query = crate::database::bind(sqlx::query(&plan.sql), &plan.params)
+            .map_err(|error| ObjectStoreError::validation(error.to_string()))?;
+        let affected = query.execute(&mut *tx).await?.rows_affected() as i64;
         tx.commit().await?;
-
-        Ok(result.rows_affected() as i64)
+        Ok(affected)
     }
 
     /// Create multiple instances in a single transaction
@@ -1624,227 +1409,33 @@ impl ObjectStore {
         instances: Vec<serde_json::Value>,
         opts: crate::instance::BulkCreateOptions,
     ) -> Result<crate::instance::BulkCreateResult> {
-        use crate::instance::{BulkCreateResult, BulkRowError, ConflictMode, ValidationMode};
-
-        let mut result = BulkCreateResult::default();
         if instances.is_empty() {
-            return Ok(result);
+            return Ok(crate::instance::BulkCreateResult::default());
         }
-
-        if instances.len() > self.config.bulk_request_limit {
-            return Err(ObjectStoreError::validation(format!(
-                "bulk request size {} exceeds limit of {}",
-                instances.len(),
-                self.config.bulk_request_limit
-            )));
-        }
-
-        // Validate conflict_columns up front — required for Skip/Upsert.
-        let conflict_cols: Option<&[String]> = match &opts.conflict_mode {
-            ConflictMode::Error => None,
-            ConflictMode::Skip { conflict_columns } | ConflictMode::Upsert { conflict_columns } => {
-                if conflict_columns.is_empty() {
-                    return Err(ObjectStoreError::validation(
-                        "`conflict_columns` must be non-empty when on_conflict is 'skip' or 'upsert'",
-                    ));
-                }
-                Some(conflict_columns.as_slice())
-            }
-        };
-
         let schema = self
             .get_schema(schema_name)
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
-
-        if let Some(cols) = conflict_cols {
-            let known: std::collections::HashSet<&str> =
-                schema.columns.iter().map(|c| c.name.as_str()).collect();
-            for name in cols {
-                if name != "id" && !known.contains(name.as_str()) {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Conflict column '{}' does not exist in schema",
-                        name
-                    )));
-                }
-            }
+        let plan = runtara_object_model_core::bulk::plan_bulk_create(
+            &self.config,
+            &schema,
+            instances,
+            opts,
+            || uuid::Uuid::new_v4().to_string(),
+        )
+        .map_err(|error| ObjectStoreError::validation(error.to_string()))?;
+        if plan.statements.is_empty() {
+            return Ok(plan.finish(0));
         }
-
-        // Per-row validation — separate into valid / invalid.
-        let mut validated: Vec<(String, serde_json::Map<String, serde_json::Value>)> =
-            Vec::with_capacity(instances.len());
-        for (idx, instance) in instances.into_iter().enumerate() {
-            match validate_instance_for_insert(&schema, &instance) {
-                Ok(obj) => {
-                    let instance_id = uuid::Uuid::new_v4().to_string();
-                    validated.push((instance_id, obj));
-                }
-                Err(reason) => match opts.validation_mode {
-                    ValidationMode::Stop => {
-                        return Err(ObjectStoreError::validation(format!(
-                            "Instance at index {}: {}",
-                            idx, reason
-                        )));
-                    }
-                    ValidationMode::Skip => {
-                        result.skipped_count += 1;
-                        result.errors.push(BulkRowError { index: idx, reason });
-                    }
-                },
-            }
-        }
-
-        if validated.is_empty() {
-            return Ok(result);
-        }
-
-        // Captured before `validated` is moved into conflict groups.
-        let validated_len = validated.len() as i64;
-
-        // Compute chunk size under Postgres' ~32k-param limit.
-        let params_per_row = 1 + schema.columns.len();
-        let chunk_size = (32000 / params_per_row.max(1)).max(1);
-
-        // Column list (shared across chunks).
-        let mut column_names = Vec::new();
-        if self.config.auto_columns.id {
-            column_names.push("id".to_string());
-        }
-        for col in &schema.columns {
-            if col.column_type.is_generated() {
-                continue;
-            }
-            column_names.push(quote_identifier(&col.name));
-        }
-
-        // Build (ON CONFLICT clause, rows) groups. Error and Skip share a
-        // single clause across all rows. Upsert groups rows by their UPDATE
-        // signature so each group's DO UPDATE SET only touches the columns
-        // present in those rows' payloads.
-        let conflict_groups: Vec<(String, Vec<ValidatedRow>)> = match &opts.conflict_mode {
-            ConflictMode::Error => vec![(String::new(), validated)],
-            ConflictMode::Skip { conflict_columns } => {
-                let cols: Vec<String> = conflict_columns
-                    .iter()
-                    .map(|c| quote_identifier(c))
-                    .collect();
-                let clause = format!(" ON CONFLICT {} DO NOTHING", live_conflict_target(&cols));
-                vec![(clause, validated)]
-            }
-            ConflictMode::Upsert { conflict_columns } => {
-                let cols: Vec<String> = conflict_columns
-                    .iter()
-                    .map(|c| quote_identifier(c))
-                    .collect();
-                let conflict_target = live_conflict_target(&cols);
-                let conflict_set: std::collections::HashSet<&str> =
-                    conflict_columns.iter().map(String::as_str).collect();
-                let mut row_groups: std::collections::HashMap<Vec<String>, Vec<ValidatedRow>> =
-                    std::collections::HashMap::new();
-                for (id, props) in validated {
-                    let sig = update_signature(&schema, &props, &conflict_set);
-                    row_groups.entry(sig).or_default().push((id, props));
-                }
-                let updated_at_bump = self.config.auto_columns.updated_at;
-                row_groups
-                    .into_iter()
-                    .map(|(signature, rows)| {
-                        let mut update_sets: Vec<String> = signature
-                            .iter()
-                            .map(|name| {
-                                let q = quote_identifier(name);
-                                format!("{} = EXCLUDED.{}", q, q)
-                            })
-                            .collect();
-                        if updated_at_bump {
-                            update_sets.push("updated_at = NOW()".to_string());
-                        }
-                        let clause = if update_sets.is_empty() {
-                            // Group has nothing to update — skip conflicts.
-                            format!(" ON CONFLICT {} DO NOTHING", conflict_target)
-                        } else {
-                            format!(
-                                " ON CONFLICT {} DO UPDATE SET {}",
-                                conflict_target,
-                                update_sets.join(", ")
-                            )
-                        };
-                        (clause, rows)
-                    })
-                    .collect()
-            }
-        };
-
         let mut tx = self.pool.begin().await?;
-        let mut db_affected: i64 = 0;
-
-        for (on_conflict_clause, group_rows) in conflict_groups {
-            for chunk in group_rows.chunks(chunk_size) {
-                let mut placeholders = Vec::new();
-                let mut param_idx = 1;
-                for (_, properties_obj) in chunk {
-                    let mut row_placeholders = Vec::new();
-                    if self.config.auto_columns.id {
-                        row_placeholders.push(format!("${}", param_idx));
-                        param_idx += 1;
-                    }
-                    for col in &schema.columns {
-                        if col.column_type.is_generated() {
-                            continue;
-                        }
-                        match classify_slot(col, properties_obj) {
-                            Slot::Default => row_placeholders.push("DEFAULT".to_string()),
-                            Slot::TypedNull | Slot::Value(_) => {
-                                row_placeholders.push(format!("${}", param_idx));
-                                param_idx += 1;
-                            }
-                        }
-                    }
-                    placeholders.push(format!("({})", row_placeholders.join(", ")));
-                }
-
-                let insert_sql = format!(
-                    "INSERT INTO {} ({}) VALUES {}{}",
-                    quote_identifier(&schema.table_name),
-                    column_names.join(", "),
-                    placeholders.join(", "),
-                    on_conflict_clause,
-                );
-
-                let mut query = sqlx::query(&insert_sql);
-                for (instance_id, properties_obj) in chunk {
-                    if self.config.auto_columns.id {
-                        query = query.bind(instance_id);
-                    }
-                    for col in &schema.columns {
-                        if col.column_type.is_generated() {
-                            continue;
-                        }
-                        query = match classify_slot(col, properties_obj) {
-                            Slot::Default => query,
-                            Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
-                            Slot::Value(v) => {
-                                Self::bind_value(query, &col.column_type, &col.name, v)?
-                            }
-                        };
-                    }
-                }
-
-                let executed = query.execute(&mut *tx).await?;
-                db_affected += executed.rows_affected() as i64;
-            }
+        let mut affected = 0i64;
+        for statement in &plan.statements {
+            let query = crate::database::bind(sqlx::query(&statement.sql), &statement.params)
+                .map_err(|error| ObjectStoreError::validation(error.to_string()))?;
+            affected += query.execute(&mut *tx).await?.rows_affected() as i64;
         }
-
         tx.commit().await?;
-
-        // Under Skip conflict, `rows_affected` is the inserted count; the rest
-        // were skipped by ON CONFLICT DO NOTHING. Add that delta to skipped.
-        if matches!(opts.conflict_mode, ConflictMode::Skip { .. }) && db_affected < validated_len {
-            result.skipped_count += validated_len - db_affected;
-        }
-        result.created_count = db_affected;
-
-        Ok(result)
+        Ok(plan.finish(affected))
     }
 
     /// Update multiple instances by ID, each with its own property values.
@@ -1875,85 +1466,19 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
-        // Pre-validate every update payload.
-        let mut validated: Vec<(String, serde_json::Map<String, serde_json::Value>)> =
-            Vec::with_capacity(updates.len());
-        for (idx, (id, properties)) in updates.into_iter().enumerate() {
-            let properties_obj = properties.as_object().ok_or_else(|| {
-                ObjectStoreError::validation(format!(
-                    "Update at index {}: properties must be a JSON object",
-                    idx
-                ))
-            })?;
-            for col in &schema.columns {
-                if col.column_type.is_generated() {
-                    continue;
-                }
-                if let Some(value) = properties_obj.get(&col.name)
-                    && let Err(e) = col.column_type.validate_value(value)
-                {
-                    return Err(ObjectStoreError::validation(format!(
-                        "Update at index {}: Invalid value for column '{}': {}",
-                        idx, col.name, e
-                    )));
-                }
-            }
-            validated.push((id, properties_obj.clone()));
-        }
-
+        let statements =
+            runtara_object_model_core::planning::plan_update_by_ids(&self.config, &schema, updates)
+                .map_err(ObjectStoreError::validation)?;
         let mut tx = self.pool.begin().await?;
-        let mut total_affected: i64 = 0;
-
-        for (instance_id, properties_obj) in &validated {
-            let mut set_clauses: Vec<String> = Vec::new();
-            let mut param_idx = 2i32; // $1 = instance_id
-
-            if self.config.auto_columns.updated_at {
-                set_clauses.push("updated_at = NOW()".to_string());
-            }
-
-            let mut bind_cols: Vec<(&ColumnDefinition, &serde_json::Value)> = Vec::new();
-            for col in &schema.columns {
-                if col.column_type.is_generated() {
-                    continue;
-                }
-                if let Some(value) = properties_obj.get(&col.name) {
-                    set_clauses.push(format!("{} = ${}", quote_identifier(&col.name), param_idx));
-                    bind_cols.push((col, value));
-                    param_idx += 1;
-                }
-            }
-
-            // Nothing to update for this row (or only the auto updated_at would change).
-            if set_clauses.is_empty()
-                || (set_clauses.len() == 1 && self.config.auto_columns.updated_at)
-            {
-                continue;
-            }
-
-            let update_sql = format!(
-                "UPDATE {} SET {} WHERE id = $1 AND deleted = FALSE",
-                quote_identifier(&schema.table_name),
-                set_clauses.join(", "),
-            );
-
-            let mut query = sqlx::query(&update_sql).bind(instance_id);
-            for (col, value) in &bind_cols {
-                query = Self::bind_value(query, &col.column_type, &col.name, value)?;
-            }
-
-            let result = query.execute(&mut *tx).await?;
-            total_affected += result.rows_affected() as i64;
+        let mut affected = 0i64;
+        for plan in &statements {
+            let query = crate::database::bind(sqlx::query(&plan.sql), &plan.params)
+                .map_err(|error| ObjectStoreError::validation(error.to_string()))?;
+            affected += query.execute(&mut *tx).await?.rows_affected() as i64;
         }
-
         tx.commit().await?;
-
-        Ok(total_affected)
+        Ok(affected)
     }
-
-    // =========================================================================
-    // Internal Helpers
-    // =========================================================================
 
     async fn tombstone_deleted_schema_rows(
         &self,
@@ -1985,12 +1510,17 @@ impl ObjectStore {
             let tombstone_table_name = Self::tombstone_name("table");
 
             if Self::table_exists(tx, &old_table_name).await? {
-                let rename_sql = format!(
-                    "ALTER TABLE {} RENAME TO {}",
-                    quote_identifier(&old_table_name),
-                    quote_identifier(&tombstone_table_name)
-                );
-                sqlx::query(&rename_sql).execute(&mut **tx).await?;
+                let indexes: Vec<String> = sqlx::query_scalar(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename=$1"
+                ).bind(&old_table_name).fetch_all(&mut **tx).await?;
+                for sql in DdlGenerator::tombstone_table(
+                    &old_table_name,
+                    &tombstone_table_name,
+                    &indexes,
+                    || Self::tombstone_name("index"),
+                ) {
+                    sqlx::query(&sql).execute(&mut **tx).await?;
+                }
             }
 
             let update_sql = format!(
@@ -2140,127 +1670,21 @@ impl ObjectStore {
             .resolve_condition_subquery_schemas(filter.condition.as_ref())
             .await?;
 
-        // Build column list
-        let mut select_columns = Vec::new();
-
-        if self.config.auto_columns.id {
-            select_columns.push("id".to_string());
-        }
-        if self.config.auto_columns.created_at {
-            select_columns.push("created_at".to_string());
-        }
-        if self.config.auto_columns.updated_at {
-            select_columns.push("updated_at".to_string());
-        }
-
-        // Optional projection: select only the requested non-generated columns
-        // (the auto id/created_at/updated_at columns above are always kept).
-        // We intersect against `schema.columns` and quote each name, so an
-        // unknown projected name is simply ignored — never interpolated — and
-        // this stays injection-safe. `None` keeps the original "all columns"
-        // behaviour. This is what lets a report page skip pulling large unused
-        // columns (e.g. base64 uploads) it never displays.
-        let projected: Option<std::collections::HashSet<&str>> = filter
-            .projection
-            .as_ref()
-            .map(|cols| cols.iter().map(String::as_str).collect());
-        for col in &schema.columns {
-            if col.column_type.is_generated() {
-                continue;
-            }
-            if let Some(set) = &projected
-                && !set.contains(col.name.as_str())
-            {
-                continue;
-            }
-            select_columns.push(quote_identifier(&col.name));
-        }
-
-        // Build WHERE clause from condition (params: $1..$N1)
-        let (where_clause, where_params) = if let Some(condition) = filter.condition {
-            let mut param_offset = 1;
-            build_condition_clause_with_subqueries(
-                &condition,
-                &mut param_offset,
-                schema,
-                &subquery_schemas,
-            )
-            .map_err(ObjectStoreError::InvalidCondition)?
-        } else {
-            ("TRUE".to_string(), Vec::new())
-        };
-
-        // Validate + render `score_expression` if provided. Score-expression
-        // params append after WHERE params, so placeholders continue at
-        // $(where_params.len() + 1).
-        let mut score_params: Vec<serde_json::Value> = Vec::new();
-        let mut score_alias: Option<String> = None;
-        if let Some(score_expr) = filter.score_expression.as_ref() {
-            validate_score_alias(&score_expr.alias).map_err(ObjectStoreError::validation)?;
-
-            let node: ExprNode =
-                serde_json::from_value(score_expr.expression.clone()).map_err(|e| {
-                    ObjectStoreError::validation(format!(
-                        "score_expression: invalid expression JSON: {}",
-                        e
-                    ))
-                })?;
-            validate_row_expression(&node, schema, 0).map_err(ObjectStoreError::validation)?;
-
-            let mut score_offset = (where_params.len() as i32) + 1;
-            let score_sql =
-                render_row_expression(&node, schema, &mut score_params, &mut score_offset, 0)
-                    .map_err(ObjectStoreError::validation)?;
-
-            select_columns.push(format!(
-                "{} AS {}",
-                score_sql,
-                quote_identifier(&score_expr.alias)
-            ));
-            score_alias = Some(score_expr.alias.clone());
-        }
-
-        // Build ORDER BY: prefer the new structured `order_by` if set,
-        // otherwise fall back to the legacy `sort_by` / `sort_order`.
-        let order_by_clause = if let Some(entries) = filter.order_by.as_ref() {
-            render_order_by_entries(entries, schema, score_alias.as_deref())
-                .map_err(ObjectStoreError::validation)?
-        } else {
-            build_order_by_clause(&filter.sort_by, &filter.sort_order, schema)
-                .map_err(ObjectStoreError::validation)?
-        };
-
-        // Clamp the caller-supplied LIMIT to a server cap so a large (or
-        // `i64::MAX`) `limit` can't force a full-table materialization. A
-        // negative limit is treated as 0. Mirrors the silent clamp applied by
-        // `aggregate_instances`.
-        let effective_limit = filter
-            .limit
-            .clamp(0, DEFAULT_FILTER_RESULT_ROW_LIMIT as i64);
-        let effective_offset = filter.offset.max(0);
-
-        let base_where = format!("deleted = FALSE AND ({})", where_clause);
-
-        // Count query: only WHERE params bind, no score params (score column
-        // isn't referenced from a count(*)).
-        let count_query = format!(
-            "SELECT COUNT(*) FROM {} WHERE {}",
-            quote_identifier(&schema.table_name),
-            base_where
-        );
-
-        // Select query: WHERE params, then score params, then LIMIT and
-        // OFFSET (in that bind order).
-        let total_param_count = where_params.len() + score_params.len();
-        let select_query = format!(
-            "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT ${} OFFSET ${}",
-            select_columns.join(", "),
-            quote_identifier(&schema.table_name),
-            base_where,
-            order_by_clause,
-            total_param_count + 1,
-            total_param_count + 2
-        );
+        let runtara_object_model_core::planning::FilterPlan {
+            count_query,
+            select_query,
+            where_params,
+            score_params,
+            score_alias,
+            effective_limit,
+            effective_offset,
+        } = runtara_object_model_core::planning::plan_filter(
+            &self.config,
+            schema,
+            filter,
+            &subquery_schemas,
+        )
+        .map_err(ObjectStoreError::InvalidCondition)?;
 
         // Execute count query
         let mut count_query_builder = sqlx::query_as::<_, (i64,)>(&count_query);
@@ -2597,171 +2021,4 @@ impl ObjectStore {
             ColumnType::Vector { .. } => query.bind(None::<pgvector::Vector>),
         }
     }
-}
-
-/// Per-column slot in a bulk-insert VALUES tuple.
-///
-/// Preserves the distinction between "payload omitted this key" and "payload
-/// set this key to null" — which Postgres cares about for (a) firing declared
-/// `DEFAULT` clauses and (b) writing SQL NULL vs JSONB `null` on JSON columns.
-enum Slot<'a> {
-    /// Key absent and the column declares a DB default — emit literal `DEFAULT`.
-    Default,
-    /// Key absent with no default — emit `$N`, bind typed `None::<T>` (SQL NULL).
-    TypedNull,
-    /// Key present (including explicit null) — emit `$N`, bind via [`ObjectStore::bind_value`].
-    Value(&'a serde_json::Value),
-}
-
-/// Classify a (column, row-payload) pair into the correct [`Slot`] variant.
-fn classify_slot<'a>(
-    col: &ColumnDefinition,
-    properties_obj: &'a serde_json::Map<String, serde_json::Value>,
-) -> Slot<'a> {
-    match properties_obj.get(&col.name) {
-        None if col.default_value.is_some() => Slot::Default,
-        None => Slot::TypedNull,
-        Some(v) => Slot::Value(v),
-    }
-}
-
-/// Compute a row's UPDATE signature: the schema column names, in schema order,
-/// that are both (a) not in the conflict-column set and (b) present in the
-/// payload. Used by the upsert paths to group rows so each group's
-/// `ON CONFLICT ... DO UPDATE SET` only touches columns the caller actually
-/// provided — absent columns keep their stored value (or fall back to
-/// `DO NOTHING` if the group has nothing to update).
-fn update_signature(
-    schema: &Schema,
-    properties_obj: &serde_json::Map<String, serde_json::Value>,
-    conflict_cols: &std::collections::HashSet<&str>,
-) -> Vec<String> {
-    schema
-        .columns
-        .iter()
-        .filter(|col| !conflict_cols.contains(col.name.as_str()))
-        .filter(|col| properties_obj.contains_key(&col.name))
-        .map(|col| col.name.clone())
-        .collect()
-}
-
-fn live_conflict_target(quoted_columns: &[String]) -> String {
-    format!("({}) WHERE deleted = FALSE", quoted_columns.join(", "))
-}
-
-/// Validate a single instance payload for an INSERT operation.
-///
-/// Returns the payload's object form on success, or a human-readable reason
-/// string on failure. Used by `create_instances_extended` to partition rows
-/// when `ValidationMode::Skip` is selected.
-fn validate_instance_for_insert(
-    schema: &Schema,
-    instance: &serde_json::Value,
-) -> std::result::Result<serde_json::Map<String, serde_json::Value>, String> {
-    let properties_obj = instance
-        .as_object()
-        .ok_or_else(|| "properties must be a JSON object".to_string())?;
-
-    for col in &schema.columns {
-        if col.column_type.is_generated() {
-            if let Some(v) = properties_obj.get(&col.name)
-                && !v.is_null()
-            {
-                return Err(format!(
-                    "Column '{}' is generated and cannot be set",
-                    col.name
-                ));
-            }
-            continue;
-        }
-        if let Some(value) = properties_obj.get(&col.name) {
-            if let Err(e) = col.column_type.validate_value(value) {
-                return Err(format!("Invalid value for column '{}': {}", col.name, e));
-            }
-            if !col.nullable && value.is_null() {
-                return Err(format!("Column '{}' does not allow NULL values", col.name));
-            }
-        } else if !col.nullable && col.default_value.is_none() {
-            return Err(format!("Required column '{}' is missing", col.name));
-        }
-    }
-
-    Ok(properties_obj.clone())
-}
-
-/// Validate the alias on a [`ScoreExpression`]. Mirrors the rule used by
-/// aggregate aliases: `[a-zA-Z_][a-zA-Z0-9_]*`.
-fn validate_score_alias(alias: &str) -> std::result::Result<(), String> {
-    if alias.is_empty() {
-        return Err("score_expression alias cannot be empty".to_string());
-    }
-    let mut chars = alias.chars();
-    let first = chars.next().unwrap();
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(format!(
-            "score_expression alias '{}' must start with a letter or underscore",
-            alias
-        ));
-    }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(format!(
-            "score_expression alias '{}' must match [a-zA-Z_][a-zA-Z0-9_]*",
-            alias
-        ));
-    }
-    Ok(())
-}
-
-/// Render structured `order_by` entries to a SQL ORDER BY clause body. Each
-/// entry's target is either a schema column (validated like the legacy
-/// `sort_by`) or the alias declared on `score_expression`.
-fn render_order_by_entries(
-    entries: &[OrderByEntry],
-    schema: &Schema,
-    score_alias: Option<&str>,
-) -> std::result::Result<String, String> {
-    if entries.is_empty() {
-        return Ok("created_at ASC".to_string());
-    }
-
-    let system_fields = ["id", "createdAt", "updatedAt", "created_at", "updated_at"];
-    let mut parts = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        match &entry.expression {
-            OrderByTarget::Column { name } => {
-                let sql_field = field_to_sql(name);
-                let is_system =
-                    system_fields.contains(&name.as_str()) || system_fields.contains(&sql_field);
-                let is_schema_column = schema.columns.iter().any(|c| c.name == *name);
-                if !is_system && !is_schema_column {
-                    return Err(format!(
-                        "Invalid order_by column: '{}'. Must be a system field or schema column.",
-                        name
-                    ));
-                }
-                parts.push(format!(
-                    "{} {}",
-                    quote_identifier(sql_field),
-                    entry.direction.as_sql()
-                ));
-            }
-            OrderByTarget::Alias { name } => {
-                if score_alias.map(|a| a == name).unwrap_or(false) {
-                    parts.push(format!(
-                        "{} {}",
-                        quote_identifier(name),
-                        entry.direction.as_sql()
-                    ));
-                } else {
-                    return Err(format!(
-                        "order_by alias '{}' does not match a declared score_expression alias",
-                        name
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(parts.join(", "))
 }

@@ -9,7 +9,7 @@
 //! Routing model (identical to the Shopify agent): the base URL is provider- and
 //! environment-specific and includes the `realmId` path segment, all resolved
 //! HOST-SIDE by the connection descriptor. The component therefore sends only
-//! RELATIVE paths (e.g. `/query`, `/invoice/42`); the proxy appends them under the
+//! RELATIVE paths (e.g. `/query`, `/invoice/42`); the outbound host service appends them under the
 //! connection's base URL (`https://…/v3/company/{realmId}`) and injects the OAuth
 //! Bearer token. The component never sees the host, the realmId, or any secret.
 #![allow(clippy::result_large_err)]
@@ -19,23 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-quickbooks/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim (mirrors runtara-agent-hubspot / -mailgun)
@@ -125,13 +108,14 @@ fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnecti
 }
 
 /// GET a relative QuickBooks path (proxy pins it under `…/v3/company/{realmId}`).
-fn qbo_get(connection: &RawConnection, path: &str) -> Result<Value, AgentError> {
+async fn qbo_get(connection: &RawConnection, path: &str) -> Result<Value, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(TIMEOUT_MS));
     let response = client
         .request("GET", path)
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .connection_id(&connection.connection_id)
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "QUICKBOOKS_NETWORK_ERROR",
@@ -143,7 +127,11 @@ fn qbo_get(connection: &RawConnection, path: &str) -> Result<Value, AgentError> 
 }
 
 /// POST a JSON body to a relative QuickBooks path.
-fn qbo_post(connection: &RawConnection, path: &str, body: Value) -> Result<Value, AgentError> {
+async fn qbo_post(
+    connection: &RawConnection,
+    path: &str,
+    body: Value,
+) -> Result<Value, AgentError> {
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         AgentError::permanent("QUICKBOOKS_SERIALIZATION_ERROR", e.to_string())
             .with_attr("integration", "QUICKBOOKS_ONLINE")
@@ -154,9 +142,10 @@ fn qbo_post(connection: &RawConnection, path: &str, body: Value) -> Result<Value
         .request("POST", path)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("X-Runtara-Connection-Id", &connection.connection_id)
+        .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "QUICKBOOKS_NETWORK_ERROR",
@@ -397,10 +386,10 @@ pub struct QueryOutput {
     module_integration_ids = "quickbooks_online",
     module_secure = true
 )]
-pub fn query(input: QueryInput) -> Result<QueryOutput, AgentError> {
+pub async fn query(input: QueryInput) -> Result<QueryOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mv = minor(&input.minor_version);
-    let response = qbo_get(connection, &query_path(&input.query, &mv))?;
+    let response = qbo_get(connection, &query_path(&input.query, &mv)).await?;
     let (items, count, query_response) = extract_query(&response);
     Ok(QueryOutput {
         items,
@@ -470,10 +459,10 @@ fn entity_output(response: &Value, entity: &str) -> EntityOutput {
     display_name = "Read",
     description = "Read a single QuickBooks entity by Id"
 )]
-pub fn read(input: ReadInput) -> Result<EntityOutput, AgentError> {
+pub async fn read(input: ReadInput) -> Result<EntityOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mv = minor(&input.minor_version);
-    let response = qbo_get(connection, &read_path(&input.entity, &input.id, &mv))?;
+    let response = qbo_get(connection, &read_path(&input.entity, &input.id, &mv)).await?;
     Ok(entity_output(&response, &input.entity))
 }
 
@@ -512,10 +501,10 @@ pub struct CreateInput {
     description = "Create a new QuickBooks entity",
     side_effects = true
 )]
-pub fn create(input: CreateInput) -> Result<EntityOutput, AgentError> {
+pub async fn create(input: CreateInput) -> Result<EntityOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mv = minor(&input.minor_version);
-    let response = qbo_post(connection, &write_path(&input.entity, &mv), input.body)?;
+    let response = qbo_post(connection, &write_path(&input.entity, &mv), input.body).await?;
     Ok(entity_output(&response, &input.entity))
 }
 
@@ -567,12 +556,12 @@ pub struct UpdateInput {
     description = "Update a QuickBooks entity (defaults to a sparse update; requires the current SyncToken)",
     side_effects = true
 )]
-pub fn update(input: UpdateInput) -> Result<EntityOutput, AgentError> {
+pub async fn update(input: UpdateInput) -> Result<EntityOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mv = minor(&input.minor_version);
     let sparse = input.sparse.unwrap_or(true);
     let body = build_update_body(input.body, &input.id, &input.sync_token, sparse);
-    let response = qbo_post(connection, &write_path(&input.entity, &mv), body)?;
+    let response = qbo_post(connection, &write_path(&input.entity, &mv), body).await?;
     Ok(entity_output(&response, &input.entity))
 }
 
@@ -621,11 +610,11 @@ pub struct DeleteOutput {
     description = "Hard-delete a QuickBooks transaction entity (name-list entities like Customer/Item can't be hard-deleted — deactivate them with a sparse update instead)",
     side_effects = true
 )]
-pub fn delete(input: DeleteInput) -> Result<DeleteOutput, AgentError> {
+pub async fn delete(input: DeleteInput) -> Result<DeleteOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mv = minor(&input.minor_version);
     let body = json!({ "Id": input.id, "SyncToken": input.sync_token });
-    let response = qbo_post(connection, &delete_path(&input.entity, &mv), body)?;
+    let response = qbo_post(connection, &delete_path(&input.entity, &mv), body).await?;
     let object = extract_entity_object(&response, &input.entity);
     Ok(DeleteOutput {
         id: str_field(&object, "Id"),
@@ -693,11 +682,11 @@ fn params_to_map(params: &Option<Value>) -> HashMap<String, String> {
     display_name = "Report",
     description = "Run a QuickBooks report by name with optional query params"
 )]
-pub fn report(input: ReportInput) -> Result<ReportOutput, AgentError> {
+pub async fn report(input: ReportInput) -> Result<ReportOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mv = minor(&input.minor_version);
     let params = params_to_map(&input.params);
-    let response = qbo_get(connection, &report_path(&input.report_name, &params, &mv))?;
+    let response = qbo_get(connection, &report_path(&input.report_name, &params, &mv)).await?;
     Ok(ReportOutput { report: response })
 }
 
@@ -797,7 +786,7 @@ pub struct CdcOutput {
     display_name = "CDC (Change Data Capture)",
     description = "Fetch all changes (updates and deletions) to the given entities since a timestamp — for incremental sync"
 )]
-pub fn cdc(input: CdcInput) -> Result<CdcOutput, AgentError> {
+pub async fn cdc(input: CdcInput) -> Result<CdcOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     if input.entities.is_empty() {
         return Err(AgentError::permanent(
@@ -810,7 +799,8 @@ pub fn cdc(input: CdcInput) -> Result<CdcOutput, AgentError> {
     let response = qbo_get(
         connection,
         &cdc_path(&input.entities, &input.changed_since, &mv),
-    )?;
+    )
+    .await?;
     Ok(CdcOutput {
         changes: extract_cdc_changes(&response),
         raw: response,
@@ -902,107 +892,10 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_quickbooks::capabilities::{ErrorInfo, Guest};
-
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "query" => __executor_query(value),
-            "read" => __executor_read(value),
-            "create" => __executor_create(value),
-            "update" => __executor_update(value),
-            "delete" => __executor_delete(value),
-            "report" => __executor_report(value),
-            "cdc" => __executor_cdc(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("quickbooks agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
+runtara_agent_macro::agent_component!(
+    agent = "quickbooks",
+    capabilities = [query, read, create, update, delete, report, cdc,],
+);
 
 // ============================================================================
 // Host-side unit tests for the pure helpers

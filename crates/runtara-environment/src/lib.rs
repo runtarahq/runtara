@@ -121,8 +121,7 @@
 //!
 //! Runner (read inside [`runner::build_runner`], with no builder path):
 //! `DATA_DIR`, `EXECUTION_TIMEOUT_SECS`, `RUNTARA_SKIP_CERT_VERIFICATION`,
-//! `RUNTARA_CONNECTION_SERVICE_URL` (falling back to
-//! `CONNECTION_SERVICE_URL`), `RUNTARA_SDK_BACKEND`,
+//! `RUNTARA_SDK_BACKEND`,
 //! `RUNTARA_INSTANCE_MEMORY_MAX_BYTES`, `RUNTARA_MAX_CONCURRENT_RUNS`,
 //! `RUNTARA_PREPARATION_CONCURRENCY`, `RUNTARA_PRECOMPILE_CHILD_CONCURRENCY`.
 //! `RUNTARA_RUNNER` is accepted and ignored with a warning.
@@ -248,6 +247,9 @@ pub mod image_cleanup_worker;
 
 /// Background worker for detecting and failing stale instances.
 pub mod heartbeat_monitor;
+
+/// Whole-run ownership retained from the durable launch queue.
+pub mod execution_lease;
 
 /// Automatic recovery of instances killed by an Environment restart.
 pub mod recovery;

@@ -23,7 +23,7 @@ use crate::host_state::{
     CallContext, DEFAULT_GUEST_MEMORY_MAX_BYTES, DEFAULT_GUEST_TABLE_MAX_ELEMENTS, HostState,
     Termination,
 };
-use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent};
+use crate::registry::{LoadedAgent, build_linker, instantiate, load_agent_bytes};
 
 /// Server-facing per-call request shape. Mirrors today's `TestAgentRequest`
 /// in `runtara-server/src/api/dto/agent_testing.rs` so wiring is a near-pass-
@@ -38,7 +38,7 @@ pub struct TestCapabilityRequest {
 }
 
 /// A connection record resolved by the host before invoke. Mirrors today's
-/// `ConnectionsFacade::get_with_parameters` output.
+/// `ConnectionsFacade::get_connection` safe metadata; parameters stay empty.
 #[derive(Debug, Clone)]
 pub struct ResolvedConnection {
     pub connection_id: String,
@@ -67,13 +67,10 @@ pub struct TestError {
     pub retryable: bool,
 }
 
-/// Routing context shared across calls — proxy URL, agent-service URL, etc.
+/// Runtime address retained for legacy core HTTP consumers.
 /// Per-tenant fields go into `TestCapabilityRequest`.
 #[derive(Debug, Clone)]
 pub struct DispatcherEnv {
-    pub proxy_url: String,
-    pub agent_service_url: String,
-    pub object_model_url: String,
     pub core_http_url: String,
 }
 
@@ -97,7 +94,11 @@ fn parse_memory_max(raw: Option<String>) -> usize {
 }
 
 pub struct ComponentDispatcherService {
+    outbound_http: std::sync::OnceLock<Arc<dyn crate::OutboundHttpHost>>,
+    database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
+    connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     engine: Arc<Engine>,
+    trusted: Arc<crate::trusted::TrustedExecutor>,
     agents: HashMap<String, Arc<LoadedAgent>>,
     /// Snapshot of every loaded agent's metadata. Shared (`Arc`) so the
     /// server-side `AgentsService` + workflow validation paths can hold the
@@ -111,6 +112,27 @@ pub struct ComponentDispatcherService {
 }
 
 impl ComponentDispatcherService {
+    pub fn set_outbound_http(&self, service: Arc<dyn crate::OutboundHttpHost>) -> Result<()> {
+        self.outbound_http
+            .set(service)
+            .map_err(|_| anyhow::anyhow!("outbound HTTP service already configured"))
+    }
+
+    pub fn set_database(&self, database: Arc<dyn crate::DatabaseHost>) -> anyhow::Result<()> {
+        self.database
+            .set(database)
+            .map_err(|_| anyhow::anyhow!("database service already configured"))
+    }
+
+    pub fn set_connection_resolver(
+        &self,
+        resolver: Arc<dyn crate::ConnectionResolverHost>,
+    ) -> Result<()> {
+        self.connection_resolver
+            .set(resolver)
+            .map_err(|_| anyhow::anyhow!("connection resolver already configured"))
+    }
+
     /// Build the service from a directory of `runtara_agent_*.wasm` files,
     /// each accompanied by a sibling `runtara_agent_*.meta.json`. The filename
     /// stem after the `runtara_agent_` prefix becomes the agent id (e.g.
@@ -127,6 +149,7 @@ impl ComponentDispatcherService {
         spawn_epoch_ticker(Arc::clone(&engine));
         let linker = build_linker(&engine)?;
 
+        let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
         let mut agents = HashMap::new();
         let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
 
@@ -182,7 +205,9 @@ impl ComponentDispatcherService {
             // returns None while `agent_ids()` yields it.
             info.id = agent_id.clone();
 
-            let loaded = load_agent(&engine, &linker, &path, &agent_id)?;
+            let bytes = std::fs::read(&path)?;
+            trusted.register(&info, &bytes, &meta_bytes)?;
+            let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 
             agent_info.insert(agent_id.clone(), info);
             agents.insert(agent_id, loaded);
@@ -202,6 +227,10 @@ impl ComponentDispatcherService {
         ));
 
         Ok(Self {
+            trusted: Arc::new(trusted),
+            outbound_http: std::sync::OnceLock::new(),
+            database: std::sync::OnceLock::new(),
+            connection_resolver: std::sync::OnceLock::new(),
             engine,
             agents,
             catalog,
@@ -219,6 +248,11 @@ impl ComponentDispatcherService {
     /// ids resolve to the same agent.
     pub fn has_agent(&self, agent_id: &str) -> bool {
         self.agents.contains_key(&canonical_agent_id(agent_id))
+    }
+
+    /// Executor backed only by this operator-installed built-in bundle.
+    pub fn trusted_executor(&self) -> Arc<crate::trusted::TrustedExecutor> {
+        Arc::clone(&self.trusted)
     }
 
     /// All loaded agent ids.
@@ -250,7 +284,7 @@ impl ComponentDispatcherService {
         // single connection channel now that `invoke` has no out-of-band
         // connection argument. Id-only, exactly like the composed-workflow
         // path (stdlib `agent-connection-input`): a connection is an opaque id,
-        // and the proxy resolves credentials by (id, tenant), so nothing secret
+        // and the outbound service resolves credentials by (id, tenant), so nothing secret
         // rides the input. This also retires the old secret-materialization
         // here (`parameters` used to carry the real connection params).
         let mut input_value = req.input.clone();
@@ -274,17 +308,23 @@ impl ComponentDispatcherService {
 
         let ctx = Arc::new(CallContext::for_test(
             &req.tenant_id,
-            &self.env.proxy_url,
-            &self.env.agent_service_url,
-            &self.env.object_model_url,
             &self.env.core_http_url,
         ));
         // Capture the same active deadline that protects the component call.
-        // Host-io uses it as an absolute upper bound, so a guest cannot start
+        // The outbound service uses it as an absolute upper bound, so a guest cannot start
         // a fresh 120-second HTTP timeout immediately before this interactive
         // invocation's shorter watchdog expires.
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
+        state.trusted = Some(Arc::clone(&self.trusted));
+        state.outbound_http =
+            crate::outbound_http::for_run(self.outbound_http.get(), Some(&req.tenant_id), None);
+        state.database =
+            crate::database_host::database_for_run(self.database.get(), Some(&req.tenant_id));
+        state.connection_resolver = crate::connection_resolver_host::resolver_for_run(
+            self.connection_resolver.get(),
+            Some(&req.tenant_id),
+        );
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 
@@ -407,6 +447,11 @@ where
     // Epoch ring: fires at guest branch points every EPOCH_TICK; interrupts
     // once the wall-clock budget is spent, otherwise re-arms for one more tick.
     store.epoch_deadline_callback(move |mut ctx| {
+        if ctx.data().cleanup_alarm.expired() {
+            return Err(wasmtime::Error::new(
+                crate::cleanup_alarm::CleanupGraceExpired,
+            ));
+        }
         if started.elapsed() >= timeout {
             ctx.data_mut().termination = Some(Termination::Timeout);
             return Ok(UpdateDeadline::Interrupt);
@@ -418,6 +463,7 @@ where
     // Watchdog ring: catches a guest blocked inside a host call, where the epoch
     // callback can't fire. Cancellation = dropping the in-flight future. Scoped
     // so the `&mut store` reborrow is released before we read the store back.
+    let cleanup_alarm = store.data().cleanup_alarm.clone();
     let outcome = {
         let call = func.call_async(&mut *store, params);
         tokio::pin!(call);
@@ -435,9 +481,15 @@ where
                 Err(trap) => GuardOutcome::Trapped(trap.into()),
             },
             _ = watchdog => GuardOutcome::TimedOut,
+            _ = cleanup_alarm.wait() => GuardOutcome::Trapped(anyhow::Error::new(crate::cleanup_alarm::CleanupGraceExpired)),
         }
     };
 
+    if cleanup_alarm.expired() {
+        return GuardOutcome::Trapped(anyhow::Error::new(
+            crate::cleanup_alarm::CleanupGraceExpired,
+        ));
+    }
     // A pure-wasm loop trips the epoch ring instead: the call returns
     // Err(trap) with our Timeout marker set. Reclassify that as TimedOut so the
     // caller doesn't mistake it for a genuine guest fault.
@@ -504,13 +556,7 @@ mod tests {
     }
 
     fn test_ctx() -> Arc<CallContext> {
-        Arc::new(CallContext::for_test(
-            "tenant-test",
-            "http://localhost:1",
-            "http://localhost:2",
-            "http://localhost:3",
-            "http://localhost:4",
-        ))
+        Arc::new(CallContext::for_test("tenant-test", "http://localhost:4"))
     }
 
     /// Instantiate a minimal WAT component that exports a no-arg `run` func and

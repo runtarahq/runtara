@@ -57,7 +57,7 @@
 //! | E058 | UndefinedReferenceField | Nested `data.*`/`variables.*` field not known under a validated prefix |
 //! | E059 | ReferenceNonObjectTraversal | Reference tries to traverse through a scalar or invalid container |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
-//! | E128 | UnsupportedStepTimeout | A per-step timeout has no enforcement path |
+//! | E128 | Retired | Agent and EmbedWorkflow timeouts now use cooperative guest deadlines |
 //! | E129 | RetryCountOverflow | Retries plus the initial attempt exceed u32 |
 //! | E130 | StepIdMismatch | A step map key differs from its declared ID |
 //! | E126 | UnknownReferenceRoot | Reference root is not one of the runtime's supported roots |
@@ -380,13 +380,6 @@ pub enum ValidationError {
     },
 
     // === Unsupported Step Configuration Errors ===
-    /// An Agent or EmbedWorkflow step declares `timeout`, but the runtime has
-    /// no host-owned deadline that can interrupt a running invocation.
-    ///
-    /// The field is retained in the DSL solely so older definitions parse and
-    /// receive this precise, structured error instead of a generic serde error.
-    UnsupportedStepTimeout { step_id: String, step_type: String },
-
     /// Retries plus the initial attempt cannot fit in the runtime u32 counter.
     RetryCountOverflow { step_id: String, max_retries: u32 },
 
@@ -426,7 +419,7 @@ pub enum ValidationError {
     },
 
     // === AI Agent Errors ===
-    /// AI Agent step has duplicate tool edge labels.
+    /// AI Agent step has duplicate tool labels, including generated MCP names.
     AiAgentDuplicateToolLabel { step_id: String, label: String },
     /// AI Agent step has an invalid tool edge label (must be alphanumeric + underscore).
     AiAgentInvalidToolLabel { step_id: String, label: String },
@@ -514,7 +507,6 @@ impl ValidationError {
             Self::InvalidEnumValue { .. } => "E024",
             Self::InvalidConditionShape { .. } => "E025",
             Self::QueryOnlyConditionOperator { .. } => "E027",
-            Self::UnsupportedStepTimeout { .. } => "E128",
             Self::RetryCountOverflow { .. } => "E129",
             Self::StepIdMismatch { .. } => "E130",
             Self::DuplicateStepName { .. } => "E060",
@@ -1032,15 +1024,6 @@ impl std::fmt::Display for ValidationError {
                     crate::retry_budget::retry_count_message(u64::from(*max_retries))
                 )
             }
-            ValidationError::UnsupportedStepTimeout { step_id, step_type } => {
-                write!(
-                    f,
-                    "[E128] Step '{}': 'timeout' is unsupported for {} steps because a running invocation cannot be interrupted. Remove this field; only Split, While, and WaitForSignal have enforced per-step timeouts.",
-                    step_id, step_type
-                )
-            }
-
-            // Naming Errors
             ValidationError::DuplicateStepName { name, step_ids } => {
                 write!(
                     f,
@@ -1111,7 +1094,7 @@ impl std::fmt::Display for ValidationError {
             ValidationError::AiAgentDuplicateToolLabel { step_id, label } => {
                 write!(
                     f,
-                    "[E110] AI Agent step '{}' has duplicate tool edge label '{}'",
+                    "[E110] AI Agent step '{}' has duplicate tool label '{}' (including generated MCP names)",
                     step_id, label
                 )
             }
@@ -1378,7 +1361,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint and not a workflow-agent child, on a Split with no retries or timeout; other shapes run sequentially.",
+                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint and not a workflow-agent child, on a Split with no retries; enclosing and Split timeouts retain the concurrent window, while other shapes run sequentially.",
                     step_id, parallelism
                 )
             }
@@ -1562,9 +1545,6 @@ pub fn validate_workflow(
 
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
-
-    // Phase 9.5: Reject per-step timeout fields with no enforcement path.
-    validate_unsupported_step_timeouts(graph, &mut result);
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
@@ -4082,48 +4062,6 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
     }
 }
 
-/// Reject an Agent or EmbedWorkflow `timeout` before it reaches a compiler.
-///
-/// A running capability or child workflow cannot be preempted in the
-/// synchronous component model. Keeping a parsed field lets stored legacy
-/// definitions receive a stable, step-scoped error instead of silently
-/// dropping a purported deadline. Split, While, and WaitForSignal use distinct
-/// runtime deadline lowerings and therefore remain valid.
-fn validate_unsupported_step_timeouts(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    for (step_id, step) in &graph.steps {
-        match step {
-            Step::Agent(agent_step) if agent_step.timeout.is_some() => {
-                result.errors.push(ValidationError::UnsupportedStepTimeout {
-                    step_id: step_id.clone(),
-                    step_type: "Agent".to_string(),
-                });
-            }
-            Step::EmbedWorkflow(embed_step) if embed_step.timeout.is_some() => {
-                result.errors.push(ValidationError::UnsupportedStepTimeout {
-                    step_id: step_id.clone(),
-                    step_type: "EmbedWorkflow".to_string(),
-                });
-            }
-            _ => {}
-        }
-
-        match step {
-            Step::Split(split_step) => {
-                validate_unsupported_step_timeouts(&split_step.subgraph, result);
-            }
-            Step::While(while_step) => {
-                validate_unsupported_step_timeouts(&while_step.subgraph, result);
-            }
-            Step::WaitForSignal(wait_step) => {
-                if let Some(on_wait) = &wait_step.on_wait {
-                    validate_unsupported_step_timeouts(on_wait, result);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 // ============================================================================
 // Phase 10: Edge Condition Validation
 // ============================================================================
@@ -5815,6 +5753,42 @@ fn extract_template_static_references_from_condition_argument(
 // Phase 11: AI Agent Validation
 // ============================================================================
 
+/// MCP meta-tools and authored tool labels share one model-visible namespace.
+/// Keep this check shared with direct compilation, which can run without the
+/// catalog-backed validator. Report each colliding name once in stable order.
+pub(crate) fn ai_agent_mcp_tool_name_collisions(
+    graph: &ExecutionGraph,
+    step_id: &str,
+) -> Vec<String> {
+    let labels: HashSet<&str> = graph
+        .execution_plan
+        .iter()
+        .filter(|edge| edge.from_step == step_id)
+        .filter_map(|edge| edge.label.as_deref())
+        .collect();
+    let ordinary_labels: HashSet<&str> = labels
+        .iter()
+        .copied()
+        .filter(|label| {
+            !matches!(*label, "next" | "onError" | "memory") && !label.starts_with("mcp.")
+        })
+        .collect();
+    let mut collisions = Vec::new();
+    for toolset in labels.iter().filter_map(|label| label.strip_prefix("mcp.")) {
+        if toolset.is_empty() {
+            continue;
+        }
+        for operation in ["search", "invoke"] {
+            let name = format!("{toolset}_{operation}");
+            if ordinary_labels.contains(name.as_str()) {
+                collisions.push(name);
+            }
+        }
+    }
+    collisions.sort();
+    collisions
+}
+
 /// Validate AI Agent steps for correct configuration.
 fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
@@ -5870,6 +5844,15 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                             });
                     }
                 }
+            }
+
+            for label in ai_agent_mcp_tool_name_collisions(graph, step_id) {
+                result
+                    .errors
+                    .push(ValidationError::AiAgentDuplicateToolLabel {
+                        step_id: step_id.clone(),
+                        label,
+                    });
             }
 
             // === Memory edge validation ===
@@ -6643,6 +6626,197 @@ mod tests {
             "no MCP errors expected, got: {:?}",
             result.errors
         );
+    }
+
+    fn mcp_with_ordinary_tool(label: &str, reverse: bool) -> ExecutionGraph {
+        let mut graph: ExecutionGraph =
+            serde_json::from_str(include_str!("../tests/fixtures/ai_agent_mcp.json")).unwrap();
+        graph.steps.insert(
+            "ordinary".into(),
+            create_agent_step("ordinary", "transform", None),
+        );
+        graph
+            .execution_plan
+            .push(edge("ai", "ordinary", Some(label)));
+        if reverse {
+            graph.execution_plan.reverse();
+        }
+        graph
+    }
+
+    #[test]
+    fn mcp_generated_names_reject_ordinary_tool_collisions_in_either_order() {
+        for label in ["github_search", "github_invoke"] {
+            for reverse in [false, true] {
+                for timeout in [None, Some(0), Some(400)] {
+                    let mut graph = mcp_with_ordinary_tool(label, reverse);
+                    let Step::Agent(provider) = graph.steps.get_mut("mcp_github").unwrap() else {
+                        unreachable!()
+                    };
+                    provider.timeout = timeout;
+                    let result = validate_workflow(&graph, &test_catalog());
+                    let collisions: Vec<_> = result
+                        .errors
+                        .iter()
+                        .filter(|error| {
+                            matches!(error, ValidationError::AiAgentDuplicateToolLabel { .. })
+                        })
+                        .collect();
+                    assert_eq!(
+                        collisions.len(),
+                        1,
+                        "{label}, reverse={reverse}, timeout={timeout:?}: {:?}",
+                        result.errors
+                    );
+                    assert!(
+                        matches!(collisions[0], ValidationError::AiAgentDuplicateToolLabel { step_id, label: actual } if step_id == "ai" && actual == label)
+                    );
+                    assert_eq!(collisions[0].code(), "E110");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_generated_names_allow_distinct_labels_and_separate_callers() {
+        for label in [
+            "github",
+            "github_search_extra",
+            "github_invoke_extra",
+            "other_search",
+        ] {
+            let graph = mcp_with_ordinary_tool(label, false);
+            let support = crate::direct_wasm::analyze_direct_wasm_support(&graph);
+            assert!(support.supported, "{label}: {support:?}");
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                !result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::AiAgentDuplicateToolLabel { .. }
+                )),
+                "{label}: {:?}",
+                result.errors
+            );
+        }
+        for label in ["github_search", "github_invoke"] {
+            let mut graph = mcp_with_ordinary_tool(label, false);
+            graph
+                .steps
+                .insert("other_ai".into(), ai_agent_with_connection("other_ai"));
+            graph.execution_plan.last_mut().unwrap().from_step = "other_ai".into();
+            graph
+                .execution_plan
+                .push(edge("ai", "other_ai", Some("next")));
+            graph
+                .execution_plan
+                .retain(|edge| !(edge.from_step == "ai" && edge.to_step == "finish"));
+            graph
+                .execution_plan
+                .push(edge("other_ai", "finish", Some("next")));
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                !result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::AiAgentDuplicateToolLabel { .. }
+                )),
+                "{label}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_generated_names_rejected_in_nested_graphs_and_public_compilation() {
+        use crate::direct_wasm::{
+            DirectCompilationInput, DirectCompileError, compile_direct_workflow,
+        };
+        use serde_json::json;
+
+        for label in ["github_search", "github_invoke"] {
+            for scope in ["root", "While", "Split", "EmbedWorkflow"] {
+                let child = mcp_with_ordinary_tool(label, false);
+                let mut children = Vec::new();
+                let graph = match scope {
+                    "While" | "Split" => {
+                        let step = if scope == "While" {
+                            json!({"id":"outer","stepType":"While","config":{"maxIterations":1},
+                                "condition":{"type":"operation","op":"EQ","arguments":[{"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]},"subgraph":child})
+                        } else {
+                            json!({"id":"outer","stepType":"Split","config":{"value":{"valueType":"immediate","value":[{}]},"sequential":true},"subgraph":child})
+                        };
+                        serde_json::from_value(json!({"entryPoint":"outer","steps":{
+                            "outer":step,"finish":{"id":"finish","stepType":"Finish"}},
+                            "executionPlan":[{"fromStep":"outer","toStep":"finish"}]}))
+                        .unwrap()
+                    }
+                    "EmbedWorkflow" => {
+                        children.push(crate::ChildWorkflowInput {
+                            step_id: "outer".into(),
+                            workflow_id: "child".into(),
+                            version_requested: "latest".into(),
+                            version_resolved: 1,
+                            execution_graph: child,
+                        });
+                        serde_json::from_value(json!({"entryPoint":"outer","steps":{
+                            "outer":{"id":"outer","stepType":"EmbedWorkflow","childWorkflowId":"child","childVersion":"latest"},
+                            "finish":{"id":"finish","stepType":"Finish"}},
+                            "executionPlan":[{"fromStep":"outer","toStep":"finish"}]})).unwrap()
+                    }
+                    _ => child,
+                };
+                let closure_children: Vec<_> = children
+                    .iter()
+                    .map(|child| ClosureChildGraph {
+                        workflow_id: child.workflow_id.clone(),
+                        version: child.version_resolved,
+                        execution_graph: child.execution_graph.clone(),
+                    })
+                    .collect();
+                let result =
+                    validate_workflow_closure("root", &graph, &test_catalog(), &closure_children);
+                let expected_origin = (scope == "EmbedWorkflow").then_some(("child", 1));
+                assert!(
+                    result
+                        .errors()
+                        .any(|(origin, error)| origin == expected_origin
+                            && matches!(error,
+                    ValidationError::AiAgentDuplicateToolLabel { step_id, label: actual }
+                    if step_id == "ai" && actual == label)),
+                    "{scope}: {result:?}"
+                );
+
+                let dir = tempfile::tempdir().unwrap();
+                let error = compile_direct_workflow(DirectCompilationInput {
+                    workflow_id: "mcp-name-collision".into(),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: graph,
+                    child_workflows: children,
+                    output_dir: dir.path().into(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                })
+                .unwrap_err();
+                let DirectCompileError::Unsupported { report } = error else {
+                    panic!("expected a public support rejection for {scope}: {error:?}");
+                };
+                assert!(
+                    report
+                        .unsupported
+                        .iter()
+                        .any(|feature| feature.feature == "ai-agent-tool-name-collision"
+                            && feature.step_id.as_deref() == Some("ai")
+                            && feature.reason.contains(label)),
+                    "{scope}: {report:?}"
+                );
+                assert_eq!(
+                    std::fs::read_dir(dir.path()).unwrap().count(),
+                    0,
+                    "invalid graph must not produce artifacts: {scope}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -11405,11 +11579,11 @@ mod tests {
         );
     }
 
-    // === Unsupported Per-Step Timeout Tests (E128) ===
+    // === Cooperative Per-Step Timeout Validation ===
 
     #[test]
-    fn test_agent_and_embed_timeout_are_errors_e128() {
-        let graph: ExecutionGraph = serde_json::from_str(
+    fn test_agent_and_embed_timeouts_validate() {
+        let mut graph: ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "a",
               "executionPlan": [
@@ -11427,40 +11601,31 @@ mod tests {
         )
         .unwrap();
 
-        let result = validate_workflow(&graph, &test_catalog());
-
-        let mut flagged: Vec<(String, String)> = result
-            .errors
-            .iter()
-            .filter_map(|error| match error {
-                ValidationError::UnsupportedStepTimeout { step_id, step_type } => {
-                    Some((step_id.clone(), step_type.clone()))
+        let child: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint":"finish", "steps":{"finish":{"id":"finish","stepType":"Finish"}},
+            "executionPlan":[]
+        }))
+        .unwrap();
+        let children = [ClosureChildGraph {
+            workflow_id: "child".into(),
+            version: 1,
+            execution_graph: child,
+        }];
+        for budget in [None, Some(0), Some(1), Some(u64::MAX)] {
+            for step in graph.steps.values_mut() {
+                match step {
+                    Step::Agent(step) => step.timeout = budget,
+                    Step::EmbedWorkflow(step) => step.timeout = budget,
+                    _ => {}
                 }
-                _ => None,
-            })
-            .collect();
-        flagged.sort();
-        assert_eq!(
-            flagged,
-            vec![
-                ("a".to_string(), "Agent".to_string()),
-                ("embed".to_string(), "EmbedWorkflow".to_string())
-            ],
-            "{:?}",
-            result.errors
-        );
-        let display = result
-            .errors
-            .iter()
-            .find(|error| matches!(error, ValidationError::UnsupportedStepTimeout { .. }))
-            .map(|error| format!("{error}"))
-            .unwrap();
-        assert!(display.contains("[E128]"), "{display}");
-        assert!(display.contains("unsupported"), "{display}");
+            }
+            let result = validate_workflow_closure("root", &graph, &test_catalog(), &children);
+            assert!(result.is_ok(), "budget={budget:?}: {result:?}");
+        }
     }
 
     #[test]
-    fn test_enforced_timeouts_are_not_rejected_e128() {
+    fn test_existing_loop_and_signal_timeouts_validate() {
         // Split / While / WaitForSignal timeouts ARE enforced and remain valid.
         // The Agent inside the Split subgraph has no timeout either.
         let graph: ExecutionGraph = serde_json::from_str(
@@ -11502,18 +11667,11 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
 
-        assert!(
-            !result
-                .errors
-                .iter()
-                .any(|error| matches!(error, ValidationError::UnsupportedStepTimeout { .. })),
-            "enforced Split/While/Wait timeouts must not be rejected: {:?}",
-            result.errors
-        );
+        assert!(!result.has_errors(), "{:?}", result.errors);
     }
 
     #[test]
-    fn test_agent_timeout_is_error_e128_inside_while_subgraph() {
+    fn test_agent_timeout_validates_inside_while_subgraph() {
         let graph: ExecutionGraph = serde_json::from_str(
             r##"{
               "entryPoint": "loop",
@@ -11545,15 +11703,7 @@ mod tests {
 
         let result = validate_workflow(&graph, &test_catalog());
 
-        assert!(
-            result.errors.iter().any(|error| matches!(
-                error,
-                ValidationError::UnsupportedStepTimeout { step_id, step_type }
-                    if step_id == "inner" && step_type == "Agent"
-            )),
-            "Agent timeout in a While subgraph must reject the graph: {:?}",
-            result.errors
-        );
+        assert!(!result.has_errors(), "{:?}", result.errors);
     }
 
     // === AiAgent WaitForSignal Tool onWait Tests (W072) ===

@@ -1,31 +1,33 @@
-//! Embedded wasmtime host for runtara agent components.
+//! Embedded Wasmtime host for Runtara agent and workflow components.
 //!
-//! Phase 1 scope (in progress):
-//!
-//! - `engine` — shared `wasmtime::Engine` builder with component-model on
-//!   and epoch-interruption for per-call deadlines.
-//! - `host_state` — `WasiView` + `WasiHttpView` impls with defensive
-//!   `X-Org-Id` injection on outbound HTTP.
-//!
-//! Not yet landed (next steps):
-//!
-//! - `bindings` — `wasmtime::component::bindgen!` against the WIT; needs
-//!   WASI WIT deps vendored or remapped to wasmtime-wasi's built-in
-//!   bindings.
-//! - `registry` — load components from a manifest, pre-instantiate, cache.
-//! - `dispatcher` — `ComponentDispatcherService` replacing the legacy
-//!   `DispatcherService`.
+//! Loads approved component bundles and binds runtime, connection, database,
+//! and outbound HTTP services. Invocation identity comes from host-owned context.
+//! Raw WASI HTTP is denied; trusted isolated capabilities also deny outbound calls.
+
+#[cfg(test)]
+extern crate self as runtara_component_host;
+#[cfg(test)]
+#[path = "../tests/common/outbound.rs"]
+mod outbound_test_fixture;
 
 pub mod bindings;
+mod cleanup_alarm;
 pub mod connection_resolver_host;
+pub mod database_host;
+pub use database_host::DatabaseHost;
+pub mod outbound_http;
+pub use outbound_http::OutboundHttpHost;
 pub mod dispatcher;
 pub mod engine;
+pub mod execution_host;
 pub(crate) mod host_io;
 pub mod host_state;
+pub mod isolated_tasks;
 pub mod lifecycle;
 pub mod precompile;
 pub mod registry;
 pub mod runtime_host;
+pub mod trusted;
 pub mod workflow;
 
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
@@ -38,8 +40,11 @@ pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
-    InvokeExit, InvokeRunResult, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
-    WorkflowRunResult, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
+    CapabilityInvocation, ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory,
+    InvokeExit, InvokeRunResult, PreparedChildCatalog, PreparedInvocationLauncher,
+    PreparedWorkflow, RootExecutionCoordinator, RootLifecycleDecision, WorkflowExecutor,
+    WorkflowExit, WorkflowLimits, WorkflowRunResult, WorkflowRunSpec, WorkflowStartConfirmation,
+    WorkflowState,
 };
 
 /// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the

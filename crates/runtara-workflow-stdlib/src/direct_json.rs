@@ -1122,7 +1122,9 @@ impl DirectJsonManifest {
         })
     }
 
-    /// Separate timer and completion records for this exact loop invocation.
+    /// Deadline identity for a loop, Agent or Embed invocation. The exported name is
+    /// retained for compatibility; loop timer/completion keys remain unchanged.
+    /// Agents use their normal result checkpoint as the completion record.
     pub fn loop_deadline_key(
         &self,
         step_id: &str,
@@ -1132,10 +1134,25 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse loop deadline source: {err}"))?;
         let step = self.step(step_id, &source)?;
-        if !matches!(step.step_type.as_str(), "While" | "Split") {
+        if !matches!(
+            step.step_type.as_str(),
+            "While" | "Split" | "Agent" | "EmbedWorkflow"
+        ) {
             return Err(format!("direct step '{step_id}' is not a loop"));
         }
-        let kind = if complete {
+        let kind = if matches!(step.step_type.as_str(), "Agent" | "EmbedWorkflow") {
+            if complete {
+                return Err(format!(
+                    "{} completion uses its result checkpoint",
+                    step.step_type
+                ));
+            }
+            if step.step_type == "Agent" {
+                "agent-deadline"
+            } else {
+                "embed-deadline"
+            }
+        } else if complete {
             "loop-complete"
         } else {
             "loop-deadline"
@@ -1672,8 +1689,7 @@ impl DirectJsonManifest {
         step_id: &str,
         child_error: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let child_error: Value = serde_json::from_slice(child_error)
-            .map_err(|err| format!("failed to parse EmbedWorkflow child error: {err}"))?;
+        let child_error = decode_embed_child_error(child_error);
         let step = self.embed_workflow_step(step_id)?;
         let child = self.child_workflow(step_id)?;
         let result = embed_workflow_error_value(step, child, child_error);
@@ -1689,8 +1705,7 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
-        let child_error: Value = serde_json::from_slice(child_error)
-            .map_err(|err| format!("failed to parse EmbedWorkflow child error: {err}"))?;
+        let child_error = decode_embed_child_error(child_error);
         let step = self.embed_step_scoped(step_id, &source)?;
         let child = self.child_workflow(step_id)?;
         serde_json::to_vec(&embed_workflow_error_value(step, child, child_error))
@@ -1824,19 +1839,66 @@ impl DirectJsonManifest {
         iteration: u32,
         source: &[u8],
     ) -> Result<String, String> {
-        let source: Value = serde_json::from_slice(source)
-            .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
-        if let Some(key) =
-            durable_key_v2(&source, "ai_turn", serde_json::json!([step_id, iteration]))
+        ai_turn_checkpoint_key(step_id, iteration, source, "ai_turn", "turn")
+    }
+
+    /// A model decision is saved before any tool dispatch, independently of
+    /// the completed-turn snapshot (which also contains the tool results).
+    pub fn ai_turn_response_key(
+        step_id: &str,
+        iteration: u32,
+        source: &[u8],
+    ) -> Result<String, String> {
+        ai_turn_checkpoint_key(
+            step_id,
+            iteration,
+            source,
+            "ai_turn_response",
+            "turn-response",
+        )
+    }
+
+    /// Reject damaged persisted decisions before dispatch or model I/O. Keep
+    /// unknown fields and argument values intact for forward compatibility.
+    pub fn ai_turn_response_validate(response: &[u8]) -> Result<(), String> {
+        let invalid = || {
+            serde_json::json!({"code":"AI_TURN_RESPONSE_STATE","message":"Invalid persisted AI turn response","category":"permanent","severity":"error","retryable":false}).to_string()
+        };
+        let value: Value = serde_json::from_slice(response).map_err(|_| invalid())?;
+        if !value["chat_history"].is_array()
+            || !value["tool_call_log"].is_array()
+            || !value["iterations"]
+                .as_u64()
+                .is_some_and(|n| n <= u64::from(u32::MAX))
         {
-            return Ok(key);
+            return Err(invalid());
         }
-        let indices_suffix = wait_loop_indices_suffix(&source);
-        let base = format!("{step_id}.turn.{iteration}{indices_suffix}");
-        Ok(match Self::source_cache_key_prefix(&source) {
-            Some(prefix) => format!("{prefix}::{base}"),
-            None => base,
-        })
+        match value["action"].as_str() {
+            Some("complete")
+                if value.get("response").is_some()
+                    && value
+                        .get("tool_calls")
+                        .is_none_or(|calls| calls.as_array().is_some_and(Vec::is_empty)) =>
+            {
+                Ok(())
+            }
+            Some("tools")
+                if value["tool_calls"].as_array().is_some_and(|calls| {
+                    !calls.is_empty()
+                        && calls.iter().all(|call| {
+                            call["tool_call_id"].is_string()
+                                && call["name"].is_string()
+                                && call["tool_index"]
+                                    .as_u64()
+                                    .is_some_and(|n| n <= u64::from(u32::MAX))
+                                && call.get("arguments").is_some()
+                        })
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(invalid()),
+        }
     }
 
     /// Per-turn durability: wrap the post-turn loop state for the turn
@@ -2580,23 +2642,46 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
 
-        let prefix = child_scope_v2(
-            &source,
-            "tool-child",
-            serde_json::json!([ai_step_id, label, call_counter]),
-        )
-        .unwrap_or_else(|| {
-            child_cache_prefix(
-                &format!("{ai_step_id}.tool.{label}.{call_counter}"),
-                &source,
-            )
-        });
+        let prefix = tool_call_cache_prefix(ai_step_id, label, call_counter, &source);
         let envelope = serde_json::json!({
             "data": input,
             "variables": { "_cache_key_prefix": prefix }
         });
         serde_json::to_vec(&envelope)
             .map_err(|err| format!("failed to serialize scoped tool input: {err}"))
+    }
+
+    /// Preserve the caller source while selecting the replay-stable tool call.
+    /// Inline Embed tools need its definition path as well as its namespace.
+    pub fn tool_scope_source(
+        ai_step_id: &str,
+        label: &str,
+        call_counter: u32,
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
+        let prefix = tool_call_cache_prefix(ai_step_id, label, call_counter, &source);
+        source_with_cache_prefix(source, prefix)
+    }
+
+    /// Memory load/save have one call per AI activation, independent of the
+    /// model's tool-call counter. Keep their durable ancestry in a distinct
+    /// domain so authored tool labels cannot alias memory budgets or results.
+    pub fn agent_aux_scope_source(&self, agent_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
+        if !matches!(agent.capability_id.as_str(), "load-memory" | "save-memory") {
+            return Err("auxiliary Agent scope requires a memory capability".into());
+        }
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse auxiliary Agent source: {err}"))?;
+        let parts = serde_json::json!([agent.step_id, agent.agent_id, agent.capability_id]);
+        let prefix = child_scope_v2(&source, "agent-aux", parts.clone())
+            .unwrap_or_else(|| child_cache_prefix(&format!("agent-aux:{parts}"), &source));
+        source_with_cache_prefix(source, prefix)
     }
 
     /// Resolve an Agent's connection to ONE concrete connection id, evaluated
@@ -2804,7 +2889,7 @@ impl DirectJsonManifest {
         })
     }
 
-    /// Convert a WIT `error-info` into the current Agent failure string shape.
+    /// Preserve the structured WIT error through retry, recovery and composition.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_error(
         &self,
@@ -2817,11 +2902,7 @@ impl DirectJsonManifest {
         retry_after_ms: Option<u64>,
         attributes: Option<&str>,
     ) -> Result<Vec<u8>, String> {
-        let agent = self
-            .agents
-            .get(&agent_id)
-            .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
-        let raw = String::from_utf8(Self::agent_error_info(
+        let raw = Self::agent_error_info(
             code,
             message,
             category,
@@ -2829,16 +2910,12 @@ impl DirectJsonManifest {
             retryable,
             retry_after_ms,
             attributes,
-        )?)
-        .map_err(|error| format!("Agent error-info JSON was not UTF-8: {error}"))?;
-        Ok(format!(
-            "Step {} failed: Agent {}::{}: {}",
-            agent.step_id, agent.agent_id, agent.capability_id, raw
-        )
-        .into_bytes())
+        )?;
+        self.agent_error_from_info(agent_id, &raw)
     }
 
-    /// Convert a raw Agent error-info payload into the current failure string shape.
+    /// Add invocation context without formatting away the machine-readable fields.
+    /// This also handles raw envelopes restored from durable attempt checkpoints.
     pub fn agent_error_from_info(
         &self,
         agent_id: u32,
@@ -2848,13 +2925,16 @@ impl DirectJsonManifest {
             .agents
             .get(&agent_id)
             .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
-        let raw = String::from_utf8(error_info.to_vec())
-            .map_err(|error| format!("Agent error-info JSON was not UTF-8: {error}"))?;
-        Ok(format!(
-            "Step {} failed: Agent {}::{}: {}",
-            agent.step_id, agent.agent_id, agent.capability_id, raw
-        )
-        .into_bytes())
+        let mut envelope: Map<String, Value> = serde_json::from_slice(error_info)
+            .map_err(|error| format!("invalid Agent error-info object: {error}"))?;
+        envelope.insert("stepId".into(), Value::String(agent.step_id.clone()));
+        envelope.insert("agentId".into(), Value::String(agent.agent_id.clone()));
+        envelope.insert(
+            "capabilityId".into(),
+            Value::String(agent.capability_id.clone()),
+        );
+        serde_json::to_vec(&envelope)
+            .map_err(|error| format!("failed to serialize Agent error-info: {error}"))
     }
 
     /// Build generated-code-compatible Agent `step_debug_end` payload for failures.
@@ -3749,15 +3829,10 @@ pub fn error_steps(step_id: &str, error: &[u8], steps: &[u8]) -> Result<Vec<u8>,
 
 /// Recover a structured error envelope for the `onError` context.
 ///
-/// Agent failures reach `error_steps` already wrapped by
-/// [`DirectJsonManifest::agent_error`] as
-/// `Step <id> failed: Agent <agent>::<cap>: {envelope-json}`, so a plain
-/// `from_slice` of the whole string fails and the structured `code` /
-/// `category` / `attributes` fields would be lost (handlers would only see the
-/// wrapped text under `message`). Recover them by parsing the JSON envelope
-/// embedded after the first `{` — mirroring how `why_execution_failed` unwraps
-/// the same shape — so `steps.__error.code` etc. resolve. Falls back to a
-/// synthesized envelope when there is no JSON to recover.
+/// New Agent failures are JSON objects. Older artifacts can still supply
+/// `Step <id> failed: Agent <agent>::<cap>: {envelope-json}`. Retain the existing
+/// best-effort presentation fallback for these historical onError inputs;
+/// execution and retry classification use structured envelopes directly.
 fn parse_error_envelope(error: &[u8], step_id: &str) -> Value {
     // Already a structured envelope (non-Agent failures, or a bare envelope).
     if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(error) {
@@ -5329,7 +5404,9 @@ fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
         .unwrap_or(true);
 
     DirectJsonWorkflowRetryInfo {
-        retryable: category != Some("permanent") && (!rate_limited || auto_retry_429),
+        retryable: category != Some("permanent")
+            && parsed.get("retryable").and_then(Value::as_bool) != Some(false)
+            && (!rate_limited || auto_retry_429),
         rate_limited,
         retry_after_ms,
     }
@@ -5722,6 +5799,56 @@ pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
     }
 }
 
+fn ai_turn_checkpoint_key(
+    step_id: &str,
+    iteration: u32,
+    source: &[u8],
+    kind: &str,
+    legacy_kind: &str,
+) -> Result<String, String> {
+    let source: Value = serde_json::from_slice(source)
+        .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
+    if let Some(key) = durable_key_v2(&source, kind, serde_json::json!([step_id, iteration])) {
+        return Ok(key);
+    }
+    let indices_suffix = wait_loop_indices_suffix(&source);
+    let base = format!("{step_id}.{legacy_kind}.{iteration}{indices_suffix}");
+    Ok(match DirectJsonManifest::source_cache_key_prefix(&source) {
+        Some(prefix) => format!("{prefix}::{base}"),
+        None => base,
+    })
+}
+
+fn source_with_cache_prefix(mut source: Value, prefix: String) -> Result<Vec<u8>, String> {
+    let object = source
+        .as_object_mut()
+        .ok_or("scoped source must be an object")?;
+    let variables = object
+        .entry("variables")
+        .or_insert_with(|| serde_json::json!({}));
+    variables
+        .as_object_mut()
+        .ok_or("scoped source variables must be an object")?
+        .insert("_cache_key_prefix".into(), prefix.into());
+    serde_json::to_vec(&source).map_err(|err| format!("failed to serialize scoped source: {err}"))
+}
+
+fn tool_call_cache_prefix(
+    ai_step_id: &str,
+    label: &str,
+    call_counter: u32,
+    source: &Value,
+) -> String {
+    child_scope_v2(
+        source,
+        "tool-child",
+        serde_json::json!([ai_step_id, label, call_counter]),
+    )
+    .unwrap_or_else(|| {
+        child_cache_prefix(&format!("{ai_step_id}.tool.{label}.{call_counter}"), source)
+    })
+}
+
 fn embed_child_variables(
     step_id: &str,
     child: &DirectJsonChildWorkflow,
@@ -5852,6 +5979,15 @@ fn embed_workflow_step_value(
     })
 }
 
+fn decode_embed_child_error(error: &[u8]) -> Value {
+    // Computation helpers return plain WIT strings; Agent/Error steps return
+    // JSON envelopes. Both are failures of the child, not of this wrapper.
+    // Preserve JSON as-is and retain plain text without interpreting embedded
+    // JSON fragments as retry policy, matching the workflow retry classifier.
+    serde_json::from_slice(error)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(error).into_owned()))
+}
+
 fn embed_workflow_error_value(
     step: &DirectJsonStep,
     child: &DirectJsonChildWorkflow,
@@ -5865,17 +6001,26 @@ fn embed_workflow_error_value(
         .get("severity")
         .and_then(Value::as_str)
         .unwrap_or("error");
-    serde_json::json!({
+    let mut envelope = serde_json::json!({
         "stepId": step.id,
         "stepName": step.name.as_deref().unwrap_or("Unnamed"),
         "stepType": "EmbedWorkflow",
-        "code": "CHILD_WORKFLOW_FAILED",
+        "code": child_error.get("code").and_then(Value::as_str).unwrap_or("CHILD_WORKFLOW_FAILED"),
         "message": format!("Child workflow {} failed", child.workflow_id),
         "category": category,
         "severity": severity,
         "childWorkflowId": child.workflow_id,
         "childError": child_error,
-    })
+    });
+    // Keep the originating policy fields at every composition boundary. The
+    // complete child remains diagnostic context; consumers need not unwrap a
+    // formatted string or recursively guess which failure controls retries.
+    for field in ["retryable", "retryAfterMs", "attributes"] {
+        if let Some(value) = envelope["childError"].get(field).cloned() {
+            envelope[field] = value;
+        }
+    }
+    envelope
 }
 
 fn wait_action_mapping(
@@ -8629,7 +8774,7 @@ mod tests {
         assert_eq!(wrapped_error["stepId"], "call_child");
         assert_eq!(wrapped_error["stepName"], "Call child");
         assert_eq!(wrapped_error["stepType"], "EmbedWorkflow");
-        assert_eq!(wrapped_error["code"], "CHILD_WORKFLOW_FAILED");
+        assert_eq!(wrapped_error["code"], "CHILD_FAILED");
         assert_eq!(
             wrapped_error["message"],
             "Child workflow child_workflow failed"
@@ -9237,6 +9382,84 @@ mod tests {
             DirectJsonManifest::ai_turn_snapshot(state, b"[]", 7, true).expect("complete snapshot");
         assert!(DirectJsonManifest::ai_turn_snapshot_complete(&complete).unwrap());
         assert!(DirectJsonManifest::ai_turn_snapshot_part(&snapshot, 2).is_err());
+    }
+
+    #[test]
+    fn ai_turn_response_keys_are_distinct_and_replay_stable() {
+        for version in [1, 2] {
+            let source = serde_json::to_vec(&json!({"variables":{"_durable_key_version":version,"_workflow_id":"wf","_cache_key_prefix":"parent","_loop_indices":[2],"_loop_path":[["items",2]]}})).unwrap();
+            let response = DirectJsonManifest::ai_turn_response_key("ai", 1, &source).unwrap();
+            assert_eq!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("ai", 1, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_cache_key("ai", 1, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("ai", 2, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("other", 1, &source).unwrap()
+            );
+            assert_ne!(
+                response,
+                DirectJsonManifest::ai_turn_response_key("ai", 1, b"{}").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn ai_turn_response_validation_keeps_decisions_and_rejects_corruption() {
+        let complete = json!({"action":"complete","chat_history":[],"iterations":1,"tool_call_log":[],"response":null});
+        let tools = json!({"action":"tools","chat_history":[{"content":"x".repeat(80_000)}],"iterations":u32::MAX,"tool_call_log":[],"tool_calls":[{"tool_call_id":"one","name":"unknown","arguments":null,"tool_index":u32::MAX}],"future_field":true});
+        for value in [&complete, &tools] {
+            assert!(
+                DirectJsonManifest::ai_turn_response_validate(&serde_json::to_vec(value).unwrap())
+                    .is_ok()
+            );
+        }
+        let mut damaged = vec![
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"action":"complete"}),
+        ];
+        for (field, value) in [
+            ("action", json!("invalid")),
+            ("chat_history", json!(null)),
+            ("iterations", json!(u64::MAX)),
+            ("tool_call_log", json!({})),
+            ("tool_calls", json!([])),
+        ] {
+            let mut candidate = tools.clone();
+            candidate[field] = value;
+            damaged.push(candidate);
+        }
+        for field in ["tool_call_id", "name", "arguments", "tool_index"] {
+            let mut candidate = tools.clone();
+            candidate["tool_calls"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            damaged.push(candidate);
+        }
+        let mut overflow = tools.clone();
+        overflow["tool_calls"][0]["tool_index"] = json!(u64::MAX);
+        damaged.push(overflow);
+        for bytes in damaged
+            .iter()
+            .map(|value| serde_json::to_vec(value).unwrap())
+            .chain([vec![], vec![0], b"{".to_vec()])
+        {
+            let error = DirectJsonManifest::ai_turn_response_validate(&bytes).unwrap_err();
+            let error: Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(error["code"], "AI_TURN_RESPONSE_STATE");
+            assert_eq!(error["retryable"], false);
+        }
     }
 
     #[test]
@@ -11692,6 +11915,128 @@ mod tests {
     }
 
     #[test]
+    fn tool_scope_source_preserves_context_and_is_replay_stable() {
+        for version in [1, 2] {
+            let original = json!({
+                "data": {"large": "x".repeat(80_000)},
+                "steps": {"previous": {"outputs": {"id": 42}}},
+                "variables": {
+                    "_durable_key_version": version,
+                    "_workflow_id": "parent",
+                    "_instance_id": "instance",
+                    "_tenant_id": "tenant",
+                    "_cache_key_prefix": "outer",
+                    "_manifest_graph_path": [["embedWorkflow", "nested"]],
+                    "_loop_path": [["items", 2]],
+                    "_loop_indices": [2],
+                    "custom": {"kept": true}
+                }
+            });
+            let bytes = serde_json::to_vec(&original).unwrap();
+            let scope = |ai, label, counter| {
+                DirectJsonManifest::tool_scope_source(ai, label, counter, &bytes).unwrap()
+            };
+            let first = scope("ai", "tool", 0);
+            assert_eq!(first, scope("ai", "tool", 0), "replay identity");
+            for other in [
+                scope("ai", "tool", 1),
+                scope("other", "tool", 0),
+                scope("ai", "other", 0),
+            ] {
+                assert_ne!(first, other, "distinct invocation identity");
+            }
+            let mut scoped: Value = serde_json::from_slice(&first).unwrap();
+            let envelope: Value = serde_json::from_slice(
+                &DirectJsonManifest::agent_tool_scope_input("ai", "tool", 0, b"{}", &bytes)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                scoped["variables"]["_cache_key_prefix"],
+                envelope["variables"]["_cache_key_prefix"]
+            );
+            scoped["variables"]["_cache_key_prefix"] =
+                original["variables"]["_cache_key_prefix"].clone();
+            assert_eq!(
+                scoped, original,
+                "definition lookup and caller state survive scoping"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_scope_source_checks_shape_and_allows_missing_variables() {
+        let scoped: Value = serde_json::from_slice(
+            &DirectJsonManifest::tool_scope_source("ai", "tool", 0, br#"{"data":42}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scoped["data"], 42);
+        assert!(scoped["variables"]["_cache_key_prefix"].is_string());
+        for input in [
+            b"{".as_slice(),
+            b"[]",
+            b"null",
+            br#"{"variables":null}"#,
+            br#"{"variables":[]}"#,
+        ] {
+            assert!(DirectJsonManifest::tool_scope_source("ai", "tool", 0, input).is_err());
+        }
+    }
+
+    #[test]
+    fn memory_scope_source_preserves_context_and_separates_calls() {
+        let mut manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).unwrap();
+        let mut load = manifest.agents[&0].clone();
+        load.agent_id = "object-model".into();
+        load.step_id = "ai".into();
+        load.capability_id = "load-memory".into();
+        let mut save = load.clone();
+        save.capability_id = "save-memory".into();
+        let mut other = load.clone();
+        other.step_id = "ai.tool.memory.load.0".into();
+        manifest.agents.insert(1, load);
+        manifest.agents.insert(2, save);
+        manifest.agents.insert(3, other);
+        for version in [1, 2] {
+            let original = json!({"data":{"keep":42},"steps":{"previous":{"outputs":true}},
+                "variables":{"_durable_key_version":version,"_workflow_id":"workflow",
+                    "_cache_key_prefix":"outer","_loop_path":[["items",3]],
+                    "_manifest_graph_path":[["embedWorkflow","child"]],"custom":"kept"}});
+            let source = serde_json::to_vec(&original).unwrap();
+            let load = manifest.agent_aux_scope_source(1, &source).unwrap();
+            assert_eq!(load, manifest.agent_aux_scope_source(1, &source).unwrap());
+            assert_ne!(load, manifest.agent_aux_scope_source(2, &source).unwrap());
+            assert_ne!(load, manifest.agent_aux_scope_source(3, &source).unwrap());
+            for label in ["load-memory", "memory.load", "memory_load", "agent-aux"] {
+                assert_ne!(
+                    load,
+                    DirectJsonManifest::tool_scope_source("ai", label, 0, &source).unwrap()
+                );
+            }
+            let mut decoded: Value = serde_json::from_slice(&load).unwrap();
+            decoded["variables"]["_cache_key_prefix"] =
+                original["variables"]["_cache_key_prefix"].clone();
+            assert_eq!(decoded, original);
+            let mut another_iteration = original.clone();
+            another_iteration["variables"]["_loop_path"] = json!([["items", 4]]);
+            // Legacy scoping uses loop indices; current scoping uses the path.
+            another_iteration["variables"]["_loop_indices"] = json!([4]);
+            let another = manifest
+                .agent_aux_scope_source(1, &serde_json::to_vec(&another_iteration).unwrap())
+                .unwrap();
+            assert_ne!(
+                serde_json::from_slice::<Value>(&load).unwrap()["variables"]["_cache_key_prefix"],
+                serde_json::from_slice::<Value>(&another).unwrap()["variables"]["_cache_key_prefix"],
+            );
+        }
+        assert!(manifest.agent_aux_scope_source(0, b"{}").is_err());
+        assert!(manifest.agent_aux_scope_source(99, b"{}").is_err());
+        for source in [b"null".as_slice(), b"[]", b"{\"variables\":42}", b"invalid"] {
+            assert!(manifest.agent_aux_scope_source(1, source).is_err());
+        }
+    }
+
+    #[test]
     fn agent_connection_input_matches_generated_injection_shape() {
         let manifest =
             DirectJsonManifest::parse(&agent_manifest_with_required_inputs_and_connection(
@@ -11846,7 +12191,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_error_retry_info_matches_resilient_macro_classification() {
+    fn workflow_error_retry_info_preserves_default_categories_and_delays() {
         let transient = br#"{"category":"transient","code":"TEMPORARY"}"#;
         assert!(DirectJsonManifest::workflow_error_retryable(transient));
         assert!(!DirectJsonManifest::workflow_error_rate_limited(transient));
@@ -11870,6 +12215,150 @@ mod tests {
         );
 
         assert!(DirectJsonManifest::workflow_error_retryable(b"not-json"));
+    }
+
+    fn wrap_agent_error_in_embed(error: &[u8]) -> Vec<u8> {
+        let manifest = DirectJsonManifest::parse(
+            &serde_json::to_vec(&json!({
+                "graph": {"steps": [{"id":"embed", "stepType":"EmbedWorkflow",
+                    "body":{"id":"embed", "stepType":"EmbedWorkflow"}}]},
+                "childWorkflows":[{"stepId":"embed", "workflowId":"child",
+                    "versionRequested":"1", "versionResolved":1, "graph":{}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let wrapped = manifest.embed_workflow_error("embed", error).unwrap();
+        assert_eq!(
+            manifest
+                .embed_workflow_error_scoped("embed", br#"{}"#, error)
+                .unwrap(),
+            wrapped
+        );
+        wrapped
+    }
+
+    #[test]
+    fn embed_plain_computation_failures_preserve_payload_and_retry_policy() {
+        for error in [
+            b"value \"abc\" cannot be coerced to integer".as_slice(),
+            b"",
+            b"not UTF-8: \xff",
+            br#"prefix {"category":"permanent","retryable":false}"#,
+            br#""JSON string""#,
+            b"null",
+            b"42",
+            br#"[{"retryable":false}]"#,
+        ] {
+            let expected = serde_json::from_slice::<Value>(error)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(error).into_owned()));
+            let wrapped = wrap_agent_error_in_embed(error);
+            let value: Value = serde_json::from_slice(&wrapped).unwrap();
+            assert_eq!(value["childError"], expected);
+            assert_eq!(value["code"], "CHILD_WORKFLOW_FAILED");
+            assert_eq!(value["category"], "transient");
+            assert!(DirectJsonManifest::workflow_error_retryable(&wrapped));
+            assert!(!DirectJsonManifest::workflow_error_rate_limited(&wrapped));
+            assert_eq!(
+                DirectJsonManifest::workflow_error_retry_after_ms(&wrapped),
+                None
+            );
+            let nested = wrap_agent_error_in_embed(&wrapped);
+            let nested_value: Value = serde_json::from_slice(&nested).unwrap();
+            assert_eq!(nested_value["childError"], value);
+            assert!(DirectJsonManifest::workflow_error_retryable(&nested));
+        }
+    }
+
+    #[test]
+    fn nested_embed_errors_preserve_policy_context_and_capability_export() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).unwrap();
+        let mut error = manifest
+            .agent_error(
+                0,
+                "SLACK_RATE_LIMITED",
+                "wait {literal}",
+                "transient",
+                "warning",
+                true,
+                Some(u64::MAX),
+                Some(r#"{"attempt":2,"nested":{"provider":"slack"}}"#),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            let previous: Value = serde_json::from_slice(&error).unwrap();
+            error = wrap_agent_error_in_embed(&error);
+            let value: Value = serde_json::from_slice(&error).unwrap();
+            assert_eq!(value["childError"], previous);
+            assert_eq!(value["stepId"], "embed");
+            assert_eq!(value["code"], "SLACK_RATE_LIMITED");
+            assert!(DirectJsonManifest::workflow_error_retryable(&error));
+            assert!(DirectJsonManifest::workflow_error_rate_limited(&error));
+            assert_eq!(
+                DirectJsonManifest::workflow_error_retry_after_ms(&error),
+                Some(u64::MAX)
+            );
+            let fields = invoke_error_fields(&error);
+            assert_eq!(fields.code, "SLACK_RATE_LIMITED");
+            assert_eq!(fields.category, "transient");
+            assert_eq!(fields.severity, "warning");
+            assert!(fields.retryable);
+            assert_eq!(fields.retry_after_ms, Some(u64::MAX));
+            assert_eq!(
+                serde_json::from_str::<Value>(fields.attributes.as_ref().unwrap()).unwrap(),
+                json!({"attempt":2,"nested":{"provider":"slack"}})
+            );
+            let recovery = parse_error_envelope(&error, "handler");
+            assert_eq!(recovery, value);
+        }
+        // A published workflow error crosses the same WIT fields as any Agent.
+        let fields = invoke_error_fields(&error);
+        let reimported = manifest
+            .agent_error(
+                0,
+                &fields.code,
+                &fields.message,
+                &fields.category,
+                &fields.severity,
+                fields.retryable,
+                fields.retry_after_ms,
+                fields.attributes.as_deref(),
+            )
+            .unwrap();
+        assert!(DirectJsonManifest::workflow_error_rate_limited(&reimported));
+        assert_eq!(
+            DirectJsonManifest::workflow_error_retry_after_ms(&reimported),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn composite_retries_respect_explicit_nonretryability_and_permanent_category() {
+        for original in [
+            json!({"code":"CANCELLED", "category":"cancellation", "retryable":false}),
+            json!({"code":"SLACK_RATE_LIMITED", "category":"transient", "retryable":false,
+                "retryAfterMs":5000}),
+            json!({"code":"BAD_INPUT", "category":"permanent", "retryable":true}),
+        ] {
+            let mut error = serde_json::to_vec(&original).unwrap();
+            for _ in 0..3 {
+                assert!(
+                    !DirectJsonManifest::workflow_error_retryable(&error),
+                    "{original}"
+                );
+                error = wrap_agent_error_in_embed(&error);
+            }
+            assert!(!DirectJsonManifest::workflow_error_retryable(&error));
+        }
+    }
+
+    #[test]
+    fn embed_error_without_code_retains_fallback_and_original_child() {
+        let original = json!({"message":"plain failure", "context":{"item":4}});
+        let wrapped = wrap_agent_error_in_embed(&serde_json::to_vec(&original).unwrap());
+        let wrapped: Value = serde_json::from_slice(&wrapped).unwrap();
+        assert_eq!(wrapped["code"], "CHILD_WORKFLOW_FAILED");
+        assert_eq!(wrapped["childError"], original);
     }
 
     #[test]
@@ -12978,7 +13467,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_error_formats_error_info_like_component_dispatch() {
+    fn agent_error_preserves_structured_fields_and_invocation_context() {
         let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
 
         let raw = DirectJsonManifest::agent_error_info(
@@ -13012,13 +13501,10 @@ mod tests {
                 Some(r#"{"field":"value"}"#),
             )
             .expect("Agent error");
-        let error = String::from_utf8(error).expect("utf8 error");
-
-        assert!(error.starts_with("Step agent failed: Agent utils::normalize: "));
-        let raw = error
-            .strip_prefix("Step agent failed: Agent utils::normalize: ")
-            .expect("raw envelope");
-        let raw: Value = serde_json::from_str(raw).expect("raw json");
+        let raw: Value = serde_json::from_slice(&error).expect("structured error");
+        assert_eq!(raw["stepId"], "agent");
+        assert_eq!(raw["agentId"], "utils");
+        assert_eq!(raw["capabilityId"], "normalize");
         assert_eq!(raw["code"], json!("CAPABILITY_ERROR"));
         assert_eq!(raw["message"], json!("bad request"));
         assert_eq!(raw["category"], json!("permanent"));
@@ -13062,19 +13548,38 @@ mod tests {
     }
 
     #[test]
-    fn agent_error_from_info_formats_preserved_retry_payload() {
+    fn agent_error_from_info_preserves_checkpointed_fields() {
         let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
-        let payload = br#"{"code":"HTTP_RATE_LIMITED","message":"try later"}"#;
-
+        let payload = br#"{"code":"HTTP_RATE_LIMITED","message":"try later {not JSON}","category":"transient","severity":"warning","retryable":true,"retryAfterMs":18446744073709551615,"attributes":{"nested":{"value":7}},"futureField":[1,2]}"#;
         let error = manifest
             .agent_error_from_info(0, payload)
             .expect("Agent error");
-        let error = String::from_utf8(error).expect("utf8 error");
-
+        let mut actual: Value = serde_json::from_slice(&error).unwrap();
+        let map = actual.as_object_mut().unwrap();
+        assert_eq!(map.remove("stepId"), Some(json!("agent")));
+        assert_eq!(map.remove("agentId"), Some(json!("utils")));
+        assert_eq!(map.remove("capabilityId"), Some(json!("normalize")));
+        assert_eq!(actual, serde_json::from_slice::<Value>(payload).unwrap());
         assert_eq!(
-            error,
-            "Step agent failed: Agent utils::normalize: {\"code\":\"HTTP_RATE_LIMITED\",\"message\":\"try later\"}"
+            DirectJsonManifest::workflow_error_retry_after_ms(&error),
+            Some(u64::MAX)
         );
+        let exported = invoke_error_fields(&error);
+        assert_eq!(exported.code, "HTTP_RATE_LIMITED");
+        assert!(exported.retryable);
+        assert_eq!(exported.retry_after_ms, Some(u64::MAX));
+        assert_eq!(
+            exported.attributes,
+            Some(r#"{"nested":{"value":7}}"#.into())
+        );
+    }
+
+    #[test]
+    fn agent_error_from_info_rejects_non_object_checkpoint_payloads() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).unwrap();
+        for payload in [b"not-json".as_slice(), b"[]", b"null", b"7", b"\xff"] {
+            assert!(manifest.agent_error_from_info(0, payload).is_err());
+        }
     }
 
     #[test]

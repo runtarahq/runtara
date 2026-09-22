@@ -35,7 +35,7 @@ The lockfile (`wit/deps.lock`) and unpacked `wit/deps/` directory are committed 
 
 ## Why no `runtara:host` interface
 
-Agents have one side-effect channel: outbound HTTP via `wasi:http/outgoing-handler`. They never need raw secrets — the proxy at `RUNTARA_HTTP_PROXY_URL` injects credentials server-side based on the connection id passed in `invoke`. Logging routes through `wasi:cli/stderr`. There's nothing left for a custom host interface to do, so 0.1.0 doesn't define one. If structured logging keyed by workflow span ever becomes necessary, `runtara:logging@0.1.0` lands as an additive minor bump.
+Agents use typed Runtara host interfaces for outbound HTTP, connections, SQL, and runtime services. Outbound requests import `runtara:outbound-http/client@0.1.0`; the host injects credentials using an opaque connection ID and host-owned tenant identity. Raw `wasi:http` is denied. Logging uses `wasi:cli/stderr`. Approved built-in trusted capabilities receive credentials only in fresh restricted instances with network access denied.
 
 ## Guest usage
 

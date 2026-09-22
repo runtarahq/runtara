@@ -27,10 +27,13 @@ members = [
     "crates/runtara-server",
     # Object model storage
     "crates/runtara-object-store",
+    "crates/runtara-object-model-core",
+    "crates/runtara-database-contract",
     # Reports DSL: schema + minijinja + condition evaluator (server-side, also compiled to WASM)
     "crates/runtara-report-dsl",
     # WASM Component Model migration
     "crates/runtara-agent-wit",
+    "crates/runtara-agent-trusted",
     "crates/runtara-workflow-wit",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
@@ -56,7 +59,6 @@ members = [
     "crates/agents/runtara-agent-hubspot",
     "crates/agents/runtara-agent-quickbooks",
     "crates/agents/runtara-agent-shopify",
-    "crates/agents/runtara-agent-sftp",
     "crates/agents/runtara-agent-compression",
     "crates/agents/runtara-agent-mcp",
     "crates/agents/runtara-agent-xlsx",
@@ -99,11 +101,6 @@ hmac = "0.12"
 # an `encoding_rs::Encoding`, so the two share one vocabulary.
 encoding_rs = "0.8"
 chardetng = "1.0"
-# Vendored OpenSSL, enabled only via runtara-agents' opt-in `vendored-openssl`
-# feature (for a fully static/musl link). Building OpenSSL from source is a
-# ~2-minute serial C compile on the cold-build critical path, so no default
-# build path enables this.
-openssl = { version = "0.10", features = ["vendored"] }
 
 # Size-tuned profile for `wasm-pack build --release` outputs (Phase 2 of the
 # reports refactor). `runtara-report-dsl`

@@ -61,12 +61,9 @@ pub struct Attachment {
     /// Base64-encoded content (for small inline attachments).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
-    /// Internal S3 storage bucket (set when attachment is persisted to tenant storage).
+    /// Provider file identifier, when supplied (e.g. a Slack file ID).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage_bucket: Option<String>,
-    /// Internal S3 storage key (set when attachment is persisted to tenant storage).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage_key: Option<String>,
+    pub id: Option<String>,
 }
 
 /// Session key: (connection_id, trigger_id, discriminator).
@@ -127,11 +124,6 @@ impl ChannelRouter {
     /// Access the connections facade.
     pub fn connections(&self) -> &Arc<ConnectionsFacade> {
         &self.connections
-    }
-
-    /// Access the shared HTTP client (used for downloading external resources).
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.http_client
     }
 
     /// Store a Teams service URL for a `(connection, conversation)`.
@@ -404,6 +396,7 @@ impl ChannelRouter {
                 &tenant_id,
                 &workflow_id,
                 &session_mode,
+                &key.0,
             )
             .await
             {
@@ -434,6 +427,7 @@ async fn session_loop(
     org_id: &str,
     workflow_id: &str,
     session_mode: &str,
+    source_connection_id: &str,
 ) -> anyhow::Result<()> {
     // conv_id tracks the current conversation target (channel/thread).
     // Updated when subsequent messages arrive from a different channel,
@@ -454,6 +448,7 @@ async fn session_loop(
         "channel": &initial_message.channel,
         "userMessage": &initial_message.text,
         "attachments": attachments_json,
+        "sourceConnectionId": source_connection_id,
         "originalMessage": &initial_message.original_message,
     });
     if let Some(target) = &initial_message.target {
@@ -523,6 +518,7 @@ async fn session_loop(
     let mut pending_signal_payload: Value = json!({
         "message": &initial_message.text,
         "attachments": &attachments_json,
+        "sourceConnectionId": source_connection_id,
         "originalMessage": &initial_message.original_message,
     });
     if let Some(target) = &initial_message.target {
@@ -702,6 +698,7 @@ async fn session_loop(
                     let mut event = json!({
                         "message": inbound.text,
                         "attachments": attachments_json,
+                        "sourceConnectionId": source_connection_id,
                         "originalMessage": inbound.original_message,
                     });
                     if let Some(target) = &inbound.target {
@@ -758,6 +755,7 @@ async fn session_loop(
                                 "channel": &initial_message.channel,
                                 "userMessage": user_message,
                                 "attachments": queued_attachments,
+                                "sourceConnectionId": source_connection_id,
                                 "originalMessage": queued_original,
                             });
                             if let Some(target) = queued_target {
@@ -807,6 +805,7 @@ async fn session_loop(
                         let mut event = json!({
                             "message": inbound.text,
                             "attachments": attachments_json,
+                            "sourceConnectionId": source_connection_id,
                             "originalMessage": inbound.original_message,
                         });
                         if let Some(target) = &inbound.target {

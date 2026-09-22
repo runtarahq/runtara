@@ -16,9 +16,9 @@ crate-type = ["cdylib", "rlib"]
 wit-bindgen = "0.58"
 serde = { workspace = true }
 serde_json = { workspace = true }
-# runtara-http compiles host-side (ureq) and wasm-side (wasi); the wasm build
-# routes through the proxy via the `X-Runtara-Connection-Id` header so AWS
-# credentials never enter the .wasm binary (the proxy computes SigV4).
+# runtara-http uses ureq natively and typed outbound host calls in WASM.
+# Connection IDs and routing controls are explicit request fields; ordinary
+# credential injection and request signing stay in the native host service.
 # Capability metadata stays beside the code: `#[capability_input]`,
 # `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
 # `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
@@ -38,3 +38,6 @@ runtara-http = { path = "../../runtara-http", default-features = false, features
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

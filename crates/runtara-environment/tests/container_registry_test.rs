@@ -294,6 +294,50 @@ async fn cleanup_is_fenced_by_launch_id_not_container_handle() {
     cleanup_instance(&pool, &instance_id).await;
 }
 
+/// Recovery snapshots carry both identities. A new physical preparation can
+/// reuse the durable launch ID, so checking only that ID is insufficient.
+#[tokio::test]
+async fn cleanup_handle_preserves_every_replacement_identity() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let registry = ContainerRegistry::new(pool.clone());
+    for (new_launch, new_handle) in [(false, true), (true, false), (true, true)] {
+        let id = Uuid::new_v4().to_string();
+        let observed = create_test_container_info(&id, "recovery-snapshot-tenant");
+        registry.register(&observed).await.unwrap();
+        let mut replacement = observed.clone();
+        if new_launch {
+            replacement.launch_id = Uuid::new_v4().to_string();
+        }
+        if new_handle {
+            replacement.container_id = Uuid::new_v4().to_string();
+        }
+        registry.register(&replacement).await.unwrap();
+        assert!(
+            !registry
+                .cleanup_handle(&id, &observed.launch_id, &observed.container_id)
+                .await
+                .unwrap()
+        );
+        let retained = registry.get(&id).await.unwrap().unwrap();
+        assert_eq!(retained.launch_id, replacement.launch_id);
+        assert_eq!(retained.container_id, replacement.container_id);
+        assert!(
+            registry
+                .cleanup_handle(&id, &replacement.launch_id, &replacement.container_id)
+                .await
+                .unwrap()
+        );
+        assert!(registry.get(&id).await.unwrap().is_none());
+        assert!(
+            !registry
+                .cleanup_handle(&id, &replacement.launch_id, &replacement.container_id)
+                .await
+                .unwrap()
+        );
+    }
+}
+
 /// Every table `ContainerRegistry::cleanup` is responsible for emptying.
 const TRACKING_TABLES: [&str; 1] = ["container_registry"];
 

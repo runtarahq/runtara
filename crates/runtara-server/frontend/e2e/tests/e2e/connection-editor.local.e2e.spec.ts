@@ -6,9 +6,9 @@ import {
 } from '@playwright/test';
 
 const runId = Date.now();
-const originalTitle = `E2E Schema Form SFTP ${runId}`;
+const originalTitle = `E2E Schema Form MCP ${runId}`;
 const updatedTitle = `${originalTitle} updated`;
-const apiBase = 'http://127.0.0.1:7001/api/runtime';
+const apiBase = `${process.env.E2E_RUNTIME_URL || 'http://127.0.0.1:7001'}/api/runtime`;
 const apiConnectionIds = new Set<string>();
 
 type ApiConnection = {
@@ -51,16 +51,18 @@ async function updateApiConnection(
 }
 
 async function openConnectionEditor(page: Page, title: string) {
-  await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+  await page.goto('connections', { waitUntil: 'domcontentloaded' });
   const row = page.locator('tr').filter({ hasText: title });
   await expect(row).toHaveCount(1);
-  await row.getByTitle('Edit connection').click();
+  await row
+    .getByRole('button', { name: 'Edit connection', exact: true })
+    .click();
   await expect(page.getByRole('heading', { name: title })).toBeVisible();
 }
 
 test.describe.serial('Connection schema form local UI', () => {
   test.afterEach(async ({ page, request }) => {
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     await expect(
       page.getByRole('button', { name: 'New connection' })
     ).toBeVisible();
@@ -68,8 +70,13 @@ test.describe.serial('Connection schema form local UI', () => {
     for (const title of [updatedTitle, originalTitle]) {
       const row = page.locator('tr').filter({ hasText: title });
       if ((await row.count()) !== 1) continue;
-      await row.getByTitle('Delete connection').click();
-      await page.getByRole('button', { name: 'Delete connection' }).click();
+      await row
+        .getByRole('button', { name: 'Delete connection', exact: true })
+        .click();
+      await page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Delete Connection', exact: true })
+        .click();
       await expect(row).not.toBeVisible();
     }
 
@@ -83,7 +90,7 @@ test.describe.serial('Connection schema form local UI', () => {
   test('renders, edits, and safely preserves a schema-defined secret', async ({
     page,
   }) => {
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
 
     const newConnection = page.getByRole('button', {
       name: 'New connection',
@@ -92,50 +99,51 @@ test.describe.serial('Connection schema form local UI', () => {
     await newConnection.click();
     const picker = page.getByRole('dialog');
     await expect(picker).toBeVisible();
-    await picker.getByText('SFTP', { exact: true }).click();
-    await expect(page).toHaveURL(/\/connections\/sftp\/create$/);
-    const passwordField = page.locator(
-      '[data-field="password"] input[type="password"]'
+    await picker.getByText('MCP Server', { exact: true }).click();
+    await expect(page).toHaveURL(/\/connections\/mcp\/create$/);
+    const bearerField = page.locator(
+      '[data-field="bearer_token"] input[type="password"]'
     );
 
     await page.getByLabel('Title').fill(originalTitle);
-    await page.getByLabel('Host').fill('sftp.example.com');
-    await page.getByLabel('Username').fill('schema-form-user');
-    await expect(passwordField).toBeVisible();
-    await expect(page.getByLabel('Private Key')).not.toBeVisible();
-    await expect(page.getByLabel('Passphrase')).not.toBeVisible();
-    await page.getByLabel('Authentication Mode').click();
-    await page.getByRole('option', { name: 'Private Key' }).click();
-    await expect(passwordField).not.toBeVisible();
-    await expect(page.getByLabel('Private Key')).toHaveJSProperty(
-      'tagName',
-      'TEXTAREA'
-    );
-    await expect(page.getByLabel('Passphrase')).toBeVisible();
+    await page.getByLabel('Server URL').fill('https://mcp.example.com');
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Bearer' }).click();
+    await expect(bearerField).toBeVisible();
+    await expect(
+      page.getByLabel('API Key*', { exact: true })
+    ).not.toBeVisible();
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Api Key' }).click();
+    await expect(bearerField).not.toBeVisible();
+    await expect(page.getByLabel('API Key*', { exact: true })).toBeVisible();
 
-    await page.getByLabel('Authentication Mode').click();
-    await page.getByRole('option', { name: 'Password' }).click();
-    await expect(page.getByLabel('Port')).toHaveValue('22');
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Bearer' }).click();
 
     // A canonical conditional requirement is focusable at the submit boundary;
     // ordinary typing/validation never steals focus before this click.
     await page.getByRole('button', { name: 'Create connection' }).click();
-    await expect(passwordField).toBeFocused();
-    await passwordField.fill('not-a-real-password');
+    await expect(bearerField).toBeFocused();
+    await bearerField.fill('not-a-real-password');
 
     await page.getByRole('button', { name: 'Create connection' }).click();
-    await expect(page).toHaveURL('/connections');
+    await expect(page).toHaveURL('connections');
     await expect(page.getByText(originalTitle, { exact: true })).toBeVisible();
 
     const createdRow = page.locator('tr').filter({ hasText: originalTitle });
     await expect(createdRow).toHaveCount(1);
-    await createdRow.getByTitle('Edit connection').click();
+    await createdRow
+      .getByRole('button', { name: 'Edit connection', exact: true })
+      .click();
     await expect(
       page.getByRole('heading', { name: originalTitle })
     ).toBeVisible();
 
-    await expect(page.getByLabel('Host')).toHaveValue('sftp.example.com');
-    await expect(passwordField).toHaveValue('');
+    await expect(page.getByLabel('Server URL')).toHaveValue(
+      'https://mcp.example.com'
+    );
+    await expect(bearerField).toHaveValue('');
     await expect(
       page.getByText(
         'A secret is configured. Enter a value only to replace it.',
@@ -155,11 +163,13 @@ test.describe.serial('Connection schema form local UI', () => {
       page.getByRole('button', { name: 'Save changes' })
     ).toBeHidden();
 
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     const updatedRow = page.locator('tr').filter({ hasText: updatedTitle });
     await expect(updatedRow).toHaveCount(1);
-    await updatedRow.getByTitle('Edit connection').click();
-    await expect(passwordField).toHaveValue('');
+    await updatedRow
+      .getByRole('button', { name: 'Edit connection', exact: true })
+      .click();
+    await expect(bearerField).toHaveValue('');
     await expect(
       page.getByText(
         'A secret is configured. Enter a value only to replace it.',
@@ -167,34 +177,36 @@ test.describe.serial('Connection schema form local UI', () => {
       )
     ).toBeVisible();
 
-    await page.getByRole('button', { name: 'Clear stored Password' }).click();
+    await page
+      .getByRole('button', { name: 'Clear stored Bearer Token' })
+      .click();
     await expect(
       page.getByText('The stored secret will be cleared when you save.')
     ).toBeVisible();
-    await page.getByLabel('Authentication Mode').click();
-    await page.getByRole('option', { name: 'Private Key' }).click();
-    await page.getByLabel('Private Key').fill('not-a-real-private-key');
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Api Key' }).click();
+    await page
+      .getByLabel('API Key*', { exact: true })
+      .fill('not-a-real-private-key');
     await page.getByRole('button', { name: 'Save changes' }).click();
     await expect(page.getByText('Connection saved.').first()).toBeVisible();
 
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     await page
       .locator('tr')
       .filter({ hasText: updatedTitle })
-      .getByTitle('Edit connection')
+      .getByRole('button', { name: 'Edit connection', exact: true })
       .click();
-    await expect(page.getByLabel('Authentication Mode')).toContainText(
-      'Private Key'
-    );
-    await page.getByLabel('Authentication Mode').click();
-    await page.getByRole('option', { name: 'Password' }).click();
+    await expect(page.getByLabel('Auth Mode')).toContainText('Api Key');
+    await page.getByLabel('Auth Mode').click();
+    await page.getByRole('option', { name: 'Bearer' }).click();
     await expect(page.getByText('No secret is configured.')).toBeVisible();
   });
 
   test('renders MCP authentication modes from canonical conditions', async ({
     page,
   }) => {
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'New connection' }).click();
     const picker = page.getByRole('dialog');
     await picker.getByText('MCP Server', { exact: true }).click();
@@ -219,25 +231,22 @@ test.describe.serial('Connection schema form local UI', () => {
   test('preserves descriptor order and exposes authored advanced sections', async ({
     page,
   }) => {
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'New connection' }).click();
-    await page.getByRole('dialog').getByText('SFTP', { exact: true }).click();
-    await expect(page.getByLabel('Host')).toBeVisible();
+    await page
+      .getByRole('dialog')
+      .getByText('MCP Server', { exact: true })
+      .click();
+    await expect(page.getByLabel('Server URL')).toBeVisible();
 
-    const sftpOrder = await page
+    const mcpOrder = await page
       .locator('[data-field]')
       .evaluateAll((nodes) =>
         nodes.map((node) => node.getAttribute('data-field'))
       );
-    expect(sftpOrder.slice(0, 5)).toEqual([
-      'title',
-      'host',
-      'port',
-      'username',
-      'auth_mode',
-    ]);
+    expect(mcpOrder.slice(0, 3)).toEqual(['title', 'url', 'auth_mode']);
 
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'New connection' }).click();
     await page
       .getByRole('dialog')
@@ -253,7 +262,7 @@ test.describe.serial('Connection schema form local UI', () => {
       quickBooksOrder.indexOf('client_secret')
     );
 
-    await page.goto('/connections', { waitUntil: 'domcontentloaded' });
+    await page.goto('connections', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'New connection' }).click();
     await page
       .getByRole('dialog')
@@ -438,17 +447,15 @@ test.describe.serial('Connection schema form local UI', () => {
     page,
     request,
   }) => {
-    const title = `E2E conflict SFTP ${runId}`;
+    const title = `E2E conflict MCP ${runId}`;
     const serverTitle = `${title} server`;
     const id = await createApiConnection(request, {
       title,
-      integrationId: 'sftp',
+      integrationId: 'mcp',
       connectionParameters: {
-        host: 'old.example.com',
-        port: 22,
-        username: 'conflict-user',
-        auth_mode: 'password',
-        password: 'stored-secret',
+        url: 'https://old.example.com',
+        auth_mode: 'bearer',
+        bearer_token: 'stored-secret',
       },
     });
 
@@ -460,14 +467,16 @@ test.describe.serial('Connection schema form local UI', () => {
     });
     expect(concurrent.status(), await concurrent.text()).toBe(200);
 
-    await page.getByLabel('Host').fill('draft.example.com');
+    await page.getByLabel('Server URL').fill('https://draft.example.com');
     await page.getByRole('button', { name: 'Save changes' }).click();
     const notice = page.getByRole('alert').filter({
       hasText: 'Review newer connection changes',
     });
     await expect(notice).toBeVisible();
     await expect(notice).toContainText('Changed on the server: Title.');
-    await expect(page.getByLabel('Host')).toHaveValue('draft.example.com');
+    await expect(page.getByLabel('Server URL')).toHaveValue(
+      'https://draft.example.com'
+    );
 
     await notice
       .getByRole('button', { name: 'Apply my submitted changes' })
@@ -475,24 +484,26 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(page.getByText('Connection saved.').first()).toBeVisible();
     const reapplied = await getApiConnection(request, id);
     expect(reapplied.title).toBe(serverTitle);
-    expect(reapplied.editProjection.values.host).toBe('draft.example.com');
-    expect(reapplied.editProjection.secretState.password.configured).toBe(true);
+    expect(reapplied.editProjection.values.url).toBe(
+      'https://draft.example.com'
+    );
+    expect(reapplied.editProjection.secretState.bearer_token.configured).toBe(
+      true
+    );
   });
 
   test('save bar tracks dirty state, discards edits, and guards navigation', async ({
     page,
     request,
   }) => {
-    const title = `E2E save bar SFTP ${runId}`;
+    const title = `E2E save bar MCP ${runId}`;
     const id = await createApiConnection(request, {
       title,
-      integrationId: 'sftp',
+      integrationId: 'mcp',
       connectionParameters: {
-        host: 'bar.example.com',
-        port: 22,
-        username: 'bar-user',
-        auth_mode: 'password',
-        password: 'stored-secret',
+        url: 'https://bar.example.com',
+        auth_mode: 'bearer',
+        bearer_token: 'stored-secret',
       },
     });
 
@@ -506,22 +517,26 @@ test.describe.serial('Connection schema form local UI', () => {
     await expect(discardButton).toBeHidden();
 
     // Editing a field surfaces the save bar with a dirty summary.
-    await page.getByLabel('Host').fill('edited.example.com');
+    await page.getByLabel('Server URL').fill('https://edited.example.com');
     await expect(saveButton).toBeVisible();
     await expect(page.getByText('1 unsaved change')).toBeVisible();
 
     // Discard reverts the field to the stored value and hides the bar.
     await discardButton.click();
-    await expect(page.getByLabel('Host')).toHaveValue('bar.example.com');
+    await expect(page.getByLabel('Server URL')).toHaveValue(
+      'https://bar.example.com'
+    );
     await expect(saveButton).toBeHidden();
 
     // Navigating away while dirty prompts the unsaved-changes guard.
-    await page.getByLabel('Host').fill('dirty.example.com');
+    await page.getByLabel('Server URL').fill('https://dirty.example.com');
     await page.getByRole('link', { name: 'Back to connections' }).click();
     const dialog = page.getByRole('alertdialog');
     await expect(dialog).toContainText('Unsaved changes');
     await dialog.getByRole('button', { name: 'Keep editing' }).click();
-    await expect(page.getByLabel('Host')).toHaveValue('dirty.example.com');
+    await expect(page.getByLabel('Server URL')).toHaveValue(
+      'https://dirty.example.com'
+    );
 
     // Discarding through the guard leaves the page.
     await page.getByRole('link', { name: 'Back to connections' }).click();
@@ -529,11 +544,11 @@ test.describe.serial('Connection schema form local UI', () => {
       .getByRole('alertdialog')
       .getByRole('button', { name: 'Discard changes' })
       .click();
-    await expect(page).toHaveURL('/connections');
+    await expect(page).toHaveURL('connections');
 
     // The discarded edit never reached the server.
     const saved = await getApiConnection(request, id);
-    expect(saved.editProjection.values.host).toBe('bar.example.com');
+    expect(saved.editProjection.values.url).toBe('https://bar.example.com');
   });
 
   test('guards reconnect when unsaved credential changes would be ignored', async ({
@@ -577,16 +592,14 @@ test.describe.serial('Connection schema form local UI', () => {
     page,
     request,
   }) => {
-    const title = `E2E removable SFTP ${runId}`;
+    const title = `E2E removable MCP ${runId}`;
     const id = await createApiConnection(request, {
       title,
-      integrationId: 'sftp',
+      integrationId: 'mcp',
       connectionParameters: {
-        host: 'delete.example.com',
-        port: 22,
-        username: 'delete-user',
-        auth_mode: 'password',
-        password: 'stored-secret',
+        url: 'https://delete.example.com',
+        auth_mode: 'bearer',
+        bearer_token: 'stored-secret',
       },
     });
 
@@ -600,11 +613,11 @@ test.describe.serial('Connection schema form local UI', () => {
 
     const dialog = page.getByRole('alertdialog');
     await expect(dialog).toContainText(`Delete “${title}”?`);
-    // SFTP is not an OAuth type, so no provider-grant revoke bullet.
+    // MCP is not an OAuth type, so no provider-grant revoke bullet.
     await expect(dialog).not.toContainText('access grant will be revoked');
     await dialog.getByRole('button', { name: 'Delete connection' }).click();
 
-    await expect(page).toHaveURL('/connections');
+    await expect(page).toHaveURL('connections');
     await expect(
       page.getByText(`Connection "${title}" deleted.`)
     ).toBeVisible();
@@ -741,7 +754,7 @@ test.describe.serial('Connection schema form local UI', () => {
       }
     });
 
-    await page.goto('/connections/quickbooks_online/create', {
+    await page.goto('connections/quickbooks_online/create', {
       waitUntil: 'domcontentloaded',
     });
     await page.getByLabel('Title').fill(title);

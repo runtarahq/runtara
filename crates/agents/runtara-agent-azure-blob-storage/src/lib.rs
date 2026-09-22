@@ -7,20 +7,19 @@
 //! the host architecture and writes `runtara_agent_azure_blob_storage.meta.json`
 //! next to the `.wasm` — the JSON is a build artifact, never hand-edited.
 //!
-//! Routing model: the `runtara-http` client reads `RUNTARA_HTTP_PROXY_URL` and
-//! forwards every request through the proxy as a JSON envelope. The
-//! `X-Runtara-Connection-Id` header causes the proxy to resolve the storage
-//! account, compute Azure Shared Key HMAC signatures, and forward to
-//! `https://{account}.blob.core.windows.net`. The component never sees storage
-//! account keys and performs no signing.
-//!
-//! Presigned SAS URLs are obtained via `runtara_http::presign(...)` — same
-//! mechanism as the s3_storage agent, fully server-side.
+//! Routing model: `runtara-http` invokes the typed outbound host service.
+//! The explicit connection ID selects host-side credentials, signing, and
+//! destination resolution. Ordinary component instances never receive secrets.
+//! Presigning uses a fresh restricted trusted instance with signing credentials;
+//! that instance performs no network I/O.
 //!
 //! The capability surface mirrors the s3_storage agent so workflows can be
 //! ported between providers with minimal rewiring. "bucket" maps to a container
 //! and "key" maps to a blob name.
 #![allow(clippy::result_large_err)]
+
+mod azure_sas;
+mod presign;
 
 use base64::Engine as _;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -28,23 +27,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
-
-#[cfg(target_arch = "wasm32")]
-#[allow(warnings)]
-mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
-    wit_bindgen::generate!({
-        path: ["../../runtara-agent-wit/wit", "wit"],
-        world: "runtara:agent-azure-blob-storage/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
-        generate_all,
-    });
-}
 
 // ============================================================================
 // Local AgentError shim
@@ -175,8 +157,8 @@ fn url_encode_blob_key(s: &str) -> String {
         .collect()
 }
 
-/// Fire an HTTP request via the runtara proxy (Azure Shared Key signing is done server-side).
-fn azure_request(
+/// Fire an HTTP request via the outbound host service (Azure Shared Key signing is done server-side).
+async fn azure_request(
     method: &str,
     path: &str,
     connection_id: &str,
@@ -184,9 +166,7 @@ fn azure_request(
     body: Option<&[u8]>,
 ) -> Result<runtara_http::HttpResponse, AgentError> {
     let client = runtara_http::HttpClient::with_timeout(Duration::from_secs(60));
-    let mut req = client
-        .request(method, path)
-        .header("X-Runtara-Connection-Id", connection_id);
+    let mut req = client.request(method, path).connection_id(connection_id);
 
     for (k, v) in headers {
         req = req.header(k, v);
@@ -196,7 +176,7 @@ fn azure_request(
         req = req.body_bytes(data);
     }
 
-    req.call_agent().map_err(|e| {
+    req.call_agent_async().await.map_err(|e| {
         AgentError::transient(
             "AZURE_BLOB_NETWORK_ERROR",
             format!("Azure Blob request {method} {path} failed: {e}"),
@@ -345,17 +325,19 @@ pub struct CreateBucketOutput {
     display_name = "Create Container",
     description = "Create a new container in Azure Blob Storage",
     module_display_name = "Azure Blob Storage",
-    module_description = "Azure Blob Storage: container and blob management, plus SAS URL generation. Credentials are injected server-side by the runtara HTTP proxy — the component never handles Shared Key material.",
+    module_description = "Azure Blob Storage: container and blob management, plus SAS URL generation. Requests use host-managed connections; SAS generation runs in an isolated trusted capability.",
     module_has_side_effects = true,
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage",
     module_secure = true,
     side_effects = true
 )]
-pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, AgentError> {
+pub async fn storage_create_bucket(
+    input: CreateBucketInput,
+) -> Result<CreateBucketOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = container_path(&input.bucket);
-    let resp = azure_request("PUT", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("PUT", &path, &conn.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         // 409 (container already exists) is treated as success — matches the
@@ -414,10 +396,12 @@ pub struct ListBucketsOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, AgentError> {
+pub async fn storage_list_buckets(
+    input: ListBucketsInput,
+) -> Result<ListBucketsOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     // GET /?comp=list — lists all containers in the storage account.
-    let resp = azure_request("GET", "/?comp=list", &conn.connection_id, &[], None)?;
+    let resp = azure_request("GET", "/?comp=list", &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -478,10 +462,12 @@ pub struct DeleteBucketOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, AgentError> {
+pub async fn storage_delete_bucket(
+    input: DeleteBucketInput,
+) -> Result<DeleteBucketOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = container_path(&input.bucket);
-    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         // 404 (already gone) is treated as success — matches legacy idempotent semantics.
@@ -582,7 +568,7 @@ pub struct UploadFileOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+pub async fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     let is_base64 = input.is_base64.unwrap_or(true);
@@ -626,7 +612,8 @@ pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, A
         &conn.connection_id,
         &[("Content-Type", ct), ("x-ms-blob-type", "BlockBlob")],
         Some(&data),
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200 | 201 => UploadFileOutput {
@@ -715,13 +702,16 @@ pub struct DownloadFileOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
+pub async fn storage_download_file(
+    input: DownloadFileInput,
+) -> Result<DownloadFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     // HEAD first to grab content-type without paying the body cost. Mirrors
     // legacy behaviour; a HEAD failure shouldn't block the GET.
     let head_path = blob_path(&input.bucket, &input.key);
     let content_type = azure_request("HEAD", &head_path, &conn.connection_id, &[], None)
+        .await
         .ok()
         .and_then(|r| {
             if r.status == 200 {
@@ -735,7 +725,7 @@ pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOut
         });
 
     let get_path = blob_path(&input.bucket, &input.key);
-    let resp = azure_request("GET", &get_path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("GET", &get_path, &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let size = resp.body.len() as u64;
@@ -842,7 +832,7 @@ pub struct ListFilesOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
+pub async fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     let mut query_parts = vec!["restype=container".to_string(), "comp=list".to_string()];
@@ -857,7 +847,7 @@ pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, Agen
     }
 
     let path = format!("/{}?{}", input.bucket, query_parts.join("&"));
-    let resp = azure_request("GET", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("GET", &path, &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -935,10 +925,12 @@ pub struct GetFileInfoOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
+pub async fn storage_get_file_info(
+    input: GetFileInfoInput,
+) -> Result<GetFileInfoOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = blob_path(&input.bucket, &input.key);
-    let resp = azure_request("HEAD", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("HEAD", &path, &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let content_type = resp
@@ -1010,10 +1002,10 @@ pub struct DeleteFileOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
+pub async fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = blob_path(&input.bucket, &input.key);
-    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         // 404 (already gone) is treated as success — matches legacy behaviour.
@@ -1075,11 +1067,11 @@ pub struct CopyFileOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
+pub async fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     // Azure Copy Blob: PUT on the destination with x-ms-copy-source pointing
-    // at the source. The proxy rewrites the absolute URL from the relative
+    // at the source. The outbound host service rewrites the absolute URL from the relative
     // source path.
     let dst_path = blob_path(&input.destination_bucket, &input.destination_key);
     let copy_source = format!("/{}/{}", input.source_bucket, input.source_key);
@@ -1090,7 +1082,8 @@ pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentEr
         &conn.connection_id,
         &[("x-ms-copy-source", &copy_source)],
         None,
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200..=202 => CopyFileOutput {
@@ -1171,6 +1164,7 @@ pub struct GeneratePresignedUrlOutput {
 }
 
 #[capability(
+    trusted = true,
     module = "azure_blob_storage",
     display_name = "Generate Presigned URL",
     description = "Generate a time-limited Shared Access Signature URL for downloading, uploading, or deleting a blob. Callers consume the URL directly without going through runtara.",
@@ -1178,11 +1172,10 @@ pub struct GeneratePresignedUrlOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_generate_presigned_url(
+pub async fn storage_generate_presigned_url(
     input: GeneratePresignedUrlInput,
+    context: &runtara_agent_trusted::TrustedContext,
 ) -> Result<GeneratePresignedUrlOutput, AgentError> {
-    let conn = require_connection(&input._connection)?;
-
     let method = match input.operation.to_lowercase().as_str() {
         "download" | "get" | "read" => "GET",
         "upload" | "put" | "write" | "create" => "PUT",
@@ -1206,8 +1199,8 @@ pub fn storage_generate_presigned_url(
         .unwrap_or(DEFAULT_PRESIGN_EXPIRES_SECONDS);
 
     Ok(
-        match runtara_http::presign(
-            &conn.connection_id,
+        match presign::presign(
+            context,
             method,
             &path,
             expires,
@@ -1316,8 +1309,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         id: "azure_blob_storage".into(),
         name: "Azure Blob Storage".into(),
         description: "Azure Blob Storage: container and blob management, plus SAS URL generation. \
-                      Credentials are injected server-side by the runtara HTTP proxy — the \
-                      component never handles Shared Key material."
+                      Requests use host-managed connections; SAS generation runs in an isolated trusted capability."
             .into(),
         has_side_effects: true,
         supports_connections: true,
@@ -1330,110 +1322,23 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 // Wasm component plumbing
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-use bindings::exports::runtara::agent_azure_blob_storage::capabilities::{ErrorInfo, Guest};
+runtara_agent_macro::agent_component!(
+    agent = "azure-blob-storage",
+    trusted = true,
+    capabilities = [
+        storage_create_bucket,
+        storage_list_buckets,
+        storage_delete_bucket,
+        storage_upload_file,
+        storage_download_file,
+        storage_list_files,
+        storage_get_file_info,
+        storage_delete_file,
+        storage_copy_file,
+        storage_generate_presigned_url,
+    ],
+);
 
-#[cfg(target_arch = "wasm32")]
-struct Component;
-
-#[cfg(target_arch = "wasm32")]
-impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-        let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
-
-        let executor_result = match capability_id.as_str() {
-            "storage-create-bucket" => __executor_storage_create_bucket(value),
-            "storage-list-buckets" => __executor_storage_list_buckets(value),
-            "storage-delete-bucket" => __executor_storage_delete_bucket(value),
-            "storage-upload-file" => __executor_storage_upload_file(value),
-            "storage-download-file" => __executor_storage_download_file(value),
-            "storage-list-files" => __executor_storage_list_files(value),
-            "storage-get-file-info" => __executor_storage_get_file_info(value),
-            "storage-delete-file" => __executor_storage_delete_file(value),
-            "storage-copy-file" => __executor_storage_copy_file(value),
-            "storage-generate-presigned-url" => __executor_storage_generate_presigned_url(value),
-            other => {
-                return Err(ErrorInfo {
-                    code: "UNKNOWN_CAPABILITY".into(),
-                    message: format!("azure_blob_storage agent has no capability `{other}`"),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                    retry_after_ms: None,
-                    attributes: None,
-                });
-            }
-        };
-        executor_result
-            .map_err(error_string_to_error_info)
-            .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn bad_json(e: serde_json::Error) -> ErrorInfo {
-    ErrorInfo {
-        code: "INPUT_DESERIALIZATION_ERROR".into(),
-        message: e.to_string(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-    }
-}
-
-/// The `#[capability]` macro packages each error as a JSON-string with
-/// `{ code, message, category, severity, ... }`. Parse it back into a typed
-/// `ErrorInfo` for the WIT result.
-#[cfg(target_arch = "wasm32")]
-fn error_string_to_error_info(s: String) -> ErrorInfo {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
-        let category = value
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("permanent")
-            .to_string();
-        let retryable = value
-            .get("retryable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| category == "transient");
-        ErrorInfo {
-            code: value
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("CAPABILITY_ERROR")
-                .into(),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&s)
-                .into(),
-            category,
-            severity: value
-                .get("severity")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .into(),
-            retryable,
-            retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-            attributes: value.get("attributes").map(|v| v.to_string()),
-        }
-    } else {
-        ErrorInfo {
-            code: "CAPABILITY_ERROR".into(),
-            message: s,
-            category: "permanent".into(),
-            severity: "error".into(),
-            retryable: false,
-            retry_after_ms: None,
-            attributes: None,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1494,5 +1399,32 @@ mod tests {
             parse_azure_error(body),
             "ContainerNotFound: The specified container does not exist."
         );
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl bindings::exports::runtara::trusted::execution::Guest for Component {
+    async fn invoke(
+        capability_id: String,
+        input: Vec<u8>,
+        context: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        if capability_id != "storage-generate-presigned-url" {
+            return Err(runtara_agent_trusted::error(
+                "TRUSTED_CAPABILITY_DENIED",
+                "Capability is not trusted",
+            ));
+        }
+        let input = serde_json::from_slice(&input).map_err(|_| {
+            runtara_agent_trusted::error("INVALID_INPUT", "Invalid capability input")
+        })?;
+        let context: runtara_agent_trusted::TrustedContext = serde_json::from_slice(&context)
+            .map_err(|_| {
+                runtara_agent_trusted::error("INVALID_CONTEXT", "Invalid trusted context")
+            })?;
+        let result = __trusted_executor_storage_generate_presigned_url(input, &context).await?;
+        serde_json::to_vec(&result).map_err(|_| {
+            runtara_agent_trusted::error("INVALID_OUTPUT", "Invalid capability output")
+        })
     }
 }

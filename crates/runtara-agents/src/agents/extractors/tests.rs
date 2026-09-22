@@ -112,8 +112,8 @@ fn resolve_integration_ids_folds_the_agent_id_canonically() {
 
 #[test]
 fn resolve_integration_ids_passes_static_agents_through() {
-    let declared = vec!["sftp".to_string()];
-    assert_eq!(resolve_integration_ids("sftp", &declared), declared);
+    let declared = vec!["mcp".to_string()];
+    assert_eq!(resolve_integration_ids("mcp", &declared), declared);
     assert!(resolve_integration_ids("crypto", &[]).is_empty());
 }
 
@@ -121,7 +121,7 @@ fn resolve_integration_ids_passes_static_agents_through() {
 fn augment_catalog_only_rewrites_the_host_dynamic_agent() {
     let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
         agent_info("http", &[]),
-        agent_info("sftp", &["sftp"]),
+        agent_info("mcp", &["mcp"]),
     ]);
 
     let augmented = augment_catalog(&catalog);
@@ -133,7 +133,7 @@ fn augment_catalog_only_rewrites_the_host_dynamic_agent() {
         "http should pick up the registered extractors, got: {:?}",
         augmented.integration_ids_for("http")
     );
-    assert_eq!(augmented.integration_ids_for("sftp"), vec!["sftp"]);
+    assert_eq!(augmented.integration_ids_for("mcp"), vec!["mcp"]);
     assert_eq!(augmented.agents().len(), catalog.agents().len());
 }
 
