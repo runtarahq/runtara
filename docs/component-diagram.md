@@ -1,6 +1,6 @@
 # Runtara component diagram
 
-Snapshot: 2026-09-22, cleanup branch reconciled with main (`6ba6bdde`). Trusted-capability support is merged upstream. Boxes represent logical components; the native components inside `runtara-server` run in one process. Core and Environment are embedded libraries, not separately deployed services.
+Boxes represent logical components; the native components inside `runtara-server` run in one process. Core and Environment are embedded libraries, not separately deployed services.
 
 Solid arrows show calls or data access. Dotted arrows show artifact production/loading or external integration. The diagram groups implementation details and is not an exhaustive Cargo dependency graph.
 
@@ -146,5 +146,3 @@ The React app is a separate Node package inside `crates/runtara-server/frontend`
 - [Host-mediated I/O](../crates/runtara-component-host/src/host_io.rs), [native outbound HTTP](../crates/runtara-server/src/api/services/outbound_http.rs), [trusted credential resolver](../crates/runtara-server/src/api/services/trusted.rs).
 - [Default runtime binding](../crates/runtara-workflows/src/direct_wasm/compile.rs), [component build and metadata emission](../scripts/build-agent-components.sh), [browser validation build](../crates/runtara-server/frontend/scripts/build-validation-wasm.mjs).
 - [Frontend routes](../crates/runtara-server/frontend/src/router/index.tsx), [browser report DSL loader](../crates/runtara-server/frontend/src/features/reports/hooks/useReportDsl.ts).
-
-See the [usage review](codebase-unused-review.md) for inactive paths and removal candidates. Inactive cancellation plumbing and speculative frontend exports are intentionally omitted from the active component diagram.
