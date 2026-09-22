@@ -168,3 +168,8 @@ pub mod error;
 
 /// Instance protocol handlers (registration, checkpoints, events, signals).
 pub mod instance_handlers;
+
+/// Explicit tenant identities supplied by the embedding host.
+pub mod tenant;
+
+pub use tenant::TenantId;
