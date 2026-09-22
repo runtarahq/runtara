@@ -14,7 +14,7 @@ export interface CreateSessionOptions {
 
 /**
  * Create a new chat session. Returns the raw SSE Response.
- * The stream will emit a `session_created` event with `token`, `sessionId`,
+ * The stream will emit a `session_created` event with `sessionId`
  * and `instanceId`, followed by regular chat events.
  */
 export async function createChatSession(

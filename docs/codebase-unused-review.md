@@ -6,7 +6,7 @@ Originally reviewed 2026-09-20; current-state reconciliation: **2026-09-22**. Sc
 
 | Finding | Status | Remaining action |
 | --- | --- | --- |
-| 1 — Discarded channel session token | **Resolved** | None. The fix has channel E2E regression coverage; public HTTP token behavior is preserved. |
+| 1 — Discarded channel session token | **Resolved** | None. Channel signing was removed first; HTTP session tokens have now also been retired, with E2E coverage. |
 | 2 — Validator fingerprint inputs | **Resolved** | None. Both fingerprint lists and their invalidation behavior were verified. |
 | 3 — Cancellation-map scaffolding | **Resolved** | None. Public Rust constructor signatures changed; in-repository callers are updated. |
 | 4 — Lint-hidden frontend exports | **Resolved and pushed**, `a8afd0ce` | None for the 21 exports and two subsequently orphaned wrappers. |
@@ -14,7 +14,7 @@ Originally reviewed 2026-09-20; current-state reconciliation: **2026-09-22**. Sc
 | 6 — Rust direct dependencies | **Resolved and pushed**, `6768eb1f` | None for the 11 removed declarations. Retain the native-transport and link-only dependencies described below. |
 | Additional backend API candidates | **Resolved in this cleanup** | Removed all ten functions/methods following explicit approval. External Rust callers must migrate if they used these APIs. |
 
-All six findings and the ten additional backend API candidates are resolved. The public session-token API needs a separate compatibility/product decision before any wider retirement. No whole Rust crate has been confirmed unused. Findings 1–4 and 6 were committed previously; finding 5 and the additional backend API removals are included in this cleanup on `feature/code-cleanup`. Unrelated trusted-capability work remains outside this cleanup.
+All six findings and the ten additional backend API candidates are resolved. The public session-token field has also been retired following explicit approval; session endpoints and their existing authentication remain. No whole Rust crate has been confirmed unused. Findings 1–4 and 6 were committed previously; finding 5 and the additional backend API removals are included in this cleanup on `feature/code-cleanup`. Unrelated trusted-capability work remains outside this cleanup.
 
 ## Completed verification by cleanup
 
@@ -35,7 +35,7 @@ Rust cleanup verification with pinned Rust 1.97.0:
 - The first sandboxed SDK test run could not bind its local HTTP listeners. The rerun outside that restriction passed. Remaining native checks used an isolated build directory to avoid other Cargo jobs' shared build lock; all Cargo checks used offline dependency resolution and server checks used `SQLX_OFFLINE=true`.
 - Database/Valkey integration targets were compiled and linted, but not executed against services. Full-workspace tests, component runtime integration tests, and E2E tests were not rerun for this manifest-only cleanup.
 
-The workspace contains 52 Rust packages, including 27 standalone agent components. I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The ten backend API candidates listed below have also been removed. Wider retirement of the public session-token API remains a separate compatibility/product decision.
+The workspace contains 52 Rust packages, including 27 standalone agent components. I found no package that can be classified as wholly unused: packages without incoming Cargo dependencies are application, browser-WASM, workflow-component, or build-tool entry points. The ten backend API candidates listed below have also been removed. HTTP session-token retirement is recorded under finding 1 below.
 
 [Component diagram and package map](component-diagram.md)
 
@@ -43,11 +43,11 @@ The workspace contains 52 Rust packages, including 27 standalone agent component
 
 ### 1. P2 — Discarded session token can prevent channel execution
 
-**Resolved (2026-09-21).** Removed the discarded signing call and now-unused import from [the channel session loop](../crates/runtara-server/src/channels/session.rs). The session ID, tenant/trigger checks, deterministic activity identity, execution admission, and message processing are unchanged. Public HTTP session signing and the token emitted by the SSE API remain intact.
+**Resolved (2026-09-21).** Removed the discarded signing call and now-unused import from [the channel session loop](../crates/runtara-server/src/channels/session.rs). The session ID, tenant/trigger checks, deterministic activity identity, execution admission, and message processing are unchanged. That initial fix preserved HTTP session signing and the SSE token field; the separately approved retirement below supersedes that decision.
 
 **Reproduced before fixing:** the channel E2E ran a fresh server with `SESSION_TOKEN_SECRET` unset and an empty local dotenv file, preventing both cached initialization and developer configuration from masking the failure. An authenticated Teams activity received HTTP 200, but no workflow instance appeared. The background task logged `Failed to sign session token: SESSION_TOKEN_SECRET environment variable is not set` and exited before queuing. The signing result had no consumer. Since the router had already returned success, the webhook caller did not receive the background failure.
 
-**Regression coverage:** [test_channel_reflush_provenance.sh](../e2e/test_channel_reflush_provenance.sh) now exercises this missing-secret setup and checks persisted instances and channel replies rather than HTTP acknowledgement alone. The exact same test failed before the production fix and passed after it:
+**Initial regression coverage (before HTTP token retirement):** [test_channel_reflush_provenance.sh](../e2e/test_channel_reflush_provenance.sh) now exercises this missing-secret setup and checks persisted instances and channel replies rather than HTTP acknowledgement alone. The exact same test failed before the production fix and passed after it:
 
 - First delivery produced one instance and one reply. The harness deliberately runs a failing workflow, so the expected reply confirms that execution was admitted and its result reached the channel.
 - Redelivery of the same activity after clearing its Valkey dedup reservation still left one instance and one reply; the foreign session did not re-flush the reply.
@@ -56,7 +56,13 @@ The workspace contains 52 Rust packages, including 27 standalone agent component
 
 The changed server binary built successfully, and all 1,197 server unit tests passed, including the five session-token signing/verification tests. Clippy passed with all targets and warnings denied, enabling embedded UI and database/Valkey/TLS integration targets; those feature-gated service suites were compiled/linted, not run in full. Rust formatting, shell syntax, and diff whitespace checks passed. The E2E used isolated ports, a mock Teams authority/connector, dedicated Valkey, and uniquely named databases. `KEEP_DB=1` retained the test databases and logs; each run stopped only its own server, mock, and Valkey container. Other channel providers were not exercised end-to-end; they share the corrected session loop.
 
-The verifier and parsed claims remain an API-surface candidate with only local unit-test consumers. The HTTP API still emits signed tokens in [sessions.rs](../crates/runtara-server/src/api/handlers/sessions.rs); retiring that contract is a separate decision, not part of this fix.
+**HTTP session-token retirement (2026-09-22; current working tree).** Following explicit approval, removed both HTTP signing calls, the SSE `token` field and stream plumbing, and the signing/verifying module with its five now-obsolete tests. Session creation and reconnection continue to emit `sessionId` and `instanceId`; messaging, tenant scoping, ordinary HTTP authentication/authorization, and channel-specific credentials/signatures remain. The frontend already ignored the emitted token and uses the user's OIDC access token; its API comment now reflects the response. Removed obsolete secret setup from 22 E2E launchers and the pipeline playground. Cryptographic dependencies remain in use by other signing/authentication code, including endpoint references and webhook verification.
+
+This intentionally changes the externally visible `session_created` event: consumers expecting `token` must stop requiring it. No repository production code verified or used that value. Session creation no longer requires `SESSION_TOKEN_SECRET`; reconnect no longer attempts signing or substitutes an empty token. AWS session credentials and Teams endpoint-reference signing are separate mechanisms and remain.
+
+The updated channel regression adds HTTP session creation and reconnection with the secret absent, asserting the exact token-free preamble, stable identifiers, and a persisted instance. Against the previous server, channel cases passed and HTTP creation failed with HTTP 500, reproducing the dependency being removed.
+
+Retirement verification: the changed server built, all **1,250 server tests passed** (seven existing ignored doctests), and Clippy passed with all targets, warnings denied, embedded UI, and database/Valkey/TLS integration features. The updated E2E passed: HTTP creation and reconnection returned stable session/instance IDs without a token, the instance was persisted, and all three Teams delivery/dedup cases remained correct. The first post-change attempt exposed a test timing assumption; the final check waits for asynchronous instance registration while keeping the SSE stream open. The isolated test databases/logs were retained with `KEEP_DB=1`; each run stopped its own processes and Valkey container. Other channel providers and the full service-backed suites were not rerun. Rust formatting, shell syntax for all 24 changed scripts, and focused frontend ESLint/Prettier checks passed. Runtime client regeneration completed with no change to the existing generated file. No full frontend suite/build was rerun for its comment-only edit.
 
 ### 2. P2 — Validator rebuild fingerprint includes unrelated components
 

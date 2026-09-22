@@ -125,7 +125,6 @@ start_server() {
     RUNTARA_MAX_AUTO_RESTARTS="${RUNTARA_MAX_AUTO_RESTARTS:-5}" \
     RUST_LOG="${RUST_LOG_OVERRIDE:-warn,runtara_server=info,runtara_environment=info,runtara_core=info}" \
     AUTH_PROVIDER=local \
-    SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true \

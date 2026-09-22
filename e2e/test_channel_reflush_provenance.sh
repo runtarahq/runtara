@@ -24,6 +24,8 @@
 #      1 "Sorry" reply total (the foreign session SUPPRESSED — the fix).
 #   C. A different activity B -> 2 instances, 2 "Sorry" replies (owned sessions
 #      always reply; suppression is provenance-scoped, not a blanket drop).
+#   D. HTTP session creation and reconnect succeed without the retired secret
+#      and emit session/instance IDs without a token field.
 #
 # The owner-died-before-flush corner (Layer-1 loss AND the owning session dead)
 # is an accepted, documented v1 limitation (see the plan) — not simulated here.
@@ -353,15 +355,6 @@ wait_for_replies() {    # $1 = want ; echoes final
     local c; for _ in {1..40}; do c=$(reply_count); [ "${c}" -ge "$1" ] && break; sleep 0.5; done; echo "${c}"
 }
 
-# Public HTTP sessions still emit signed tokens; their contract is unchanged.
-# A failed attempt must not initialize the signing-secret cache.
-print_step "Public HTTP session creation still requires the signing secret..."
-HTTP_SESSION_CODE=$(curl -sS --max-time 10 -o "${TEST_DATA_DIR}/http-session.json" -w "%{http_code}" \
-    -X POST -H "Content-Type: application/json" -d '{}' "${API}/workflows/${WF_ID}/sessions")
-[ "${HTTP_SESSION_CODE}" = "500" ] || { print_error "Expected unsigned HTTP session creation to fail, got ${HTTP_SESSION_CODE}"; exit 1; }
-jq -e '.message | contains("SESSION_TOKEN_SECRET environment variable is not set")' \
-    "${TEST_DATA_DIR}/http-session.json" >/dev/null || { print_error "HTTP session failed for an unexpected reason"; exit 1; }
-
 # --- Case A: first delivery → 1 instance, 1 reply -------------------------
 print_step "Case A: first delivery of activity A → 1 instance + 1 reply (owner)..."
 CODE=$(post_activity "activity-A")
@@ -399,5 +392,58 @@ IC=$(wait_for_instances 2); RC=$(wait_for_replies 2)
 [ "${IC}" -lt 2 ] && { print_error "Distinct activity did not start a new instance (count=${IC})"; tail -80 "${TEST_LOG}"; exit 1; }
 [ "${RC}" -lt 2 ] && { print_error "Owned new instance did not reply (replies=${RC}) — suppression must be provenance-scoped, not blanket"; tail -80 "${TEST_LOG}"; exit 1; }
 echo "  2 instances, 2 replies — suppression is provenance-scoped ✓"
+
+# --- Case D: HTTP sessions need no signing secret -------------------------
+print_step "Case D: HTTP session creation and reconnect without a signing secret..."
+python3 - "${API}" "${WF_ID}" <<'PY_SESSION'
+import json
+import sys
+import time
+import urllib.request
+import uuid
+
+api, workflow_id = sys.argv[1:]
+
+def wait_for_instance(instance_id):
+    # Admission is asynchronous; keep the SSE connection alive until the
+    # accepted instance has reached the runtime's persisted-instance listing.
+    for _ in range(40):
+        with urllib.request.urlopen(f"{api}/workflows/{workflow_id}/instances?size=100", timeout=10) as response:
+            instances = json.load(response)["data"]["content"]
+        if any(instance["id"] == instance_id for instance in instances):
+            return
+        time.sleep(0.25)
+    raise AssertionError("HTTP session did not create a durable instance")
+
+def session_preamble(path, data=None):
+    request = urllib.request.Request(
+        api + path,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200, response.status
+        assert response.headers.get_content_type() == "text/event-stream"
+        event_type = None
+        for raw in response:
+            line = raw.decode().strip()
+            if line.startswith("event:"):
+                event_type = line.removeprefix("event:").strip()
+            elif line.startswith("data:") and event_type == "session_created":
+                event = json.loads(line.removeprefix("data:").strip())
+                assert set(event) == {"type", "sessionId", "instanceId"}, "Unexpected session preamble fields"
+                assert event["type"] == "session_created"
+                uuid.UUID(event["sessionId"])
+                uuid.UUID(event["instanceId"])
+                if data is not None:
+                    wait_for_instance(event["instanceId"])
+                return event
+    raise AssertionError("Missing session_created SSE event")
+
+created = session_preamble(f"/workflows/{workflow_id}/sessions", b"{}")
+reconnected = session_preamble(f"/sessions/{created['sessionId']}/events")
+assert reconnected == created, "Reconnect changed the session/instance identifiers"
+print("  HTTP creation and reconnect succeeded; durable instance exists; no token field")
+PY_SESSION
 
 print_success "Re-flush guard: owner replies once; foreign redelivery suppressed (no duplicate); distinct activity still replies"

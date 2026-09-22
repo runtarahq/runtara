@@ -23,7 +23,7 @@ use crate::api::handlers::chat::{
     ChatEvent, chat_event_type, extract_message_from_outputs, make_event, parse_debug_event,
 };
 use crate::api::handlers::common::execution_error_response;
-use crate::api::services::{session_queue, session_token};
+use crate::api::services::session_queue;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 
@@ -99,14 +99,6 @@ pub async fn create_session(
     // Generate session ID
     let session_id = Uuid::new_v4().to_string();
 
-    // Sign session token (for future public API use)
-    let token = session_token::sign(&tenant_id, &workflow_id, &session_id).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"success": false, "message": format!("Failed to sign session token: {}", e)})),
-        )
-    })?;
-
     // Inject sessionId into inputs.data
     let mut data = if request.data.is_object() {
         request.data.clone()
@@ -165,7 +157,6 @@ pub async fn create_session(
         workflow_id,
         tenant_id,
         session_id,
-        token,
     });
 
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
@@ -264,9 +255,6 @@ pub async fn session_event_stream(
             )
         })?;
 
-    // Generate token for the response
-    let token = session_token::sign(&tenant_id, &meta.workflow_id, &session_id).unwrap_or_default();
-
     // `pool` is retained for route/state compatibility; execution admission
     // has already gone through the shared durable engine.
     let _ = pool;
@@ -278,7 +266,6 @@ pub async fn session_event_stream(
         workflow_id: meta.workflow_id,
         tenant_id,
         session_id,
-        token,
     });
 
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
@@ -515,7 +502,6 @@ struct SessionStreamParams {
     workflow_id: String,
     tenant_id: String,
     session_id: String,
-    token: String,
 }
 
 /// Start a new instance for the session, returning the new instance_id.
@@ -592,13 +578,11 @@ fn build_session_event_stream(
             workflow_id,
             tenant_id: org_id,
             session_id,
-            token,
         } = params;
 
         // Emit session_created event
         let created = json!({
             "type": "session_created",
-            "token": token,
             "sessionId": session_id,
             "instanceId": initial_instance_id,
         });

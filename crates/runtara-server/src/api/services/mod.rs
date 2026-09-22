@@ -14,7 +14,6 @@ pub mod pending_inputs;
 pub mod reports;
 pub mod schema_validator;
 pub mod session_queue;
-pub mod session_token;
 pub mod triggers;
 pub mod webhook_manager;
 pub mod webhook_verification;
