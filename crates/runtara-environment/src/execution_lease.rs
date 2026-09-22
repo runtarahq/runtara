@@ -41,6 +41,10 @@ impl ExecutionLease {
         pool: &sqlx::PgPool,
         handle: &RunnerHandle,
     ) -> &'static str {
+        let tenant_id = match runtara_core::TenantId::new(handle.tenant_id.clone()) {
+            Ok(tenant_id) => tenant_id,
+            Err(_) => return "invalid execution tenant identity",
+        };
         let repository = LaunchRepository::new(pool.clone());
         loop {
             if Instant::now() >= self.deadline {
@@ -50,6 +54,7 @@ impl ExecutionLease {
             match tokio::time::timeout_at(
                 self.deadline,
                 repository.renew_running_lease(
+                    &tenant_id,
                     &handle.launch_id,
                     &self.owner,
                     self.attempt_count,

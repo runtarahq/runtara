@@ -460,7 +460,7 @@ impl WakeScheduler {
         }
 
         let image_id = match InstanceRepository::new(self.pool.clone())
-            .image_binding(&instance.instance_id)
+            .image_binding(&self.tenant_id, &instance.instance_id)
             .await?
         {
             Some(binding) => binding.image_id,
@@ -488,7 +488,7 @@ impl WakeScheduler {
 
         let repository = LaunchRepository::new(self.pool.clone());
         for released in repository
-            .reconcile_released_instance(&instance.instance_id)
+            .reconcile_released_instance(&self.tenant_id, &instance.instance_id)
             .await
             .map_err(|error| {
                 crate::error::Error::Other(format!("Failed to reconcile parked launch: {error}"))
@@ -506,7 +506,7 @@ impl WakeScheduler {
             LaunchKind::Wake,
             DEFAULT_LAUNCH_QUEUE_TIMEOUT,
         );
-        match repository.enqueue(request).await {
+        match repository.enqueue(&self.tenant_id, request).await {
             Ok(EnqueueOutcome::Enqueued(launch)) | Ok(EnqueueOutcome::Existing(launch)) => {
                 // A new generation clears its wake claim inside enqueue's
                 // transaction. A late clear here could erase its next timer.

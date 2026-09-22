@@ -59,6 +59,23 @@ pub enum RuntimeError {
     InvalidExecutionTimeout(String),
 }
 
+impl From<EnvironmentError> for RuntimeError {
+    fn from(error: EnvironmentError) -> Self {
+        use runtara_environment::error::Error;
+        match error {
+            EnvironmentError::InstanceNotFound(id)
+            | EnvironmentError::Environment(Error::InstanceNotFound(id))
+            | EnvironmentError::Environment(Error::Core(
+                runtara_core::error::CoreError::InstanceNotFound { instance_id: id },
+            )) => Self::InstanceNotFound(id),
+            EnvironmentError::ImageNotFound(id)
+            | EnvironmentError::Environment(Error::ImageNotFound(id)) => Self::ImageNotFound(id),
+            EnvironmentError::SingleInstanceActive => Self::SingleInstanceActive,
+            other => Self::SdkError(other.to_string()),
+        }
+    }
+}
+
 /// Result of a workflow execution
 #[derive(Debug, Clone)]
 pub struct ExecutionOutput {
@@ -360,7 +377,7 @@ impl RuntimeClient {
         let info = sdk
             .get_instance_status(instance_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
 
         Ok(info.status)
     }
@@ -387,7 +404,7 @@ impl RuntimeClient {
             let info = sdk
                 .get_instance_status(instance_id)
                 .await
-                .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+                .map_err(RuntimeError::from)?;
 
             match info.status {
                 InstanceStatus::Completed => {
@@ -505,7 +522,7 @@ impl RuntimeClient {
 
         sdk.stop_instance(options)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
 
         info!(instance_id = %instance_id, "Requested workflow cancellation with abort grace");
         Ok(())
@@ -529,7 +546,7 @@ impl RuntimeClient {
                 i64::try_from(ceiling).unwrap_or(i64::MAX),
             )
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
@@ -558,7 +575,7 @@ impl RuntimeClient {
         let result = sdk
             .list_instances(options)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
 
         Ok(result.instances)
     }
@@ -574,7 +591,7 @@ impl RuntimeClient {
 
         sdk.list_instances(options)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// Get detailed instance info including output and error
@@ -583,7 +600,7 @@ impl RuntimeClient {
 
         sdk.get_instance_status(instance_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// Cancel using the same signal and bounded grace as public Stop.
@@ -600,7 +617,7 @@ impl RuntimeClient {
 
         sdk.send_signal(instance_id, crate::runtime_types::SignalType::Pause, None)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
 
         info!(instance_id = %instance_id, "Sent pause signal to workflow instance");
         Ok(())
@@ -617,7 +634,7 @@ impl RuntimeClient {
         // Resume is an explicit host launch operation, never a guest lifecycle command.
         sdk.resume_instance(instance_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
 
         info!(instance_id = %instance_id, "Resumed workflow instance");
         Ok(())
@@ -639,7 +656,7 @@ impl RuntimeClient {
         let signal_id = sdk
             .send_custom_signal(instance_id, checkpoint_id, payload)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+            .map_err(RuntimeError::from)?;
 
         info!(instance_id = %instance_id, signal_id = %signal_id, "Sent custom signal to workflow instance");
         Ok(signal_id)
@@ -659,7 +676,7 @@ impl RuntimeClient {
 
         sdk.get_image(image_id, tenant_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// List images for a tenant
@@ -676,9 +693,7 @@ impl RuntimeClient {
             .with_tenant_id(tenant_id)
             .with_limit(limit);
 
-        sdk.list_images(options)
-            .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+        sdk.list_images(options).await.map_err(RuntimeError::from)
     }
 
     /// Find an image by name for a tenant
@@ -700,7 +715,7 @@ impl RuntimeClient {
         self.client
             .image_artifact_present(image_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// Find an image by name for a tenant and return the full summary.
@@ -712,7 +727,7 @@ impl RuntimeClient {
         self.client
             .find_image_by_name(tenant_id, name)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// Register an image using streaming upload
@@ -733,7 +748,7 @@ impl RuntimeClient {
         let result = sdk
             .register_image_stream(options, reader)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()));
+            .map_err(RuntimeError::from);
 
         let upload_duration = upload_start.elapsed();
         let total_duration = total_start.elapsed();
@@ -779,7 +794,7 @@ impl RuntimeClient {
 
         sdk.list_checkpoints(instance_id, options)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// List events for an instance with optional filtering
@@ -801,7 +816,7 @@ impl RuntimeClient {
 
         sdk.list_events(instance_id, opts)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// List step summaries for an instance with optional filtering
@@ -823,7 +838,7 @@ impl RuntimeClient {
 
         sdk.list_step_summaries(instance_id, opts)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// Get ancestor scopes for a given scope ID
@@ -840,7 +855,7 @@ impl RuntimeClient {
 
         sdk.get_scope_ancestors(instance_id, scope_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 
     /// Get aggregated execution metrics for a tenant
@@ -858,7 +873,7 @@ impl RuntimeClient {
 
         sdk.get_tenant_metrics(options)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(RuntimeError::from)
     }
 }
 
@@ -977,5 +992,29 @@ mod execution_timeout_tests {
         let config = RuntimeClientConfig::new(policy);
 
         assert_eq!(config.execution_timeout_policy, policy);
+    }
+    #[test]
+    fn scoped_missing_errors_survive_environment_adapters() {
+        for error in [
+            EnvironmentError::InstanceNotFound("target".into()),
+            EnvironmentError::Environment(runtara_environment::error::Error::InstanceNotFound(
+                "target".into(),
+            )),
+            EnvironmentError::Environment(runtara_environment::error::Error::Core(
+                runtara_core::error::CoreError::InstanceNotFound {
+                    instance_id: "target".into(),
+                },
+            )),
+        ] {
+            assert!(
+                matches!(RuntimeError::from(error), RuntimeError::InstanceNotFound(id) if id == "target")
+            );
+        }
+        assert!(matches!(
+            RuntimeError::from(EnvironmentError::Environment(
+                runtara_environment::error::Error::Other("database unavailable".into())
+            )),
+            RuntimeError::SdkError(_)
+        ));
     }
 }

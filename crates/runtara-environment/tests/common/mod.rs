@@ -285,3 +285,23 @@ async fn integration_database(base_url: &str) -> Result<String, String> {
 
     Ok(base.database(&name).to_url_lossy().to_string())
 }
+
+/// Establish the durable parent rows required by a physical registration.
+/// Registry-only tests deliberately do not exercise the launch dispatcher.
+pub async fn register_container_fixture(
+    pool: &PgPool,
+    registry: &runtara_environment::container_registry::ContainerRegistry,
+    tenant: &runtara_core::TenantId,
+    info: &runtara_environment::container_registry::ContainerInfo,
+) -> runtara_environment::error::Result<()> {
+    let image_id = format!("registry-fixture-{}", info.instance_id);
+    sqlx::query("INSERT INTO instances (instance_id, tenant_id, status) VALUES ($1, $2, 'running') ON CONFLICT DO NOTHING")
+        .bind(&info.instance_id).bind(tenant.as_str()).execute(pool).await?;
+    sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $2, $1, $3) ON CONFLICT DO NOTHING")
+        .bind(&image_id).bind(tenant.as_str()).bind(&info.binary_path).execute(pool).await?;
+    sqlx::query("UPDATE instance_launches SET state = 'completed' WHERE tenant_id = $1 AND instance_id = $2 AND launch_id <> $3")
+        .bind(tenant.as_str()).bind(&info.instance_id).bind(&info.launch_id).execute(pool).await?;
+    sqlx::query("INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, state, available_at, deadline_at) VALUES ($1, $2, $3, $4, 'start', 'running', NOW(), NOW() + INTERVAL '1 hour') ON CONFLICT DO NOTHING")
+        .bind(&info.launch_id).bind(&info.instance_id).bind(tenant.as_str()).bind(&image_id).execute(pool).await?;
+    registry.register(tenant, info).await
+}

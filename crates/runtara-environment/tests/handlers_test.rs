@@ -73,7 +73,10 @@ async fn active_launch(
     instance_id: &str,
 ) -> runtara_environment::launch_queue::Launch {
     LaunchRepository::new(pool.clone())
-        .get_active_for_instance(instance_id)
+        .get_active_for_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            instance_id,
+        )
         .await
         .expect("active launch query must succeed")
         .expect("instance must have one active durable launch")
@@ -227,16 +230,23 @@ async fn test_start_instance_success() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request)
-        .await
-        .expect("Start should succeed");
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .expect("Start should succeed");
 
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
     assert!(!response.instance_id.is_empty());
 
     // Verify instance was created in DB
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&response.instance_id)
+        .detail(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &response.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -286,7 +296,13 @@ async fn test_start_instance_with_custom_id() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
     assert_eq!(response.instance_id, custom_instance_id);
@@ -334,7 +350,13 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
         env: std::collections::HashMap::new(),
     };
 
-    let first = handle_start_instance(&state, request()).await.unwrap();
+    let first = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request(),
+    )
+    .await
+    .unwrap();
     assert!(
         first.is_accepted(),
         "first start failed: {:?}",
@@ -342,7 +364,13 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     );
     assert!(!first.deduplicated);
 
-    let replay = handle_start_instance(&state, request()).await.unwrap();
+    let replay = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request(),
+    )
+    .await
+    .unwrap();
     assert!(
         replay.is_accepted(),
         "replay failed: {:?}",
@@ -402,6 +430,7 @@ async fn test_start_instance_hands_runner_the_stored_input() {
     let instance_id = format!("input-passthrough-{}", Uuid::new_v4());
     let response = handle_start_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StartInstanceRequest {
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
@@ -587,7 +616,13 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
         env: std::collections::HashMap::new(),
     };
 
-    let first = handle_start_instance(&state, request()).await.unwrap();
+    let first = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request(),
+    )
+    .await
+    .unwrap();
     assert!(
         first.is_accepted(),
         "first start failed: {:?}",
@@ -597,7 +632,13 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
 
     std::fs::remove_file(&artifact).unwrap();
 
-    let replay = handle_start_instance(&state, request()).await.unwrap();
+    let replay = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request(),
+    )
+    .await
+    .unwrap();
     assert!(
         replay.is_accepted(),
         "replay after the artifact vanished must still be deduplicated, got: {:?}",
@@ -640,6 +681,7 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
     let instance_id = format!("missing-artifact-{}", Uuid::new_v4());
     let response = handle_start_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StartInstanceRequest {
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
@@ -660,7 +702,10 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
     ));
     assert!(
         InstanceRepository::new(pool.clone())
-            .detail(&instance_id)
+            .detail(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &instance_id
+            )
             .await
             .unwrap()
             .is_none(),
@@ -747,11 +792,18 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
         env: std::collections::HashMap::new(),
     };
 
-    let failed = handle_start_instance(&state, request())
-        .await
-        .expect("the handler should report an association error in its response");
+    let failed = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request(),
+    )
+    .await
+    .expect("the handler should report an association error in its response");
     let after_failed_start = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+        )
         .await
         .expect("failed to inspect instance after injected association failure");
 
@@ -776,9 +828,13 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     // At-least-once trigger delivery retries the same ID. A rolled-back claim
     // must be available to retry, rather than returning the historical
     // `Instance already exists` response for a poisoned pending row.
-    let retried = handle_start_instance(&state, request())
-        .await
-        .expect("retry should complete normally after the injector is removed");
+    let retried = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request(),
+    )
+    .await
+    .expect("retry should complete normally after the injector is removed");
     assert!(
         retried.is_accepted(),
         "retry failed: {:?}",
@@ -788,7 +844,10 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     assert_eq!(retried.instance_id, instance_id);
     assert_eq!(
         InstanceRepository::new(pool.clone())
-            .image_binding(&instance_id)
+            .image_binding(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &instance_id
+            )
             .await
             .expect("failed to inspect retry image association")
             .map(|binding| binding.image_id),
@@ -833,14 +892,22 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
         env: std::collections::HashMap::new(),
     };
 
-    let first = handle_start_instance(&state, start(first_image_id.clone()))
-        .await
-        .unwrap();
+    let first = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        start(first_image_id.clone()),
+    )
+    .await
+    .unwrap();
     assert!(first.is_accepted());
 
-    let conflict = handle_start_instance(&state, start(second_image_id.clone()))
-        .await
-        .unwrap();
+    let conflict = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        start(second_image_id.clone()),
+    )
+    .await
+    .unwrap();
     assert!(!conflict.is_accepted());
     assert!(!conflict.deduplicated);
     assert!(matches!(
@@ -869,7 +936,13 @@ async fn test_start_instance_empty_image_id() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(!response.is_accepted());
     assert!(matches!(
@@ -895,7 +968,13 @@ async fn test_start_instance_image_not_found() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(!response.is_accepted());
     assert!(matches!(
@@ -935,7 +1014,13 @@ async fn a_database_failure_is_not_reported_as_a_missing_image() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(!response.is_accepted());
     assert!(
@@ -975,7 +1060,7 @@ async fn test_stop_instance_not_found() {
     assert!(response.error.as_ref().unwrap().contains("not found"));
 }
 
-/// A live runner and persisted handle, without an image/dispatcher fixture: this
+/// A live runner and owned durable handle, without a dispatcher: this
 /// isolates Stop's signal, grace, and publication contract.
 async fn running_stop_fixture(
     pool: &PgPool,
@@ -1019,8 +1104,11 @@ async fn running_stop_fixture(
         })
         .await
         .unwrap();
-    ContainerRegistry::new(pool.clone())
-        .register(&ContainerInfo {
+    common::register_container_fixture(
+        pool,
+        &ContainerRegistry::new(pool.clone()),
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
             instance_id,
@@ -1028,9 +1116,10 @@ async fn running_stop_fixture(
             binary_path: test_artifact_path(),
             started_at: handle.started_at,
             timeout_seconds: Some(300),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     (
         EnvironmentHandlerState::new(pool.clone(), persistence, runner.clone(), data_dir),
         runner,
@@ -1156,6 +1245,7 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
         .bind(&image).bind(test_artifact_path()).execute(&pool).await.unwrap();
     let started = handle_start_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StartInstanceRequest {
             image_id: image.clone(),
             tenant_id: "test-tenant".into(),
@@ -1200,7 +1290,10 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
     );
     assert!(
         LaunchRepository::new(pool.clone())
-            .get_active_for_instance(&started.instance_id)
+            .get_active_for_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &started.instance_id
+            )
             .await
             .unwrap()
             .is_none()
@@ -1253,7 +1346,10 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
     assert!(command.acknowledged_at.is_none());
     assert!(
         ContainerRegistry::new(pool.clone())
-            .get(&handle.instance_id)
+            .get(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id
+            )
             .await
             .unwrap()
             .is_some()
@@ -1340,7 +1436,10 @@ async fn test_stop_instance_zero_grace_aborts_without_faking_guest_acknowledgeme
     );
     assert!(
         ContainerRegistry::new(pool.clone())
-            .get(&handle.instance_id)
+            .get(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id
+            )
             .await
             .unwrap()
             .is_some()
@@ -1357,7 +1456,12 @@ async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforce
         runner.stop(&handle).await.unwrap();
         if !registered {
             ContainerRegistry::new(pool.clone())
-                .cleanup_handle(&handle.instance_id, &handle.launch_id, &handle.handle_id)
+                .cleanup_handle(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &handle.instance_id,
+                    &handle.launch_id,
+                    &handle.handle_id,
+                )
                 .await
                 .unwrap();
         }
@@ -1401,7 +1505,10 @@ async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforce
         );
         assert_eq!(
             ContainerRegistry::new(pool.clone())
-                .get(&handle.instance_id)
+                .get(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &handle.instance_id
+                )
                 .await
                 .unwrap()
                 .is_some(),
@@ -1735,7 +1842,10 @@ async fn test_resume_instance_success() {
 
     // The dispatcher, not the request path, promotes the instance to running.
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -1825,7 +1935,13 @@ async fn test_start_instance_tenant_isolation() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("tenant-B").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     // Should fail - tenant-B should not be able to use tenant-A's image
     assert!(
@@ -1879,7 +1995,13 @@ async fn test_start_instance_same_tenant_allowed() {
         env: std::collections::HashMap::new(),
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("tenant-A").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     // Should succeed
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
@@ -1935,12 +2057,21 @@ async fn test_start_instance_stores_env() {
         env,
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify env vars were stored in the database
     let result = InstanceRepository::new(pool.clone())
-        .image_binding(&response.instance_id)
+        .image_binding(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &response.instance_id,
+        )
         .await
         .expect("Failed to get instance env");
 
@@ -1991,12 +2122,21 @@ async fn test_start_instance_empty_env() {
         env: std::collections::HashMap::new(), // Empty env
     };
 
-    let response = handle_start_instance(&state, request).await.unwrap();
+    let response = handle_start_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify empty env is stored correctly (should return empty HashMap)
     let result = InstanceRepository::new(pool.clone())
-        .image_binding(&response.instance_id)
+        .image_binding(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &response.instance_id,
+        )
         .await
         .expect("Failed to get instance env");
 
@@ -2373,27 +2513,42 @@ async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
     // No row at all: nothing to claim, so this monitor is stale.
     assert!(
         !registry
-            .cleanup_generation(&instance_id, "monitor-handle")
+            .cleanup_generation(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+                "monitor-handle"
+            )
             .await
             .expect("cleanup_generation failed"),
         "a monitor whose registry row is gone must read as stale"
     );
 
     // A row belonging to a newer run: not ours, and it must survive.
-    registry
-        .register(&make_container_info(&instance_id, tenant_id, "newer-run"))
-        .await
-        .expect("register failed");
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        &make_container_info(&instance_id, tenant_id, "newer-run"),
+    )
+    .await
+    .expect("register failed");
     assert!(
         !registry
-            .cleanup_generation(&instance_id, "monitor-handle")
+            .cleanup_generation(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+                "monitor-handle"
+            )
             .await
             .expect("cleanup_generation failed"),
         "a monitor must not claim a row registered by the run that replaced it"
     );
     assert!(
         registry
-            .get(&instance_id)
+            .get(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id
+            )
             .await
             .expect("registry read failed")
             .is_some(),
@@ -2403,14 +2558,21 @@ async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
     // Our own row: claimed, and removed by the claim.
     assert!(
         registry
-            .cleanup_generation(&instance_id, "launch-newer-run")
+            .cleanup_generation(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+                "launch-newer-run"
+            )
             .await
             .expect("cleanup_generation failed"),
         "the owning monitor must claim its own row"
     );
     assert!(
         registry
-            .get(&instance_id)
+            .get(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id
+            )
             .await
             .expect("registry read failed")
             .is_none(),
@@ -2427,7 +2589,7 @@ async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
 /// id would otherwise keep serving the old `binary_path` and the launch would
 /// run the previous artifact.
 #[tokio::test]
-async fn registering_an_image_invalidates_the_cached_read() {
+async fn registering_an_image_refreshes_subsequent_reads() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
     let registry = runtara_environment::image_registry::ImageRegistry::new(pool.clone());
@@ -2447,21 +2609,43 @@ async fn registering_an_image_invalidates_the_cached_read() {
     };
 
     registry
-        .register(&image("/first/workflow.wasm"))
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image("/first/workflow.wasm"),
+        )
         .await
         .unwrap();
     assert_eq!(
-        registry.get(&image_id).await.unwrap().unwrap().binary_path,
+        registry
+            .get(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &image_id
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .binary_path,
         "/first/workflow.wasm"
     );
 
     // Recompile: same tenant and name, new artifact. The read above is cached.
     registry
-        .register(&image("/second/workflow.wasm"))
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image("/second/workflow.wasm"),
+        )
         .await
         .unwrap();
     assert_eq!(
-        registry.get(&image_id).await.unwrap().unwrap().binary_path,
+        registry
+            .get(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &image_id
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .binary_path,
         "/second/workflow.wasm",
         "a re-registration must invalidate the cached row, or a launch runs the \
          artifact it replaced"
@@ -2649,6 +2833,7 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
 
     let response = handle_start_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StartInstanceRequest {
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
@@ -2710,9 +2895,13 @@ async fn test_tenant_metrics_rejects_a_zero_bucket_width() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
 
-    let error = handle_get_tenant_metrics(&state, &metrics_options("tenant-a", 0, 3_600))
-        .await
-        .expect_err("a zero bucket width must be rejected, not sent to Postgres");
+    let error = handle_get_tenant_metrics(
+        &state,
+        &runtara_core::TenantId::new("tenant-a").unwrap(),
+        &metrics_options("tenant-a", 0, 3_600),
+    )
+    .await
+    .expect_err("a zero bucket width must be rejected, not sent to Postgres");
 
     let message = error.to_string();
     assert!(
@@ -2730,9 +2919,13 @@ async fn test_tenant_metrics_rejects_a_width_that_overruns_the_bucket_cap() {
 
     // One-minute buckets over ninety days: 129,601 spine rows.
     let ninety_days = 90 * 86_400;
-    let error = handle_get_tenant_metrics(&state, &metrics_options("tenant-a", 60, ninety_days))
-        .await
-        .expect_err("a request past the bucket cap must be rejected");
+    let error = handle_get_tenant_metrics(
+        &state,
+        &runtara_core::TenantId::new("tenant-a").unwrap(),
+        &metrics_options("tenant-a", 60, ninety_days),
+    )
+    .await
+    .expect_err("a request past the bucket cap must be rejected");
 
     let message = error.to_string();
     assert!(
@@ -2750,10 +2943,13 @@ async fn test_tenant_metrics_allows_the_widest_console_request() {
 
     // The console's widest ask: seven days at 24-minute buckets, 421 rows.
     let seven_days = 7 * 86_400;
-    let buckets =
-        handle_get_tenant_metrics(&state, &metrics_options("tenant-a", 1_440, seven_days))
-            .await
-            .expect("the widest legitimate console request must be allowed");
+    let buckets = handle_get_tenant_metrics(
+        &state,
+        &runtara_core::TenantId::new("tenant-a").unwrap(),
+        &metrics_options("tenant-a", 1_440, seven_days),
+    )
+    .await
+    .expect("the widest legitimate console request must be allowed");
 
     assert_eq!(buckets.len(), 421);
     assert!(
@@ -2926,7 +3122,10 @@ async fn every_stored_status_reads_back_as_itself() {
 
     for (instance_id, expected) in &created {
         let one = instances
-            .detail(instance_id)
+            .detail(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                instance_id,
+            )
             .await
             .expect("status read must succeed")
             .unwrap_or_else(|| panic!("{instance_id} must exist"));
@@ -2937,11 +3136,13 @@ async fn every_stored_status_reads_back_as_itself() {
     }
 
     let page = instances
-        .list(&ListInstancesOptions {
-            tenant_id: Some(tenant_id.clone()),
-            limit: 100,
-            ..Default::default()
-        })
+        .list(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &ListInstancesOptions {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("list must succeed");
 
@@ -3007,7 +3208,11 @@ async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
     let statuses = vec!["suspended".to_string()];
 
     let capped = instances
-        .count_by_status(Some(&tenant_id), &statuses, 3)
+        .count_by_status(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &statuses,
+            3,
+        )
         .await
         .expect("capped count");
     assert_eq!(
@@ -3016,7 +3221,7 @@ async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
     );
 
     let unbounded = instances
-        .count_parked(&tenant_id)
+        .count_parked(&runtara_core::TenantId::new(tenant_id.to_string()).unwrap())
         .await
         .expect("unbounded count");
     assert_eq!(
@@ -3027,7 +3232,9 @@ async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
     // Both must agree on WHICH rows match, so a tenant with none reads zero
     // rather than picking up another tenant's parked instances.
     let other = instances
-        .count_parked(&format!("count-tenant-{}", Uuid::new_v4()))
+        .count_parked(
+            &runtara_core::TenantId::new(format!("count-tenant-{}", Uuid::new_v4())).unwrap(),
+        )
         .await
         .expect("unbounded count for an empty tenant");
     assert_eq!(other, 0);

@@ -2,6 +2,7 @@
 //! real HTTP teardown -> PostgreSQL acknowledgement and runner/monitor cleanup.
 //! Uses the existing artifact-dependent integration test gate, not an alternate
 //! production backend. No isolation policy or custom invocation catalog.
+mod common;
 #[path = "../../runtara-component-host/tests/common/outbound.rs"]
 mod outbound_fixture;
 
@@ -227,8 +228,11 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
         })
         .await?;
     let registry = ContainerRegistry::new(pool.clone());
-    registry
-        .register(&ContainerInfo {
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new("stop-test").unwrap(),
+        &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
             instance_id: id.clone(),
@@ -236,8 +240,9 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             binary_path: compiled.wasm_path.to_string_lossy().into_owned(),
             started_at: handle.started_at,
             timeout_seconds: Some(30),
-        })
-        .await?;
+        },
+    )
+    .await?;
     spawn_container_monitor(
         pool.clone(),
         runner.clone(),
@@ -281,7 +286,12 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
                 .await?
                 .is_some()
         );
-        anyhow::ensure!(registry.get(&id).await?.is_some());
+        anyhow::ensure!(
+            registry
+                .get(&runtara_core::TenantId::new("stop-test").unwrap(), &id)
+                .await?
+                .is_some()
+        );
         anyhow::ensure!(runner.occupancy().unwrap().held == 1);
     }
     tokio::time::timeout(
@@ -330,7 +340,12 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
     );
     anyhow::ensure!(runner.occupancy().unwrap().held == 0);
     tokio::time::timeout(Duration::from_secs(3), async {
-        while registry.get(&id).await.unwrap().is_some() {
+        while registry
+            .get(&runtara_core::TenantId::new("stop-test").unwrap(), &id)
+            .await
+            .unwrap()
+            .is_some()
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

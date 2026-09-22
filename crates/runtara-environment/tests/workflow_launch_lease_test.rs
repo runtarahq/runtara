@@ -64,12 +64,10 @@ async fn claim_initial(
     let instance_id = Uuid::new_v4().to_string();
     let launch_id = Uuid::new_v4().to_string();
     match repository
-        .claim_initial(initial_request(
-            fixture,
-            instance_id,
-            launch_id,
-            single_instance,
-        ))
+        .claim_initial(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            initial_request(fixture, instance_id, launch_id, single_instance),
+        )
         .await
         .expect("initial launch claim must succeed")
     {
@@ -80,11 +78,12 @@ async fn claim_initial(
 
 async fn mark_running_without_gate_confirmation(
     repository: &LaunchRepository,
+    tenant_id: &runtara_core::TenantId,
     launch_id: &str,
 ) -> i32 {
     let owner = "workflow-launch-lease-test";
     let claimed = repository
-        .claim_ready(owner, Duration::from_secs(60), 16)
+        .claim_ready(tenant_id, owner, Duration::from_secs(60), 16)
         .await
         .expect("launch must be claimable");
     let claimed_launch = claimed
@@ -93,25 +92,30 @@ async fn mark_running_without_gate_confirmation(
         .expect("target launch must be claimed");
     assert!(
         repository
-            .begin_start(launch_id, owner, claimed_launch.attempt_count)
+            .begin_start(tenant_id, launch_id, owner, claimed_launch.attempt_count)
             .await
             .expect("start transition must succeed")
             .is_some(),
         "claimed launch must enter the start gate"
     );
     let running = repository
-        .mark_running(launch_id, owner, claimed_launch.attempt_count)
+        .mark_running(tenant_id, launch_id, owner, claimed_launch.attempt_count)
         .await
         .expect("running transition must succeed")
         .expect("start-gated launch must promote to running");
     running.attempt_count
 }
 
-async fn promote_running(repository: &LaunchRepository, launch_id: &str) {
-    let attempt_count = mark_running_without_gate_confirmation(repository, launch_id).await;
+async fn promote_running(
+    repository: &LaunchRepository,
+    tenant_id: &runtara_core::TenantId,
+    launch_id: &str,
+) {
+    let attempt_count =
+        mark_running_without_gate_confirmation(repository, tenant_id, launch_id).await;
     assert!(
         repository
-            .confirm_gate_open(launch_id, attempt_count)
+            .confirm_gate_open(tenant_id, launch_id, attempt_count)
             .await
             .expect("gate confirmation must succeed")
             .is_some(),
@@ -160,9 +164,10 @@ async fn concurrent_single_instance_claims_admit_exactly_one_durable_lease() {
             Uuid::new_v4().to_string(),
             true,
         );
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         tokio::spawn(async move {
             barrier.wait().await;
-            repository.claim_initial(request).await
+            repository.claim_initial(&tenant_scope, request).await
         })
     };
     let second = {
@@ -174,9 +179,10 @@ async fn concurrent_single_instance_claims_admit_exactly_one_durable_lease() {
             Uuid::new_v4().to_string(),
             true,
         );
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         tokio::spawn(async move {
             barrier.wait().await;
-            repository.claim_initial(request).await
+            repository.claim_initial(&tenant_scope, request).await
         })
     };
 
@@ -224,7 +230,12 @@ async fn parked_history_is_lease_free_and_preserves_the_sleeping_marker() {
     // workflow-wide lease.
     for index in 0..3 {
         let launch = claim_initial(&repository, &fixture, true).await;
-        promote_running(&repository, &launch.launch_id).await;
+        promote_running(
+            &repository,
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &launch.launch_id,
+        )
+        .await;
         if index == 0 {
             sqlx::query(
                 r#"
@@ -240,7 +251,10 @@ async fn parked_history_is_lease_free_and_preserves_the_sleeping_marker() {
             .expect("test sleeping marker must be writable");
         }
         let parked = repository
-            .mark_suspended(&launch.launch_id)
+            .mark_suspended(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch.launch_id,
+            )
             .await
             .expect("parking transition must succeed")
             .expect("running generation must park");
@@ -274,9 +288,17 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
     let repository = LaunchRepository::new(context.pool.clone());
 
     let parked = claim_initial(&repository, &fixture, true).await;
-    promote_running(&repository, &parked.launch_id).await;
+    promote_running(
+        &repository,
+        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &parked.launch_id,
+    )
+    .await;
     repository
-        .mark_suspended(&parked.launch_id)
+        .mark_suspended(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &parked.launch_id,
+        )
         .await
         .expect("parking transition must succeed")
         .expect("running generation must park");
@@ -293,9 +315,10 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
             LaunchKind::Wake,
             Duration::from_secs(60),
         );
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         tokio::spawn(async move {
             barrier.wait().await;
-            repository.enqueue(request).await
+            repository.enqueue(&tenant_scope, request).await
         })
     };
     let trigger = {
@@ -307,9 +330,10 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
             Uuid::new_v4().to_string(),
             true,
         );
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         tokio::spawn(async move {
             barrier.wait().await;
-            repository.claim_initial(request).await
+            repository.claim_initial(&tenant_scope, request).await
         })
     };
 
@@ -344,7 +368,12 @@ async fn reconciler_releases_a_lease_after_monitor_crash() {
     let repository = LaunchRepository::new(context.pool.clone());
 
     let running = claim_initial(&repository, &fixture, true).await;
-    promote_running(&repository, &running.launch_id).await;
+    promote_running(
+        &repository,
+        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &running.launch_id,
+    )
+    .await;
 
     // Model a host loss after Core committed a durable park but before its
     // monitor released the matching queue generation.
@@ -363,7 +392,10 @@ async fn reconciler_releases_a_lease_after_monitor_crash() {
     .expect("test crash window must be writable");
 
     let released = repository
-        .reconcile_released_instances(16)
+        .reconcile_released_instances(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            16,
+        )
         .await
         .expect("bounded reconciliation must succeed");
     assert_eq!(released.len(), 1);
@@ -384,7 +416,12 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
     let repository = LaunchRepository::new(context.pool.clone());
 
     let unconfirmed = claim_initial(&repository, &fixture, true).await;
-    mark_running_without_gate_confirmation(&repository, &unconfirmed.launch_id).await;
+    mark_running_without_gate_confirmation(
+        &repository,
+        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &unconfirmed.launch_id,
+    )
+    .await;
     sqlx::query(
         r#"
         UPDATE instance_launches
@@ -398,7 +435,10 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
     .expect("test gate deadline must be writable");
 
     let expired = repository
-        .expire_due(16)
+        .expire_due(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            16,
+        )
         .await
         .expect("unconfirmed gate expiry must succeed");
     assert_eq!(expired.len(), 1);
@@ -417,11 +457,19 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
     assert_eq!(active_scope_count(&context.pool, &fixture).await, 0);
 
     let confirmed = claim_initial(&repository, &fixture, true).await;
-    let confirmed_attempt =
-        mark_running_without_gate_confirmation(&repository, &confirmed.launch_id).await;
+    let confirmed_attempt = mark_running_without_gate_confirmation(
+        &repository,
+        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &confirmed.launch_id,
+    )
+    .await;
     assert!(
         repository
-            .confirm_gate_open(&confirmed.launch_id, confirmed_attempt)
+            .confirm_gate_open(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &confirmed.launch_id,
+                confirmed_attempt
+            )
             .await
             .expect("gate confirmation must succeed")
             .is_some()

@@ -668,13 +668,14 @@ async fn count_launch_telemetry(
     launches: &runtara_environment::launch_queue::LaunchRepository,
     tenant_id: &str,
 ) -> Option<LaunchTelemetryReading> {
+    let tenant_id = runtara_core::TenantId::new(tenant_id).ok()?;
     let started = Instant::now();
 
     // The SQL lives with the table it reads. This used to be two queries here,
     // carrying their own copies of the launch state names and of three
     // `last_error` constants the environment crate already exports — a second
     // spelling of a wire contract, in a crate that does not own it.
-    let summary = match launches.stage_telemetry(tenant_id).await {
+    let summary = match launches.stage_telemetry(&tenant_id).await {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(error = %error, "pipeline sampler could not count durable launches");
@@ -683,7 +684,7 @@ async fn count_launch_telemetry(
     };
 
     let attribution = launches
-        .workflow_telemetry(tenant_id, TOP_LAUNCH_WORKFLOWS)
+        .workflow_telemetry(&tenant_id, TOP_LAUNCH_WORKFLOWS)
         .await;
 
     let attribution = match attribution {
@@ -760,12 +761,13 @@ async fn count_parked(
     instances: &runtara_environment::instance_repository::InstanceRepository,
     tenant_id: &str,
 ) -> Option<u64> {
+    let tenant_id = runtara_core::TenantId::new(tenant_id).ok()?;
     let started = Instant::now();
     // Both the predicate and the vocabulary live with the table now. This used
     // to be a raw `SELECT COUNT(*) FROM instances ... status = 'suspended'`
     // here — the query and the status name both spelled in a crate that owns
     // neither.
-    let result = instances.count_parked(tenant_id).await;
+    let result = instances.count_parked(&tenant_id).await;
 
     match result {
         Ok(count) => {

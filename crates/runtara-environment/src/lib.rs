@@ -189,6 +189,8 @@
 /// ```
 pub mod migrations;
 
+mod artifact_paths;
+
 /// Typed, bounded active-execution timeout policy.
 pub mod execution_timeout;
 

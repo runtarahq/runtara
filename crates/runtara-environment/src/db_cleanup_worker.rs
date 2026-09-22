@@ -309,21 +309,25 @@ impl DbCleanupWorker {
             return Ok(());
         }
 
-        // One transaction across three tables, which is why these DELETEs stay
+        // One transaction across both tables, which is why these DELETEs stay
         // here rather than moving to the registries that own each table:
         // splitting them would let a failure part-way leave an instance whose
         // rows disagree about whether it still exists.
         let mut tx = self.pool.begin().await?;
 
         // container_registry
-        sqlx::query("DELETE FROM container_registry WHERE instance_id = ANY($1)")
-            .bind(instance_ids)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM container_registry WHERE instance_id = ANY($1) AND tenant_id = $2",
+        )
+        .bind(instance_ids)
+        .bind(self.tenant_id.as_str())
+        .execute(&mut *tx)
+        .await?;
 
         // instance_images
-        sqlx::query("DELETE FROM instance_images WHERE instance_id = ANY($1)")
+        sqlx::query("DELETE FROM instance_images WHERE instance_id = ANY($1) AND tenant_id = $2")
             .bind(instance_ids)
+            .bind(self.tenant_id.as_str())
             .execute(&mut *tx)
             .await?;
 

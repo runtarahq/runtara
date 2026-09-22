@@ -79,26 +79,34 @@ pub enum RecoveryOutcome {
 /// and a new start from replacing the generation midway through recovery.
 /// None means a live claim or a replacement owns the observation now.
 pub async fn recover_registered(
+    tenant_id: &runtara_core::TenantId,
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     container: &crate::container_registry::ContainerInfo,
     auto_recover: bool,
 ) -> Result<Option<RecoveryOutcome>> {
-    let tenant_id = runtara_core::TenantId::new(container.tenant_id.clone())?;
+    if container.tenant_id != tenant_id.as_str() {
+        return Err(crate::error::Error::InstanceNotFound(
+            container.instance_id.clone(),
+        ));
+    }
     let mut guard = pool.begin().await?;
-    let launch_state: Option<String> =
-        sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1 FOR UPDATE")
-            .bind(&container.launch_id)
-            .fetch_optional(&mut *guard)
-            .await?;
+    let launch_state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM instance_launches WHERE launch_id = $1 AND tenant_id = $2 FOR UPDATE",
+    )
+    .bind(&container.launch_id)
+    .bind(tenant_id.as_str())
+    .fetch_optional(&mut *guard)
+    .await?;
     if let Some(state) = launch_state {
         // Evaluate time in a fresh statement after acquiring the row lock.
         let live: bool = sqlx::query_scalar(
             "SELECT lease_owner IS NOT NULL AND \
              COALESCE(lease_expires_at > clock_timestamp(), false) \
-             FROM instance_launches WHERE launch_id = $1",
+             FROM instance_launches WHERE launch_id = $1 AND tenant_id = $2",
         )
         .bind(&container.launch_id)
+        .bind(tenant_id.as_str())
         .fetch_one(&mut *guard)
         .await?;
         if live || !matches!(state.as_str(), "running" | "starting") {
@@ -109,25 +117,26 @@ pub async fn recover_registered(
     // behavior remains; they do not establish cross-version owner liveness.
     let registered: Option<String> = sqlx::query_scalar(
         "SELECT container_id FROM container_registry \
-         WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 FOR UPDATE",
+         WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 AND tenant_id = $4 FOR UPDATE",
     )
     .bind(&container.instance_id)
     .bind(&container.launch_id)
     .bind(&container.container_id)
+    .bind(tenant_id.as_str())
     .fetch_optional(&mut *guard)
     .await?;
     if registered.is_none() {
         return Ok(None);
     }
     let outcome = match persistence
-        .get_instance_meta(&tenant_id, &container.instance_id)
+        .get_instance_meta(tenant_id, &container.instance_id)
         .await?
     {
         Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
             let outcome = recover_or_fail(
                 pool,
                 persistence,
-                &tenant_id,
+                tenant_id,
                 &container.instance_id,
                 auto_recover,
             )
@@ -145,11 +154,12 @@ pub async fn recover_registered(
     };
     sqlx::query(
         "DELETE FROM container_registry \
-         WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3",
+         WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 AND tenant_id = $4",
     )
     .bind(&container.instance_id)
     .bind(&container.launch_id)
     .bind(&container.container_id)
+    .bind(tenant_id.as_str())
     .execute(&mut *guard)
     .await?;
     guard.commit().await?;

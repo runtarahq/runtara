@@ -139,23 +139,31 @@ async fn owned_running_registration(
     let repository = LaunchRepository::new(context.pool.clone());
     let id = Uuid::new_v4().to_string();
     repository
-        .enqueue(request(
-            &fixture,
-            &id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            request(&fixture, &id, LaunchKind::Start, Duration::from_secs(60)),
+        )
         .await
         .unwrap();
     let claim = repository
-        .claim_ready("live-owner", Duration::from_secs(60), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            "live-owner",
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .unwrap()
         .pop()
         .unwrap();
     assert_eq!(claim.launch_id, id);
     repository
-        .begin_start(&id, "live-owner", claim.attempt_count)
+        .begin_start(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &id,
+            "live-owner",
+            claim.attempt_count,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -169,16 +177,28 @@ async fn owned_running_registration(
         timeout_seconds: Some(60),
     };
     ContainerRegistry::new(context.pool.clone())
-        .register(&container)
+        .register(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &container,
+        )
         .await
         .unwrap();
     let running = repository
-        .mark_running(&id, "live-owner", claim.attempt_count)
+        .mark_running(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &id,
+            "live-owner",
+            claim.attempt_count,
+        )
         .await
         .unwrap()
         .unwrap();
     repository
-        .confirm_gate_open(&id, claim.attempt_count)
+        .confirm_gate_open(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &id,
+            claim.attempt_count,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -196,10 +216,16 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
     assert!(running.lease_expires_at.is_some());
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert!(
-        recover_registered(&context.pool, &persistence, &container, true)
-            .await
-            .unwrap()
-            .is_none()
+        recover_registered(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &context.pool,
+            &persistence,
+            &container,
+            true
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert_eq!(
         instance_result(&context.pool, &fixture.instance_id).await.0,
@@ -207,7 +233,10 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
     );
     assert!(
         ContainerRegistry::new(context.pool.clone())
-            .get(&fixture.instance_id)
+            .get(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &fixture.instance_id
+            )
             .await
             .unwrap()
             .is_some()
@@ -229,6 +258,7 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
         assert!(
             !repository
                 .renew_running_lease(
+                    &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                     &running.launch_id,
                     owner,
                     attempt,
@@ -242,6 +272,7 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
     assert!(
         repository
             .renew_running_lease(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &running.launch_id,
                 "live-owner",
                 running.attempt_count,
@@ -251,7 +282,14 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
             .await
             .unwrap()
     );
-    let renewed = repository.get(&running.launch_id).await.unwrap().unwrap();
+    let renewed = repository
+        .get(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &running.launch_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(renewed.lease_expires_at > running.lease_expires_at);
     context.cleanup_tenant(&fixture.tenant_id).await;
 }
@@ -270,6 +308,7 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     assert!(
         !repository
             .renew_running_lease(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &running.launch_id,
                 "live-owner",
                 running.attempt_count,
@@ -281,9 +320,15 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     );
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert_eq!(
-        recover_registered(&context.pool, &persistence, &container, true)
-            .await
-            .unwrap(),
+        recover_registered(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &context.pool,
+            &persistence,
+            &container,
+            true
+        )
+        .await
+        .unwrap(),
         Some(RecoveryOutcome::Recovered)
     );
     assert_eq!(
@@ -292,16 +337,25 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     );
     assert!(
         ContainerRegistry::new(context.pool.clone())
-            .get(&fixture.instance_id)
+            .get(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &fixture.instance_id
+            )
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        recover_registered(&context.pool, &persistence, &container, true)
-            .await
-            .unwrap()
-            .is_none()
+        recover_registered(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &context.pool,
+            &persistence,
+            &container,
+            true
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     context.cleanup_tenant(&fixture.tenant_id).await;
 }
@@ -318,13 +372,25 @@ async fn expired_owner_snapshot_cannot_recover_a_replacement_handle() {
     let mut current = old.clone();
     current.container_id = Uuid::new_v4().to_string();
     let registry = ContainerRegistry::new(context.pool.clone());
-    registry.register(&current).await.unwrap();
+    registry
+        .register(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &current,
+        )
+        .await
+        .unwrap();
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert!(
-        recover_registered(&context.pool, &persistence, &old, true)
-            .await
-            .unwrap()
-            .is_none()
+        recover_registered(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &context.pool,
+            &persistence,
+            &old,
+            true
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert_eq!(
         instance_result(&context.pool, &fixture.instance_id).await.0,
@@ -332,7 +398,10 @@ async fn expired_owner_snapshot_cannot_recover_a_replacement_handle() {
     );
     assert_eq!(
         registry
-            .get(&fixture.instance_id)
+            .get(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &fixture.instance_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -359,9 +428,10 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
             Duration::from_secs(60),
         );
         let barrier = barrier.clone();
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         tokio::spawn(async move {
             barrier.wait().await;
-            repository.enqueue(request).await
+            repository.enqueue(&tenant_scope, request).await
         })
     };
     let competing_task = {
@@ -373,9 +443,10 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
             Duration::from_secs(60),
         );
         let barrier = barrier.clone();
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         tokio::spawn(async move {
             barrier.wait().await;
-            repository.enqueue(request).await
+            repository.enqueue(&tenant_scope, request).await
         })
     };
     barrier.wait().await;
@@ -397,12 +468,15 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     assert_eq!(first.state, LaunchState::Queued);
 
     let duplicate = repository
-        .enqueue(request(
-            &fixture,
-            &first.launch_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            request(
+                &fixture,
+                &first.launch_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("idempotent enqueue must succeed");
     assert!(matches!(
@@ -411,7 +485,12 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     ));
 
     let claimed = repository
-        .claim_ready("dispatcher-a", Duration::from_secs(30), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            "dispatcher-a",
+            Duration::from_secs(30),
+            1,
+        )
         .await
         .expect("claim must succeed");
     assert_eq!(claimed.len(), 1);
@@ -419,14 +498,24 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     assert_eq!(claimed[0].attempt_count, 1);
     assert!(
         repository
-            .begin_start(&first.launch_id, "dispatcher-a", claimed[0].attempt_count)
+            .begin_start(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &first.launch_id,
+                "dispatcher-a",
+                claimed[0].attempt_count
+            )
             .await
             .expect("start transition must succeed")
             .is_some()
     );
     assert!(
         repository
-            .mark_running(&first.launch_id, "dispatcher-a", claimed[0].attempt_count)
+            .mark_running(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &first.launch_id,
+                "dispatcher-a",
+                claimed[0].attempt_count
+            )
             .await
             .expect("running transition must succeed")
             .is_some()
@@ -438,13 +527,16 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     );
     assert!(matches!(
         repository
-            .mark_terminal(&first.launch_id, LaunchState::Suspended, None)
+            .mark_terminal(&runtara_core::TenantId::new(&fixture.tenant_id).unwrap(), &first.launch_id, LaunchState::Suspended, None)
             .await,
         Err(runtara_environment::launch_queue::LaunchQueueError::SuspensionRequiresParkingTransaction)
     ));
 
     let parked = repository
-        .mark_suspended(&first.launch_id)
+        .mark_suspended(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &first.launch_id,
+        )
         .await
         .expect("parking transition must succeed")
         .expect("running generation must be parked");
@@ -455,12 +547,15 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     );
 
     let resumed = repository
-        .enqueue(request(
-            &fixture,
-            Uuid::new_v4().to_string(),
-            LaunchKind::Resume,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            request(
+                &fixture,
+                Uuid::new_v4().to_string(),
+                LaunchKind::Resume,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("parked instance must accept its next generation");
     assert!(matches!(resumed, EnqueueOutcome::Enqueued(_)));
@@ -476,16 +571,24 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     let launch_id = Uuid::new_v4().to_string();
 
     repository
-        .enqueue(request(
-            &first_fixture,
-            &launch_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+            request(
+                &first_fixture,
+                &launch_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("enqueue must succeed");
     let claimed = repository
-        .claim_ready("dispatcher-a", Duration::from_secs(60), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+            "dispatcher-a",
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("claim must succeed");
     assert_eq!(claimed[0].state, LaunchState::Leased);
@@ -499,7 +602,10 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     .expect("test lease expiry must be writable");
 
     let recovered = repository
-        .recover_expired_leases(1)
+        .recover_expired_leases(
+            &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+            1,
+        )
         .await
         .expect("expired lease recovery must succeed");
     assert_eq!(recovered.len(), 1);
@@ -508,7 +614,12 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     assert!(recovered[0].lease_owner.is_none());
 
     let reclaimed = repository
-        .claim_ready("dispatcher-b", Duration::from_secs(60), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+            "dispatcher-b",
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("reclaim must succeed");
     assert_eq!(reclaimed.len(), 1);
@@ -517,7 +628,10 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     assert_eq!(reclaimed[0].attempt_count, 2);
     assert!(
         repository
-            .recover_expired_leases(1)
+            .recover_expired_leases(
+                &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+                1
+            )
             .await
             .expect("a live lease scan must succeed")
             .is_empty()
@@ -528,7 +642,12 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     // claim; no guest could have crossed into execution under the old owner.
     assert!(
         repository
-            .begin_start(&launch_id, "dispatcher-b", reclaimed[0].attempt_count)
+            .begin_start(
+                &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+                &launch_id,
+                "dispatcher-b",
+                reclaimed[0].attempt_count
+            )
             .await
             .expect("starting transition must succeed")
             .is_some()
@@ -541,7 +660,10 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     .await
     .expect("test start-gate expiry must be writable");
     let recovered_starting = repository
-        .recover_expired_leases(1)
+        .recover_expired_leases(
+            &runtara_core::TenantId::new(&first_fixture.tenant_id).unwrap(),
+            1,
+        )
         .await
         .expect("expired gated start must be recoverable");
     assert_eq!(recovered_starting.len(), 1);
@@ -561,16 +683,24 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     let legacy_fixture = fixture(&context).await;
     let legacy_id = Uuid::new_v4().to_string();
     repository
-        .enqueue(request(
-            &legacy_fixture,
-            &legacy_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&legacy_fixture.tenant_id).unwrap(),
+            request(
+                &legacy_fixture,
+                &legacy_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("legacy-shaped launch must enqueue");
     let legacy_claimed = repository
-        .claim_ready("legacy-dispatcher", Duration::from_secs(60), 2)
+        .claim_ready(
+            &runtara_core::TenantId::new(&legacy_fixture.tenant_id).unwrap(),
+            "legacy-dispatcher",
+            Duration::from_secs(60),
+            2,
+        )
         .await
         .expect("legacy-shaped launch must claim");
     let legacy_attempt = legacy_claimed
@@ -580,7 +710,12 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
         .attempt_count;
     assert!(
         repository
-            .begin_start(&legacy_id, "legacy-dispatcher", legacy_attempt)
+            .begin_start(
+                &runtara_core::TenantId::new(&legacy_fixture.tenant_id).unwrap(),
+                &legacy_id,
+                "legacy-dispatcher",
+                legacy_attempt
+            )
             .await
             .expect("test setup start must succeed")
             .is_some()
@@ -599,7 +734,10 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     .expect("legacy-shaped marker must be removable for rollout test");
     assert!(
         repository
-            .recover_expired_leases(1)
+            .recover_expired_leases(
+                &runtara_core::TenantId::new(&legacy_fixture.tenant_id).unwrap(),
+                1
+            )
             .await
             .expect("rollout-fenced recovery scan must succeed")
             .is_empty(),
@@ -607,7 +745,10 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     );
     assert_eq!(
         repository
-            .get(&legacy_id)
+            .get(
+                &runtara_core::TenantId::new(&legacy_fixture.tenant_id).unwrap(),
+                &legacy_id
+            )
             .await
             .expect("legacy-shaped launch read must succeed")
             .expect("legacy-shaped launch must remain")
@@ -627,16 +768,24 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     let owner = "preparation-owner";
 
     repository
-        .enqueue(request(
-            &fixture,
-            &launch_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            request(
+                &fixture,
+                &launch_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("launch must enqueue");
     let first = repository
-        .claim_ready_for_preparation(owner, Duration::from_secs(60), 1)
+        .claim_ready_for_preparation(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            owner,
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("preparation claim must succeed")
         .pop()
@@ -659,6 +808,7 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     assert!(
         repository
             .promote_prepared(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &launch_id,
                 owner,
                 first.attempt_count,
@@ -671,6 +821,7 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     assert!(
         repository
             .requeue_owned(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &launch_id,
                 owner,
                 first.attempt_count,
@@ -683,21 +834,36 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     );
     assert!(
         repository
-            .fail_before_runner(&launch_id, owner, first.attempt_count, "stale_failure")
+            .fail_before_runner(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch_id,
+                owner,
+                first.attempt_count,
+                "stale_failure"
+            )
             .await
             .expect("stale failure check must succeed")
             .is_none()
     );
 
     let recovered = repository
-        .recover_expired_preparations(Duration::ZERO, 1)
+        .recover_expired_preparations(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            Duration::ZERO,
+            1,
+        )
         .await
         .expect("expired preparation must recover");
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].state, LaunchState::Queued);
 
     let second = repository
-        .claim_ready_for_preparation(owner, Duration::from_secs(60), 1)
+        .claim_ready_for_preparation(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            owner,
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("same owner may reclaim with a fresh incarnation")
         .pop()
@@ -708,6 +874,7 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     assert!(
         repository
             .promote_prepared(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &launch_id,
                 owner,
                 first.attempt_count,
@@ -720,6 +887,7 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     assert!(
         repository
             .requeue_owned(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &launch_id,
                 owner,
                 first.attempt_count,
@@ -732,14 +900,23 @@ async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_la
     );
     assert!(
         repository
-            .fail_before_runner(&launch_id, owner, first.attempt_count, "stale_failure")
+            .fail_before_runner(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch_id,
+                owner,
+                first.attempt_count,
+                "stale_failure"
+            )
             .await
             .expect("old failure after same-owner reclaim must be harmless")
             .is_none()
     );
     assert_eq!(
         repository
-            .get(&launch_id)
+            .get(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch_id
+            )
             .await
             .expect("launch must remain readable")
             .expect("launch must remain present")
@@ -760,27 +937,45 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
     let owner = "gate-owner";
 
     repository
-        .enqueue(request(
-            &fixture,
-            &launch_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            request(
+                &fixture,
+                &launch_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("launch must enqueue");
     let claimed = repository
-        .claim_ready(owner, Duration::from_secs(60), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            owner,
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("launch must claim")
         .pop()
         .expect("one launch must claim");
     repository
-        .begin_start(&launch_id, owner, claimed.attempt_count)
+        .begin_start(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &launch_id,
+            owner,
+            claimed.attempt_count,
+        )
         .await
         .expect("start transition must succeed")
         .expect("launch must enter starting");
     let running = repository
-        .mark_running(&launch_id, owner, claimed.attempt_count)
+        .mark_running(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &launch_id,
+            owner,
+            claimed.attempt_count,
+        )
         .await
         .expect("running transition must succeed")
         .expect("launch must become running");
@@ -803,7 +998,11 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
     .expect("test later attempt must be writable");
     assert!(
         repository
-            .confirm_gate_open(&launch_id, running.attempt_count)
+            .confirm_gate_open(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch_id,
+                running.attempt_count
+            )
             .await
             .expect("stale confirmation query must succeed")
             .is_none(),
@@ -812,6 +1011,7 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
     assert!(
         repository
             .fail_unconfirmed_running(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
                 &launch_id,
                 running.attempt_count,
                 "stale monitor must not win",
@@ -834,7 +1034,11 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
     );
     assert!(
         repository
-            .confirm_gate_open(&launch_id, later_attempt)
+            .confirm_gate_open(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch_id,
+                later_attempt
+            )
             .await
             .expect("current confirmation query must succeed")
             .is_some(),
@@ -868,7 +1072,11 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
         let launch_id = launch_id.clone();
         tokio::spawn(async move {
             repository
-                .confirm_gate_open(&launch_id, later_attempt)
+                .confirm_gate_open(
+                    &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                    &launch_id,
+                    later_attempt,
+                )
                 .await
         })
     };
@@ -920,15 +1128,24 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     let expiry_id = Uuid::new_v4().to_string();
 
     repository
-        .enqueue(request(
-            &expiry_fixture,
-            &expiry_id,
-            LaunchKind::Start,
-            Duration::ZERO,
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&expiry_fixture.tenant_id).unwrap(),
+            request(
+                &expiry_fixture,
+                &expiry_id,
+                LaunchKind::Start,
+                Duration::ZERO,
+            ),
+        )
         .await
         .expect("enqueue must succeed");
-    let expired = repository.expire_due(1).await.expect("expiry must succeed");
+    let expired = repository
+        .expire_due(
+            &runtara_core::TenantId::new(&expiry_fixture.tenant_id).unwrap(),
+            1,
+        )
+        .await
+        .expect("expiry must succeed");
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].kind, LaunchKind::Start);
     assert_eq!(expired[0].state, LaunchState::Failed);
@@ -943,7 +1160,10 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     );
     assert!(
         repository
-            .expire_due(1)
+            .expire_due(
+                &runtara_core::TenantId::new(&expiry_fixture.tenant_id).unwrap(),
+                1
+            )
             .await
             .expect("repeat expiry must be idempotent")
             .is_empty()
@@ -953,21 +1173,32 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     set_instance_status(&context.pool, &cancel_fixture.instance_id, "suspended").await;
     let cancel_id = Uuid::new_v4().to_string();
     repository
-        .enqueue(request(
-            &cancel_fixture,
-            &cancel_id,
-            LaunchKind::Wake,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&cancel_fixture.tenant_id).unwrap(),
+            request(
+                &cancel_fixture,
+                &cancel_id,
+                LaunchKind::Wake,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("enqueue must succeed");
     repository
-        .claim_ready("dispatcher-a", Duration::from_secs(60), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&cancel_fixture.tenant_id).unwrap(),
+            "dispatcher-a",
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("claim must succeed");
 
     let cancelled = repository
-        .cancel_before_start(&cancel_id)
+        .cancel_before_start(
+            &runtara_core::TenantId::new(&cancel_fixture.tenant_id).unwrap(),
+            &cancel_id,
+        )
         .await
         .expect("leased launch cancellation must succeed");
     assert!(matches!(
@@ -981,7 +1212,7 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     );
     assert!(matches!(
         repository
-            .cancel_before_start(&cancel_id)
+            .cancel_before_start(&runtara_core::TenantId::new(&cancel_fixture.tenant_id).unwrap(), &cancel_id)
             .await
             .expect("repeat cancellation must be idempotent"),
         CancelOutcome::Cancelled(ref launch)
@@ -991,21 +1222,30 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     let starting_fixture = fixture(&context).await;
     let starting_id = Uuid::new_v4().to_string();
     repository
-        .enqueue(request(
-            &starting_fixture,
-            &starting_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&starting_fixture.tenant_id).unwrap(),
+            request(
+                &starting_fixture,
+                &starting_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("starting launch must enqueue");
     let starting_claimed = repository
-        .claim_ready("dispatcher-gated", Duration::from_secs(60), 1)
+        .claim_ready(
+            &runtara_core::TenantId::new(&starting_fixture.tenant_id).unwrap(),
+            "dispatcher-gated",
+            Duration::from_secs(60),
+            1,
+        )
         .await
         .expect("starting launch must claim");
     assert!(
         repository
             .begin_start(
+                &runtara_core::TenantId::new(&starting_fixture.tenant_id).unwrap(),
                 &starting_id,
                 "dispatcher-gated",
                 starting_claimed[0].attempt_count,
@@ -1016,7 +1256,7 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     );
     assert!(matches!(
         repository
-            .cancel_before_start(&starting_id)
+            .cancel_before_start(&runtara_core::TenantId::new(&starting_fixture.tenant_id).unwrap(), &starting_id)
             .await
             .expect("closed start gate cancellation must succeed"),
         CancelOutcome::Cancelled(ref launch) if launch.state == LaunchState::Cancelled
@@ -1051,17 +1291,25 @@ async fn enqueue_requires_the_bound_image_and_matching_pre_launch_state() {
         Duration::from_secs(60),
     );
     assert!(matches!(
-        repository.enqueue(wrong_image_request).await,
+        repository
+            .enqueue(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                wrong_image_request
+            )
+            .await,
         Err(runtara_environment::launch_queue::LaunchQueueError::InvalidLaunchTarget { .. })
     ));
     assert!(matches!(
         repository
-            .enqueue(request(
-                &fixture,
-                Uuid::new_v4().to_string(),
-                LaunchKind::Resume,
-                Duration::from_secs(60),
-            ))
+            .enqueue(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                request(
+                    &fixture,
+                    Uuid::new_v4().to_string(),
+                    LaunchKind::Resume,
+                    Duration::from_secs(60),
+                )
+            )
             .await,
         Err(runtara_environment::launch_queue::LaunchQueueError::InvalidLaunchTarget { .. })
     ));
@@ -1099,7 +1347,10 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     };
 
     let queued = repository
-        .claim_initial(request.clone())
+        .claim_initial(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            request.clone(),
+        )
         .await
         .expect("initial claim must commit");
     assert!(matches!(
@@ -1114,7 +1365,10 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     );
     assert_eq!(
         InstanceRepository::new(context.pool.clone())
-            .image_binding(&instance_id)
+            .image_binding(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id
+            )
             .await
             .expect("image binding read must succeed")
             .map(|binding| binding.image_id),
@@ -1122,7 +1376,10 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     );
 
     let replay = repository
-        .claim_initial(request)
+        .claim_initial(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            request,
+        )
         .await
         .expect("idempotent initial claim must succeed");
     assert!(matches!(
@@ -1145,7 +1402,12 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
         timeout_seconds: Some(30),
     };
     assert!(matches!(
-        repository.claim_initial(invalid).await,
+        repository
+            .claim_initial(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                invalid
+            )
+            .await,
         Err(LaunchQueueError::InvalidLaunchTarget { .. })
     ));
     let missing: Option<(String,)> =
@@ -1173,17 +1435,21 @@ async fn dispatcher_hands_off_a_durable_row_without_a_runner_waiter() {
     let repository = LaunchRepository::new(context.pool.clone());
     let launch_id = Uuid::new_v4().to_string();
     repository
-        .enqueue(request(
-            &fixture,
-            &launch_id,
-            LaunchKind::Start,
-            Duration::from_secs(60),
-        ))
+        .enqueue(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            request(
+                &fixture,
+                &launch_id,
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ),
+        )
         .await
         .expect("queue row must be inserted");
 
     let runner = Arc::new(MockRunner::never_completing());
     let dispatcher = LaunchDispatcher::new(
+        runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
         context.pool.clone(),
         Arc::new(PostgresPersistence::new(context.pool.clone())),
         runner.clone(),
@@ -1204,7 +1470,10 @@ async fn dispatcher_hands_off_a_durable_row_without_a_runner_waiter() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let state = repository
-                .get(&launch_id)
+                .get(
+                    &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                    &launch_id,
+                )
                 .await
                 .expect("launch read must succeed")
                 .expect("launch must exist")
@@ -1253,23 +1522,36 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
         set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
         let launch_id = Uuid::new_v4().to_string();
         repository
-            .enqueue(request(
-                &fixture,
-                &launch_id,
-                LaunchKind::Wake,
-                Duration::from_secs(60),
-            ))
+            .enqueue(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                request(
+                    &fixture,
+                    &launch_id,
+                    LaunchKind::Wake,
+                    Duration::from_secs(60),
+                ),
+            )
             .await
             .unwrap();
         let claim = repository
-            .claim_ready("cancel-race", Duration::from_secs(60), 1)
+            .claim_ready(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                "cancel-race",
+                Duration::from_secs(60),
+                1,
+            )
             .await
             .unwrap()
             .pop()
             .unwrap();
         assert_eq!(claim.launch_id, launch_id);
         repository
-            .begin_start(&launch_id, "cancel-race", claim.attempt_count)
+            .begin_start(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &launch_id,
+                "cancel-race",
+                claim.attempt_count,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1300,7 +1582,12 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
         let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         let (cancelled, started) = tokio::join!(
             persistence.cancel_suspended_instances(&tenant_scope, Some(&fixture.instance_id), 1),
-            repository.mark_running(&launch_id, "cancel-race", claim.attempt_count),
+            repository.mark_running(
+                &tenant_scope,
+                &launch_id,
+                "cancel-race",
+                claim.attempt_count
+            ),
         );
         let cancelled = cancelled.unwrap();
         let instance = persistence
@@ -1374,7 +1661,10 @@ async fn owned_mock_execution(
         .unwrap();
     container.container_id = handle.handle_id.clone();
     runtara_environment::container_registry::ContainerRegistry::new(context.pool.clone())
-        .register(&container)
+        .register(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &container,
+        )
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1433,14 +1723,24 @@ async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
     );
     assert_eq!(
         registry
-            .deliver_abort_requests("wrong-owner", runner.as_ref(), 32)
+            .deliver_abort_requests(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                "wrong-owner",
+                runner.as_ref(),
+                32
+            )
             .await
             .unwrap(),
         0
     );
     assert_eq!(
         registry
-            .deliver_abort_requests("live-owner", peer_runner.as_ref(), 32)
+            .deliver_abort_requests(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                "live-owner",
+                peer_runner.as_ref(),
+                32
+            )
             .await
             .unwrap(),
         0
@@ -1451,7 +1751,12 @@ async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
     );
     assert_eq!(
         registry
-            .deliver_abort_requests("live-owner", runner.as_ref(), 32)
+            .deliver_abort_requests(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                "live-owner",
+                runner.as_ref(),
+                32
+            )
             .await
             .unwrap(),
         1
@@ -1459,7 +1764,12 @@ async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
     assert!(stop.await.unwrap().success);
     assert_eq!(
         registry
-            .deliver_abort_requests("live-owner", runner.as_ref(), 32)
+            .deliver_abort_requests(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                "live-owner",
+                runner.as_ref(),
+                32
+            )
             .await
             .unwrap(),
         0
@@ -1497,30 +1807,60 @@ async fn remote_grace_never_extends_and_cannot_follow_a_replacement_handle() {
     let registry = ContainerRegistry::new(context.pool.clone());
     let now = tokio::time::Instant::now();
     let first = registry
-        .request_abort(&handle, now + Duration::from_secs(30))
+        .request_abort(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &handle,
+            now + Duration::from_secs(30),
+        )
         .await
         .unwrap()
         .unwrap();
     let earlier = registry
-        .request_abort(&handle, now + Duration::from_millis(50))
+        .request_abort(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &handle,
+            now + Duration::from_millis(50),
+        )
         .await
         .unwrap()
         .unwrap();
     assert!(earlier < first);
     assert_eq!(
         registry
-            .request_abort(&handle, now + Duration::from_secs(60))
+            .request_abort(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &handle,
+                now + Duration::from_secs(60)
+            )
             .await
             .unwrap(),
         Some(earlier)
     );
     // Updating the same registration cannot erase an accepted control request.
-    let mut container = registry.get(&fixture.instance_id).await.unwrap().unwrap();
-    registry.register(&container).await.unwrap();
+    let mut container = registry
+        .get(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &fixture.instance_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    registry
+        .register(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &container,
+        )
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert_eq!(
         registry
-            .deliver_abort_requests("live-owner", runner.as_ref(), 32)
+            .deliver_abort_requests(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                "live-owner",
+                runner.as_ref(),
+                32
+            )
             .await
             .unwrap(),
         1
@@ -1531,13 +1871,47 @@ async fn remote_grace_never_extends_and_cannot_follow_a_replacement_handle() {
     )
     .await
     .unwrap();
-    assert!(registry.abort_is_armed(&handle, earlier).await.unwrap());
+    assert!(
+        registry
+            .abort_is_armed(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &handle,
+                earlier
+            )
+            .await
+            .unwrap()
+    );
     // Reuse the durable launch but replace the physical registration. Old
     // requests and acknowledgements must no longer address this execution.
     container.container_id = Uuid::new_v4().to_string();
-    registry.register(&container).await.unwrap();
-    assert!(!registry.abort_is_armed(&handle, earlier).await.unwrap());
-    assert_eq!(registry.request_abort(&handle, now).await.unwrap(), None);
+    registry
+        .register(
+            &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &container,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !registry
+            .abort_is_armed(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &handle,
+                earlier
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        registry
+            .request_abort(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &handle,
+                now
+            )
+            .await
+            .unwrap(),
+        None
+    );
     let empty: bool = sqlx::query_scalar("SELECT abort_deadline_at IS NULL AND abort_armed_deadline_at IS NULL FROM container_registry WHERE instance_id = $1")
         .bind(&fixture.instance_id).fetch_one(&context.pool).await.unwrap();
     assert!(empty);

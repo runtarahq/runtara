@@ -147,7 +147,9 @@ pub(crate) fn build_env(
 
 /// The per-instance run directory (stderr capture lives here).
 pub(crate) fn run_dir(data_dir: &Path, tenant_id: &str, instance_id: &str) -> PathBuf {
-    data_dir.join(tenant_id).join("runs").join(instance_id)
+    crate::artifact_paths::tenant_root(data_dir, tenant_id)
+        .join("runs")
+        .join(crate::artifact_paths::identity_component(instance_id))
 }
 
 /// The per-launch run directory.
@@ -161,7 +163,8 @@ pub(crate) fn launch_run_dir(
     instance_id: &str,
     launch_id: &str,
 ) -> PathBuf {
-    run_dir(data_dir, tenant_id, instance_id).join(launch_id)
+    run_dir(data_dir, tenant_id, instance_id)
+        .join(crate::artifact_paths::identity_component(launch_id))
 }
 
 /// Load stderr from the per-run log file for diagnostics.

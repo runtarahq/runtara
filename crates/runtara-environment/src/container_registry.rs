@@ -6,6 +6,7 @@
 //! Enables fire-and-forget launching, runtime restart recovery, and distributed cancellation.
 
 use chrono::{DateTime, Utc};
+use runtara_core::TenantId;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -62,13 +63,22 @@ impl ContainerRegistry {
     /// Register a container as running
     ///
     /// Should be called BEFORE spawning the container process.
-    pub async fn register(&self, info: &ContainerInfo) -> Result<()> {
-        sqlx::query(
+    pub async fn register(&self, tenant_id: &TenantId, info: &ContainerInfo) -> Result<()> {
+        if info.tenant_id != tenant_id.as_str() {
+            return Err(crate::error::Error::InvalidRequest(
+                "container tenant does not match operation tenant".into(),
+            ));
+        }
+        let result = sqlx::query(
             r#"
             INSERT INTO container_registry (
                 container_id, launch_id, instance_id, tenant_id, binary_path,
                 started_at, timeout_seconds
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ) SELECT $1, $2, $3, $4, $5, $6, $7
+              FROM instances i
+              JOIN instance_launches launch ON launch.instance_id = i.instance_id AND launch.tenant_id = i.tenant_id
+              WHERE i.instance_id = $3 AND i.tenant_id = $4 AND launch.launch_id = $2
+              FOR SHARE OF i, launch
             ON CONFLICT (instance_id) DO UPDATE SET
                 container_id = EXCLUDED.container_id,
                 launch_id = EXCLUDED.launch_id,
@@ -81,6 +91,7 @@ impl ContainerRegistry {
                 abort_armed_deadline_at = CASE WHEN container_registry.container_id = EXCLUDED.container_id
                     AND container_registry.launch_id = EXCLUDED.launch_id
                     THEN container_registry.abort_armed_deadline_at ELSE NULL END
+            WHERE container_registry.tenant_id = EXCLUDED.tenant_id
             "#,
         )
         .bind(&info.container_id)
@@ -93,6 +104,12 @@ impl ContainerRegistry {
         .execute(&self.pool)
         .await?;
 
+        if result.rows_affected() != 1 {
+            return Err(crate::error::Error::InstanceNotFound(
+                info.instance_id.clone(),
+            ));
+        }
+
         tracing::info!(
             container_id = %info.container_id,
             instance_id = %info.instance_id,
@@ -103,26 +120,30 @@ impl ContainerRegistry {
         Ok(())
     }
 
-    /// List all registered containers (all tenants)
-    pub async fn list_all_registered(&self) -> Result<Vec<ContainerInfo>> {
-        let containers = sqlx::query_as::<_, ContainerInfo>("SELECT * FROM container_registry")
-            .fetch_all(&self.pool)
-            .await?;
+    /// List registered containers for the supplied tenant.
+    pub async fn list_registered(&self, tenant_id: &TenantId) -> Result<Vec<ContainerInfo>> {
+        let containers = sqlx::query_as::<_, ContainerInfo>(
+            "SELECT * FROM container_registry WHERE tenant_id = $1",
+        )
+        .bind(tenant_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(containers)
     }
 
     /// Bounded candidates whose running owner lease expired. Recovery still
     /// locks and rechecks each claim before changing any lifecycle state.
-    pub async fn expired_running_owners(&self) -> Result<Vec<ContainerInfo>> {
+    pub async fn expired_running_owners(&self, tenant_id: &TenantId) -> Result<Vec<ContainerInfo>> {
         Ok(sqlx::query_as::<_, ContainerInfo>(
             "SELECT cr.* FROM instance_launches launch \
              JOIN container_registry cr ON cr.launch_id = launch.launch_id \
                  AND cr.instance_id = launch.instance_id \
-             WHERE launch.state = 'running' AND launch.lease_owner IS NOT NULL \
+             WHERE cr.tenant_id = $1 AND launch.tenant_id = cr.tenant_id AND launch.state = 'running' AND launch.lease_owner IS NOT NULL \
                  AND launch.lease_expires_at <= clock_timestamp() \
              ORDER BY launch.lease_expires_at LIMIT 256",
         )
+        .bind(tenant_id.as_str())
         .fetch_all(&self.pool)
         .await?)
     }
@@ -132,20 +153,26 @@ impl ContainerRegistry {
     ///
     /// The heartbeat monitor wants a membership set, not the rows, and used to
     /// read the table itself for it.
-    pub async fn tracked_instance_ids(&self) -> Result<Vec<String>> {
-        Ok(
-            sqlx::query_scalar::<_, String>("SELECT instance_id FROM container_registry")
-                .fetch_all(&self.pool)
-                .await?,
+    pub async fn tracked_instance_ids(&self, tenant_id: &TenantId) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT instance_id FROM container_registry WHERE tenant_id = $1",
         )
+        .bind(tenant_id.as_str())
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Get a specific container's info
-    pub async fn get(&self, instance_id: &str) -> Result<Option<ContainerInfo>> {
+    pub async fn get(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<ContainerInfo>> {
         let container = sqlx::query_as::<_, ContainerInfo>(
-            "SELECT * FROM container_registry WHERE instance_id = $1",
+            "SELECT * FROM container_registry WHERE instance_id = $1 AND tenant_id = $2",
         )
         .bind(instance_id)
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await?;
 
@@ -157,9 +184,16 @@ impl ContainerRegistry {
     /// sampling/transport time is subtracted, never a fresh grace interval.
     pub async fn request_abort(
         &self,
+        tenant_id: &TenantId,
         handle: &crate::runner::RunnerHandle,
         deadline: tokio::time::Instant,
     ) -> Result<Option<DateTime<Utc>>> {
+        if handle.tenant_id != tenant_id.as_str() {
+            return Err(crate::error::Error::InstanceNotFound(
+                handle.instance_id.clone(),
+            ));
+        }
+
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&self.pool)
             .await?;
@@ -174,9 +208,9 @@ impl ContainerRegistry {
         })?;
         Ok(sqlx::query_scalar(
             "UPDATE container_registry cr SET abort_deadline_at = LEAST(cr.abort_deadline_at, $4) \
-             WHERE cr.instance_id = $1 AND cr.launch_id = $2 AND cr.container_id = $3 \
+             WHERE cr.instance_id = $1 AND cr.launch_id = $2 AND cr.container_id = $3 AND cr.tenant_id = $5 \
                AND EXISTS (SELECT 1 FROM instance_launches launch \
-                   WHERE launch.launch_id = cr.launch_id AND launch.instance_id = cr.instance_id \
+                   WHERE launch.tenant_id = cr.tenant_id AND launch.launch_id = cr.launch_id AND launch.instance_id = cr.instance_id \
                      AND launch.state = 'running' AND launch.lease_owner IS NOT NULL \
                      AND launch.lease_expires_at > clock_timestamp()) \
              RETURNING abort_deadline_at",
@@ -185,6 +219,7 @@ impl ContainerRegistry {
         .bind(&handle.launch_id)
         .bind(&handle.handle_id)
         .bind(requested)
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await?)
     }
@@ -193,18 +228,26 @@ impl ContainerRegistry {
     /// Earlier timers satisfy later requests; stale physical handles never do.
     pub async fn abort_is_armed(
         &self,
+        tenant_id: &TenantId,
         handle: &crate::runner::RunnerHandle,
         deadline: DateTime<Utc>,
     ) -> Result<bool> {
+        if handle.tenant_id != tenant_id.as_str() {
+            return Err(crate::error::Error::InstanceNotFound(
+                handle.instance_id.clone(),
+            ));
+        }
+
         Ok(sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM container_registry \
-             WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 \
+             WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 AND tenant_id = $5 \
                AND abort_armed_deadline_at <= $4)",
         )
         .bind(&handle.instance_id)
         .bind(&handle.launch_id)
         .bind(&handle.handle_id)
         .bind(deadline)
+        .bind(tenant_id.as_str())
         .fetch_one(&self.pool)
         .await?)
     }
@@ -214,6 +257,7 @@ impl ContainerRegistry {
     /// after the exact local runner accepted its monotonic timer.
     pub async fn deliver_abort_requests(
         &self,
+        tenant_id: &TenantId,
         owner: &str,
         runner: &dyn crate::runner::Runner,
         limit: usize,
@@ -231,7 +275,7 @@ impl ContainerRegistry {
                  (cr.abort_deadline_at - clock_timestamp())) * 1000000)::bigint AS remaining_us \
              FROM container_registry cr JOIN instance_launches launch \
                ON launch.launch_id = cr.launch_id AND launch.instance_id = cr.instance_id \
-             WHERE launch.lease_owner = $1 AND launch.state = 'running' \
+             WHERE cr.tenant_id = $3 AND launch.tenant_id = cr.tenant_id AND launch.lease_owner = $1 AND launch.state = 'running' \
                AND launch.lease_expires_at > clock_timestamp() \
                AND cr.abort_deadline_at IS NOT NULL \
                AND (cr.abort_armed_deadline_at IS NULL OR cr.abort_armed_deadline_at > cr.abort_deadline_at) \
@@ -239,6 +283,7 @@ impl ContainerRegistry {
         )
         .bind(owner)
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(tenant_id.as_str())
         .fetch_all(&self.pool)
         .await?;
         let mut delivered = 0;
@@ -258,12 +303,13 @@ impl ContainerRegistry {
             if runner.schedule_abort(&handle, deadline).await? {
                 sqlx::query(
                     "UPDATE container_registry SET abort_armed_deadline_at = LEAST(abort_armed_deadline_at, $4) \
-                     WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3",
+                     WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 AND tenant_id = $5",
                 )
                 .bind(&handle.instance_id)
                 .bind(&handle.launch_id)
                 .bind(&handle.handle_id)
                 .bind(request.abort_deadline_at)
+                .bind(tenant_id.as_str())
                 .execute(&self.pool)
                 .await?;
                 delivered += 1;
@@ -283,11 +329,17 @@ impl ContainerRegistry {
     /// alone would throw away the live run's row, so this doubles as an
     /// ownership claim — `false` means a newer run owns the instance and the
     /// caller must leave it alone.
-    pub async fn cleanup_generation(&self, instance_id: &str, launch_id: &str) -> Result<bool> {
+    pub async fn cleanup_generation(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        launch_id: &str,
+    ) -> Result<bool> {
         let result =
-            sqlx::query("DELETE FROM container_registry WHERE instance_id = $1 AND launch_id = $2")
+            sqlx::query("DELETE FROM container_registry WHERE instance_id = $1 AND launch_id = $2 AND tenant_id = $3")
                 .bind(instance_id)
                 .bind(launch_id)
+                .bind(tenant_id.as_str())
                 .execute(&self.pool)
                 .await?;
 
@@ -310,17 +362,19 @@ impl ContainerRegistry {
     /// form before changing paired durable state.
     pub async fn cleanup_handle(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         launch_id: &str,
         container_id: &str,
     ) -> Result<bool> {
         let result = sqlx::query(
             "DELETE FROM container_registry \
-             WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3",
+             WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 AND tenant_id = $4",
         )
         .bind(instance_id)
         .bind(launch_id)
         .bind(container_id)
+        .bind(tenant_id.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -336,9 +390,10 @@ impl ContainerRegistry {
     }
 
     /// Drop a container's registry entry, once it has reached a terminal state.
-    pub async fn cleanup(&self, instance_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM container_registry WHERE instance_id = $1")
+    pub async fn cleanup(&self, tenant_id: &TenantId, instance_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM container_registry WHERE instance_id = $1 AND tenant_id = $2")
             .bind(instance_id)
+            .bind(tenant_id.as_str())
             .execute(&self.pool)
             .await?;
 

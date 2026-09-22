@@ -264,7 +264,10 @@ async fn test_create_and_get_instance() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance should exist");
@@ -295,7 +298,10 @@ async fn test_update_instance_status() {
     update_test_instance_status(tenant_id, &pool, &instance_id, "running", None).await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -313,7 +319,10 @@ async fn test_update_instance_status() {
     .await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -351,7 +360,10 @@ async fn test_update_instance_result() {
     .await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -388,7 +400,10 @@ async fn test_update_instance_result_with_error() {
     .await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -431,12 +446,14 @@ async fn test_list_instances() {
 
     // List all for tenant-a
     let options = ListInstancesOptions {
-        tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         ..Default::default()
     };
     let instances = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new("list-test-tenant-a").unwrap(),
+            &options,
+        )
         .await
         .unwrap()
         .instances;
@@ -444,13 +461,15 @@ async fn test_list_instances() {
 
     // List running for tenant-a
     let options = ListInstancesOptions {
-        tenant_id: Some("list-test-tenant-a".to_string()),
         statuses: Some(vec!["running".to_string()]),
         limit: 100,
         ..Default::default()
     };
     let instances = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new("list-test-tenant-a").unwrap(),
+            &options,
+        )
         .await
         .unwrap()
         .instances;
@@ -462,7 +481,10 @@ async fn test_list_instances() {
         ..Default::default()
     };
     let instances = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new("list-test-tenant-a").unwrap(),
+            &options,
+        )
         .await
         .unwrap()
         .instances;
@@ -472,23 +494,27 @@ async fn test_list_instances() {
     // saturate at `limit` as soon as the shared database holds more than 100
     // instances, and the assertion silently compares 100 against 100 - 1.
     let all_options = ListInstancesOptions {
-        tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         ..Default::default()
     };
     let all = InstanceRepository::new(pool.clone())
-        .list(&all_options)
+        .list(
+            &runtara_core::TenantId::new("list-test-tenant-a").unwrap(),
+            &all_options,
+        )
         .await
         .unwrap()
         .instances;
     let offset_options = ListInstancesOptions {
-        tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         offset: 1,
         ..Default::default()
     };
     let with_offset = InstanceRepository::new(pool.clone())
-        .list(&offset_options)
+        .list(
+            &runtara_core::TenantId::new("list-test-tenant-a").unwrap(),
+            &offset_options,
+        )
         .await
         .unwrap()
         .instances;
@@ -589,7 +615,10 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
             .expect("Instance should exist")
             .status;
         healthy_queued = launches
-            .get_active_for_instance(&healthy_id)
+            .get_active_for_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &healthy_id,
+            )
             .await
             .expect("active launch query must succeed")
             .is_some_and(|launch| {
@@ -793,12 +822,18 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
     let launches = LaunchRepository::new(pool.clone());
     assert!(
         launches
-            .get_active_for_instance(&first_id)
+            .get_active_for_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &first_id
+            )
             .await
             .unwrap()
             .is_none()
             && launches
-                .get_active_for_instance(&second_id)
+                .get_active_for_instance(
+                    &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                    &second_id
+                )
                 .await
                 .unwrap()
                 .is_none(),
@@ -855,7 +890,10 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
     for id in &ids {
         assert!(
             launches
-                .get_active_for_instance(id)
+                .get_active_for_instance(
+                    &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                    id
+                )
                 .await
                 .unwrap()
                 .is_some_and(

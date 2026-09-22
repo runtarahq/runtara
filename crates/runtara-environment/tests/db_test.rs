@@ -221,7 +221,10 @@ async fn test_create_and_get_instance() {
 
     // Get instance (use get_instance_full to also get image_id)
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -265,7 +268,10 @@ async fn test_update_instance_status() {
     update_test_instance_status(tenant_id, &pool, &instance_id, "running", None).await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -284,7 +290,10 @@ async fn test_update_instance_status() {
     .await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -338,7 +347,10 @@ async fn test_update_instance_result() {
     .await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -391,7 +403,10 @@ async fn test_update_instance_result_with_error() {
     .await;
 
     let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+        .detail(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -441,12 +456,14 @@ async fn test_list_instances() {
 
     // List all
     let options = ListInstancesOptions {
-        tenant_id: Some(tenant_id.to_string()),
         limit: 100,
         ..Default::default()
     };
     let instances = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &options,
+        )
         .await
         .expect("Failed to list instances")
         .instances;
@@ -455,13 +472,15 @@ async fn test_list_instances() {
 
     // List by status
     let options = ListInstancesOptions {
-        tenant_id: Some(tenant_id.to_string()),
         statuses: Some(vec!["completed".to_string()]),
         limit: 100,
         ..Default::default()
     };
     let completed = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &options,
+        )
         .await
         .expect("Failed to list instances")
         .instances;
@@ -510,14 +529,16 @@ async fn test_list_instances_by_multiple_statuses() {
     update_test_instance_status(tenant_id, &pool, &ids[2], "completed", None).await;
 
     let options = ListInstancesOptions {
-        tenant_id: Some(tenant_id.to_string()),
         statuses: Some(vec!["failed".to_string(), "cancelled".to_string()]),
         limit: 100,
         ..Default::default()
     };
 
     let matched = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &options,
+        )
         .await
         .expect("Failed to list instances")
         .instances;
@@ -530,7 +551,10 @@ async fn test_list_instances_by_multiple_statuses() {
 
     // The count drives totalElements, so it has to agree with the page.
     let count = InstanceRepository::new(pool.clone())
-        .list(&options)
+        .list(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &options,
+        )
         .await
         .expect("Failed to count instances")
         .total_count;
@@ -538,14 +562,16 @@ async fn test_list_instances_by_multiple_statuses() {
 
     // An empty list means "no status filter", not "match nothing".
     let unfiltered = ListInstancesOptions {
-        tenant_id: Some(tenant_id.to_string()),
         statuses: Some(Vec::new()),
         limit: 100,
         ..Default::default()
     };
     assert_eq!(
         InstanceRepository::new(pool.clone())
-            .list(&unfiltered)
+            .list(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &unfiltered
+            )
             .await
             .expect("Failed to count instances")
             .total_count,
@@ -594,7 +620,10 @@ async fn test_create_instance_with_env() {
 
     // Retrieve and verify env vars
     let result = InstanceRepository::new(pool.clone())
-        .image_binding(&instance_id)
+        .image_binding(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance env");
 
@@ -641,7 +670,10 @@ async fn test_create_instance_without_env() {
 
     // Retrieve and verify empty env
     let result = InstanceRepository::new(pool.clone())
-        .image_binding(&instance_id)
+        .image_binding(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance env");
 
@@ -674,7 +706,10 @@ async fn test_get_instance_image_with_env_not_found() {
     let pool = get_pool().await.expect("Failed to connect to database");
 
     let result = InstanceRepository::new(pool.clone())
-        .image_binding("nonexistent-instance")
+        .image_binding(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            "nonexistent-instance",
+        )
         .await
         .expect("Query should succeed");
 
@@ -707,7 +742,10 @@ async fn test_instance_timeout_seconds_round_trips() {
     seed_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800)).await;
 
     let timeout = InstanceRepository::new(pool.clone())
-        .image_binding(&instance_id)
+        .image_binding(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Query should succeed")
         .and_then(|binding| binding.timeout_seconds);
@@ -743,7 +781,10 @@ async fn test_instance_timeout_seconds_absent_is_none() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     let timeout = InstanceRepository::new(pool.clone())
-        .image_binding(&instance_id)
+        .image_binding(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Query should succeed")
         .and_then(|binding| binding.timeout_seconds);
@@ -751,7 +792,10 @@ async fn test_instance_timeout_seconds_absent_is_none() {
 
     // A nonexistent instance is also None (no row).
     let missing = InstanceRepository::new(pool.clone())
-        .image_binding("nonexistent-instance")
+        .image_binding(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            "nonexistent-instance",
+        )
         .await
         .expect("Query should succeed");
     assert!(missing.is_none());

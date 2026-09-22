@@ -10,6 +10,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Utc};
+use runtara_core::TenantId;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
@@ -509,7 +510,7 @@ impl LaunchRepository {
     /// [`LAUNCH_QUEUE_TIMEOUT`] — reported apart from arbitrary failures.
     pub async fn stage_telemetry(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
     ) -> Result<Vec<LaunchStageCount>, LaunchQueueError> {
         let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let reported_states =
@@ -557,7 +558,7 @@ impl LaunchRepository {
             "#
         );
         Ok(sqlx::query_as::<_, LaunchStageCount>(&query)
-            .bind(tenant_id)
+            .bind(tenant_id.as_str())
             .fetch_all(&self.pool)
             .await?)
     }
@@ -571,7 +572,7 @@ impl LaunchRepository {
     /// many published workflows must not widen every sample without limit.
     pub async fn workflow_telemetry(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         per_stage: i64,
     ) -> Result<Vec<LaunchWorkflowCount>, LaunchQueueError> {
         let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
@@ -617,7 +618,7 @@ impl LaunchRepository {
                         )
                     END AS oldest_age_ms
                 FROM relevant
-                JOIN images ON images.image_id = relevant.image_id
+                JOIN images ON images.image_id = relevant.image_id AND images.tenant_id = $1
                 GROUP BY relevant.stage, workflow_id
             ), ranked AS (
                 SELECT
@@ -638,17 +639,24 @@ impl LaunchRepository {
             "#
         );
         Ok(sqlx::query_as::<_, LaunchWorkflowCount>(&query)
-            .bind(tenant_id)
+            .bind(tenant_id.as_str())
             .bind(per_stage)
             .fetch_all(&self.pool)
             .await?)
     }
 
     /// Read one durable generation by its idempotency key.
-    pub async fn get(&self, launch_id: &str) -> Result<Option<Launch>, LaunchQueueError> {
-        let query = format!("SELECT {LAUNCH_COLUMNS} FROM instance_launches WHERE launch_id = $1");
+    pub async fn get(
+        &self,
+        tenant_id: &TenantId,
+        launch_id: &str,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let query = format!(
+            "SELECT {LAUNCH_COLUMNS} FROM instance_launches WHERE tenant_id = $2 AND launch_id = $1"
+        );
         sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -665,8 +673,15 @@ impl LaunchRepository {
     /// queue is meant to remove.
     pub async fn claim_initial(
         &self,
+        tenant_id: &TenantId,
         request: InitialLaunchRequest,
     ) -> Result<InitialLaunchOutcome, LaunchQueueError> {
+        if request.launch.tenant_id != tenant_id.as_str() {
+            return Err(LaunchQueueError::InvalidLaunchTarget {
+                launch_id: request.launch.launch_id.clone(),
+            });
+        }
+
         if request.launch.kind != LaunchKind::Start {
             return Err(LaunchQueueError::InitialLaunchRequiresStart);
         }
@@ -683,7 +698,7 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE instance_id = $1
+            WHERE instance_id = $1 AND tenant_id = $2
               AND state IN ({active_states})
             LIMIT 1
             "#
@@ -721,8 +736,19 @@ impl LaunchRepository {
         .await?;
 
         if claimed.is_none() {
+            let owned: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM instances WHERE instance_id = $1 AND tenant_id = $2)",
+            )
+            .bind(&request.launch.instance_id)
+            .bind(tenant_id.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+            if !owned {
+                return Ok(InitialLaunchOutcome::ExistingInstance);
+            }
             let existing = sqlx::query_as::<_, LaunchRow>(&active)
                 .bind(&request.launch.instance_id)
+                .bind(tenant_id.as_str())
                 .fetch_optional(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -770,6 +796,7 @@ impl LaunchRepository {
             SELECT $1, image_id, $3, $4, $5, NOW()
             FROM images
             WHERE image_id = $2 AND tenant_id = $3
+            FOR SHARE
             RETURNING instance_id
             "#,
         )
@@ -816,8 +843,15 @@ impl LaunchRepository {
     /// observed.
     pub async fn enqueue(
         &self,
+        tenant_id: &TenantId,
         request: EnqueueRequest,
     ) -> Result<EnqueueOutcome, LaunchQueueError> {
+        if request.tenant_id != tenant_id.as_str() {
+            return Err(LaunchQueueError::InvalidLaunchTarget {
+                launch_id: request.launch_id.clone(),
+            });
+        }
+
         let available_after_us = duration_to_micros(request.available_after, "available_after")?;
         let queue_timeout_us = duration_to_micros(request.queue_timeout, "queue_timeout")?;
         let insert = format!(
@@ -842,14 +876,14 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE instance_id = $1
+            WHERE instance_id = $1 AND tenant_id = $2
               AND state IN ({active_states})
             LIMIT 1
             "#
         );
 
         for _ in 0..3 {
-            if let Some(existing) = self.get(&request.launch_id).await? {
+            if let Some(existing) = self.get(tenant_id, &request.launch_id).await? {
                 return Ok(EnqueueOutcome::Existing(existing));
             }
 
@@ -858,15 +892,16 @@ impl LaunchRepository {
                 r#"
                 SELECT tenant_id, status::TEXT
                 FROM instances
-                WHERE instance_id = $1
+                WHERE instance_id = $1 AND tenant_id = $2
                 FOR UPDATE
                 "#,
             )
             .bind(&request.instance_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
 
-            let Some((tenant_id, status)) = target else {
+            let Some((stored_tenant_id, status)) = target else {
                 return Err(LaunchQueueError::InvalidLaunchTarget {
                     launch_id: request.launch_id.clone(),
                 });
@@ -874,6 +909,7 @@ impl LaunchRepository {
 
             if let Some(existing) = sqlx::query_as::<_, LaunchRow>(&active)
                 .bind(&request.instance_id)
+                .bind(tenant_id.as_str())
                 .fetch_optional(&mut *tx)
                 .await?
             {
@@ -903,7 +939,8 @@ impl LaunchRepository {
             .bind(&request.tenant_id)
             .fetch_one(&mut *tx)
             .await?;
-            if tenant_id != request.tenant_id || status != expected_status || !image_is_bound {
+            if stored_tenant_id != request.tenant_id || status != expected_status || !image_is_bound
+            {
                 return Err(LaunchQueueError::InvalidLaunchTarget {
                     launch_id: request.launch_id.clone(),
                 });
@@ -917,13 +954,14 @@ impl LaunchRepository {
                 r#"
                 SELECT workflow_id, single_instance
                 FROM instance_launches
-                WHERE instance_id = $1
+                WHERE instance_id = $1 AND tenant_id = $2
                   AND workflow_id IS NOT NULL
                 ORDER BY created_at DESC, launch_id DESC
                 LIMIT 1
                 "#,
             )
             .bind(&request.instance_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?
             .map(WorkflowLaunchScope::try_from)
@@ -975,9 +1013,10 @@ impl LaunchRepository {
                             runtara_core::domain::WakeReason::ManualResume,
                         ),
                     );
-                    sqlx::query("UPDATE instances SET wake_reason = COALESCE($2, wake_reason), sleep_until = NULL WHERE instance_id = $1")
+                    sqlx::query("UPDATE instances SET wake_reason = COALESCE($2, wake_reason), sleep_until = NULL WHERE instance_id = $1 AND tenant_id = $3")
                         .bind(&request.instance_id)
                         .bind(reason)
+                        .bind(tenant_id.as_str())
                         .execute(&mut *tx)
                         .await?;
                 }
@@ -987,6 +1026,7 @@ impl LaunchRepository {
 
             if let Some(existing) = sqlx::query_as::<_, LaunchRow>(&active)
                 .bind(&request.instance_id)
+                .bind(tenant_id.as_str())
                 .fetch_optional(&mut *tx)
                 .await?
             {
@@ -1008,6 +1048,7 @@ impl LaunchRepository {
     /// unambiguous.
     pub async fn get_active_for_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
@@ -1015,13 +1056,14 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE instance_id = $1
+            WHERE tenant_id = $2 AND instance_id = $1
               AND state IN ({active_states})
             LIMIT 1
             "#
         );
         sqlx::query_as::<_, LaunchRow>(&query)
             .bind(instance_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -1039,22 +1081,26 @@ impl LaunchRepository {
     /// legitimately remains `suspended` until the start gate opens.
     pub async fn reconcile_released_instances(
         &self,
+        tenant_id: &TenantId,
         limit: usize,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
-        self.reconcile_released(limit, None).await
+        self.reconcile_released(tenant_id, limit, None).await
     }
 
     /// Release a finished generation before an explicit resume can mistake it
     /// for an already queued relaunch. Starting/queued generations stay active.
     pub async fn reconcile_released_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
-        self.reconcile_released(1, Some(instance_id)).await
+        self.reconcile_released(tenant_id, 1, Some(instance_id))
+            .await
     }
 
     async fn reconcile_released(
         &self,
+        tenant_id: &TenantId,
         limit: usize,
         instance_id: Option<&str>,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
@@ -1071,7 +1117,7 @@ impl LaunchRepository {
                 JOIN instances AS core_instance
                   ON core_instance.instance_id = launch.instance_id
                  AND core_instance.tenant_id = launch.tenant_id
-                WHERE ($2::TEXT IS NULL OR launch.instance_id = $2)
+                WHERE launch.tenant_id = $3 AND ($2::TEXT IS NULL OR launch.instance_id = $2)
                   AND launch.state IN ({active_states})
                   AND (
                         core_instance.status IN ('completed', 'failed', 'cancelled')
@@ -1104,6 +1150,7 @@ impl LaunchRepository {
             sqlx::query_as::<_, LaunchRow>(&query)
                 .bind(limit)
                 .bind(instance_id)
+                .bind(tenant_id.as_str())
                 .fetch_all(&self.pool)
                 .await?,
         )
@@ -1116,6 +1163,7 @@ impl LaunchRepository {
     /// change which deadline has passed.
     pub async fn claim_ready(
         &self,
+        tenant_id: &TenantId,
         lease_owner: &str,
         lease_for: Duration,
         limit: usize,
@@ -1133,7 +1181,7 @@ impl LaunchRepository {
             WITH claimable AS (
                 SELECT launch_id
                 FROM instance_launches
-                WHERE state = 'queued'
+                WHERE tenant_id = $4 AND state = 'queued'
                   AND available_at <= NOW()
                   AND deadline_at > NOW()
                 ORDER BY available_at, created_at, launch_id
@@ -1156,6 +1204,7 @@ impl LaunchRepository {
                 .bind(lease_owner)
                 .bind(lease_us)
                 .bind(limit)
+                .bind(tenant_id.as_str())
                 .fetch_all(&self.pool)
                 .await?,
         )
@@ -1170,6 +1219,7 @@ impl LaunchRepository {
     /// uses `SKIP LOCKED` across dispatcher processes.
     pub async fn claim_ready_for_preparation(
         &self,
+        tenant_id: &TenantId,
         lease_owner: &str,
         lease_for: Duration,
         limit: usize,
@@ -1187,7 +1237,7 @@ impl LaunchRepository {
             WITH claimable AS (
                 SELECT launch_id
                 FROM instance_launches
-                WHERE state = 'queued'
+                WHERE tenant_id = $4 AND state = 'queued'
                   AND available_at <= NOW()
                   AND deadline_at > NOW()
                 ORDER BY available_at, created_at, launch_id
@@ -1210,6 +1260,7 @@ impl LaunchRepository {
                 .bind(lease_owner)
                 .bind(lease_us)
                 .bind(limit)
+                .bind(tenant_id.as_str())
                 .fetch_all(&self.pool)
                 .await?,
         )
@@ -1224,6 +1275,7 @@ impl LaunchRepository {
     /// this owner and lease.
     pub async fn recover_expired_preparations(
         &self,
+        tenant_id: &TenantId,
         retry_after: Duration,
         limit: usize,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
@@ -1237,7 +1289,7 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE state = 'preparing'
+            WHERE tenant_id = $2 AND state = 'preparing'
               AND lease_expires_at <= clock_timestamp()
               AND deadline_at > clock_timestamp()
             ORDER BY lease_expires_at, created_at, launch_id
@@ -1247,6 +1299,7 @@ impl LaunchRepository {
         );
         let expired = sqlx::query_as::<_, LaunchRow>(&select)
             .bind(limit)
+            .bind(tenant_id.as_str())
             .fetch_all(&mut *tx)
             .await?;
         if expired.is_empty() {
@@ -1265,7 +1318,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 last_error = $3,
                 updated_at = NOW()
-            WHERE launch_id = ANY($1)
+            WHERE tenant_id = $4 AND launch_id = ANY($1)
               AND state = 'preparing'
             RETURNING {LAUNCH_COLUMNS}
             "#
@@ -1274,6 +1327,7 @@ impl LaunchRepository {
             .bind(&ids)
             .bind(retry_after_us)
             .bind(PREPARATION_TIMEOUT)
+            .bind(tenant_id.as_str())
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -1290,6 +1344,7 @@ impl LaunchRepository {
     /// it prevents a late compiler from promoting a newer same-owner claim.
     pub async fn promote_prepared(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         lease_owner: &str,
         preparation_attempt: i32,
@@ -1306,7 +1361,7 @@ impl LaunchRepository {
                 lease_expires_at = NOW() + ($4 * INTERVAL '1 microsecond'),
                 last_error = NULL,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $5 AND launch_id = $1
               AND state = 'preparing'
               AND lease_owner = $2
               AND attempt_count = $3
@@ -1320,6 +1375,7 @@ impl LaunchRepository {
             .bind(lease_owner)
             .bind(preparation_attempt)
             .bind(handoff_lease_us)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -1335,6 +1391,7 @@ impl LaunchRepository {
     /// `starting` row, whose guest may already be executing.
     pub async fn recover_expired_leases(
         &self,
+        tenant_id: &TenantId,
         limit: usize,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
         if limit == 0 {
@@ -1346,7 +1403,7 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE (
+            WHERE tenant_id = $2 AND (
                     state = 'leased'
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                 )
@@ -1359,6 +1416,7 @@ impl LaunchRepository {
         );
         let leased = sqlx::query_as::<_, LaunchRow>(&select)
             .bind(limit)
+            .bind(tenant_id.as_str())
             .fetch_all(&mut *tx)
             .await?;
         if leased.is_empty() {
@@ -1376,7 +1434,7 @@ impl LaunchRepository {
                 lease_expires_at = NULL,
                 start_gate_deadline_at = NULL,
                 updated_at = NOW()
-            WHERE launch_id = ANY($1)
+            WHERE tenant_id = $2 AND launch_id = ANY($1)
               AND (
                     state = 'leased'
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
@@ -1386,6 +1444,7 @@ impl LaunchRepository {
         );
         let recovered = sqlx::query_as::<_, LaunchRow>(&update)
             .bind(&ids)
+            .bind(tenant_id.as_str())
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -1402,6 +1461,7 @@ impl LaunchRepository {
     /// re-claimed generation.
     pub async fn begin_start(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         lease_owner: &str,
         attempt_count: i32,
@@ -1415,7 +1475,7 @@ impl LaunchRepository {
                 -- reclaimed or terminalized while it remains unconfirmed.
                 start_gate_deadline_at = lease_expires_at,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $4 AND launch_id = $1
               AND state = 'leased'
               AND lease_owner = $2
               AND attempt_count = $3
@@ -1428,6 +1488,7 @@ impl LaunchRepository {
             .bind(launch_id)
             .bind(lease_owner)
             .bind(attempt_count)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -1443,6 +1504,7 @@ impl LaunchRepository {
     /// observe execution while either side still says `pending`/`suspended`.
     pub async fn mark_running(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         lease_owner: &str,
         attempt_count: i32,
@@ -1453,7 +1515,7 @@ impl LaunchRepository {
             UPDATE instance_launches
             SET state = 'running',
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $4 AND launch_id = $1
               AND state = 'starting'
               AND lease_owner = $2
               AND attempt_count = $3
@@ -1466,6 +1528,7 @@ impl LaunchRepository {
             .bind(launch_id)
             .bind(lease_owner)
             .bind(attempt_count)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
         let Some(running) = running else {
@@ -1493,7 +1556,7 @@ impl LaunchRepository {
                 finished_at = NULL,
                 sleep_until = NULL,
                 termination_reason = NULL
-            WHERE instance_id = $1
+            WHERE tenant_id = $4 AND instance_id = $1
               AND tenant_id = $2
               AND status = $3::instance_status
             "#,
@@ -1501,6 +1564,7 @@ impl LaunchRepository {
         .bind(&running.instance_id)
         .bind(&running.tenant_id)
         .bind(expected_status)
+        .bind(tenant_id.as_str())
         .execute(&mut *tx)
         .await?;
         if promoted.rows_affected() != 1 {
@@ -1518,6 +1582,7 @@ impl LaunchRepository {
     /// revive its right to execute, even if this query waited on a row lock.
     pub async fn renew_running_lease(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         owner: &str,
         attempt_count: i32,
@@ -1528,7 +1593,7 @@ impl LaunchRepository {
         let result = sqlx::query(
             r#"
             WITH locked(launch_id) AS MATERIALIZED (
-                SELECT launch_id FROM instance_launches WHERE launch_id = $1 FOR UPDATE
+                SELECT launch_id FROM instance_launches WHERE tenant_id = $6 AND launch_id = $1 FOR UPDATE
             ), checked(launch_id, checked_at) AS MATERIALIZED (
                 SELECT launch_id, clock_timestamp() FROM locked
             )
@@ -1543,7 +1608,7 @@ impl LaunchRepository {
               AND launch.lease_expires_at > checked.checked_at
               AND EXISTS (
                   SELECT 1 FROM container_registry cr
-                  WHERE cr.instance_id = launch.instance_id
+                  WHERE cr.tenant_id = launch.tenant_id AND cr.instance_id = launch.instance_id
                     AND cr.launch_id = launch.launch_id AND cr.container_id = $4
               )
             "#,
@@ -1553,6 +1618,7 @@ impl LaunchRepository {
         .bind(attempt_count)
         .bind(handle_id)
         .bind(duration_us)
+        .bind(tenant_id.as_str())
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -1568,6 +1634,7 @@ impl LaunchRepository {
     /// host's immediate pre-instantiation boundary.
     pub async fn confirm_gate_open(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         attempt_count: i32,
     ) -> Result<Option<Launch>, LaunchQueueError> {
@@ -1583,7 +1650,7 @@ impl LaunchRepository {
             WITH locked(locked_launch_id) AS MATERIALIZED (
                 SELECT locked_source.launch_id
                 FROM instance_launches AS locked_source
-                WHERE locked_source.launch_id = $1
+                WHERE locked_source.launch_id = $1 AND locked_source.tenant_id = $3
                 FOR UPDATE
             ), checked(locked_launch_id, checked_at) AS MATERIALIZED (
                 SELECT locked.locked_launch_id, clock_timestamp()
@@ -1604,6 +1671,7 @@ impl LaunchRepository {
         sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
             .bind(attempt_count)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -1619,6 +1687,7 @@ impl LaunchRepository {
     /// guest code with a cleared marker.
     pub async fn is_gate_confirmed(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         attempt_count: i32,
     ) -> Result<bool, LaunchQueueError> {
@@ -1628,11 +1697,12 @@ impl LaunchRepository {
                AND attempt_count = $2
                AND start_gate_deadline_at IS NULL
             FROM instance_launches
-            WHERE launch_id = $1
+            WHERE tenant_id = $3 AND launch_id = $1
             "#,
         )
         .bind(launch_id)
         .bind(attempt_count)
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await?;
         Ok(confirmed.unwrap_or(false))
@@ -1648,6 +1718,7 @@ impl LaunchRepository {
     /// durable.
     pub async fn fail_unconfirmed_running(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         attempt_count: i32,
         error: &str,
@@ -1662,7 +1733,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 last_error = $3,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $4 AND launch_id = $1
               AND state = 'running'
               AND attempt_count = $2
               AND start_gate_deadline_at IS NOT NULL
@@ -1673,6 +1744,7 @@ impl LaunchRepository {
             .bind(launch_id)
             .bind(attempt_count)
             .bind(error)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
         let Some(failed) = failed else {
@@ -1688,12 +1760,13 @@ impl LaunchRepository {
                 sleep_until = NULL,
                 termination_reason = 'start_gate_failed',
                 error = $2
-            WHERE instance_id = $1
+            WHERE tenant_id = $3 AND instance_id = $1
               AND status = 'running'
             "#,
         )
         .bind(&failed.instance_id)
         .bind(error)
+        .bind(tenant_id.as_str())
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
@@ -1715,6 +1788,7 @@ impl LaunchRepository {
     /// monitor result has won the race.
     pub async fn requeue_owned(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         lease_owner: &str,
         attempt_count: i32,
@@ -1733,7 +1807,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 last_error = $5,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $6 AND launch_id = $1
               AND lease_owner = $2
               AND attempt_count = $3
               AND state IN ({claimed_states})
@@ -1748,6 +1822,7 @@ impl LaunchRepository {
             .bind(attempt_count)
             .bind(retry_after_us)
             .bind(last_error)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -1762,6 +1837,7 @@ impl LaunchRepository {
     /// `suspended` instance behind once its launch has been terminalized.
     pub async fn fail_before_runner(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         lease_owner: &str,
         attempt_count: i32,
@@ -1778,7 +1854,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 last_error = $4,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $5 AND launch_id = $1
               AND lease_owner = $2
               AND attempt_count = $3
               AND state IN ({claimed_states})
@@ -1792,6 +1868,7 @@ impl LaunchRepository {
             .bind(lease_owner)
             .bind(attempt_count)
             .bind(error)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
         let Some(failed) = failed else {
@@ -1807,12 +1884,13 @@ impl LaunchRepository {
                 sleep_until = NULL,
                 termination_reason = 'crashed',
                 error = $2
-            WHERE instance_id = $1
+            WHERE tenant_id = $3 AND instance_id = $1
               AND status IN ('pending', 'suspended')
             "#,
         )
         .bind(&failed.instance_id)
         .bind(error)
+        .bind(tenant_id.as_str())
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
@@ -1831,6 +1909,7 @@ impl LaunchRepository {
     /// allowing a subsequent manual resume or wake to enqueue a new generation.
     pub async fn mark_suspended(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
@@ -1843,13 +1922,14 @@ impl LaunchRepository {
                 lease_expires_at = NULL,
                 start_gate_deadline_at = NULL,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $2 AND launch_id = $1
               AND state IN ({live_states})
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
         let suspended = sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
         let Some(suspended) = suspended else {
@@ -1862,11 +1942,12 @@ impl LaunchRepository {
             UPDATE instances
             SET status = 'suspended',
                 finished_at = NULL
-            WHERE instance_id = $1
+            WHERE tenant_id = $2 AND instance_id = $1
               AND status IN ('running', 'suspended')
             "#,
         )
         .bind(&suspended.instance_id)
+        .bind(tenant_id.as_str())
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
@@ -1882,6 +1963,7 @@ impl LaunchRepository {
     /// Mark an active generation terminal after runner ownership has stopped.
     pub async fn mark_terminal(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
         state: LaunchState,
         last_error: Option<&str>,
@@ -1902,7 +1984,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 last_error = $3,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $4 AND launch_id = $1
               AND state IN ({active_states})
             RETURNING {LAUNCH_COLUMNS}
             "#
@@ -1911,6 +1993,7 @@ impl LaunchRepository {
             .bind(launch_id)
             .bind(state.as_str())
             .bind(last_error)
+            .bind(tenant_id.as_str())
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -1924,7 +2007,11 @@ impl LaunchRepository {
     /// immediately releasing their existing pending admission occupancy.  The
     /// later durable-admission layer may add its own reservation release to
     /// this transaction without changing the launch race semantics.
-    pub async fn expire_due(&self, limit: usize) -> Result<Vec<Launch>, LaunchQueueError> {
+    pub async fn expire_due(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1935,7 +2022,7 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE (
+            WHERE tenant_id = $2 AND ((
                     state IN ({pre_runner_states})
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                 )
@@ -1948,6 +2035,7 @@ impl LaunchRepository {
                         OR deadline_at <= clock_timestamp()
                     )
                 )
+            )
             ORDER BY deadline_at, created_at, launch_id
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -1955,6 +2043,7 @@ impl LaunchRepository {
         );
         let due = sqlx::query_as::<_, LaunchRow>(&select)
             .bind(limit)
+            .bind(tenant_id.as_str())
             .fetch_all(&mut *tx)
             .await?;
         if due.is_empty() {
@@ -1974,7 +2063,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 last_error = $2,
                 updated_at = NOW()
-            WHERE launch_id = ANY($1)
+            WHERE tenant_id = $3 AND launch_id = ANY($1)
               AND (
                     (
                         state IN ({pre_runner_states})
@@ -1996,6 +2085,7 @@ impl LaunchRepository {
         let expired = sqlx::query_as::<_, LaunchRow>(&update_launches)
             .bind(&launch_ids)
             .bind(LAUNCH_QUEUE_TIMEOUT)
+            .bind(tenant_id.as_str())
             .fetch_all(&mut *tx)
             .await?;
         if expired.len() != due.len() {
@@ -2012,13 +2102,14 @@ impl LaunchRepository {
                 sleep_until = NULL,
                 termination_reason = 'launch_queue_timeout',
                 error = $2
-            WHERE instance_id = ANY($1)
+            WHERE tenant_id = $3 AND instance_id = ANY($1)
               AND status IN ('pending', 'suspended', 'running')
             RETURNING instance_id
             "#,
         )
         .bind(&instance_ids)
         .bind(LAUNCH_QUEUE_TIMEOUT)
+        .bind(tenant_id.as_str())
         .fetch_all(&mut *tx)
         .await?;
         if terminalized.len() != instance_ids.len() {
@@ -2040,6 +2131,7 @@ impl LaunchRepository {
     /// generation-specific runner cancellation owns the outcome instead.
     pub async fn cancel_before_start(
         &self,
+        tenant_id: &TenantId,
         launch_id: &str,
     ) -> Result<CancelOutcome, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
@@ -2053,7 +2145,7 @@ impl LaunchRepository {
                 lease_expires_at = NULL,
                 start_gate_deadline_at = NULL,
                 updated_at = NOW()
-            WHERE launch_id = $1
+            WHERE tenant_id = $2 AND launch_id = $1
               AND (
                     state IN ({pre_runner_states})
                     OR (state IN ({live_states}) AND start_gate_deadline_at IS NOT NULL)
@@ -2063,6 +2155,7 @@ impl LaunchRepository {
         );
         let cancelled = sqlx::query_as::<_, LaunchRow>(&update)
             .bind(launch_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
 
@@ -2074,11 +2167,12 @@ impl LaunchRepository {
                     finished_at = NOW(),
                     sleep_until = NULL,
                     termination_reason = 'cancelled'
-                WHERE instance_id = $1
+                WHERE tenant_id = $2 AND instance_id = $1
                   AND status IN ('pending', 'suspended', 'running')
                 "#,
             )
             .bind(&cancelled.instance_id)
+            .bind(tenant_id.as_str())
             .execute(&mut *tx)
             .await?;
             if updated.rows_affected() != 1 {
@@ -2090,9 +2184,12 @@ impl LaunchRepository {
             return Ok(CancelOutcome::Cancelled(cancelled.try_into()?));
         }
 
-        let query = format!("SELECT {LAUNCH_COLUMNS} FROM instance_launches WHERE launch_id = $1");
+        let query = format!(
+            "SELECT {LAUNCH_COLUMNS} FROM instance_launches WHERE tenant_id = $2 AND launch_id = $1"
+        );
         let existing = sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
+            .bind(tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await?;
         tx.commit().await?;

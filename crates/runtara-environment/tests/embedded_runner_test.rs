@@ -11,6 +11,8 @@
 //! Cargo.toml. These are `multi_thread` and not serialised, so every instance id
 //! is minted fresh — the database is shared with the rest of the suite.
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,8 +134,11 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
         .await
         .unwrap();
     let registry = ContainerRegistry::new(h.pool.clone());
-    registry
-        .register(&ContainerInfo {
+    common::register_container_fixture(
+        &h.pool,
+        &registry,
+        &runtara_core::TenantId::new("embedded-test").unwrap(),
+        &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
             instance_id: inst_id.clone(),
@@ -141,24 +146,15 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
             binary_path: wasm.to_string_lossy().into_owned(),
             started_at: handle.started_at,
             timeout_seconds: Some(30),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     let peer_delivery = if peer {
         // Seed the existing running launch claim. The fixture's peer shares
         // persistence but has no access to the owner's native task registry.
-        let image_id = unique("remote-abort-image");
-        sqlx::query(
-            "INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $2, $1, $3)",
-        )
-        .bind(&image_id)
-        .bind(&handle.tenant_id)
-        .bind(wasm.to_string_lossy().as_ref())
-        .execute(&h.pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, state, deadline_at, lease_owner, lease_expires_at, attempt_count) VALUES ($1, $2, $3, $4, 'start', 'running', NOW() + INTERVAL '60 seconds', 'spinning-owner', NOW() + INTERVAL '60 seconds', 1)")
-            .bind(&handle.launch_id).bind(&inst_id).bind(&handle.tenant_id).bind(image_id)
+        sqlx::query("UPDATE instance_launches SET lease_owner = 'spinning-owner', lease_expires_at = NOW() + INTERVAL '60 seconds', attempt_count = 1 WHERE tenant_id = $1 AND launch_id = $2")
+            .bind(&handle.tenant_id).bind(&handle.launch_id)
             .execute(&h.pool).await.unwrap();
         let pool = h.pool.clone();
         let runner = h.runner.clone();
@@ -167,7 +163,12 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
             while runner.is_running(&physical).await {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 ContainerRegistry::new(pool.clone())
-                    .deliver_abort_requests("spinning-owner", runner.as_ref(), 32)
+                    .deliver_abort_requests(
+                        &runtara_core::TenantId::new("embedded-test").unwrap(),
+                        "spinning-owner",
+                        runner.as_ref(),
+                        32,
+                    )
                     .await
                     .unwrap();
             }
@@ -191,7 +192,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     assert_eq!(
         h.persistence
             .get_instance_meta(
-                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &runtara_core::TenantId::new("embedded-test").unwrap(),
                 &inst_id
             )
             .await
@@ -203,7 +204,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     let before = tokio::time::Instant::now();
     let response = handle_stop_instance(
         &state,
-        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &runtara_core::TenantId::new("embedded-test").unwrap(),
         StopInstanceRequest {
             instance_id: inst_id.clone(),
             reason: "clicked Cancel".into(),
@@ -221,7 +222,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
         assert_eq!(
             h.persistence
                 .get_instance_meta(
-                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &runtara_core::TenantId::new("embedded-test").unwrap(),
                     &inst_id
                 )
                 .await
@@ -230,12 +231,21 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
                 .status,
             InstanceStatus::Running
         );
-        assert!(registry.get(&inst_id).await.unwrap().is_some());
+        assert!(
+            registry
+                .get(
+                    &runtara_core::TenantId::new("embedded-test").unwrap(),
+                    &inst_id
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
         // A repeated request cannot keep an uncooperative run alive by
         // extending an already accepted cancellation grace period.
         let response = handle_stop_instance(
             &state,
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             StopInstanceRequest {
                 instance_id: inst_id.clone(),
                 reason: "Cancel again".into(),
@@ -268,7 +278,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     let instance = h
         .persistence
         .get_instance(
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             &inst_id,
         )
         .await
@@ -279,7 +289,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     let command = h
         .persistence
         .get_pending_signal(
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             &inst_id,
         )
         .await
@@ -384,8 +394,11 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
         .await
         .unwrap();
     let registry = ContainerRegistry::new(h.pool.clone());
-    registry
-        .register(&ContainerInfo {
+    common::register_container_fixture(
+        &h.pool,
+        &registry,
+        &runtara_core::TenantId::new("embedded-test").unwrap(),
+        &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
             instance_id: id.clone(),
@@ -393,9 +406,10 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
             binary_path: wasm.to_string_lossy().into_owned(),
             started_at: handle.started_at,
             timeout_seconds: Some(30),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
     // Exhaust only the monitor's private pool. Runner/Core work retains its
     // independent pool, so this specifically blocks renewal, not guest start.
     let blocked_pool = sqlx::postgres::PgPoolOptions::new()
@@ -433,13 +447,18 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
     assert_eq!(h.runner.occupancy().unwrap().held, 0);
     assert!(
         h.persistence
-            .get_pending_signal(&runtara_core::TenantId::new("test-tenant").unwrap(), &id)
+            .get_pending_signal(&runtara_core::TenantId::new("embedded-test").unwrap(), &id)
             .await
             .unwrap()
             .is_none()
     );
     tokio::time::timeout(Duration::from_secs(3), async {
-        while registry.get(&id).await.unwrap().is_some() {
+        while registry
+            .get(&runtara_core::TenantId::new("embedded-test").unwrap(), &id)
+            .await
+            .unwrap()
+            .is_some()
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -633,7 +652,7 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     // aborted via the runner's existing whole-execution stop mechanism.
     h.persistence
         .insert_signal(
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             &inst_id,
             runtara_core::domain::SignalType::Cancel,
             b"request",
@@ -643,7 +662,7 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     let command = h
         .persistence
         .get_pending_signal(
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             &inst_id,
         )
         .await
@@ -660,7 +679,7 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     let instance = h
         .persistence
         .get_instance(
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             &inst_id,
         )
         .await
@@ -674,7 +693,7 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     let pending = h
         .persistence
         .get_pending_signal(
-            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &runtara_core::TenantId::new("embedded-test").unwrap(),
             &inst_id,
         )
         .await

@@ -1612,14 +1612,21 @@ async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
 
     // The instance is woken and relaunched: the old row goes, a new one arrives.
     registry
-        .cleanup(&instance_id)
+        .cleanup(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("cleanup failed");
     insert("gen-new".to_string()).await;
 
     // The scan's stale processing now arrives, still holding the old id.
     let removed = registry
-        .cleanup_generation(&instance_id, "gen-old")
+        .cleanup_generation(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+            "gen-old",
+        )
         .await
         .expect("cleanup_generation failed");
     assert!(
@@ -1628,7 +1635,10 @@ async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
     );
     assert_eq!(
         registry
-            .get(&instance_id)
+            .get(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id
+            )
             .await
             .expect("registry read failed")
             .expect("the replacement container must still be registered")
@@ -1640,7 +1650,11 @@ async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
     // And the guard still lets the owning generation through.
     assert!(
         registry
-            .cleanup_generation(&instance_id, "gen-new")
+            .cleanup_generation(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+                "gen-new"
+            )
             .await
             .expect("cleanup_generation failed"),
         "the current generation must be able to claim its own row"

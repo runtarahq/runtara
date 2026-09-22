@@ -95,6 +95,7 @@ impl ImageCleanupWorkerConfig {
 
 /// Background worker that cleans up unused images.
 pub struct ImageCleanupWorker {
+    tenant_id: runtara_core::TenantId,
     pool: PgPool,
     config: ImageCleanupWorkerConfig,
     shutdown: Arc<Notify>,
@@ -102,8 +103,13 @@ pub struct ImageCleanupWorker {
 
 impl ImageCleanupWorker {
     /// Create a new image cleanup worker.
-    pub fn new(pool: PgPool, config: ImageCleanupWorkerConfig) -> Self {
+    pub fn new(
+        tenant_id: runtara_core::TenantId,
+        pool: PgPool,
+        config: ImageCleanupWorkerConfig,
+    ) -> Self {
         Self {
+            tenant_id,
             pool,
             config,
             shutdown: Arc::new(Notify::new()),
@@ -166,7 +172,8 @@ impl ImageCleanupWorker {
     /// These orphans are created when `ImageRegistry::register()` upserts on
     /// `(tenant_id, name)` with a new `image_id` — the old directory is left behind.
     async fn cleanup_orphaned_directories(&self) -> u64 {
-        let images_dir = self.config.data_dir.join("images");
+        let images_dir =
+            crate::artifact_paths::images_dir(&self.config.data_dir, self.tenant_id.as_str());
 
         // Read all subdirectory names from disk
         let mut dir_entries = match tokio::fs::read_dir(&images_dir).await {
@@ -196,13 +203,16 @@ impl ImageCleanupWorker {
 
         // Batch-check which IDs exist in the database
         let db_ids: HashSet<String> = match sqlx::query_scalar::<_, String>(
-            "SELECT image_id FROM images WHERE image_id = ANY($1)",
+            "SELECT image_id FROM images WHERE tenant_id = $1",
         )
-        .bind(&disk_ids)
+        .bind(self.tenant_id.as_str())
         .fetch_all(&self.pool)
         .await
         {
-            Ok(ids) => ids.into_iter().collect(),
+            Ok(ids) => ids
+                .into_iter()
+                .map(|id| crate::artifact_paths::identity_component(&id))
+                .collect(),
             Err(e) => {
                 warn!(error = %e, "Failed to query images table for orphan detection");
                 return 0;
@@ -240,51 +250,17 @@ impl ImageCleanupWorker {
             - chrono::Duration::from_std(self.config.max_age)
                 .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?;
 
-        let stale_images: Vec<(String, String, String)> = sqlx::query_as(
-            r#"
-            SELECT i.image_id, i.tenant_id, i.name
-            FROM images i
-            WHERE i.updated_at < $1
-              AND NOT EXISTS (
-                SELECT 1
-                FROM instance_images ii
-                JOIN instances inst ON ii.instance_id = inst.instance_id
-                WHERE ii.image_id = i.image_id
-                  AND (
-                    inst.status NOT IN ('completed', 'failed', 'cancelled')
-                    OR ii.created_at > $1
-                  )
-              )
-            ORDER BY i.updated_at ASC
-            LIMIT $2
-            "#,
-        )
-        .bind(cutoff)
-        .bind(self.config.batch_size)
-        .fetch_all(&self.pool)
-        .await?;
-
-        if stale_images.is_empty() {
-            return Ok(0);
-        }
-
-        // Deleting an image row is ImageRegistry's operation; this worker
-        // decides *which* images are stale, which is its own concern.
-        let images = ImageRegistry::new(self.pool.clone());
+        let stale_images = ImageRegistry::new(self.pool.clone())
+            .delete_stale(&self.tenant_id, cutoff, self.config.batch_size)
+            .await?;
         let mut cleaned = 0u64;
-        for (image_id, tenant_id, name) in &stale_images {
-            // Delete from DB (CASCADE handles instance_images)
-            if let Err(e) = images.delete(image_id).await {
-                warn!(
-                    image_id = %image_id,
-                    error = %e,
-                    "Failed to delete stale image from database"
-                );
-                continue;
-            }
-
+        for image_id in &stale_images {
             // Delete disk directory
-            let image_dir = self.config.data_dir.join("images").join(image_id);
+            let image_dir = crate::artifact_paths::image_dir(
+                &self.config.data_dir,
+                self.tenant_id.as_str(),
+                image_id,
+            );
             if let Err(e) = tokio::fs::remove_dir_all(&image_dir).await
                 && e.kind() != std::io::ErrorKind::NotFound
             {
@@ -297,8 +273,7 @@ impl ImageCleanupWorker {
 
             info!(
                 image_id = %image_id,
-                tenant_id = %tenant_id,
-                name = %name,
+                tenant_id = %self.tenant_id,
                 "Deleted stale image"
             );
             cleaned += 1;
@@ -359,7 +334,11 @@ mod tests {
     async fn test_shutdown_handle() {
         let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
         let config = ImageCleanupWorkerConfig::default();
-        let worker = ImageCleanupWorker::new(pool, config);
+        let worker = ImageCleanupWorker::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+            pool,
+            config,
+        );
         let handle = worker.shutdown_handle();
         // Both the worker and the returned handle hold a reference
         assert!(Arc::strong_count(&handle) >= 2);
@@ -372,7 +351,11 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let worker = ImageCleanupWorker::new(pool, config);
+        let worker = ImageCleanupWorker::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+            pool,
+            config,
+        );
 
         // Should return immediately without blocking
         tokio::time::timeout(Duration::from_secs(1), worker.run())
@@ -387,7 +370,11 @@ mod tests {
             data_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
             ..Default::default()
         };
-        let worker = ImageCleanupWorker::new(pool, config);
+        let worker = ImageCleanupWorker::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+            pool,
+            config,
+        );
 
         // Should return 0 without error when images dir doesn't exist
         let cleaned = worker.cleanup_orphaned_directories().await;
@@ -406,7 +393,11 @@ mod tests {
             data_dir: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let worker = ImageCleanupWorker::new(pool, config);
+        let worker = ImageCleanupWorker::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+            pool,
+            config,
+        );
 
         // Should return 0 when images dir is empty
         let cleaned = worker.cleanup_orphaned_directories().await;
@@ -429,7 +420,11 @@ mod tests {
             data_dir: temp_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let worker = ImageCleanupWorker::new(pool, config);
+        let worker = ImageCleanupWorker::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+            pool,
+            config,
+        );
 
         // Should return 0 because files are not processed, only directories
         let cleaned = worker.cleanup_orphaned_directories().await;
@@ -447,7 +442,11 @@ mod tests {
             poll_interval: Duration::from_secs(3600), // Long interval
             ..Default::default()
         };
-        let worker = ImageCleanupWorker::new(pool, config);
+        let worker = ImageCleanupWorker::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+            pool,
+            config,
+        );
         let shutdown = worker.shutdown_handle();
 
         let handle = tokio::spawn(async move {
@@ -462,5 +461,62 @@ mod tests {
             .await
             .expect("worker should shut down within 2 seconds")
             .expect("worker task should not panic");
+    }
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn cleanup_preserves_other_tenants_files_and_active_images() {
+        use crate::image_registry::ImageBuilder;
+        let pool = crate::test_support::pool().await;
+        let root = TempDir::new().unwrap();
+        let a = runtara_core::TenantId::new(crate::test_support::unique_id("cleanup-a")).unwrap();
+        let b = runtara_core::TenantId::new(crate::test_support::unique_id("cleanup-b")).unwrap();
+        let registry = ImageRegistry::new(pool.clone());
+        let mut files = Vec::new();
+        for tenant in [&a, &b] {
+            for label in ["stale", "active", "orphan"] {
+                let id = crate::test_support::unique_id(label);
+                let path = crate::artifact_paths::image_dir(root.path(), tenant.as_str(), &id)
+                    .join("binary");
+                tokio::fs::create_dir_all(path.parent().unwrap())
+                    .await
+                    .unwrap();
+                tokio::fs::write(&path, label).await.unwrap();
+                if label != "orphan" {
+                    registry
+                        .register(
+                            tenant,
+                            &ImageBuilder::new(tenant.as_str(), label, path.to_string_lossy())
+                                .image_id(&id)
+                                .build(),
+                        )
+                        .await
+                        .unwrap();
+                    sqlx::query("UPDATE images SET updated_at = NOW() - INTERVAL '10 days' WHERE image_id = $1").bind(&id).execute(&pool).await.unwrap();
+                }
+                if label == "active" {
+                    let instance = crate::test_support::unique_id("active");
+                    sqlx::query("INSERT INTO instances (instance_id, tenant_id, status) VALUES ($1, $2, 'running')").bind(&instance).bind(tenant.as_str()).execute(&pool).await.unwrap();
+                    sqlx::query("INSERT INTO instance_images (instance_id, image_id, tenant_id) VALUES ($1, $2, $3)").bind(&instance).bind(&id).bind(tenant.as_str()).execute(&pool).await.unwrap();
+                }
+                files.push((tenant.clone(), label, path));
+            }
+        }
+        let worker = ImageCleanupWorker::new(
+            a.clone(),
+            pool,
+            ImageCleanupWorkerConfig {
+                data_dir: root.path().to_path_buf(),
+                batch_size: 100,
+                ..Default::default()
+            },
+        );
+        worker.cleanup_images().await.unwrap();
+        for (tenant, label, path) in files {
+            assert_eq!(
+                path.exists(),
+                tenant == b || label == "active",
+                "{tenant} {label}"
+            );
+        }
     }
 }

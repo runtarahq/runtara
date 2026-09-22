@@ -8,7 +8,7 @@ Core validates tenant representation and enforces scope on durable state, includ
 
 The embedded SDK and guest host retain a validated tenant supplied by their caller. Environment workers and the dedicated HTTP instance listener require an explicit configured tenant. Registration's body tenant must match the listener's host-selected tenant. This retains the dedicated deployment model while eliminating unrestricted core calls; the host still needs a tenant directory and assignment orchestration to schedule multiple tenants.
 
-This is not a complete shared-environment rollout. Environment/server repositories and direct SQL, public authentication and instance capability binding, filesystem/cache namespaces, quotas, and resource fairness still need the transition plan's separate audits. The dedicated HTTP listener's tenant binding is not authentication between individual instances. Suggested improvements in the tables remain suggestions unless explicitly described above.
+This is not a complete shared-environment rollout. The [environment isolation slice](runtara-environment-tenancy.md) now scopes environment repositories, workers and artifact namespaces. Server request authentication and tenant propagation, instance capability binding, remaining server storage/cache namespaces, quotas and resource fairness still need the transition plan's separate work. The dedicated HTTP listener's tenant binding is not authentication between individual instances. Suggested improvements in the tables remain suggestions unless explicitly described above.
 
 **API convention used in these tables**
 

@@ -48,13 +48,19 @@ async fn test_register_and_get_image() {
 
     // Register
     registry
-        .register(&image)
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image,
+        )
         .await
         .expect("Failed to register image");
 
     // Get by ID
     let retrieved = registry
-        .get(&image_id)
+        .get(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image_id,
+        )
         .await
         .expect("Failed to get image")
         .expect("Image not found");
@@ -64,7 +70,10 @@ async fn test_register_and_get_image() {
 
     // Cleanup
     registry
-        .delete(&image_id)
+        .delete(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image_id,
+        )
         .await
         .expect("Failed to delete image");
 }
@@ -83,13 +92,16 @@ async fn test_get_by_name() {
 
     // Register
     registry
-        .register(&image)
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image,
+        )
         .await
         .expect("Failed to register image");
 
     // Get by name
     let retrieved = registry
-        .get_by_name(tenant_id, &name)
+        .get_by_name(&runtara_core::TenantId::new(tenant_id).unwrap(), &name)
         .await
         .expect("Failed to get image")
         .expect("Image not found");
@@ -98,7 +110,10 @@ async fn test_get_by_name() {
 
     // Cleanup
     registry
-        .delete(&image_id)
+        .delete(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image_id,
+        )
         .await
         .expect("Failed to delete image");
 }
@@ -118,7 +133,10 @@ async fn test_list_images() {
         let image = ImageBuilder::new(&tenant_id, &name, "/tmp/test-binary").build();
         let id = image.image_id.clone();
         registry
-            .register(&image)
+            .register(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &image,
+            )
             .await
             .expect("Failed to register image");
         image_ids.push(id);
@@ -126,28 +144,42 @@ async fn test_list_images() {
 
     // List by tenant
     let images = registry
-        .list(&tenant_id)
+        .list(&runtara_core::TenantId::new(tenant_id.to_string()).unwrap())
         .await
         .expect("Failed to list images");
     assert_eq!(images.len(), 3);
 
     // List with limit
     let images = registry
-        .list_by_tenant(&tenant_id, 2, 0)
+        .list_by_tenant(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            2,
+            0,
+        )
         .await
         .expect("Failed to list images");
     assert_eq!(images.len(), 2);
 
     // List with offset
     let images = registry
-        .list_by_tenant(&tenant_id, 100, 2)
+        .list_by_tenant(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            100,
+            2,
+        )
         .await
         .expect("Failed to list images");
     assert_eq!(images.len(), 1);
 
     // Cleanup
     for id in image_ids {
-        registry.delete(&id).await.expect("Failed to delete image");
+        registry
+            .delete(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &id,
+            )
+            .await
+            .expect("Failed to delete image");
     }
 }
 
@@ -167,19 +199,25 @@ async fn test_duplicate_name_updates() {
 
     // Register first
     registry
-        .register(&image1)
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image1,
+        )
         .await
         .expect("Failed to register first image");
 
     // Register second with same name - should update (ON CONFLICT DO UPDATE)
     registry
-        .register(&image2)
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image2,
+        )
         .await
         .expect("Failed to register second image");
 
     // The second registration should have updated the existing record
     let retrieved = registry
-        .get_by_name(tenant_id, &name)
+        .get_by_name(&runtara_core::TenantId::new(tenant_id).unwrap(), &name)
         .await
         .expect("Failed to get image")
         .expect("Image not found");
@@ -189,7 +227,10 @@ async fn test_duplicate_name_updates() {
     assert_eq!(retrieved.binary_path, "/tmp/test-binary-2");
 
     registry
-        .delete(&image_id1)
+        .delete(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image_id1,
+        )
         .await
         .expect("Failed to delete image");
 }
@@ -205,15 +246,16 @@ async fn test_claim_name_returns_one_canonical_id() {
     let first_candidate = Uuid::new_v4().to_string();
     let second_candidate = Uuid::new_v4().to_string();
 
+    let tenant_scope = runtara_core::TenantId::new(tenant_id).unwrap();
     let (first, second) = tokio::join!(
         registry.claim_name(
-            tenant_id,
+            &tenant_scope,
             &name,
             &first_candidate,
             "/tmp/test-claimed-binary",
         ),
         registry.claim_name(
-            tenant_id,
+            &tenant_scope,
             &name,
             &second_candidate,
             "/tmp/test-claimed-binary",
@@ -230,7 +272,10 @@ async fn test_claim_name_returns_one_canonical_id() {
     assert_eq!(second.image_id, first.image_id);
 
     registry
-        .delete(&first.image_id)
+        .delete(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &first.image_id,
+        )
         .await
         .expect("Failed to delete claimed image");
 }
@@ -245,7 +290,10 @@ async fn test_delete_nonexistent() {
 
     // Delete should return false for nonexistent
     let deleted = registry
-        .delete(&nonexistent_id)
+        .delete(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &nonexistent_id,
+        )
         .await
         .expect("Delete should not error");
     assert!(!deleted);
@@ -260,7 +308,10 @@ async fn test_get_nonexistent() {
     let nonexistent_id = Uuid::new_v4().to_string();
 
     let result = registry
-        .get(&nonexistent_id)
+        .get(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &nonexistent_id,
+        )
         .await
         .expect("Get should not error");
     assert!(result.is_none());
@@ -287,12 +338,18 @@ async fn test_image_with_metadata() {
     let image_id = image.image_id.clone();
 
     registry
-        .register(&image)
+        .register(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image,
+        )
         .await
         .expect("Failed to register image");
 
     let retrieved = registry
-        .get(&image_id)
+        .get(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image_id,
+        )
         .await
         .expect("Failed to get image")
         .expect("Image not found");
@@ -300,7 +357,10 @@ async fn test_image_with_metadata() {
 
     // Cleanup
     registry
-        .delete(&image_id)
+        .delete(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &image_id,
+        )
         .await
         .expect("Failed to delete image");
 }

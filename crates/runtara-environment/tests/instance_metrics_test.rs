@@ -58,6 +58,7 @@ async fn resource_metrics_keep_the_first_observation() {
 
     metrics::record_resources_returning_status(
         &pool,
+        &runtara_core::TenantId::new("env-metrics-tenant-resources").unwrap(),
         &instance_id,
         Some(1024 * 1024),
         Some(500_000),
@@ -79,9 +80,15 @@ async fn resource_metrics_keep_the_first_observation() {
     assert_eq!(row.0, Some(1024 * 1024));
     assert_eq!(row.1, Some(500_000));
 
-    metrics::record_resources_returning_status(&pool, &instance_id, Some(9_999_999), Some(1))
-        .await
-        .expect("failed to record resources");
+    metrics::record_resources_returning_status(
+        &pool,
+        &runtara_core::TenantId::new("env-metrics-tenant-resources").unwrap(),
+        &instance_id,
+        Some(9_999_999),
+        Some(1),
+    )
+    .await
+    .expect("failed to record resources");
 
     let row = read(instance_id.clone(), pool.clone()).await;
     assert_eq!(
@@ -110,9 +117,15 @@ async fn recording_no_resources_leaves_the_columns_null() {
     let pool = test_pool().await;
     let instance_id = registered_instance(&pool, "noop").await;
 
-    let observed = metrics::record_resources_returning_status(&pool, &instance_id, None, None)
-        .await
-        .expect("recording nothing must succeed");
+    let observed = metrics::record_resources_returning_status(
+        &pool,
+        &runtara_core::TenantId::new("env-metrics-tenant-noop").unwrap(),
+        &instance_id,
+        None,
+        None,
+    )
+    .await
+    .expect("recording nothing must succeed");
     assert!(
         observed.is_some(),
         "a registered instance must still report its status"
@@ -140,12 +153,22 @@ async fn stderr_keeps_the_first_capture() {
     let pool = test_pool().await;
     let instance_id = registered_instance(&pool, "stderr").await;
 
-    metrics::record_instance_stderr(&pool, &instance_id, "Error: something went wrong\n")
-        .await
-        .expect("failed to record stderr");
-    metrics::record_instance_stderr(&pool, &instance_id, "second capture\n")
-        .await
-        .expect("failed to record stderr");
+    metrics::record_instance_stderr(
+        &pool,
+        &runtara_core::TenantId::new("env-metrics-tenant-stderr").unwrap(),
+        &instance_id,
+        "Error: something went wrong\n",
+    )
+    .await
+    .expect("failed to record stderr");
+    metrics::record_instance_stderr(
+        &pool,
+        &runtara_core::TenantId::new("env-metrics-tenant-stderr").unwrap(),
+        &instance_id,
+        "second capture\n",
+    )
+    .await
+    .expect("failed to record stderr");
 
     let row: (Option<String>,) =
         sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
@@ -173,18 +196,29 @@ async fn returning_status_reports_the_guest_status() {
     let pool = test_pool().await;
     let instance_id = registered_instance(&pool, "returning").await;
 
-    let observed =
-        metrics::record_resources_returning_status(&pool, &instance_id, Some(2048), Some(7))
-            .await
-            .expect("failed to record resources");
+    let observed = metrics::record_resources_returning_status(
+        &pool,
+        &runtara_core::TenantId::new("env-metrics-tenant-returning").unwrap(),
+        &instance_id,
+        Some(2048),
+        Some(7),
+    )
+    .await
+    .expect("failed to record resources");
     let (status, _reason) = observed.expect("a registered instance must return a status");
     assert_eq!(status, runtara_core::domain::InstanceStatus::Pending);
 
     assert!(
-        metrics::record_resources_returning_status(&pool, "no-such-instance", None, None)
-            .await
-            .expect("a missing row is not an error")
-            .is_none(),
+        metrics::record_resources_returning_status(
+            &pool,
+            &runtara_core::TenantId::new("env-metrics-tenant-returning").unwrap(),
+            "no-such-instance",
+            None,
+            None
+        )
+        .await
+        .expect("a missing row is not an error")
+        .is_none(),
         "an unknown instance must report no status"
     );
 

@@ -172,11 +172,16 @@ impl HeartbeatMonitor {
         // A process may die just after publishing an event. Owner expiry is
         // independent of event age, so do not wait for heartbeat_timeout before
         // reconciling that abandoned run.
-        for container in self.container_registry.expired_running_owners().await? {
+        for container in self
+            .container_registry
+            .expired_running_owners(&self.tenant_id)
+            .await?
+        {
             if container.tenant_id != self.tenant_id.as_str() {
                 continue;
             }
             crate::recovery::recover_registered(
+                &self.tenant_id,
                 &self.pool,
                 self.core_persistence.as_ref(),
                 &container,
@@ -263,6 +268,7 @@ impl HeartbeatMonitor {
                 cr.started_at,
                 (SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) as last_activity
             FROM container_registry cr
+            JOIN instances i ON i.instance_id = cr.instance_id AND i.tenant_id = cr.tenant_id
             WHERE
                 -- Nothing that started within the timeout can be stale yet, whatever
                 -- its event history says. A woken sleeper is registered with a fresh
@@ -329,18 +335,22 @@ impl HeartbeatMonitor {
             metrics: None,
         };
         let leased = crate::launch_queue::LaunchRepository::new(self.pool.clone())
-            .get(&container.launch_id)
+            .get(&self.tenant_id, &container.launch_id)
             .await
             .map_err(|error| crate::error::Error::Other(error.to_string()))?
             .is_some_and(|launch| launch.lease_owner.is_some());
         if leased && !self.runner.is_running(&handle).await {
             // Absence from this process is not proof of owner death. The
             // durable launch lock/lease decides whether a peer may recover it.
-            if let Some(current) = self.container_registry.get(&container.instance_id).await?
+            if let Some(current) = self
+                .container_registry
+                .get(&self.tenant_id, &container.instance_id)
+                .await?
                 && current.launch_id == container.launch_id
                 && current.container_id == container.container_id
             {
                 crate::recovery::recover_registered(
+                    &self.tenant_id,
                     &self.pool,
                     self.core_persistence.as_ref(),
                     &current,
@@ -390,6 +400,7 @@ impl HeartbeatMonitor {
         if !self
             .container_registry
             .cleanup_handle(
+                &self.tenant_id,
                 &container.instance_id,
                 &container.launch_id,
                 &container.container_id,
@@ -460,7 +471,7 @@ impl HeartbeatMonitor {
         // Get all instance IDs we're tracking locally
         let tracked_ids: std::collections::HashSet<String> =
             ContainerRegistry::new(self.pool.clone())
-                .tracked_instance_ids()
+                .tracked_instance_ids(&self.tenant_id)
                 .await?
                 .into_iter()
                 .collect();

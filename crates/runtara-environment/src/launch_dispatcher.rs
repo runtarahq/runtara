@@ -201,6 +201,7 @@ impl Default for LaunchDispatcherConfig {
 /// last boundary before it loads guest code, so a dispatcher crash after
 /// opening the in-memory gate leaves the durable marker recoverable.
 struct DurableStartGateConfirmation {
+    tenant_id: runtara_core::TenantId,
     repository: LaunchRepository,
     launch_id: String,
     attempt_count: i32,
@@ -211,7 +212,7 @@ impl StartGateConfirmation for DurableStartGateConfirmation {
     async fn confirm(&self) -> std::result::Result<(), RunnerError> {
         match self
             .repository
-            .confirm_gate_open(&self.launch_id, self.attempt_count)
+            .confirm_gate_open(&self.tenant_id, &self.launch_id, self.attempt_count)
             .await
         {
             Ok(Some(_)) => Ok(()),
@@ -233,7 +234,7 @@ impl StartGateConfirmation for DurableStartGateConfirmation {
                 // guest after recovery became legal.
                 match self
                     .repository
-                    .is_gate_confirmed(&self.launch_id, self.attempt_count)
+                    .is_gate_confirmed(&self.tenant_id, &self.launch_id, self.attempt_count)
                     .await
                 {
                     Ok(true) => {
@@ -276,6 +277,7 @@ impl StartGateConfirmation for DurableStartGateConfirmation {
 
 /// Background worker that turns durable launch rows into runner generations.
 pub struct LaunchDispatcher {
+    tenant_id: runtara_core::TenantId,
     pool: PgPool,
     persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
@@ -298,6 +300,7 @@ pub struct LaunchDispatcher {
 impl Clone for LaunchDispatcher {
     fn clone(&self) -> Self {
         Self {
+            tenant_id: self.tenant_id.clone(),
             pool: self.pool.clone(),
             persistence: self.persistence.clone(),
             runner: self.runner.clone(),
@@ -318,6 +321,7 @@ impl Clone for LaunchDispatcher {
 impl LaunchDispatcher {
     /// Build a dispatcher over a shared Environment/Core database.
     pub fn new(
+        tenant_id: runtara_core::TenantId,
         pool: PgPool,
         persistence: Arc<dyn Persistence>,
         runner: Arc<dyn Runner>,
@@ -326,6 +330,7 @@ impl LaunchDispatcher {
     ) -> Self {
         let config = LaunchDispatcherConfig::default();
         Self {
+            tenant_id,
             image_registry: ImageRegistry::new(pool.clone()),
             instances: InstanceRepository::new(pool.clone()),
             pool,
@@ -407,7 +412,12 @@ impl LaunchDispatcher {
         // Serve control for already-running executions even during drain and
         // before queue preparation/reconciliation can consume this pass.
         ContainerRegistry::new(self.pool.clone())
-            .deliver_abort_requests(&self.owner, self.runner.as_ref(), self.config.batch_size)
+            .deliver_abort_requests(
+                &self.tenant_id,
+                &self.owner,
+                self.runner.as_ref(),
+                self.config.batch_size,
+            )
             .await?;
         let repository = LaunchRepository::new(self.pool.clone());
 
@@ -416,18 +426,22 @@ impl LaunchDispatcher {
         // queue row is the durable single-instance lease, so reconcile that
         // bounded crash window before admitting any new work.
         for released in repository
-            .reconcile_released_instances(self.config.batch_size)
+            .reconcile_released_instances(&self.tenant_id, self.config.batch_size)
             .await?
         {
             self.lifecycle_observers
                 .notify_released(&released, "reconciled");
         }
-        for expired in repository.expire_due(self.config.batch_size).await? {
+        for expired in repository
+            .expire_due(&self.tenant_id, self.config.batch_size)
+            .await?
+        {
             self.lifecycle_observers
                 .notify_released(&expired, LAUNCH_QUEUE_TIMEOUT);
         }
         let recovered_preparations = repository
             .recover_expired_preparations(
+                &self.tenant_id,
                 self.config.preparation_retry_delay,
                 self.config.batch_size,
             )
@@ -439,7 +453,7 @@ impl LaunchDispatcher {
             );
         }
         let recovered = repository
-            .recover_expired_leases(self.config.batch_size)
+            .recover_expired_leases(&self.tenant_id, self.config.batch_size)
             .await?;
         if !recovered.is_empty() {
             debug!(
@@ -472,6 +486,7 @@ impl LaunchDispatcher {
             .min(runner_capacity);
         let launches = repository
             .claim_ready_for_preparation(
+                &self.tenant_id,
                 &self.owner,
                 self.config.preparation_lease_duration,
                 claim_limit,
@@ -694,6 +709,7 @@ impl LaunchDispatcher {
         let promoted = tokio::time::timeout_at(
             preparation_deadline,
             repository.promote_prepared(
+                &self.tenant_id,
                 &launch.launch_id,
                 &self.owner,
                 launch.attempt_count,
@@ -786,7 +802,12 @@ impl LaunchDispatcher {
             return Ok(());
         }
         let Some(starting) = repository
-            .begin_start(&launch.launch_id, &self.owner, launch.attempt_count)
+            .begin_start(
+                &self.tenant_id,
+                &launch.launch_id,
+                &self.owner,
+                launch.attempt_count,
+            )
             .await?
         else {
             debug!(launch_id = %launch.launch_id, "Launch was cancelled or expired before runner handoff");
@@ -798,6 +819,7 @@ impl LaunchDispatcher {
         // runner is forced to abandon its unopened task.
         let gate = StartGate::new(self.start_gate_remaining(&starting)).with_confirmation(
             Arc::new(DurableStartGateConfirmation {
+                tenant_id: self.tenant_id.clone(),
                 repository: repository.clone(),
                 launch_id: launch.launch_id.clone(),
                 attempt_count: starting.attempt_count,
@@ -824,7 +846,7 @@ impl LaunchDispatcher {
                             .expect("bounded execution timeout fits in database integer"),
                     ),
                 };
-                if let Err(error) = registry.register(&container).await {
+                if let Err(error) = registry.register(&self.tenant_id, &container).await {
                     error!(
                         launch_id = %launch.launch_id,
                         error = %error,
@@ -840,7 +862,12 @@ impl LaunchDispatcher {
                 }
 
                 let running = match repository
-                    .mark_running(&launch.launch_id, &self.owner, launch.attempt_count)
+                    .mark_running(
+                        &self.tenant_id,
+                        &launch.launch_id,
+                        &self.owner,
+                        launch.attempt_count,
+                    )
                     .await
                 {
                     Ok(Some(running)) => running,
@@ -935,6 +962,7 @@ impl LaunchDispatcher {
         let terminal = match tokio::time::timeout(
             PREPARATION_CLEANUP_TIMEOUT,
             repository.fail_before_runner(
+                &self.tenant_id,
                 &launch.launch_id,
                 &self.owner,
                 launch.attempt_count,
@@ -980,6 +1008,7 @@ impl LaunchDispatcher {
         match tokio::time::timeout(
             PREPARATION_CLEANUP_TIMEOUT,
             repository.requeue_owned(
+                &self.tenant_id,
                 &launch.launch_id,
                 &self.owner,
                 launch.attempt_count,
@@ -1053,7 +1082,12 @@ impl LaunchDispatcher {
         const CLAIM_WATCH_INTERVAL: Duration = Duration::from_millis(200);
 
         loop {
-            match tokio::time::timeout_at(deadline, repository.get(&launch.launch_id)).await {
+            match tokio::time::timeout_at(
+                deadline,
+                repository.get(&self.tenant_id, &launch.launch_id),
+            )
+            .await
+            {
                 Ok(Ok(Some(current)))
                     if current.state == crate::launch_queue::LaunchState::Preparing
                         && current.lease_owner.as_deref() == Some(self.owner.as_str())
@@ -1116,7 +1150,12 @@ impl LaunchDispatcher {
         }
         match timeout_at(
             cleanup_deadline,
-            registry.cleanup_handle(&handle.instance_id, &handle.launch_id, &handle.handle_id),
+            registry.cleanup_handle(
+                &self.tenant_id,
+                &handle.instance_id,
+                &handle.launch_id,
+                &handle.handle_id,
+            ),
         )
         .await
         {
@@ -1136,7 +1175,12 @@ impl LaunchDispatcher {
         let repository = LaunchRepository::new(self.pool.clone());
         let terminal = match tokio::time::timeout(
             PREPARATION_CLEANUP_TIMEOUT,
-            repository.fail_unconfirmed_running(&launch.launch_id, launch.attempt_count, message),
+            repository.fail_unconfirmed_running(
+                &self.tenant_id,
+                &launch.launch_id,
+                launch.attempt_count,
+                message,
+            ),
         )
         .await
         {
@@ -1168,13 +1212,12 @@ impl LaunchDispatcher {
         launch: &Launch,
         preparation_deadline: Option<Instant>,
     ) -> std::result::Result<LaunchOptions, String> {
+        if launch.tenant_id != self.tenant_id.as_str() {
+            return Err("launch does not belong to this dispatcher tenant".into());
+        }
         let instance = self
             .persistence
-            .get_instance(
-                &runtara_core::TenantId::new(launch.tenant_id.clone())
-                    .map_err(|error| error.to_string())?,
-                &launch.instance_id,
-            )
+            .get_instance(&self.tenant_id, &launch.instance_id)
             .await
             .map_err(|error| format!("failed to read durable instance: {error}"))?
             .ok_or_else(|| "durable instance no longer exists".to_string())?;
@@ -1200,7 +1243,7 @@ impl LaunchDispatcher {
         // together is the same answer the two queries gave.
         let binding = self
             .instances
-            .image_binding(&launch.instance_id)
+            .image_binding(&self.tenant_id, &launch.instance_id)
             .await
             .map_err(|error| format!("failed to read image binding: {error}"))?
             .ok_or_else(|| "instance has no associated image".to_string())?;
@@ -1209,7 +1252,7 @@ impl LaunchDispatcher {
         }
         let image = self
             .image_registry
-            .get(&launch.image_id)
+            .get(&self.tenant_id, &launch.image_id)
             .await
             .map_err(|error| format!("failed to read image: {error}"))?
             .ok_or_else(|| "launch image no longer exists".to_string())?;

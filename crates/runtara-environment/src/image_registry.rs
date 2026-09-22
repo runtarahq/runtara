@@ -6,10 +6,9 @@
 //! An image represents a compiled workflow or other executable that can be run.
 
 use chrono::{DateTime, Utc};
+use runtara_core::TenantId;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 use crate::error::Result;
 
@@ -84,53 +83,10 @@ pub async fn require_current_workflow_entrypoint(image: &Image) -> Result<()> {
     .map_err(|error| crate::error::Error::Other(format!("unsupported workflow image: {error:#}")))
 }
 
-/// How long a read of the `images` row is reused.
-///
-/// A launch reads its image on the way in, and the same image backs every
-/// launch of that workflow version, so this is one read per burst instead of
-/// one per instance. Short rather than permanent because the row is not truly
-/// immutable: `register` upserts on `(tenant_id, name)`, so re-registering a
-/// workflow rewrites the row a live id already points at.
-const IMAGE_CACHE_TTL: Duration = Duration::from_secs(5);
-
-type ImageCache = std::sync::Mutex<HashMap<String, (Instant, Image)>>;
-
-fn image_cache() -> &'static ImageCache {
-    static CACHE: std::sync::OnceLock<ImageCache> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn cached_image(image_id: &str) -> Option<Image> {
-    let cache = image_cache().lock().ok()?;
-    cache
-        .get(image_id)
-        .filter(|(at, _)| at.elapsed() < IMAGE_CACHE_TTL)
-        .map(|(_, image)| image.clone())
-}
-
-fn cache_image(image_id: &str, image: &Image) {
-    if let Ok(mut cache) = image_cache().lock() {
-        cache.insert(image_id.to_string(), (Instant::now(), image.clone()));
-    }
-}
-
-/// Drop every cached row.
-///
-/// Called on any write to `images`. Registration upserts by name, so the id
-/// whose row it rewrote is not known here — and registration is rare next to
-/// launching, so clearing everything is both correct and cheap.
-fn invalidate_image_cache() {
-    if let Ok(mut cache) = image_cache().lock() {
-        cache.clear();
-    }
-}
-
 /// Which images [`ImageRegistry::list_filtered`] should return.
 #[derive(Debug, Default)]
 pub struct ImageFilter {
-    /// Restrict to one tenant.
-    pub tenant_id: Option<String>,
-    /// Exact name match; only meaningful together with `tenant_id`.
+    /// Exact name match within the supplied tenant.
     pub name: Option<String>,
     /// Page size.
     pub limit: i64,
@@ -180,7 +136,7 @@ impl ImageRegistry {
     /// abandoned placeholder.
     pub async fn claim_name(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         name: &str,
         candidate_image_id: &str,
         binary_path: &str,
@@ -194,19 +150,18 @@ impl ImageRegistry {
                 INSERT INTO images (
                     image_id, tenant_id, name, binary_path, created_at, updated_at
                 ) VALUES ($1, $2, $3, $4, NOW(), NOW())
-                ON CONFLICT (tenant_id, name) DO NOTHING
+                ON CONFLICT DO NOTHING
                 RETURNING image_id
                 "#,
             )
             .bind(candidate_image_id)
-            .bind(tenant_id)
+            .bind(tenant_id.as_str())
             .bind(name)
             .bind(binary_path)
             .fetch_optional(&self.pool)
             .await?;
 
             if let Some(image_id) = inserted {
-                invalidate_image_cache();
                 return Ok(ImageNameClaim {
                     image_id,
                     created: true,
@@ -216,7 +171,7 @@ impl ImageRegistry {
             let existing: Option<String> = sqlx::query_scalar(
                 "SELECT image_id FROM images WHERE tenant_id = $1 AND name = $2",
             )
-            .bind(tenant_id)
+            .bind(tenant_id.as_str())
             .bind(name)
             .fetch_optional(&self.pool)
             .await?;
@@ -235,8 +190,12 @@ impl ImageRegistry {
     }
 
     /// Register a new image
-    pub async fn register(&self, image: &Image) -> Result<()> {
-        invalidate_image_cache();
+    pub async fn register(&self, tenant_id: &TenantId, image: &Image) -> Result<()> {
+        if image.tenant_id != tenant_id.as_str() {
+            return Err(crate::error::Error::InvalidRequest(
+                "image tenant does not match operation tenant".into(),
+            ));
+        }
         sqlx::query(
             r#"
             INSERT INTO images (
@@ -259,7 +218,17 @@ impl ImageRegistry {
         .bind(image.updated_at)
         .bind(&image.metadata)
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|db| db.is_unique_violation())
+            {
+                crate::error::Error::InvalidRequest("image identity is unavailable".into())
+            } else {
+                error.into()
+            }
+        })?;
 
         tracing::info!(
             image_id = %image.image_id,
@@ -271,34 +240,27 @@ impl ImageRegistry {
     }
 
     /// Get an image by ID
-    pub async fn get(&self, image_id: &str) -> Result<Option<Image>> {
-        if let Some(hit) = cached_image(image_id) {
-            return Ok(Some(hit));
-        }
-
+    pub async fn get(&self, tenant_id: &TenantId, image_id: &str) -> Result<Option<Image>> {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path,
                    created_at, updated_at, metadata
             FROM images
-            WHERE image_id = $1
+            WHERE image_id = $1 AND tenant_id = $2
             "#,
         )
         .bind(image_id)
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await?;
 
         let image: Option<Image> = row.map(|r| r.into());
-        if let Some(image) = &image {
-            cache_image(image_id, image);
-        }
         Ok(image)
     }
 
     /// Whether an image's registered artifact is still on disk.
     ///
-    /// The row and the file can disagree. The row is immutable once written;
-    /// the file can go missing — a wiped data dir, a half-restored backup, an
+    /// The row and the file can disagree. The file can go missing — a wiped data dir, a half-restored backup, an
     /// operator clearing space. A caller about to reuse an artifact on the
     /// strength of its row is exactly the caller that needs to know which it
     /// has, because reusing a row whose file is gone produces an image that
@@ -306,8 +268,8 @@ impl ImageRegistry {
     ///
     /// `false` for an image that does not exist at all: a caller asking whether
     /// it can reuse this artifact gets the same answer either way.
-    pub async fn artifact_present(&self, image_id: &str) -> Result<bool> {
-        let Some(image) = self.get(image_id).await? else {
+    pub async fn artifact_present(&self, tenant_id: &TenantId, image_id: &str) -> Result<bool> {
+        let Some(image) = self.get(tenant_id, image_id).await? else {
             return Ok(false);
         };
         let path = std::path::PathBuf::from(&image.binary_path);
@@ -316,57 +278,27 @@ impl ImageRegistry {
             .unwrap_or(false))
     }
 
-    /// Get an image by ID, refusing one that belongs to another tenant.
-    ///
-    /// A hit owned by a different tenant reads as `None`, not as a rejection:
-    /// telling a caller "this exists but is not yours" would leak the existence
-    /// of another tenant's image. `None` for `tenant_id` skips the check, for
-    /// callers that are not acting on behalf of a tenant.
-    pub async fn get_scoped(
+    /// List images belonging to the supplied tenant.
+    pub async fn list_filtered(
         &self,
-        image_id: &str,
-        tenant_id: Option<&str>,
-    ) -> Result<Option<Image>> {
-        if image_id.is_empty() {
-            return Err(crate::error::Error::InvalidRequest(
-                "image_id is required".to_string(),
-            ));
-        }
-
-        let Some(image) = self.get(image_id).await? else {
-            return Ok(None);
-        };
-        if let Some(tenant_id) = tenant_id
-            && image.tenant_id != tenant_id
-        {
-            return Ok(None);
-        }
-        Ok(Some(image))
-    }
-
-    /// List images, narrowing as far as the caller's filters allow.
-    ///
-    /// An exact name is only meaningful within a tenant, so it selects the
-    /// single-row lookup; a tenant alone pages that tenant's images; neither
-    /// pages every image. Naming the three cases here keeps the choice with the
-    /// table rather than with whoever is asking.
-    pub async fn list_filtered(&self, filter: &ImageFilter) -> Result<Vec<Image>> {
-        Ok(match (&filter.tenant_id, &filter.name) {
-            (Some(tenant_id), Some(name)) => self
+        tenant_id: &TenantId,
+        filter: &ImageFilter,
+    ) -> Result<Vec<Image>> {
+        match &filter.name {
+            Some(name) => Ok(self
                 .get_by_name(tenant_id, name)
                 .await?
                 .into_iter()
-                .collect(),
-            (Some(tenant_id), None) => {
+                .collect()),
+            None => {
                 self.list_by_tenant(tenant_id, filter.limit, filter.offset)
-                    .await?
+                    .await
             }
-            (None, _) => self.list_all(filter.limit, filter.offset).await?,
-        })
+        }
     }
 
     /// Get an image by name for a tenant
-    pub async fn get_by_name(&self, tenant_id: &str, name: &str) -> Result<Option<Image>> {
+    pub async fn get_by_name(&self, tenant_id: &TenantId, name: &str) -> Result<Option<Image>> {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path,
@@ -375,7 +307,7 @@ impl ImageRegistry {
             WHERE tenant_id = $1 AND name = $2
             "#,
         )
-        .bind(tenant_id)
+        .bind(tenant_id.as_str())
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
@@ -384,7 +316,7 @@ impl ImageRegistry {
     }
 
     /// List images for a tenant
-    pub async fn list(&self, tenant_id: &str) -> Result<Vec<Image>> {
+    pub async fn list(&self, tenant_id: &TenantId) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path,
@@ -394,7 +326,7 @@ impl ImageRegistry {
             ORDER BY name
             "#,
         )
-        .bind(tenant_id)
+        .bind(tenant_id.as_str())
         .fetch_all(&self.pool)
         .await?;
 
@@ -404,7 +336,7 @@ impl ImageRegistry {
     /// List images for a tenant with pagination
     pub async fn list_by_tenant(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Image>> {
@@ -418,7 +350,7 @@ impl ImageRegistry {
             LIMIT $2 OFFSET $3
             "#,
         )
-        .bind(tenant_id)
+        .bind(tenant_id.as_str())
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -427,30 +359,54 @@ impl ImageRegistry {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    /// List all images with pagination
-    pub async fn list_all(&self, limit: i64, offset: i64) -> Result<Vec<Image>> {
-        let rows: Vec<ImageRow> = sqlx::query_as(
-            r#"
-            SELECT image_id, tenant_id, name, description, binary_path,
-                   created_at, updated_at, metadata
-            FROM images
-            ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
-            "#,
+    /// Delete a bounded set of unused images, rechecking references after locking.
+    ///
+    /// The image lock excludes concurrent uploads and image bindings. A fresh
+    /// statement after the lock observes bindings committed while we waited.
+    pub async fn delete_stale(
+        &self,
+        tenant_id: &TenantId,
+        cutoff: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let mut tx = self.pool.begin().await?;
+        let candidates: Vec<String> = sqlx::query_scalar(
+            "SELECT i.image_id FROM images i WHERE i.tenant_id = $1 AND i.updated_at < $2 \
+             AND NOT EXISTS (SELECT 1 FROM instance_images binding \
+                 JOIN instances inst ON inst.instance_id = binding.instance_id \
+                 WHERE binding.image_id = i.image_id AND ( \
+                     inst.status NOT IN ('completed', 'failed', 'cancelled') \
+                     OR binding.created_at > $2)) \
+             ORDER BY i.updated_at, i.image_id LIMIT $3 FOR UPDATE OF i SKIP LOCKED",
         )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
+        .bind(tenant_id.as_str())
+        .bind(cutoff)
+        .bind(limit.max(0))
+        .fetch_all(&mut *tx)
         .await?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        let deleted = sqlx::query_scalar(
+            "DELETE FROM images i WHERE i.tenant_id = $1 AND i.image_id = ANY($2) \
+             AND i.updated_at < $3 AND NOT EXISTS ( \
+                 SELECT 1 FROM instance_images binding \
+                 JOIN instances inst ON inst.instance_id = binding.instance_id \
+                 WHERE binding.image_id = i.image_id AND ( \
+                     inst.status NOT IN ('completed', 'failed', 'cancelled') \
+                     OR binding.created_at > $3)) RETURNING i.image_id",
+        )
+        .bind(tenant_id.as_str())
+        .bind(&candidates)
+        .bind(cutoff)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(deleted)
     }
 
     /// Delete an image
-    pub async fn delete(&self, image_id: &str) -> Result<bool> {
-        invalidate_image_cache();
-        let result = sqlx::query("DELETE FROM images WHERE image_id = $1")
+    pub async fn delete(&self, tenant_id: &TenantId, image_id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM images WHERE image_id = $1 AND tenant_id = $2")
             .bind(image_id)
+            .bind(tenant_id.as_str())
             .execute(&self.pool)
             .await?;
 

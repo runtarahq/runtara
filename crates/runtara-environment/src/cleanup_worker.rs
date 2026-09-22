@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Background worker for cleaning up old run directories.
 //!
-//! Run directories (`{DATA_DIR}/{tenant_id}/runs/{instance_id}/`) hold the
+//! Run directories (`{DATA_DIR}/tenants/{tenant_hash}/runs/{instance_hash}/{launch_hash}/`) hold the
 //! `stderr.log` captured from the workflow guest.
 //!
 //! These directories are not cleaned up immediately after execution to allow
@@ -77,14 +77,16 @@ impl CleanupWorkerConfig {
 
 /// Background worker that cleans up old run directories.
 pub struct CleanupWorker {
+    tenant_id: runtara_core::TenantId,
     config: CleanupWorkerConfig,
     shutdown: Arc<Notify>,
 }
 
 impl CleanupWorker {
     /// Create a new cleanup worker.
-    pub fn new(config: CleanupWorkerConfig) -> Self {
+    pub fn new(tenant_id: runtara_core::TenantId, config: CleanupWorkerConfig) -> Self {
         Self {
+            tenant_id,
             config,
             shutdown: Arc::new(Notify::new()),
         }
@@ -129,45 +131,11 @@ impl CleanupWorker {
         let mut cleaned = 0u64;
         let mut errors = 0u64;
 
-        // Scan all tenant directories
-        let mut tenant_dirs = match tokio::fs::read_dir(&self.config.data_dir).await {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                debug!("Data directory does not exist, nothing to clean");
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-
-        while let Some(tenant_entry) = tenant_dirs.next_entry().await? {
-            let tenant_path = tenant_entry.path();
-
-            // Skip non-directories and special directories
-            if !tenant_path.is_dir() {
-                continue;
-            }
-
-            let tenant_name = tenant_entry.file_name();
-            let tenant_name_str = tenant_name.to_string_lossy();
-
-            // Skip known non-tenant directories
-            if matches!(
-                tenant_name_str.as_ref(),
-                "images" | "logs" | "library_cache" | "pids"
-            ) {
-                continue;
-            }
-
-            // Check for runs subdirectory
-            let runs_dir = tenant_path.join("runs");
-            if !runs_dir.exists() {
-                continue;
-            }
-
-            // Scan run directories for this tenant
-            let (tenant_cleaned, tenant_errors) = self.cleanup_tenant_runs(&runs_dir, cutoff).await;
-            cleaned += tenant_cleaned;
-            errors += tenant_errors;
+        let runs_dir =
+            crate::artifact_paths::tenant_root(&self.config.data_dir, self.tenant_id.as_str())
+                .join("runs");
+        if tokio::fs::try_exists(&runs_dir).await? {
+            (cleaned, errors) = self.cleanup_tenant_runs(&runs_dir, cutoff).await;
         }
 
         if cleaned > 0 || errors > 0 {
@@ -207,7 +175,7 @@ impl CleanupWorker {
         while let Ok(Some(run_entry)) = run_dirs.next_entry().await {
             let run_path = run_entry.path();
 
-            if !run_path.is_dir() {
+            if !run_entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
 
@@ -284,14 +252,16 @@ mod tests {
     #[test]
     fn test_worker_new() {
         let config = CleanupWorkerConfig::default();
-        let worker = CleanupWorker::new(config);
+        let worker =
+            CleanupWorker::new(runtara_core::TenantId::new("test-tenant").unwrap(), config);
         assert!(Arc::strong_count(&worker.shutdown) >= 1);
     }
 
     #[test]
     fn test_shutdown_handle() {
         let config = CleanupWorkerConfig::default();
-        let worker = CleanupWorker::new(config);
+        let worker =
+            CleanupWorker::new(runtara_core::TenantId::new("test-tenant").unwrap(), config);
         let handle = worker.shutdown_handle();
         assert!(Arc::strong_count(&handle) >= 2);
     }
@@ -305,7 +275,8 @@ mod tests {
             max_age: Duration::from_secs(1),
             ..Default::default()
         };
-        let worker = CleanupWorker::new(config);
+        let worker =
+            CleanupWorker::new(runtara_core::TenantId::new("test-tenant").unwrap(), config);
 
         // Should not error on empty directory
         let result = worker.cleanup_old_directories().await;
@@ -320,7 +291,8 @@ mod tests {
             max_age: Duration::from_secs(1),
             ..Default::default()
         };
-        let worker = CleanupWorker::new(config);
+        let worker =
+            CleanupWorker::new(runtara_core::TenantId::new("test-tenant").unwrap(), config);
 
         // Should not error on nonexistent directory
         let result = worker.cleanup_old_directories().await;
@@ -345,7 +317,8 @@ mod tests {
             max_age: Duration::from_secs(0), // Immediate cleanup
             ..Default::default()
         };
-        let worker = CleanupWorker::new(config);
+        let worker =
+            CleanupWorker::new(runtara_core::TenantId::new("test-tenant").unwrap(), config);
 
         worker.cleanup_old_directories().await.unwrap();
 
@@ -359,7 +332,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Create a tenant with old run directory
-        let runs_dir = temp_dir.path().join("test-tenant").join("runs");
+        let runs_dir =
+            crate::artifact_paths::tenant_root(temp_dir.path(), "test-tenant").join("runs");
         let old_run = runs_dir.join("old-instance");
         tokio::fs::create_dir_all(&old_run).await.unwrap();
 
@@ -374,7 +348,8 @@ mod tests {
             max_age: Duration::from_secs(0), // Immediate cleanup
             ..Default::default()
         };
-        let worker = CleanupWorker::new(config);
+        let worker =
+            CleanupWorker::new(runtara_core::TenantId::new("test-tenant").unwrap(), config);
 
         worker.cleanup_old_directories().await.unwrap();
 
@@ -382,5 +357,34 @@ mod tests {
         assert!(!old_run.exists());
         // But runs directory should still exist
         assert!(runs_dir.exists());
+    }
+    #[tokio::test]
+    async fn cleanup_only_visits_its_assigned_tenant() {
+        let root = TempDir::new().unwrap();
+        let a = crate::artifact_paths::tenant_root(root.path(), "a")
+            .join("runs")
+            .join("old");
+        let b = crate::artifact_paths::tenant_root(root.path(), "b")
+            .join("runs")
+            .join("old");
+        let legacy = root.path().join("a/runs/old");
+        for path in [&a, &b, &legacy] {
+            tokio::fs::create_dir_all(path).await.unwrap();
+        }
+        let worker = CleanupWorker::new(
+            runtara_core::TenantId::new("a").unwrap(),
+            CleanupWorkerConfig {
+                data_dir: root.path().to_path_buf(),
+                max_age: Duration::ZERO,
+                ..Default::default()
+            },
+        );
+        worker.cleanup_old_directories().await.unwrap();
+        assert!(!a.exists());
+        assert!(b.exists());
+        assert!(
+            legacy.exists(),
+            "legacy directories have no encoded tenant ownership"
+        );
     }
 }

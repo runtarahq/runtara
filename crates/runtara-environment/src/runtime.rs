@@ -364,11 +364,16 @@ impl EnvironmentRuntimeConfig {
 
         // Recover orphaned containers from previous Environment run
         // This handles containers that were running when Environment restarted
-        if let Err(e) = recover_orphaned_containers(&self.pool, self.persistence.as_ref()).await {
+        if let Err(e) =
+            recover_orphaned_containers(&self.tenant_id, &self.pool, self.persistence.as_ref())
+                .await
+        {
             warn!(error = %e, "Failed to recover orphaned containers");
         }
 
-        if let Err(e) = fail_interrupted_pending_starts(&self.pool, pending_start_cutoff).await {
+        if let Err(e) =
+            fail_interrupted_pending_starts(&self.pool, &self.tenant_id, pending_start_cutoff).await
+        {
             warn!(error = %e, "Failed to recover legacy pending starts without a durable launch");
         }
 
@@ -402,6 +407,7 @@ impl EnvironmentRuntimeConfig {
         // queue row then notify it, and a periodic scan recovers notifications
         // lost across process interruption.
         let launch_dispatcher = LaunchDispatcher::new(
+            self.tenant_id.clone(),
             self.pool.clone(),
             self.persistence.clone(),
             self.runner.clone(),
@@ -426,7 +432,7 @@ impl EnvironmentRuntimeConfig {
         cleanup_config.poll_interval = self.cleanup_poll_interval;
         cleanup_config.max_age = self.cleanup_max_age;
         let cleanup_enabled = cleanup_config.enabled;
-        let cleanup_worker = CleanupWorker::new(cleanup_config);
+        let cleanup_worker = CleanupWorker::new(self.tenant_id.clone(), cleanup_config);
         let cleanup = Worker::spawn_configurable(
             "run-dir cleanup",
             cleanup_worker.shutdown_handle(),
@@ -478,7 +484,11 @@ impl EnvironmentRuntimeConfig {
         let mut image_cleanup_config = self.image_cleanup_config;
         image_cleanup_config.data_dir = self.data_dir.clone();
         let image_cleanup_enabled = image_cleanup_config.enabled;
-        let image_cleanup_worker = ImageCleanupWorker::new(self.pool.clone(), image_cleanup_config);
+        let image_cleanup_worker = ImageCleanupWorker::new(
+            self.tenant_id.clone(),
+            self.pool.clone(),
+            image_cleanup_config,
+        );
         let image_cleanup = Worker::spawn_configurable(
             "image cleanup",
             image_cleanup_worker.shutdown_handle(),
@@ -491,6 +501,7 @@ impl EnvironmentRuntimeConfig {
         info!("EnvironmentRuntime started");
 
         Ok(EnvironmentRuntime {
+            tenant_id: self.tenant_id,
             wake,
             launch_dispatcher: dispatcher,
             // This order is the shutdown join order, which the panic report
@@ -571,6 +582,7 @@ impl Worker {
 ///
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
+    tenant_id: runtara_core::TenantId,
     /// Held by name because [`Self::drain`] stops it first and then waits for
     /// it to quiesce before taking its snapshot.
     wake: Worker,
@@ -659,7 +671,7 @@ impl EnvironmentRuntime {
         // crash-loop cap. Reporting that as a successful drain is how a host
         // comes to believe its instances were parked when none of them were.
         let registered = container_registry
-            .list_all_registered()
+            .list_registered(&self.tenant_id)
             .await
             .map_err(|e| {
                 error!(error = %e, "Could not list active instances; drain cannot proceed");
@@ -945,10 +957,15 @@ impl DrainReport {
 
 /// Reconcile registrations whose durable owner has expired. A peer starting
 /// does not imply that other in-process executions sharing this database died.
-async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistence) -> Result<()> {
+async fn recover_orphaned_containers(
+    tenant_id: &runtara_core::TenantId,
+    pool: &PgPool,
+    persistence: &dyn Persistence,
+) -> Result<()> {
     let registry = ContainerRegistry::new(pool.clone());
-    for container in registry.list_all_registered().await? {
+    for container in registry.list_registered(tenant_id).await? {
         match crate::recovery::recover_registered(
+            tenant_id,
             pool,
             persistence,
             &container,
@@ -981,6 +998,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
 /// advanced concurrently a no-op rather than overwriting a live transition.
 async fn fail_interrupted_pending_starts<'e, E>(
     executor: E,
+    tenant_id: &runtara_core::TenantId,
     started_before: chrono::DateTime<chrono::Utc>,
 ) -> Result<()>
 where
@@ -998,20 +1016,20 @@ where
                 EXISTS (
                     SELECT 1
                     FROM instance_images ii
-                    WHERE ii.instance_id = i.instance_id
+                    WHERE ii.instance_id = i.instance_id AND ii.tenant_id = i.tenant_id
                 ) AS has_image
             FROM instances i
-            WHERE i.status = 'pending'
+            WHERE i.tenant_id = $2 AND i.status = 'pending'
               AND i.created_at < $1
               AND NOT EXISTS (
                     SELECT 1
                     FROM container_registry cr
-                    WHERE cr.instance_id = i.instance_id
+                    WHERE cr.instance_id = i.instance_id AND cr.tenant_id = i.tenant_id
               )
               AND NOT EXISTS (
                     SELECT 1
                     FROM instance_launches launch
-                    WHERE launch.instance_id = i.instance_id
+                    WHERE launch.instance_id = i.instance_id AND launch.tenant_id = i.tenant_id
                       AND launch.state IN ({active_states})
               )
         )
@@ -1027,12 +1045,13 @@ where
                     'Instance start was interrupted before an image was bound'
             END
         FROM candidates
-        WHERE i.instance_id = candidates.instance_id
+        WHERE i.instance_id = candidates.instance_id AND i.tenant_id = $2
           AND i.status = 'pending'
         RETURNING candidates.has_image
         "#
     ))
     .bind(started_before)
+    .bind(tenant_id.as_str())
     .fetch_all(executor)
     .await?;
 
@@ -1511,9 +1530,13 @@ mod tests {
         .await
         .expect("register live pending start");
 
-        fail_interrupted_pending_starts(&mut *tx, cutoff)
-            .await
-            .expect("recover interrupted pending starts");
+        fail_interrupted_pending_starts(
+            &mut *tx,
+            &runtara_core::TenantId::new(&tenant_id).unwrap(),
+            cutoff,
+        )
+        .await
+        .expect("recover interrupted pending starts");
 
         let states: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
             r#"

@@ -2260,6 +2260,13 @@ pub async fn list_instance_checkpoints_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
+        Err(crate::runtime_client::RuntimeError::InstanceNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": "Instance not found",
+            })),
+        ),
         Err(e) => {
             let error_response = json!({
                 "success": false,
@@ -3388,6 +3395,37 @@ mod checkpoint_pagination_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         body
+    }
+
+    #[tokio::test]
+    async fn foreign_and_missing_checkpoint_parents_return_the_same_not_found() {
+        let (client, persistence) = client_and_store().await;
+        let foreign = "22222222-2222-4222-8222-222222222222";
+        let missing = "33333333-3333-4333-8333-333333333333";
+        persistence
+            .register_instance(
+                &runtara_core::TenantId::new("other-tenant").unwrap(),
+                foreign,
+            )
+            .await
+            .unwrap();
+        let mut responses = Vec::new();
+        for id in [foreign, missing] {
+            let (status, Json(body)) = list_instance_checkpoints_handler(
+                OrgId("test-tenant".into()),
+                State(lazy_pool()),
+                State(Some(Arc::clone(&client))),
+                Path(("wf-1".into(), id.into())),
+                Query(ListCheckpointsQuery {
+                    page: None,
+                    size: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            responses.push(body);
+        }
+        assert_eq!(responses[0], responses[1]);
     }
 
     fn ids(body: &Value) -> Vec<String> {

@@ -55,7 +55,6 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
         .unwrap();
     }
     let mut options = ListInstancesOptions {
-        tenant_id: Some(tenant.clone()),
         search: Some("ORDER/12 [done]".into()),
         limit: 4,
         ..Default::default()
@@ -63,13 +62,26 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     let mut ids = Vec::new();
     for page in 0..3 {
         options.offset = page * 4;
-        assert_eq!(count_instances(&pool, &options).await.unwrap(), 9);
+        assert_eq!(
+            count_instances(
+                &pool,
+                &runtara_core::TenantId::new(&tenant).unwrap(),
+                &options
+            )
+            .await
+            .unwrap(),
+            9
+        );
         ids.extend(
-            list_instances(&pool, &options)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|i| i.instance_id),
+            list_instances(
+                &pool,
+                &runtara_core::TenantId::new(&tenant).unwrap(),
+                &options,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.instance_id),
         );
     }
     assert_eq!(ids.len(), 9);
@@ -78,22 +90,76 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
         9
     );
     options.offset = 100;
-    assert!(list_instances(&pool, &options).await.unwrap().is_empty());
-    assert_eq!(count_instances(&pool, &options).await.unwrap(), 9);
+    assert!(
+        list_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        count_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap(),
+        9
+    );
     options.offset = 0;
     options.search = None;
     options.run_label = Some("Order/12 [done] (v1.2)".into());
-    assert_eq!(count_instances(&pool, &options).await.unwrap(), 9);
+    assert_eq!(
+        count_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap(),
+        9
+    );
     options.statuses = Some(vec!["failed".into()]);
-    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    assert_eq!(
+        count_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap(),
+        0
+    );
     options.statuses = None;
     options.created_after = Some(epoch(1_001));
-    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    assert_eq!(
+        count_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap(),
+        0
+    );
     options.created_after = None;
     options.run_label = None;
     for term in ["%", "_", "\\"] {
         options.search = Some(term.into());
-        assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+        assert_eq!(
+            count_instances(
+                &pool,
+                &runtara_core::TenantId::new(&tenant).unwrap(),
+                &options
+            )
+            .await
+            .unwrap(),
+            0
+        );
     }
     // A workflow filter must intersect the label predicate before pagination.
     let image_id = format!("{tenant}-image");
@@ -110,12 +176,50 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     .unwrap();
     options.search = Some("Order/12".into());
     options.image_name_prefix = Some("invoice:".into());
-    assert_eq!(count_instances(&pool, &options).await.unwrap(), 1);
-    assert_eq!(list_instances(&pool, &options).await.unwrap().len(), 1);
+    assert_eq!(
+        count_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        list_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
     options.search = Some("search by workflow name".into());
     options.search_workflow_ids = vec!["invoice".into()];
-    assert_eq!(count_instances(&pool, &options).await.unwrap(), 1);
-    assert_eq!(list_instances(&pool, &options).await.unwrap().len(), 1);
+    assert_eq!(
+        count_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        list_instances(
+            &pool,
+            &runtara_core::TenantId::new(&tenant).unwrap(),
+            &options
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
     // The database enforces the same constraints even outside application code.
     let id = format!("{tenant}-00");
     for invalid in [
@@ -242,9 +346,15 @@ async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
     )
     .await;
 
-    let buckets = get_tenant_metrics(&pool, &tenant_id, start, end, 60)
-        .await
-        .expect("aggregation should succeed");
+    let buckets = get_tenant_metrics(
+        &pool,
+        &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        start,
+        end,
+        60,
+    )
+    .await
+    .expect("aggregation should succeed");
 
     // 60 whole minutes, and the spine is inclusive of both edges.
     assert_eq!(buckets.len(), 61, "expected a full minute-resolution spine");
@@ -288,9 +398,15 @@ async fn test_tenant_metrics_empty_buckets_carry_null_aggregates_not_zero() {
     )
     .await;
 
-    let buckets = get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(600), 60)
-        .await
-        .expect("aggregation should succeed");
+    let buckets = get_tenant_metrics(
+        &pool,
+        &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        epoch(0),
+        epoch(600),
+        60,
+    )
+    .await
+    .expect("aggregation should succeed");
 
     // "No runs" and "runs that took no time" are different claims. A zero here
     // would be averaged into the dashboard's duration and memory figures.
@@ -331,9 +447,15 @@ async fn test_tenant_metrics_hourly_width_aligns_to_hour_boundaries() {
     )
     .await;
 
-    let buckets = get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(10_800), 3_600)
-        .await
-        .expect("aggregation should succeed");
+    let buckets = get_tenant_metrics(
+        &pool,
+        &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        epoch(0),
+        epoch(10_800),
+        3_600,
+    )
+    .await
+    .expect("aggregation should succeed");
 
     // Flooring the epoch by 3600 must reproduce what date_trunc('hour') gave,
     // since hours divide the epoch evenly. This is the compatibility pin.
@@ -413,9 +535,15 @@ async fn test_tenant_metrics_daily_buckets_stay_utc_under_a_shifted_session_time
     )
     .await;
 
-    let buckets = get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(3 * day), 86_400)
-        .await
-        .expect("aggregation should succeed");
+    let buckets = get_tenant_metrics(
+        &pool,
+        &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        epoch(0),
+        epoch(3 * day),
+        86_400,
+    )
+    .await
+    .expect("aggregation should succeed");
 
     for bucket in &buckets {
         assert_eq!(
@@ -442,9 +570,15 @@ async fn test_tenant_metrics_counts_a_boundary_crossing_run_once() {
     // finished_at, so it belongs to the later bucket and to only that bucket.
     seed_terminal_instance(&pool, &tenant_id, "completed", epoch(30), epoch(150), None).await;
 
-    let buckets = get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(600), 60)
-        .await
-        .expect("aggregation should succeed");
+    let buckets = get_tenant_metrics(
+        &pool,
+        &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        epoch(0),
+        epoch(600),
+        60,
+    )
+    .await
+    .expect("aggregation should succeed");
 
     let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
     assert_eq!(total, 1, "a run spanning a boundary was counted twice");
@@ -487,9 +621,15 @@ async fn test_tenant_metrics_totals_do_not_change_with_bucket_width() {
     // must total the same at every width. If the two sides of the LEFT JOIN
     // ever key differently, runs silently vanish into unmatched buckets.
     for width in [60u32, 360, 1_440, 3_600, 7_200, 21_600, 86_400] {
-        let buckets = get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(86_400), width)
-            .await
-            .expect("aggregation should succeed");
+        let buckets = get_tenant_metrics(
+            &pool,
+            &runtara_core::TenantId::new(&tenant_id).unwrap(),
+            epoch(0),
+            epoch(86_400),
+            width,
+        )
+        .await
+        .expect("aggregation should succeed");
 
         let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
         assert_eq!(
@@ -521,9 +661,15 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
     // Running: no finished_at, so it is invisible to the aggregation by design.
     seed_terminal_instance(&pool, &tenant_id, "running", epoch(0), epoch(30), None).await;
 
-    let buckets = get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(600), 60)
-        .await
-        .expect("aggregation should succeed");
+    let buckets = get_tenant_metrics(
+        &pool,
+        &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        epoch(0),
+        epoch(600),
+        60,
+    )
+    .await
+    .expect("aggregation should succeed");
 
     let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
     assert_eq!(

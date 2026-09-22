@@ -388,7 +388,7 @@ async fn existing_start_response(
     }
 
     match InstanceRepository::new(state.pool.clone())
-        .image_binding(instance_id)
+        .image_binding(&tenant_scope, instance_id)
         .await?
         .map(|binding| binding.image_id)
     {
@@ -478,6 +478,7 @@ pub fn enrich_input_for_storage(
 ))]
 pub async fn handle_start_instance(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     request: StartInstanceRequest,
 ) -> Result<StartInstanceResponse> {
     info!(
@@ -485,6 +486,12 @@ pub async fn handle_start_instance(
         tenant_id = %request.tenant_id,
         "Start instance request received"
     );
+
+    if request.tenant_id != tenant_id.as_str() {
+        return Ok(StartInstanceResponse::rejected(
+            StartRejection::InvalidRequest("request tenant does not match operation tenant".into()),
+        ));
+    }
 
     // Validate image_id
     if request.image_id.is_empty() {
@@ -495,7 +502,7 @@ pub async fn handle_start_instance(
 
     // Look up image
     let image_registry = ImageRegistry::new(state.pool.clone());
-    let image = match image_registry.get(&request.image_id).await {
+    let image = match image_registry.get(tenant_id, &request.image_id).await {
         Ok(Some(img)) => img,
         Ok(None) => {
             return Ok(StartInstanceResponse::rejected(
@@ -650,7 +657,7 @@ pub async fn handle_start_instance(
         ),
     };
 
-    match repository.claim_initial(initial).await {
+    match repository.claim_initial(tenant_id, initial).await {
         Ok(InitialLaunchOutcome::Enqueued(launch)) => {
             state.launch_notifier.notify_one();
             info!(
@@ -770,8 +777,14 @@ pub async fn handle_stop_instance(
     // A queued/leased launch has no runner handle yet. Cancel it in the same
     // transaction that terminalizes Core, before signalling an active guest.
     let launches = LaunchRepository::new(state.pool.clone());
-    match launches.get_active_for_instance(&request.instance_id).await {
-        Ok(Some(active)) => match launches.cancel_before_start(&active.launch_id).await {
+    match launches
+        .get_active_for_instance(tenant_id, &request.instance_id)
+        .await
+    {
+        Ok(Some(active)) => match launches
+            .cancel_before_start(tenant_id, &active.launch_id)
+            .await
+        {
             Ok(CancelOutcome::Cancelled(cancelled)) => {
                 state
                     .lifecycle_observers
@@ -843,7 +856,10 @@ pub async fn handle_stop_instance(
 
     // Look up container
     let container_registry = ContainerRegistry::new(state.pool.clone());
-    let container = match container_registry.get(&request.instance_id).await {
+    let container = match container_registry
+        .get(tenant_id, &request.instance_id)
+        .await
+    {
         Ok(Some(c)) => c,
         Ok(None) => {
             return stop_after_handle_retired(state, tenant_id, &request).await;
@@ -875,12 +891,16 @@ pub async fn handle_stop_instance(
             // needs proof that the physical owner armed whole-run emergency
             // grace; persisting a request alone is not that proof.
             let delivery = async {
-                let Some(deadline) = container_registry.request_abort(&handle, abort_at).await?
+                let Some(deadline) = container_registry
+                    .request_abort(tenant_id, &handle, abort_at)
+                    .await?
                 else {
                     return stop_after_handle_retired(state, tenant_id, &request).await;
                 };
                 loop {
-                    if container_registry.abort_is_armed(&handle, deadline).await?
+                    if container_registry
+                        .abort_is_armed(tenant_id, &handle, deadline)
+                        .await?
                         || state
                             .persistence
                             .get_instance_meta(tenant_id, &request.instance_id)
@@ -979,15 +999,12 @@ pub async fn handle_resume_instance(
     info!(instance_id = %request.instance_id, "Resume instance request received");
 
     // Get instance from DB
-    let (status, tenant_id) = match state
+    let status = match state
         .persistence
         .get_instance_meta(tenant_id, &request.instance_id)
         .await?
     {
-        Some(instance) => (
-            crate::core_types::status_name(instance.status),
-            instance.tenant_id,
-        ),
+        Some(instance) => crate::core_types::status_name(instance.status),
         None => {
             return Ok(ResumeInstanceResponse {
                 success: false,
@@ -1013,7 +1030,7 @@ pub async fn handle_resume_instance(
     // Read only the durable image binding. Artifact and timeout preflight is
     // owned by the dispatcher, after this request has a recoverable queue row.
     let image_id = match InstanceRepository::new(state.pool.clone())
-        .image_binding(&request.instance_id)
+        .image_binding(tenant_id, &request.instance_id)
         .await?
     {
         Some(binding) => binding.image_id,
@@ -1027,7 +1044,7 @@ pub async fn handle_resume_instance(
 
     let repository = LaunchRepository::new(state.pool.clone());
     for released in repository
-        .reconcile_released_instance(&request.instance_id)
+        .reconcile_released_instance(tenant_id, &request.instance_id)
         .await
         .map_err(|error| {
             crate::error::Error::Other(format!("Failed to reconcile parked launch: {error}"))
@@ -1040,12 +1057,12 @@ pub async fn handle_resume_instance(
     let enqueue = EnqueueRequest::immediate(
         uuid::Uuid::new_v4().to_string(),
         request.instance_id.clone(),
-        tenant_id,
+        tenant_id.as_str(),
         image_id,
         LaunchKind::Resume,
         DEFAULT_LAUNCH_QUEUE_TIMEOUT,
     );
-    match repository.enqueue(enqueue).await {
+    match repository.enqueue(tenant_id, enqueue).await {
         Ok(EnqueueOutcome::Enqueued(launch)) | Ok(EnqueueOutcome::Existing(launch)) => {
             // Enqueuing a new resume clears the old timer in its transaction.
             // Clearing here could erase a timer set by a fast resumed guest.
@@ -1139,19 +1156,24 @@ async fn release_launch_after_monitor(
     let repository = LaunchRepository::new(pool.clone());
     let result = match instance.status {
         CoreInstanceStatus::Suspended => repository
-            .mark_suspended(launch_id)
+            .mark_suspended(tenant_id, launch_id)
             .await
             .map(|launch| launch.map(|launch| (launch, "suspended"))),
         CoreInstanceStatus::Completed => repository
-            .mark_terminal(launch_id, LaunchState::Completed, None)
+            .mark_terminal(tenant_id, launch_id, LaunchState::Completed, None)
             .await
             .map(|launch| launch.map(|launch| (launch, "completed"))),
         CoreInstanceStatus::Failed => repository
-            .mark_terminal(launch_id, LaunchState::Failed, instance.error.as_deref())
+            .mark_terminal(
+                tenant_id,
+                launch_id,
+                LaunchState::Failed,
+                instance.error.as_deref(),
+            )
             .await
             .map(|launch| launch.map(|launch| (launch, "failed"))),
         CoreInstanceStatus::Cancelled => repository
-            .mark_terminal(launch_id, LaunchState::Cancelled, None)
+            .mark_terminal(tenant_id, launch_id, LaunchState::Cancelled, None)
             .await
             .map(|launch| launch.map(|launch| (launch, "cancelled"))),
         status => {
@@ -1257,7 +1279,12 @@ async fn settle_execution_timeout(
     // Clean up container registry, but only the row this monitor
     // registered: a resume may have replaced it with a live run.
     let _ = container_registry
-        .cleanup_handle(instance_id, &handle.launch_id, &handle.handle_id)
+        .cleanup_handle(
+            &tenant_id,
+            instance_id,
+            &handle.launch_id,
+            &handle.handle_id,
+        )
         .await;
 
     release_launch_after_monitor(
@@ -1303,6 +1330,7 @@ async fn record_exit_diagnostics(
 
     let observed_status = match crate::metrics::record_resources_returning_status(
         pool,
+        &tenant_id,
         instance_id,
         metrics.memory_peak_bytes,
         metrics.cpu_usage_usec,
@@ -1337,7 +1365,8 @@ async fn record_exit_diagnostics(
     // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
     if let Some(ref stderr_content) = stderr {
         if let Err(e) =
-            crate::metrics::record_instance_stderr(pool, instance_id, stderr_content).await
+            crate::metrics::record_instance_stderr(pool, &tenant_id, instance_id, stderr_content)
+                .await
         {
             warn!(
                 instance_id = %instance_id,
@@ -1487,6 +1516,11 @@ async fn settle_failed_start_gate(
     instance_id: &str,
     attempt_count: i32,
 ) -> AfterFailedGate {
+    let tenant_id = match runtara_core::TenantId::new(handle.tenant_id.clone()) {
+        Ok(tenant_id) => tenant_id,
+        Err(_) => return AfterFailedGate::Done,
+    };
+
     warn!(
         instance_id = %instance_id,
         launch_id = %handle.launch_id,
@@ -1498,6 +1532,7 @@ async fn settle_failed_start_gate(
     let terminal = match tokio::time::timeout(
         START_GATE_MONITOR_CLEANUP_TIMEOUT,
         repository.fail_unconfirmed_running(
+            &tenant_id,
             &handle.launch_id,
             attempt_count,
             "runner did not durably cross start gate",
@@ -1534,7 +1569,7 @@ async fn settle_failed_start_gate(
                 &handle.launch_id,
                 "Could not remove failed start-gate runner registry row",
                 "Timed out removing failed start-gate registry row; restart recovery will reconcile it",
-                ContainerRegistry::new(pool.clone()).cleanup_handle(
+                ContainerRegistry::new(pool.clone()).cleanup_handle(&tenant_id,
                     instance_id,
                     &handle.launch_id,
                     &handle.handle_id,
@@ -1548,7 +1583,7 @@ async fn settle_failed_start_gate(
         // marker — a live guest — or someone else already settled this.
         Ok(None) => match tokio::time::timeout(
             START_GATE_MONITOR_CLEANUP_TIMEOUT,
-            repository.is_gate_confirmed(&handle.launch_id, attempt_count),
+            repository.is_gate_confirmed(&tenant_id, &handle.launch_id, attempt_count),
         )
         .await
         {
@@ -1702,7 +1737,7 @@ pub fn spawn_container_monitor(
                 // stale monitor would have used to throw away the row of the
                 // run that replaced it.
                 let is_stale_monitor = match container_registry
-                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
+                    .cleanup_handle(&tenant_id, &instance_id, &handle.launch_id, &handle.handle_id)
                     .await
                 {
                     Ok(owned) => !owned,
@@ -2065,8 +2100,7 @@ pub async fn handle_list_checkpoints(
             params.created_after,
             params.created_before,
         )
-        .await
-        .unwrap_or(0);
+        .await?;
 
     Ok(ListCheckpointsResult {
         checkpoints: checkpoints
@@ -2127,8 +2161,7 @@ pub async fn handle_list_events(
     let total_count = state
         .persistence
         .count_events(tenant_id, instance_id, filter)
-        .await
-        .unwrap_or(0);
+        .await?;
 
     Ok(ListEventsResult {
         events: events
@@ -2218,8 +2251,7 @@ pub async fn handle_list_step_summaries(
     let total_count = state
         .persistence
         .count_paired_records(tenant_id, instance_id, vocabulary, filter)
-        .await
-        .unwrap_or(0);
+        .await?;
 
     Ok(ListStepSummariesResult {
         steps: steps
@@ -2437,9 +2469,10 @@ pub struct MetricsBucket {
 /// terminal yet reports `None` rather than 0%.
 pub async fn handle_get_tenant_metrics(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     options: &TenantMetricsOptions,
 ) -> Result<Vec<MetricsBucket>> {
-    if options.tenant_id.is_empty() {
+    if options.tenant_id != tenant_id.as_str() {
         return Err(crate::error::Error::InvalidRequest(
             "tenant_id is required".to_string(),
         ));
@@ -2464,7 +2497,7 @@ pub async fn handle_get_tenant_metrics(
 
     let bucket_rows = db::get_tenant_metrics(
         &state.pool,
-        &options.tenant_id,
+        tenant_id,
         options.start_time,
         options.end_time,
         options.bucket_seconds,
@@ -2542,21 +2575,25 @@ impl std::error::Error for StoreImageError {}
 /// partially written artifact.
 pub async fn handle_store_image(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     params: StoreImageParams,
     binary: &[u8],
 ) -> std::result::Result<String, StoreImageError> {
     use std::io::Write;
 
+    if params.tenant_id != tenant_id.as_str() {
+        return Err(StoreImageError::Lookup(
+            "image tenant does not match operation tenant".into(),
+        ));
+    }
     let image_registry = ImageRegistry::new(state.pool.clone());
     let candidate_image_id = uuid::Uuid::new_v4().to_string();
-    let candidate_binary_path = state
-        .data_dir
-        .join("images")
-        .join(&candidate_image_id)
-        .join("binary");
+    let candidate_binary_path =
+        crate::artifact_paths::image_dir(&state.data_dir, tenant_id.as_str(), &candidate_image_id)
+            .join("binary");
     let name_claim = image_registry
         .claim_name(
-            &params.tenant_id,
+            tenant_id,
             &params.name,
             &candidate_image_id,
             &candidate_binary_path.to_string_lossy(),
@@ -2565,7 +2602,8 @@ pub async fn handle_store_image(
         .map_err(|e| StoreImageError::Lookup(format!("Failed to claim image name: {e}")))?;
     let image_id = name_claim.image_id;
 
-    let images_dir = state.data_dir.join("images").join(&image_id);
+    let images_dir =
+        crate::artifact_paths::image_dir(&state.data_dir, tenant_id.as_str(), &image_id);
     let binary_path = images_dir.join("binary");
 
     if let Err(e) = std::fs::create_dir_all(&images_dir) {
@@ -2612,7 +2650,7 @@ pub async fn handle_store_image(
 
     let image = builder.build();
 
-    if let Err(e) = image_registry.register(&image).await {
+    if let Err(e) = image_registry.register(tenant_id, &image).await {
         return Err(StoreImageError::Register(format!(
             "Failed to register image: {}",
             e

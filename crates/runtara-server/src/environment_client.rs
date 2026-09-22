@@ -92,6 +92,15 @@ impl EnvironmentClient {
         Self { state, tenant_id }
     }
 
+    fn require_bound_tenant(&self, tenant_id: Option<&str>) -> Result<()> {
+        if tenant_id.is_some_and(|tenant| tenant != self.tenant_id.as_str()) {
+            return Err(EnvironmentError::InvalidInput(
+                "tenant does not match configured runtime".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The registry that owns the `images` table.
     ///
     /// Image reads go straight to it. They used to pass through a pair of
@@ -116,7 +125,11 @@ impl EnvironmentClient {
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<InstanceInfo> {
         debug!("Getting instance status");
 
-        let Some(inst) = self.instances().detail(instance_id).await? else {
+        let Some(inst) = self
+            .instances()
+            .detail(&self.tenant_id, instance_id)
+            .await?
+        else {
             return Err(EnvironmentError::InstanceNotFound(instance_id.to_string()));
         };
 
@@ -154,9 +167,10 @@ impl EnvironmentClient {
         statuses: &[String],
         ceiling: i64,
     ) -> Result<i64> {
+        self.require_bound_tenant(tenant_id)?;
         Ok(self
             .instances()
-            .count_by_status(tenant_id, statuses, ceiling)
+            .count_by_status(&self.tenant_id, statuses, ceiling)
             .await?)
     }
 
@@ -167,10 +181,11 @@ impl EnvironmentClient {
         options: ListInstancesOptions,
     ) -> Result<ListInstancesResult> {
         debug!("Listing instances");
+        self.require_bound_tenant(options.tenant_id.as_deref())?;
 
         let result = self
             .instances()
-            .list(&list_instances_options(&options))
+            .list(&self.tenant_id, &list_instances_options(&options))
             .await?;
 
         Ok(ListInstancesResult {
@@ -204,6 +219,7 @@ impl EnvironmentClient {
 
         let resp = handlers::handle_start_instance(
             &self.state,
+            &self.tenant_id,
             StartInstanceRequest {
                 image_id: options.image_id,
                 tenant_id: options.tenant_id,
@@ -358,15 +374,18 @@ impl EnvironmentClient {
     #[instrument(skip(self, options), level = "debug")]
     pub async fn list_images(&self, options: ListImagesOptions) -> Result<ListImagesResult> {
         debug!("Listing images");
+        self.require_bound_tenant(options.tenant_id.as_deref())?;
 
         let images = self
             .image_registry()
-            .list_filtered(&ImageFilter {
-                tenant_id: options.tenant_id,
-                name: None,
-                limit: i64::from(options.limit),
-                offset: i64::from(options.offset),
-            })
+            .list_filtered(
+                &self.tenant_id,
+                &ImageFilter {
+                    name: None,
+                    limit: i64::from(options.limit),
+                    offset: i64::from(options.offset),
+                },
+            )
             .await?;
 
         let total_count = images.len() as u32;
@@ -389,15 +408,18 @@ impl EnvironmentClient {
         name: &str,
     ) -> Result<Option<ImageSummary>> {
         debug!("Finding image by name");
+        self.require_bound_tenant(Some(tenant_id))?;
 
         Ok(self
             .image_registry()
-            .list_filtered(&ImageFilter {
-                tenant_id: Some(tenant_id.to_string()),
-                name: Some(name.to_string()),
-                limit: 1,
-                offset: 0,
-            })
+            .list_filtered(
+                &self.tenant_id,
+                &ImageFilter {
+                    name: Some(name.to_string()),
+                    limit: 1,
+                    offset: 0,
+                },
+            )
             .await?
             .into_iter()
             .next()
@@ -410,17 +432,21 @@ impl EnvironmentClient {
     /// row; this is how it checks the file is actually there before doing so.
     #[instrument(skip(self), fields(image_id = %image_id), level = "debug")]
     pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool> {
-        Ok(self.image_registry().artifact_present(image_id).await?)
+        Ok(self
+            .image_registry()
+            .artifact_present(&self.tenant_id, image_id)
+            .await?)
     }
 
     /// Get one image, scoped to a tenant.
     #[instrument(skip(self), fields(image_id = %image_id, tenant_id = %tenant_id), level = "debug")]
     pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
+        self.require_bound_tenant(Some(tenant_id))?;
 
         Ok(self
             .image_registry()
-            .get_scoped(image_id, Some(tenant_id))
+            .get(&self.tenant_id, image_id)
             .await?
             .map(image_summary))
     }
@@ -467,6 +493,7 @@ impl EnvironmentClient {
 
         let image_id = handlers::handle_store_image(
             &self.state,
+            &self.tenant_id,
             handlers::StoreImageParams {
                 tenant_id: options.tenant_id,
                 name: options.name,
@@ -742,6 +769,7 @@ impl EnvironmentClient {
 
         let buckets = handlers::handle_get_tenant_metrics(
             &self.state,
+            &self.tenant_id,
             &handlers::TenantMetricsOptions {
                 tenant_id: options.tenant_id.clone(),
                 start_time,
@@ -833,7 +861,6 @@ fn list_instances_options(
         search: options.search.clone(),
         run_label: options.run_label.clone(),
         search_workflow_ids: options.search_workflow_ids.clone(),
-        tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {
             options
                 .statuses

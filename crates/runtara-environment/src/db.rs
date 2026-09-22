@@ -6,6 +6,7 @@
 //! `instance_images` table to track which image launched each instance.
 
 use chrono::{DateTime, Utc};
+use runtara_core::TenantId;
 use sqlx::PgPool;
 
 use crate::instance_repository::ListInstancesOptions;
@@ -83,6 +84,7 @@ pub struct InstanceFull {
 /// Get full instance details including image name and heartbeat.
 pub async fn get_instance_full(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
 ) -> Result<Option<InstanceFull>, sqlx::Error> {
     sqlx::query_as::<_, InstanceFull>(
@@ -94,12 +96,13 @@ pub async fn get_instance_full(
                i.memory_peak_bytes, i.cpu_usage_usec,
                i.termination_reason::TEXT as termination_reason, i.exit_code
         FROM instances i
-        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
-        LEFT JOIN images img ON ii.image_id = img.image_id
-        WHERE i.instance_id = $1
+        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id AND i.tenant_id = ii.tenant_id
+        LEFT JOIN images img ON ii.image_id = img.image_id AND ii.tenant_id = img.tenant_id
+        WHERE i.instance_id = $1 AND i.tenant_id = $2
         "#,
     )
     .bind(instance_id)
+    .bind(tenant_id.as_str())
     .fetch_optional(pool)
     .await
 }
@@ -130,12 +133,12 @@ pub fn escape_like_literal(value: &str) -> String {
 /// One predicate builder for both the page and its unpaged count.
 fn push_instance_filters(
     query: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
+    tenant_id: &TenantId,
     options: &ListInstancesOptions,
 ) {
-    query.push(" WHERE TRUE");
-    if let Some(tenant) = &options.tenant_id {
-        query.push(" AND i.tenant_id = ").push_bind(tenant.clone());
-    }
+    query
+        .push(" WHERE i.tenant_id = ")
+        .push_bind(tenant_id.as_str().to_owned());
     if let Some(statuses) = status_filter(options) {
         query
             .push(" AND i.status = ANY(")
@@ -192,6 +195,7 @@ fn push_instance_filters(
 /// List instances with optional filters, with a deterministic tie-breaker.
 pub async fn list_instances(
     pool: &PgPool,
+    tenant_id: &TenantId,
     options: &ListInstancesOptions,
 ) -> Result<Vec<InstanceWithImage>, sqlx::Error> {
     let mut query = sqlx::QueryBuilder::new(
@@ -199,10 +203,10 @@ pub async fn list_instances(
          i.created_at, i.started_at, i.finished_at, i.error, i.run_label,
          ii.image_id, img.name as image_name
          FROM instances i
-         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
-         LEFT JOIN images img ON ii.image_id = img.image_id",
+         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id AND i.tenant_id = ii.tenant_id
+         LEFT JOIN images img ON ii.image_id = img.image_id AND ii.tenant_id = img.tenant_id",
     );
-    push_instance_filters(&mut query, options);
+    push_instance_filters(&mut query, tenant_id, options);
     query.push(match options.order_by.as_deref() {
         Some("created_at_asc") => " ORDER BY i.created_at ASC, i.instance_id ASC",
         Some("finished_at_desc") => " ORDER BY i.finished_at DESC NULLS LAST, i.instance_id DESC",
@@ -232,7 +236,7 @@ pub async fn list_instances(
 /// intake exactly when a large sleeping population had accumulated.
 pub async fn count_instances_by_status(
     pool: &PgPool,
-    tenant_id: Option<&str>,
+    tenant_id: &TenantId,
     statuses: &[String],
     ceiling: i64,
 ) -> Result<i64, sqlx::Error> {
@@ -246,13 +250,13 @@ pub async fn count_instances_by_status(
         SELECT COUNT(*) FROM (
             SELECT 1
             FROM instances
-            WHERE ($1::TEXT IS NULL OR tenant_id = $1)
+            WHERE tenant_id = $1
               AND status = ANY($2::instance_status[])
             LIMIT $3
         ) capped
         "#,
     )
-    .bind(tenant_id)
+    .bind(tenant_id.as_str())
     .bind(statuses)
     .bind(ceiling)
     .fetch_one(pool)
@@ -290,7 +294,7 @@ pub(crate) fn parked_count_sql(parked: &str) -> String {
 /// before that index, 261 after.
 pub async fn count_parked_instances(
     pool: &PgPool,
-    tenant_id: &str,
+    tenant_id: &TenantId,
     parked: &str,
 ) -> Result<i64, sqlx::Error> {
     // Why the status is spliced rather than bound, which is the whole reason
@@ -315,7 +319,7 @@ pub async fn count_parked_instances(
     // rest of the crate already uses — and a renamed variant cannot leave this
     // query silently disagreeing with it.
     let count: (i64,) = sqlx::query_as(&parked_count_sql(parked))
-        .bind(tenant_id)
+        .bind(tenant_id.as_str())
         .fetch_one(pool)
         .await?;
 
@@ -325,14 +329,15 @@ pub async fn count_parked_instances(
 /// Count instances matching filters (for pagination total_count).
 pub async fn count_instances(
     pool: &PgPool,
+    tenant_id: &TenantId,
     options: &ListInstancesOptions,
 ) -> Result<i64, sqlx::Error> {
     let mut query = sqlx::QueryBuilder::new(
         "SELECT COUNT(*) FROM instances i
-         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
-         LEFT JOIN images img ON ii.image_id = img.image_id",
+         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id AND i.tenant_id = ii.tenant_id
+         LEFT JOIN images img ON ii.image_id = img.image_id AND ii.tenant_id = img.tenant_id",
     );
-    push_instance_filters(&mut query, options);
+    push_instance_filters(&mut query, tenant_id, options);
     let (count,): (i64,) = query.build_query_as().fetch_one(pool).await?;
     Ok(count)
 }
@@ -385,7 +390,7 @@ pub struct MetricsBucketRow {
 /// Returns all buckets in the time range, including empty ones (with zero counts).
 pub async fn get_tenant_metrics(
     pool: &PgPool,
-    tenant_id: &str,
+    tenant_id: &TenantId,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
     bucket_seconds: u32,
@@ -449,7 +454,7 @@ pub async fn get_tenant_metrics(
     "#;
 
     sqlx::query_as::<_, MetricsBucketRow>(query)
-        .bind(tenant_id)
+        .bind(tenant_id.as_str())
         .bind(start_time)
         .bind(end_time)
         .bind(bucket_seconds)
@@ -472,7 +477,6 @@ mod tests {
     fn test_list_instances_options_default() {
         let options = ListInstancesOptions::default();
 
-        assert!(options.tenant_id.is_none());
         assert!(options.statuses.is_none());
         assert!(options.image_id.is_none());
         assert!(options.image_name_prefix.is_none());
@@ -483,16 +487,6 @@ mod tests {
         assert!(options.order_by.is_none());
         assert_eq!(options.limit, 0);
         assert_eq!(options.offset, 0);
-    }
-
-    #[test]
-    fn test_list_instances_options_with_tenant() {
-        let options = ListInstancesOptions {
-            tenant_id: Some("tenant-1".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(options.tenant_id, Some("tenant-1".to_string()));
     }
 
     #[test]
@@ -590,7 +584,6 @@ mod tests {
         let now = Utc::now();
 
         let options = ListInstancesOptions {
-            tenant_id: Some("tenant-1".to_string()),
             statuses: Some(vec!["completed".to_string()]),
             image_id: Some("img-456".to_string()),
             image_name_prefix: Some("workflow:".to_string()),
@@ -604,7 +597,6 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(options.tenant_id, Some("tenant-1".to_string()));
         assert_eq!(options.statuses, Some(vec!["completed".to_string()]));
         assert_eq!(options.image_id, Some("img-456".to_string()));
         assert_eq!(options.image_name_prefix, Some("workflow:".to_string()));
@@ -619,21 +611,15 @@ mod tests {
 
     #[test]
     fn test_list_instances_options_debug() {
-        let options = ListInstancesOptions {
-            tenant_id: Some("test".to_string()),
-            ..Default::default()
-        };
+        let options = ListInstancesOptions::default();
 
         let debug_str = format!("{:?}", options);
         assert!(debug_str.contains("ListInstancesOptions"));
-        assert!(debug_str.contains("tenant_id"));
-        assert!(debug_str.contains("test"));
     }
 
     #[test]
     fn test_list_instances_options_clone() {
         let options = ListInstancesOptions {
-            tenant_id: Some("tenant-1".to_string()),
             statuses: Some(vec!["running".to_string()]),
             limit: 10,
             ..Default::default()
@@ -641,7 +627,6 @@ mod tests {
 
         let cloned = options.clone();
 
-        assert_eq!(options.tenant_id, cloned.tenant_id);
         assert_eq!(options.statuses, cloned.statuses);
         assert_eq!(options.limit, cloned.limit);
     }

@@ -119,18 +119,24 @@ impl InstanceMetricsSink for OtlpMetricsSink {
 /// stays here is the OTLP vocabulary, which is this module's whole job.
 pub async fn record_resources_returning_status(
     pool: &PgPool,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     memory_peak_bytes: Option<u64>,
     cpu_usage_usec: Option<u64>,
 ) -> Result<Option<(runtara_core::domain::InstanceStatus, Option<String>)>> {
     let instances = InstanceRepository::new(pool.clone());
     let observed = instances
-        .record_resources_returning_status(instance_id, memory_peak_bytes, cpu_usage_usec)
+        .record_resources_returning_status(
+            tenant_id,
+            instance_id,
+            memory_peak_bytes,
+            cpu_usage_usec,
+        )
         .await?;
 
     if observed.is_some()
         && (memory_peak_bytes.is_some() || cpu_usage_usec.is_some())
-        && let Some(metric) = instances.completion_metrics(instance_id).await?
+        && let Some(metric) = instances.completion_metrics(tenant_id, instance_id).await?
     {
         let metrics = workflow_metrics();
         let attributes = metric_attributes(&metric);
@@ -141,8 +147,13 @@ pub async fn record_resources_returning_status(
 }
 
 /// Store raw stderr captured from the runner, for debugging.
-pub async fn record_instance_stderr(pool: &PgPool, instance_id: &str, stderr: &str) -> Result<()> {
+pub async fn record_instance_stderr(
+    pool: &PgPool,
+    tenant_id: &runtara_core::TenantId,
+    instance_id: &str,
+    stderr: &str,
+) -> Result<()> {
     InstanceRepository::new(pool.clone())
-        .record_stderr(instance_id, stderr)
+        .record_stderr(tenant_id, instance_id, stderr)
         .await
 }

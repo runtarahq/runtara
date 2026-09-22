@@ -123,11 +123,21 @@ async fn test_register_and_get() {
     let info = create_test_container_info(&instance_id, "test-tenant");
 
     // Register
-    registry.register(&info).await.expect("Failed to register");
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+        &info,
+    )
+    .await
+    .expect("Failed to register");
 
     // Get
     let retrieved = registry
-        .get(&instance_id)
+        .get(
+            &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get")
         .expect("Should find container");
@@ -149,17 +159,35 @@ async fn test_register_upsert() {
     let mut info = create_test_container_info(&instance_id, "tenant-1");
 
     // Register first time
-    registry.register(&info).await.expect("Failed to register");
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+        &info,
+    )
+    .await
+    .expect("Failed to register");
 
     // Update and re-register (upsert)
     info.binary_path = "/new/path".to_string();
-    registry
-        .register(&info)
-        .await
-        .expect("Failed to re-register");
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+        &info,
+    )
+    .await
+    .expect("Failed to re-register");
 
     // Verify update
-    let retrieved = registry.get(&instance_id).await.unwrap().unwrap();
+    let retrieved = registry
+        .get(
+            &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+            &instance_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(retrieved.binary_path, "/new/path");
 
     cleanup_instance(&pool, &instance_id).await;
@@ -175,26 +203,37 @@ async fn test_list_all_registered() {
     let instance1 = Uuid::new_v4().to_string();
     let instance2 = Uuid::new_v4().to_string();
 
-    registry
-        .register(&create_test_container_info(&instance1, "tenant-list-1"))
-        .await
-        .unwrap();
-    registry
-        .register(&create_test_container_info(&instance2, "tenant-list-2"))
-        .await
-        .unwrap();
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new("tenant-list-1").unwrap(),
+        &create_test_container_info(&instance1, "tenant-list-1"),
+    )
+    .await
+    .unwrap();
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new("tenant-list-2").unwrap(),
+        &create_test_container_info(&instance2, "tenant-list-2"),
+    )
+    .await
+    .unwrap();
 
     // Assert only on this test's own rows. A global count is racy: sibling
     // tests register and clean up against the same table concurrently, so
     // `len()` can drop between the two reads.
-    let all = registry.list_all_registered().await.unwrap();
+    let all = registry
+        .list_registered(&runtara_core::TenantId::new("tenant-list-1").unwrap())
+        .await
+        .unwrap();
     assert!(
         all.iter().any(|c| c.instance_id == instance1),
         "instance1 should be in the list"
     );
     assert!(
-        all.iter().any(|c| c.instance_id == instance2),
-        "instance2 should be in the list"
+        !all.iter().any(|c| c.instance_id == instance2),
+        "another tenant must not appear in the list"
     );
 
     cleanup_instance(&pool, &instance1).await;
@@ -208,7 +247,10 @@ async fn test_get_nonexistent() {
 
     let registry = ContainerRegistry::new(pool.clone());
     let result = registry
-        .get("nonexistent-instance-id")
+        .get(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            "nonexistent-instance-id",
+        )
         .await
         .expect("Query should succeed");
     assert!(result.is_none());
@@ -229,7 +271,14 @@ async fn test_cleanup_single_container() {
     // cleanup() drops the registry entry once an instance reaches a terminal
     // state.
     let info = create_test_container_info(&instance_id, "tenant-1");
-    registry.register(&info).await.unwrap();
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+        &info,
+    )
+    .await
+    .unwrap();
 
     for table in TRACKING_TABLES {
         assert_eq!(
@@ -239,7 +288,13 @@ async fn test_cleanup_single_container() {
         );
     }
 
-    registry.cleanup(&instance_id).await.unwrap();
+    registry
+        .cleanup(
+            &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
+            &instance_id,
+        )
+        .await
+        .unwrap();
 
     for table in TRACKING_TABLES {
         assert_eq!(
@@ -263,29 +318,45 @@ async fn cleanup_is_fenced_by_launch_id_not_container_handle() {
     let mut first = create_test_container_info(&instance_id, "generation-tenant");
     first.container_id = "opaque-shared-handle".to_string();
     first.launch_id = "launch-old".to_string();
-    registry
-        .register(&first)
-        .await
-        .expect("register old launch");
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
+        &first,
+    )
+    .await
+    .expect("register old launch");
 
     let mut replacement = first.clone();
     replacement.launch_id = "launch-new".to_string();
     replacement.started_at = Utc::now();
-    registry
-        .register(&replacement)
-        .await
-        .expect("register replacement launch");
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
+        &replacement,
+    )
+    .await
+    .expect("register replacement launch");
 
     assert!(
         !registry
-            .cleanup_generation(&instance_id, "launch-old")
+            .cleanup_generation(
+                &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
+                &instance_id,
+                "launch-old"
+            )
             .await
             .expect("old cleanup"),
         "an old generation must not delete the replacement even if the runner handle matches"
     );
     assert!(
         registry
-            .cleanup_generation(&instance_id, "launch-new")
+            .cleanup_generation(
+                &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
+                &instance_id,
+                "launch-new"
+            )
             .await
             .expect("current cleanup"),
         "the current generation owns the row"
@@ -304,7 +375,14 @@ async fn cleanup_handle_preserves_every_replacement_identity() {
     for (new_launch, new_handle) in [(false, true), (true, false), (true, true)] {
         let id = Uuid::new_v4().to_string();
         let observed = create_test_container_info(&id, "recovery-snapshot-tenant");
-        registry.register(&observed).await.unwrap();
+        common::register_container_fixture(
+            &pool,
+            &registry,
+            &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+            &observed,
+        )
+        .await
+        .unwrap();
         let mut replacement = observed.clone();
         if new_launch {
             replacement.launch_id = Uuid::new_v4().to_string();
@@ -312,26 +390,64 @@ async fn cleanup_handle_preserves_every_replacement_identity() {
         if new_handle {
             replacement.container_id = Uuid::new_v4().to_string();
         }
-        registry.register(&replacement).await.unwrap();
+        common::register_container_fixture(
+            &pool,
+            &registry,
+            &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+            &replacement,
+        )
+        .await
+        .unwrap();
         assert!(
             !registry
-                .cleanup_handle(&id, &observed.launch_id, &observed.container_id)
+                .cleanup_handle(
+                    &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+                    &id,
+                    &observed.launch_id,
+                    &observed.container_id
+                )
                 .await
                 .unwrap()
         );
-        let retained = registry.get(&id).await.unwrap().unwrap();
+        let retained = registry
+            .get(
+                &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+                &id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(retained.launch_id, replacement.launch_id);
         assert_eq!(retained.container_id, replacement.container_id);
         assert!(
             registry
-                .cleanup_handle(&id, &replacement.launch_id, &replacement.container_id)
+                .cleanup_handle(
+                    &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+                    &id,
+                    &replacement.launch_id,
+                    &replacement.container_id
+                )
                 .await
                 .unwrap()
         );
-        assert!(registry.get(&id).await.unwrap().is_none());
+        assert!(
+            registry
+                .get(
+                    &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+                    &id
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !registry
-                .cleanup_handle(&id, &replacement.launch_id, &replacement.container_id)
+                .cleanup_handle(
+                    &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
+                    &id,
+                    &replacement.launch_id,
+                    &replacement.container_id
+                )
                 .await
                 .unwrap()
         );
@@ -365,7 +481,13 @@ async fn test_operations_on_nonexistent_container() {
     let instance_id = "nonexistent-instance";
 
     // All these should succeed (no error) but have no effect
-    registry.cleanup(instance_id).await.unwrap();
+    registry
+        .cleanup(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            instance_id,
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -386,9 +508,23 @@ async fn test_container_with_no_optional_fields() {
         timeout_seconds: None,
     };
 
-    registry.register(&info).await.unwrap();
+    common::register_container_fixture(
+        &pool,
+        &registry,
+        &runtara_core::TenantId::new("tenant").unwrap(),
+        &info,
+    )
+    .await
+    .unwrap();
 
-    let retrieved = registry.get(&instance_id).await.unwrap().unwrap();
+    let retrieved = registry
+        .get(
+            &runtara_core::TenantId::new("tenant").unwrap(),
+            &instance_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(retrieved.timeout_seconds.is_none());
 
     cleanup_instance(&pool, &instance_id).await;

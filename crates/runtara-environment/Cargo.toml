@@ -54,6 +54,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 getrandom = "0.3"
+sha2 = { workspace = true }
 
 # Base64 for the wire-shaped payloads the management protocol reports.
 
@@ -135,3 +136,8 @@ required-features = ["scoped-workflow-integration-tests"]
 [[test]]
 name = "cooperative_stop_test"
 required-features = ["scoped-workflow-integration-tests"]
+
+[[test]]
+name = "tenancy_test"
+path = "tests/tenancy_test.rs"
+required-features = ["db-integration-tests"]

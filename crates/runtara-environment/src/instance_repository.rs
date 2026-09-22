@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use runtara_core::TenantId;
 use runtara_core::domain::InstanceStatus;
 use runtara_core::persistence::InstanceCompletionMetrics;
 use sqlx::PgPool;
@@ -135,8 +136,6 @@ pub struct ListInstancesOptions {
     pub run_label: Option<String>,
     /// Workflow IDs whose names match search, resolved in the server database.
     pub search_workflow_ids: Vec<String>,
-    /// Filter by tenant ID.
-    pub tenant_id: Option<String>,
     /// Filter by status — a row matches if it holds any one of these. `None`
     /// (or an empty list) leaves the status unfiltered.
     pub statuses: Option<Vec<String>>,
@@ -187,11 +186,16 @@ impl InstanceRepository {
     /// One row, one query: `instance_images.instance_id` is that table's
     /// primary key, so there is nothing to page and no join that could change
     /// the cardinality.
-    pub async fn image_binding(&self, instance_id: &str) -> Result<Option<InstanceImageBinding>> {
+    pub async fn image_binding(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceImageBinding>> {
         let row: Option<(String, Option<serde_json::Value>, Option<i64>)> = sqlx::query_as(
-            "SELECT image_id, env, timeout_seconds FROM instance_images WHERE instance_id = $1",
+            "SELECT binding.image_id, binding.env, binding.timeout_seconds FROM instance_images binding JOIN instances i ON i.instance_id = binding.instance_id AND i.tenant_id = binding.tenant_id JOIN images img ON img.image_id = binding.image_id AND img.tenant_id = binding.tenant_id WHERE binding.instance_id = $1 AND binding.tenant_id = $2",
         )
         .bind(instance_id)
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| Error::Other(format!("image_binding: {e}")))?;
@@ -209,8 +213,13 @@ impl InstanceRepository {
 
     /// Everything the server reports about one instance. `None` if there is no
     /// such row.
-    pub async fn detail(&self, instance_id: &str) -> Result<Option<InstanceDetail>> {
-        let Some(inst) = crate::db::get_instance_full(&self.pool, instance_id).await? else {
+    pub async fn detail(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceDetail>> {
+        let Some(inst) = crate::db::get_instance_full(&self.pool, tenant_id, instance_id).await?
+        else {
             return Ok(None);
         };
 
@@ -241,9 +250,13 @@ impl InstanceRepository {
     /// List instances matching `options`.
     ///
     /// Count failures propagate: a successful page must have truthful totals.
-    pub async fn list(&self, options: &ListInstancesOptions) -> Result<InstancePage> {
-        let instances = crate::db::list_instances(&self.pool, options).await?;
-        let total_count = crate::db::count_instances(&self.pool, options).await?;
+    pub async fn list(
+        &self,
+        tenant_id: &TenantId,
+        options: &ListInstancesOptions,
+    ) -> Result<InstancePage> {
+        let instances = crate::db::list_instances(&self.pool, tenant_id, options).await?;
+        let total_count = crate::db::count_instances(&self.pool, tenant_id, options).await?;
 
         Ok(InstancePage {
             instances: instances
@@ -274,7 +287,7 @@ impl InstanceRepository {
     /// was by far the more expensive of the two.
     pub async fn count_by_status(
         &self,
-        tenant_id: Option<&str>,
+        tenant_id: &TenantId,
         statuses: &[String],
         ceiling: i64,
     ) -> Result<i64> {
@@ -296,7 +309,7 @@ impl InstanceRepository {
     /// per tenant, so the answer is an index-only scan and the missing ceiling
     /// costs a viewer nothing. The query has to spell the status as a literal
     /// to reach that index; [`crate::db::count_parked_instances`] says why.
-    pub async fn count_parked(&self, tenant_id: &str) -> Result<i64> {
+    pub async fn count_parked(&self, tenant_id: &TenantId) -> Result<i64> {
         Ok(crate::db::count_parked_instances(
             &self.pool,
             tenant_id,
@@ -317,6 +330,7 @@ impl InstanceRepository {
     /// re-reported exit cannot overwrite the original observation.
     pub async fn record_resources_returning_status(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         memory_peak_bytes: Option<u64>,
         cpu_usage_usec: Option<u64>,
@@ -325,12 +339,13 @@ impl InstanceRepository {
             "UPDATE instances \
              SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2), \
                  cpu_usage_usec = COALESCE(cpu_usage_usec, $3) \
-             WHERE instance_id = $1 \
+             WHERE instance_id = $1 AND tenant_id = $4 \
              RETURNING status::TEXT, termination_reason::TEXT",
         )
         .bind(instance_id)
         .bind(memory_peak_bytes.map(|v| v as i64))
         .bind(cpu_usage_usec.map(|v| v as i64))
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| Error::Other(format!("record_resources_returning_status: {e}")))?;
@@ -348,10 +363,16 @@ impl InstanceRepository {
     ///
     /// First writer wins, so a later re-report cannot clobber the output that
     /// actually explained the failure.
-    pub async fn record_stderr(&self, instance_id: &str, stderr: &str) -> Result<()> {
-        sqlx::query("UPDATE instances SET stderr = COALESCE(stderr, $2) WHERE instance_id = $1")
+    pub async fn record_stderr(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        stderr: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE instances SET stderr = COALESCE(stderr, $2) WHERE instance_id = $1 AND tenant_id = $3")
             .bind(instance_id)
             .bind(stderr)
+            .bind(tenant_id.as_str())
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Other(format!("record_stderr: {e}")))?;
@@ -365,15 +386,17 @@ impl InstanceRepository {
     /// the status and timestamps they belong to.
     pub async fn completion_metrics(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<InstanceCompletionMetrics>> {
         let row: Option<MetricRow> = sqlx::query_as(
             "SELECT tenant_id, status::text AS status, \
                     termination_reason::text AS termination_reason, \
                     started_at, finished_at, memory_peak_bytes, cpu_usage_usec \
-             FROM instances WHERE instance_id = $1",
+             FROM instances WHERE instance_id = $1 AND tenant_id = $2",
         )
         .bind(instance_id)
+        .bind(tenant_id.as_str())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| Error::Other(format!("completion_metrics: {e}")))?;
