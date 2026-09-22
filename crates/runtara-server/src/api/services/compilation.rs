@@ -446,8 +446,13 @@ impl CompilationService {
     /// A lookup failure answers `false`: the cost of re-registering an artifact
     /// that was actually present is one wasted write, and the cost of reusing
     /// one that was not is a workflow that never starts.
-    async fn artifact_present_for_reuse(&self, client: &RuntimeClient, image_id: &str) -> bool {
-        match client.image_artifact_present(image_id).await {
+    async fn artifact_present_for_reuse(
+        &self,
+        tenant_scope: &runtara_core::TenantId,
+        client: &RuntimeClient,
+        image_id: &str,
+    ) -> bool {
+        match client.image_artifact_present(tenant_scope, image_id).await {
             Ok(present) => present,
             Err(error) => {
                 warn!(
@@ -572,6 +577,9 @@ impl CompilationService {
         force_recompile: bool,
         source: CompilationSource,
     ) -> Result<CompilationResultDto, ServiceError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ServiceError::RegistrationError(e.to_string()))?;
+
         let compile_start = std::time::Instant::now();
         info!(
             force_recompile = force_recompile,
@@ -916,7 +924,7 @@ impl CompilationService {
             &result.binary_checksum,
         );
         let image_id = match client
-            .find_image_by_name_summary(tenant_id, &image_name)
+            .find_image_by_name_summary(&tenant_scope, &image_name)
             .await
         {
             // Reuse needs the row AND the file. The row is immutable and the
@@ -933,7 +941,7 @@ impl CompilationService {
                     track_events,
                     &result.binary_checksum,
                 ) && self
-                    .artifact_present_for_reuse(client, &existing_image.image_id)
+                    .artifact_present_for_reuse(&tenant_scope, client, &existing_image.image_id)
                     .await =>
             {
                 info!(
@@ -1277,6 +1285,9 @@ impl CompilationService {
         registration: WorkflowImageRegistration<'_>,
         image_name: &str,
     ) -> Result<String, ServiceError> {
+        let tenant_scope = runtara_core::TenantId::new(registration.tenant_id)
+            .map_err(|e| ServiceError::RegistrationError(e.to_string()))?;
+
         // Get binary path and size (use binary_path from compilation result,
         // which is target-aware: "workflow" for native, "workflow.wasm" for WASM)
         let binary_path = &compilation_result.binary_path;
@@ -1332,7 +1343,7 @@ impl CompilationService {
 
         // Register via streaming upload
         let result = client
-            .register_image_stream(options, file)
+            .register_image_stream(&tenant_scope, options, file)
             .await
             .map_err(|e| ServiceError::RegistrationError(format!("Registration failed: {}", e)))?;
 

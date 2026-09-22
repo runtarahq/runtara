@@ -1367,7 +1367,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     println!("Initializing runtime client...");
     let runtime_client: Option<Arc<RuntimeClient>> = match embedded_runtara.as_ref() {
         Some(runtara) => Some(Arc::new(RuntimeClient::new(
-            runtara_core::TenantId::new(config::tenant_id())?,
             runtara.environment_state(),
             runtime_client::RuntimeClientConfig::new(execution_timeout_policy),
         ))),

@@ -14,6 +14,7 @@
 //! milliseconds, base64 or status strings any more; the mappings left here are
 //! total, so no reading of a stored row can fall through one.
 
+use runtara_core::TenantId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -76,7 +77,6 @@ pub type Result<T> = std::result::Result<T, EnvironmentError>;
 /// In-process client for the embedded environment.
 #[derive(Clone)]
 pub struct EnvironmentClient {
-    tenant_id: runtara_core::TenantId,
     state: Arc<EnvironmentHandlerState>,
 }
 
@@ -88,14 +88,15 @@ impl std::fmt::Debug for EnvironmentClient {
 
 impl EnvironmentClient {
     /// Wrap the running environment's shared handler state.
-    pub fn new(tenant_id: runtara_core::TenantId, state: Arc<EnvironmentHandlerState>) -> Self {
-        Self { state, tenant_id }
+    pub fn new(state: Arc<EnvironmentHandlerState>) -> Self {
+        Self { state }
     }
 
-    fn require_bound_tenant(&self, tenant_id: Option<&str>) -> Result<()> {
-        if tenant_id.is_some_and(|tenant| tenant != self.tenant_id.as_str()) {
+    // Legacy DTO tenant fields may only confirm the explicit host scope.
+    fn require_matching_tenant(tenant_id: &TenantId, supplied: Option<&str>) -> Result<()> {
+        if supplied.is_some_and(|value| value != tenant_id.as_str()) {
             return Err(EnvironmentError::InvalidInput(
-                "tenant does not match configured runtime".into(),
+                "tenant does not match operation scope".into(),
             ));
         }
         Ok(())
@@ -122,14 +123,14 @@ impl EnvironmentClient {
 
     /// Read one instance's full state.
     #[instrument(skip(self), fields(instance_id = %instance_id), level = "debug")]
-    pub async fn get_instance_status(&self, instance_id: &str) -> Result<InstanceInfo> {
+    pub async fn get_instance_status(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<InstanceInfo> {
         debug!("Getting instance status");
 
-        let Some(inst) = self
-            .instances()
-            .detail(&self.tenant_id, instance_id)
-            .await?
-        else {
+        let Some(inst) = self.instances().detail(tenant_id, instance_id).await? else {
             return Err(EnvironmentError::InstanceNotFound(instance_id.to_string()));
         };
 
@@ -163,14 +164,13 @@ impl EnvironmentClient {
     #[instrument(skip(self), level = "debug")]
     pub async fn count_instances_by_status(
         &self,
-        tenant_id: Option<&str>,
+        tenant_id: &TenantId,
         statuses: &[String],
         ceiling: i64,
     ) -> Result<i64> {
-        self.require_bound_tenant(tenant_id)?;
         Ok(self
             .instances()
-            .count_by_status(&self.tenant_id, statuses, ceiling)
+            .count_by_status(tenant_id, statuses, ceiling)
             .await?)
     }
 
@@ -178,14 +178,15 @@ impl EnvironmentClient {
     #[instrument(skip(self, options), level = "debug")]
     pub async fn list_instances(
         &self,
+        tenant_id: &TenantId,
         options: ListInstancesOptions,
     ) -> Result<ListInstancesResult> {
         debug!("Listing instances");
-        self.require_bound_tenant(options.tenant_id.as_deref())?;
+        Self::require_matching_tenant(tenant_id, options.tenant_id.as_deref())?;
 
         let result = self
             .instances()
-            .list(&self.tenant_id, &list_instances_options(&options))
+            .list(tenant_id, &list_instances_options(&options))
             .await?;
 
         Ok(ListInstancesResult {
@@ -213,12 +214,14 @@ impl EnvironmentClient {
     #[instrument(skip(self, options), fields(image_id = %options.image_id, tenant_id = %options.tenant_id))]
     pub(crate) async fn start_instance(
         &self,
+        tenant_id: &TenantId,
         options: crate::runtime_types::StartInstanceOptions,
     ) -> Result<StartInstanceResult> {
+        Self::require_matching_tenant(tenant_id, Some(&options.tenant_id))?;
         info!("Starting instance");
 
         let resp = handlers::handle_start_instance(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             StartInstanceRequest {
                 image_id: options.image_id,
@@ -263,11 +266,15 @@ impl EnvironmentClient {
 
     /// Stop a running instance.
     #[instrument(skip(self, options), fields(instance_id = %options.instance_id))]
-    pub async fn stop_instance(&self, options: StopInstanceOptions) -> Result<()> {
+    pub async fn stop_instance(
+        &self,
+        tenant_id: &TenantId,
+        options: StopInstanceOptions,
+    ) -> Result<()> {
         info!(reason = %options.reason, "Stopping instance");
 
         let resp = handlers::handle_stop_instance(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             StopInstanceRequest {
                 instance_id: options.instance_id,
@@ -282,11 +289,11 @@ impl EnvironmentClient {
 
     /// Resume a suspended instance.
     #[instrument(skip(self), fields(instance_id = %instance_id))]
-    pub async fn resume_instance(&self, instance_id: &str) -> Result<()> {
+    pub async fn resume_instance(&self, tenant_id: &TenantId, instance_id: &str) -> Result<()> {
         info!("Resuming instance");
 
         let resp = handlers::handle_resume_instance(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             ResumeInstanceRequest {
                 instance_id: instance_id.to_string(),
@@ -305,6 +312,7 @@ impl EnvironmentClient {
     #[instrument(skip(self), fields(instance_id = %instance_id, signal = ?signal_type))]
     pub async fn send_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         signal_type: SignalType,
         payload: Option<&[u8]>,
@@ -317,14 +325,8 @@ impl EnvironmentClient {
             SignalType::Shutdown => "shutdown",
         };
 
-        match handlers::handle_send_signal(
-            &self.tenant_id,
-            &self.state,
-            instance_id,
-            signal_str,
-            payload,
-        )
-        .await?
+        match handlers::handle_send_signal(tenant_id, &self.state, instance_id, signal_str, payload)
+            .await?
         {
             SendSignalOutcome::Delivered => Ok(()),
             SendSignalOutcome::InstanceNotFound => {
@@ -344,6 +346,7 @@ impl EnvironmentClient {
     #[instrument(skip(self, payload), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id))]
     pub async fn send_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         payload: Option<&[u8]>,
@@ -351,7 +354,7 @@ impl EnvironmentClient {
         info!("Sending custom signal to instance");
 
         match handlers::handle_send_custom_signal(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             instance_id,
             checkpoint_id,
@@ -372,14 +375,18 @@ impl EnvironmentClient {
 
     /// List images.
     #[instrument(skip(self, options), level = "debug")]
-    pub async fn list_images(&self, options: ListImagesOptions) -> Result<ListImagesResult> {
+    pub async fn list_images(
+        &self,
+        tenant_id: &TenantId,
+        options: ListImagesOptions,
+    ) -> Result<ListImagesResult> {
         debug!("Listing images");
-        self.require_bound_tenant(options.tenant_id.as_deref())?;
+        Self::require_matching_tenant(tenant_id, options.tenant_id.as_deref())?;
 
         let images = self
             .image_registry()
             .list_filtered(
-                &self.tenant_id,
+                tenant_id,
                 &ImageFilter {
                     name: None,
                     limit: i64::from(options.limit),
@@ -404,16 +411,15 @@ impl EnvironmentClient {
     #[instrument(skip(self), fields(tenant_id = %tenant_id, name = %name), level = "debug")]
     pub async fn find_image_by_name(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         name: &str,
     ) -> Result<Option<ImageSummary>> {
         debug!("Finding image by name");
-        self.require_bound_tenant(Some(tenant_id))?;
 
         Ok(self
             .image_registry()
             .list_filtered(
-                &self.tenant_id,
+                tenant_id,
                 &ImageFilter {
                     name: Some(name.to_string()),
                     limit: 1,
@@ -431,22 +437,29 @@ impl EnvironmentClient {
     /// The compile path reuses an immutable artifact on the strength of its
     /// row; this is how it checks the file is actually there before doing so.
     #[instrument(skip(self), fields(image_id = %image_id), level = "debug")]
-    pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool> {
+    pub async fn image_artifact_present(
+        &self,
+        tenant_id: &TenantId,
+        image_id: &str,
+    ) -> Result<bool> {
         Ok(self
             .image_registry()
-            .artifact_present(&self.tenant_id, image_id)
+            .artifact_present(tenant_id, image_id)
             .await?)
     }
 
     /// Get one image, scoped to a tenant.
     #[instrument(skip(self), fields(image_id = %image_id, tenant_id = %tenant_id), level = "debug")]
-    pub async fn get_image(&self, tenant_id: &str, image_id: &str) -> Result<Option<ImageSummary>> {
+    pub async fn get_image(
+        &self,
+        tenant_id: &TenantId,
+        image_id: &str,
+    ) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
-        self.require_bound_tenant(Some(tenant_id))?;
 
         Ok(self
             .image_registry()
-            .get(&self.tenant_id, image_id)
+            .get(tenant_id, image_id)
             .await?
             .map(image_summary))
     }
@@ -460,11 +473,13 @@ impl EnvironmentClient {
     #[instrument(skip(self, options, reader), fields(tenant_id = %options.tenant_id, name = %options.name))]
     pub async fn register_image_stream<R: tokio::io::AsyncRead + Unpin>(
         &self,
+        tenant_id: &TenantId,
         options: RegisterImageStreamOptions,
         mut reader: R,
     ) -> Result<RegisterImageResult> {
         use tokio::io::AsyncReadExt;
 
+        Self::require_matching_tenant(tenant_id, Some(&options.tenant_id))?;
         info!("Registering image");
 
         let mut binary = Vec::with_capacity(options.binary_size as usize);
@@ -492,7 +507,7 @@ impl EnvironmentClient {
         }
 
         let image_id = handlers::handle_store_image(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             handlers::StoreImageParams {
                 tenant_id: options.tenant_id,
@@ -530,6 +545,7 @@ impl EnvironmentClient {
     #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         options: ListCheckpointsOptions,
     ) -> Result<ListCheckpointsResult> {
@@ -539,7 +555,7 @@ impl EnvironmentClient {
         let offset = options.offset.unwrap_or(0);
 
         let result = handlers::handle_list_checkpoints(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             instance_id,
             &handlers::ListCheckpointsParams {
@@ -573,6 +589,7 @@ impl EnvironmentClient {
     #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         options: ListEventsOptions,
     ) -> Result<ListEventsResult> {
@@ -616,7 +633,7 @@ impl EnvironmentClient {
         };
 
         let result = handlers::handle_list_events(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             instance_id,
             &filter,
@@ -649,6 +666,7 @@ impl EnvironmentClient {
     #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_step_summaries(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         options: ListStepSummariesOptions,
     ) -> Result<ListStepSummariesResult> {
@@ -680,7 +698,7 @@ impl EnvironmentClient {
         };
 
         let result = handlers::handle_list_step_summaries(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             instance_id,
             &filter,
@@ -720,37 +738,37 @@ impl EnvironmentClient {
     #[instrument(skip(self), fields(instance_id = %instance_id, scope_id = %scope_id), level = "debug")]
     pub async fn get_scope_ancestors(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         scope_id: &str,
     ) -> Result<Vec<ScopeInfo>> {
         debug!("Getting scope ancestors");
 
-        Ok(handlers::handle_get_scope_ancestors(
-            &self.tenant_id,
-            &self.state,
-            instance_id,
-            scope_id,
+        Ok(
+            handlers::handle_get_scope_ancestors(tenant_id, &self.state, instance_id, scope_id)
+                .await?
+                .into_iter()
+                .map(|info| ScopeInfo {
+                    scope_id: info.scope_id,
+                    parent_scope_id: info.parent_scope_id,
+                    step_id: info.step_id,
+                    step_name: info.step_name,
+                    step_type: info.step_type,
+                    index: info.index,
+                    created_at: info.created_at,
+                })
+                .collect(),
         )
-        .await?
-        .into_iter()
-        .map(|info| ScopeInfo {
-            scope_id: info.scope_id,
-            parent_scope_id: info.parent_scope_id,
-            step_id: info.step_id,
-            step_name: info.step_name,
-            step_type: info.step_type,
-            index: info.index,
-            created_at: info.created_at,
-        })
-        .collect())
     }
 
     /// Read a tenant's execution metrics, bucketed.
     #[instrument(skip(self, options), level = "debug")]
     pub async fn get_tenant_metrics(
         &self,
+        tenant_id: &TenantId,
         options: GetTenantMetricsOptions,
     ) -> Result<TenantMetricsResult> {
+        Self::require_matching_tenant(tenant_id, Some(&options.tenant_id))?;
         debug!("Getting tenant metrics");
 
         if options.tenant_id.is_empty() {
@@ -768,7 +786,7 @@ impl EnvironmentClient {
         let granularity = options.granularity.unwrap_or(MetricsGranularity::Hourly);
 
         let buckets = handlers::handle_get_tenant_metrics(
-            &self.tenant_id,
+            tenant_id,
             &self.state,
             &handlers::TenantMetricsOptions {
                 tenant_id: options.tenant_id.clone(),
@@ -945,6 +963,128 @@ mod tests {
     use runtara_core::persistence::{EventRecord, Persistence, memory::InMemoryPersistence};
     use runtara_environment::runner::MockRunner;
 
+    #[tokio::test]
+    async fn option_tenants_cannot_override_scope_or_trigger_io() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            Arc::new(InMemoryPersistence::new()),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )));
+        let tenant = TenantId::new("a").unwrap();
+        assert!(matches!(
+            client
+                .list_instances(&tenant, ListInstancesOptions::new().with_tenant_id("b"))
+                .await,
+            Err(EnvironmentError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            client
+                .list_images(&tenant, ListImagesOptions::new().with_tenant_id("b"))
+                .await,
+            Err(EnvironmentError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            client
+                .get_tenant_metrics(&tenant, GetTenantMetricsOptions::new("b"))
+                .await,
+            Err(EnvironmentError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            client
+                .start_instance(
+                    &tenant,
+                    crate::runtime_types::StartInstanceOptions::new("b", "image")
+                )
+                .await,
+            Err(EnvironmentError::InvalidInput(_))
+        ));
+        // A reader that cannot finish demonstrates validation happens before reading.
+        let (_writer, reader) = tokio::io::duplex(1);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.register_image_stream(
+                &tenant,
+                RegisterImageStreamOptions::new("b", "image", 1),
+                reader,
+            ),
+        )
+        .await
+        .expect("scope must be checked before draining the reader");
+        assert!(matches!(result, Err(EnvironmentError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn shared_client_keeps_signals_and_checkpoint_reads_in_the_callers_tenant() {
+        let persistence = Arc::new(InMemoryPersistence::new());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            persistence.clone(),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )));
+        let a = TenantId::new("a").unwrap();
+        let b = TenantId::new("b").unwrap();
+        for (tenant, id) in [(&a, "a-instance"), (&b, "b-instance")] {
+            persistence.register_instance(tenant, id).await.unwrap();
+            persistence
+                .save_checkpoint(tenant, id, "cp", tenant.as_str().as_bytes())
+                .await
+                .unwrap();
+        }
+        let (a_result, b_result) = tokio::join!(
+            client.send_custom_signal(&a, "a-instance", "cp", Some(b"a")),
+            client.send_custom_signal(&b, "b-instance", "cp", Some(b"b"))
+        );
+        assert!(a_result.is_ok() && b_result.is_ok());
+        for (tenant, own, foreign) in [
+            (&a, "a-instance", "b-instance"),
+            (&b, "b-instance", "a-instance"),
+        ] {
+            assert_eq!(
+                client
+                    .list_checkpoints(tenant, own, ListCheckpointsOptions::new())
+                    .await
+                    .unwrap()
+                    .total_count,
+                1
+            );
+            for id in [foreign, "missing"] {
+                assert!(matches!(
+                    client
+                        .send_custom_signal(tenant, id, "cp", Some(b"bad"))
+                        .await,
+                    Err(EnvironmentError::InstanceNotFound(_))
+                ));
+                assert!(matches!(
+                    crate::runtime_client::RuntimeError::from(
+                        client
+                            .list_checkpoints(tenant, id, ListCheckpointsOptions::new())
+                            .await
+                            .unwrap_err()
+                    ),
+                    crate::runtime_client::RuntimeError::InstanceNotFound(_)
+                ));
+            }
+            assert_eq!(
+                persistence
+                    .get_custom_signal(tenant, own, "cp")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .payload
+                    .as_deref(),
+                Some(tenant.as_str().as_bytes())
+            );
+        }
+    }
+
     /// A signal payload must reach the store byte for byte.
     ///
     /// This path used to run the bytes through `String::from_utf8_lossy` and
@@ -965,15 +1105,12 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
-        let client = EnvironmentClient::new(
-            runtara_core::TenantId::new("tenant-1").unwrap(),
-            Arc::new(EnvironmentHandlerState::new(
-                pool,
-                persistence.clone(),
-                Arc::new(MockRunner::new()),
-                std::env::temp_dir(),
-            )),
-        );
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            persistence.clone(),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )));
 
         // Lone continuation bytes and an interior NUL: not valid UTF-8, so
         // `from_utf8_lossy` would substitute replacement characters here.
@@ -984,7 +1121,12 @@ mod tests {
         );
 
         client
-            .send_custom_signal("signal-bytes", "cp-1", Some(&payload))
+            .send_custom_signal(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "signal-bytes",
+                "cp-1",
+                Some(&payload),
+            )
             .await
             .expect("send custom signal");
 
@@ -1044,18 +1186,16 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
-        let client = EnvironmentClient::new(
-            runtara_core::TenantId::new("test-tenant").unwrap(),
-            Arc::new(EnvironmentHandlerState::new(
-                pool,
-                persistence,
-                Arc::new(MockRunner::new()),
-                std::env::temp_dir(),
-            )),
-        );
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            persistence,
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )));
         for (name, _) in events {
             let page = client
                 .list_events(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
                     "event-filter-test",
                     ListEventsOptions::new().with_event_type(name),
                 )
@@ -1066,13 +1206,18 @@ mod tests {
             assert_eq!(page.events[0].event_type, name);
         }
         let all = client
-            .list_events("event-filter-test", ListEventsOptions::new())
+            .list_events(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                "event-filter-test",
+                ListEventsOptions::new(),
+            )
             .await
             .unwrap();
         assert_eq!(all.total_count, 7);
         for name in ["unknown", "CUSTOM", ""] {
             let page = client
                 .list_events(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
                     "event-filter-test",
                     ListEventsOptions::new()
                         .with_event_type(name)

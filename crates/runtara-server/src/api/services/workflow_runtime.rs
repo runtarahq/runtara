@@ -77,13 +77,14 @@ pub struct SubmitWorkflowActionRequest {
 }
 
 pub async fn list_instance_actions(
+    tenant_scope: &runtara_core::TenantId,
     client: &RuntimeClient,
     workflow_id: &str,
     instance_id: &str,
 ) -> Result<Vec<WorkflowRuntimeAction>, WorkflowRuntimeError> {
     validate_instance_id(instance_id)?;
 
-    let (input_events, end_events) = fetch_input_and_end_events(client, instance_id)
+    let (input_events, end_events) = fetch_input_and_end_events(tenant_scope, client, instance_id)
         .await
         .map_err(|error| map_runtime_error(error, instance_id))?;
 
@@ -166,6 +167,9 @@ pub async fn list_workflow_actions(
     page: Option<i32>,
     size: Option<i32>,
 ) -> Result<WorkflowRuntimeActionPage, WorkflowRuntimeError> {
+    let tenant_scope = runtara_core::TenantId::new(tenant_id)
+        .map_err(|e| WorkflowRuntimeError::InvalidRequest(e.to_string()))?;
+
     let page_number = crate::api::utils::pagination::normalize_page(page);
     let page_size = size.unwrap_or(25).clamp(1, 100);
     let instances = engine
@@ -178,7 +182,8 @@ pub async fn list_workflow_actions(
         if !instance.has_pending_input {
             continue;
         }
-        actions.extend(list_instance_actions(client, workflow_id, &instance.id).await?);
+        actions
+            .extend(list_instance_actions(&tenant_scope, client, workflow_id, &instance.id).await?);
     }
 
     Ok(WorkflowRuntimeActionPage {
@@ -202,6 +207,9 @@ pub async fn submit_workflow_action(
     action_id: &str,
     payload: &Value,
 ) -> Result<WorkflowRuntimeAction, WorkflowRuntimeError> {
+    let tenant_scope = runtara_core::TenantId::new(tenant_id)
+        .map_err(|e| WorkflowRuntimeError::InvalidRequest(e.to_string()))?;
+
     validate_instance_id(instance_id)?;
     if action_id.trim().is_empty() {
         return Err(WorkflowRuntimeError::InvalidRequest(
@@ -220,7 +228,7 @@ pub async fn submit_workflow_action(
         )));
     }
 
-    let actions = list_instance_actions(client, workflow_id, instance_id).await?;
+    let actions = list_instance_actions(&tenant_scope, client, workflow_id, instance_id).await?;
     let action = actions
         .into_iter()
         .find(|action| action.action_id == action_id || action.signal_id == action_id)
@@ -246,9 +254,14 @@ pub async fn submit_workflow_action(
     })?;
 
     client
-        .send_custom_signal(instance_id, &action.signal_id, Some(&payload_bytes))
+        .send_custom_signal(
+            &tenant_scope,
+            instance_id,
+            &action.signal_id,
+            Some(&payload_bytes),
+        )
         .await
-        .map_err(|error| map_runtime_error(error.to_string(), instance_id))?;
+        .map_err(|error| map_runtime_error(error, instance_id))?;
 
     Ok(action)
 }
@@ -284,13 +297,17 @@ fn map_execution_error(error: ExecutionError) -> WorkflowRuntimeError {
     }
 }
 
-fn map_runtime_error(message: String, instance_id: &str) -> WorkflowRuntimeError {
-    if message.contains("not found") || message.contains("InstanceNotFound") {
-        WorkflowRuntimeError::NotFound(format!(
-            "Instance '{}' was not found: {}",
-            instance_id, message
-        ))
-    } else {
-        WorkflowRuntimeError::Runtime(message)
+fn map_runtime_error(
+    error: crate::runtime_client::RuntimeError,
+    instance_id: &str,
+) -> WorkflowRuntimeError {
+    match error {
+        crate::runtime_client::RuntimeError::InstanceNotFound(_) => {
+            WorkflowRuntimeError::NotFound(format!("Instance '{}' was not found", instance_id))
+        }
+        crate::runtime_client::RuntimeError::InvalidInput(message) => {
+            WorkflowRuntimeError::InvalidRequest(message)
+        }
+        other => WorkflowRuntimeError::Runtime(other.to_string()),
     }
 }

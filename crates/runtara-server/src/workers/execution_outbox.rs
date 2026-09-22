@@ -1450,9 +1450,15 @@ impl ExecutionAdmissionReconciler {
         };
 
         for reservation in reservations {
+            let Ok(tenant_scope) = runtara_core::TenantId::new(reservation.tenant_id.clone())
+            else {
+                tracing::warn!("Invalid tenant on delivered execution reservation");
+                stats.unresolved += 1;
+                continue;
+            };
             match self
                 .runtime_client
-                .get_instance_status(&reservation.instance_id)
+                .get_instance_status(&tenant_scope, &reservation.instance_id)
                 .await
             {
                 Ok(status) => {

@@ -59,7 +59,7 @@ pub struct SubmitEventRequest {
 /// POST /api/runtime/workflows/{id}/sessions
 #[allow(clippy::too_many_arguments)]
 pub async fn create_session(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
@@ -67,6 +67,8 @@ pub async fn create_session(
     Path(workflow_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let runtime_client = runtime_client.ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -150,12 +152,12 @@ pub async fn create_session(
     // delivery is a relay concern rather than an intake precondition.
     let _ = pool;
     let stream = build_session_event_stream(SessionStreamParams {
+        tenant_scope,
         client: runtime_client,
         valkey,
         engine,
         instance_id,
         workflow_id,
-        tenant_id,
         session_id,
     });
 
@@ -216,13 +218,15 @@ pub async fn submit_event(
 /// GET /api/runtime/sessions/{sessionId}/events
 #[allow(clippy::too_many_arguments)]
 pub async fn session_event_stream(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(session_id): Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let runtime_client = runtime_client.ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -259,12 +263,12 @@ pub async fn session_event_stream(
     // has already gone through the shared durable engine.
     let _ = pool;
     let stream = build_session_event_stream(SessionStreamParams {
+        tenant_scope,
         client: runtime_client,
         valkey,
         engine,
         instance_id: meta.instance_id,
         workflow_id: meta.workflow_id,
-        tenant_id,
         session_id,
     });
 
@@ -282,11 +286,13 @@ pub async fn session_event_stream(
 ///
 /// GET /api/runtime/sessions/{sessionId}/pending-input
 pub async fn session_pending_input(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     Path(session_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let client = match runtime_client {
         Some(c) => c,
         None => {
@@ -334,7 +340,10 @@ pub async fn session_pending_input(
         .with_subtype("external_input_requested")
         .with_sort_order(crate::runtime_types::EventSortOrder::Asc);
 
-    let input_events = match client.list_events(&instance_id, Some(input_options)).await {
+    let input_events = match client
+        .list_events(&tenant_scope, &instance_id, Some(input_options))
+        .await
+    {
         Ok(result) => result.events,
         Err(e) => {
             let msg = e.to_string();
@@ -360,7 +369,10 @@ pub async fn session_pending_input(
         .with_event_type("custom")
         .with_subtype("step_debug_end");
 
-    let end_events = match client.list_events(&instance_id, Some(end_options)).await {
+    let end_events = match client
+        .list_events(&tenant_scope, &instance_id, Some(end_options))
+        .await
+    {
         Ok(result) => result.events,
         Err(_) => vec![],
     };
@@ -453,16 +465,18 @@ pub async fn session_pending_input(
 
 /// Guard that stops an instance when dropped (e.g., client disconnects SSE stream).
 struct InstanceStopGuard {
+    tenant_scope: runtara_core::TenantId,
     client: Arc<RuntimeClient>,
     instance_id: String,
 }
 
 impl Drop for InstanceStopGuard {
     fn drop(&mut self) {
+        let tenant_scope = self.tenant_scope.clone();
         let client = self.client.clone();
         let instance_id = self.instance_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.stop_instance(&instance_id).await {
+            if let Err(e) = client.stop_instance(&tenant_scope, &instance_id).await {
                 debug!(
                     instance_id = %instance_id,
                     error = %e,
@@ -476,14 +490,21 @@ impl Drop for InstanceStopGuard {
 }
 
 /// Find the most recent pending signal_id for an instance.
-async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) -> Option<String> {
+async fn find_pending_signal_id(
+    tenant_scope: &runtara_core::TenantId,
+    client: &Arc<RuntimeClient>,
+    instance_id: &str,
+) -> Option<String> {
     let options = ListEventsOptions::new()
         .with_limit(10)
         .with_event_type("custom")
         .with_subtype("external_input_requested")
         .with_sort_order(crate::runtime_types::EventSortOrder::Desc);
 
-    let result = client.list_events(instance_id, Some(options)).await.ok()?;
+    let result = client
+        .list_events(tenant_scope, instance_id, Some(options))
+        .await
+        .ok()?;
     result
         .events
         .first()
@@ -495,12 +516,12 @@ async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) 
 
 /// Parameters for the session SSE stream.
 struct SessionStreamParams {
+    tenant_scope: runtara_core::TenantId,
     client: Arc<RuntimeClient>,
     valkey: ConnectionManager,
     engine: Arc<ExecutionEngine>,
     instance_id: String,
     workflow_id: String,
-    tenant_id: String,
     session_id: String,
 }
 
@@ -571,14 +592,15 @@ fn build_session_event_stream(
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
         let SessionStreamParams {
+            tenant_scope,
             client,
             mut valkey,
             engine,
             instance_id: initial_instance_id,
             workflow_id,
-            tenant_id: org_id,
             session_id,
         } = params;
+        let org_id = tenant_scope.to_string();
 
         // Emit session_created event
         let created = json!({
@@ -593,6 +615,7 @@ fn build_session_event_stream(
 
         let mut current_instance_id = initial_instance_id;
         let mut _stop_guard = InstanceStopGuard {
+            tenant_scope: tenant_scope.clone(),
             client: client.clone(),
             instance_id: current_instance_id.clone(),
         };
@@ -614,11 +637,11 @@ fn build_session_event_stream(
 
             while !instance_done && !session_ended && start_time.elapsed() < max_duration {
                 // Check instance status
-                match client.get_instance_info(&current_instance_id).await {
+                match client.get_instance_info(&tenant_scope, &current_instance_id).await {
                     Ok(info) => {
                         if info.status.is_terminal() {
                             // Flush remaining events
-                            if let Ok(result) = client.list_events(&current_instance_id, Some(ListEventsOptions {
+                            if let Ok(result) = client.list_events(&tenant_scope, &current_instance_id, Some(ListEventsOptions {
                                 event_type: Some("custom".to_string()),
                                 sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                                 limit: Some(100),
@@ -705,7 +728,7 @@ fn build_session_event_stream(
                     ..Default::default()
                 };
 
-                match client.list_events(&current_instance_id, Some(options)).await {
+                match client.list_events(&tenant_scope, &current_instance_id, Some(options)).await {
                     Ok(result) => {
                         for event in result.events {
                             if let Some(payload) = &event.payload {
@@ -730,7 +753,7 @@ fn build_session_event_stream(
                                         match session_queue::pop_event(&mut valkey, &org_id, &session_id).await {
                                             Ok(Some(queued_event)) => {
                                                 let payload_bytes = serde_json::to_vec(&queued_event).unwrap_or_default();
-                                                if let Err(e) = client.send_custom_signal(&current_instance_id, &signal_id, Some(&payload_bytes)).await {
+                                                if let Err(e) = client.send_custom_signal(&tenant_scope, &current_instance_id, &signal_id, Some(&payload_bytes)).await {
                                                     error!(error = %e, "Failed to auto-deliver queued signal");
                                                     waiting_for_input = true;
                                                     let chat_events = parse_debug_event(event.subtype.as_deref(), payload);
@@ -771,10 +794,10 @@ fn build_session_event_stream(
                         // Poll queue when waiting for input
                         if waiting_for_input
                             && let Ok(Some(queued_event)) = session_queue::pop_event(&mut valkey, &org_id, &session_id).await
-                            && let Some(sig) = find_pending_signal_id(&client, &current_instance_id).await
+                            && let Some(sig) = find_pending_signal_id(&tenant_scope, &client, &current_instance_id).await
                         {
                             let payload_bytes = serde_json::to_vec(&queued_event).unwrap_or_default();
-                            if client.send_custom_signal(&current_instance_id, &sig, Some(&payload_bytes)).await.is_ok() {
+                            if client.send_custom_signal(&tenant_scope, &current_instance_id, &sig, Some(&payload_bytes)).await.is_ok() {
                                 waiting_for_input = false;
                             }
                         }
@@ -821,6 +844,7 @@ fn build_session_event_stream(
 
                                     current_instance_id = new_id.clone();
                                     _stop_guard = InstanceStopGuard {
+                                        tenant_scope: tenant_scope.clone(),
                                         client: client.clone(),
                                         instance_id: new_id,
                                     };

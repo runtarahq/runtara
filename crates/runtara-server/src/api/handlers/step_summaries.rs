@@ -171,7 +171,7 @@ fn step_status_and_error(
     tag = "workflow-controller"
 )]
 pub async fn get_step_summaries(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<StepSummariesQuery>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
@@ -262,30 +262,31 @@ pub async fn get_step_summaries(
 
     // Fetch step summaries from runtara-environment
     match client
-        .list_step_summaries(&instance_id, Some(options))
+        .list_step_summaries(&tenant_scope, &instance_id, Some(options))
         .await
     {
         Ok(result) => {
             // Fetch instance info to check if instance is in terminal state
-            let instance_terminal_state = match client.get_instance_info(&instance_id).await {
-                Ok(info) => {
-                    use crate::runtime_types::InstanceStatus;
-                    match info.status {
-                        InstanceStatus::Failed => Some("failed"),
-                        InstanceStatus::Cancelled => Some("cancelled"),
-                        InstanceStatus::Completed => Some("completed"),
-                        _ => None,
+            let instance_terminal_state =
+                match client.get_instance_info(&tenant_scope, &instance_id).await {
+                    Ok(info) => {
+                        use crate::runtime_types::InstanceStatus;
+                        match info.status {
+                            InstanceStatus::Failed => Some("failed"),
+                            InstanceStatus::Cancelled => Some("cancelled"),
+                            InstanceStatus::Completed => Some("completed"),
+                            _ => None,
+                        }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to get instance info for step status override"
-                    );
-                    None
-                }
-            };
+                    Err(e) => {
+                        tracing::warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to get instance info for step status override"
+                        );
+                        None
+                    }
+                };
 
             if let Some(terminal_state) = instance_terminal_state {
                 tracing::debug!(

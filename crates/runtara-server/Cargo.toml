@@ -247,3 +247,8 @@ insta = { version = "1", features = ["json", "filters"] }
 proptest = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[[test]]
+name = "runtime_tenancy"
+path = "tests/runtime_tenancy.rs"
+required-features = ["db-integration-tests"]

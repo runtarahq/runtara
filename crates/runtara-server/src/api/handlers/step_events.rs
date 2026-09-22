@@ -114,7 +114,7 @@ pub struct StepEventResponse {
     tag = "workflow-controller"
 )]
 pub async fn get_step_events(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<StepEventsQuery>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
@@ -203,7 +203,10 @@ pub async fn get_step_events(
     }
 
     // Fetch events from runtara-environment
-    match client.list_events(&instance_id, Some(options)).await {
+    match client
+        .list_events(&tenant_scope, &instance_id, Some(options))
+        .await
+    {
         Ok(result) => {
             // Convert EventSummary to StepEventResponse
             let events: Vec<StepEventResponse> = result
@@ -329,7 +332,7 @@ pub struct ScopeAncestorsResponseData {
     tag = "workflow-controller"
 )]
 pub async fn get_scope_ancestors(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     Path((_workflow_id, instance_id, scope_id)): Path<(String, String, String)>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
@@ -360,7 +363,10 @@ pub async fn get_scope_ancestors(
     };
 
     // Fetch scope ancestors from runtara-environment
-    match client.get_scope_ancestors(&instance_id, &scope_id).await {
+    match client
+        .get_scope_ancestors(&tenant_scope, &instance_id, &scope_id)
+        .await
+    {
         Ok(scope_infos) => {
             // Convert SDK ScopeInfo to response format
             let ancestors: Vec<ScopeAncestorResponse> = scope_infos
@@ -461,7 +467,7 @@ pub struct WorkflowActionsQuery {
     tag = "step-events"
 )]
 pub async fn get_pending_input(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     Path((_workflow_id, instance_id)): Path<(String, String)>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
@@ -492,29 +498,33 @@ pub async fn get_pending_input(
         }
     };
 
-    let (input_events, end_events) = match fetch_input_and_end_events(&client, &instance_id).await {
-        Ok(events) => events,
-        Err(message) => {
-            if message.contains("not found") {
+    let (input_events, end_events) =
+        match fetch_input_and_end_events(&tenant_scope, &client, &instance_id).await {
+            Ok(events) => events,
+            Err(message) => {
+                if matches!(
+                    message,
+                    crate::runtime_client::RuntimeError::InstanceNotFound(_)
+                ) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "success": false,
+                            "message": format!("Instance not found: {}", instance_id),
+                            "data": Value::Null
+                        })),
+                    );
+                }
                 return (
-                    StatusCode::NOT_FOUND,
+                    StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({
                         "success": false,
-                        "message": format!("Instance not found: {}", instance_id),
+                        "message": format!("Failed to query events: {}", message),
                         "data": Value::Null
                     })),
                 );
             }
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "success": false,
-                    "message": format!("Failed to query events: {}", message),
-                    "data": Value::Null
-                })),
-            );
-        }
-    };
+        };
 
     // The payload fields are at the top level (not nested under "data")
     let pending: Vec<PendingInputResponse> = open_input_events(&input_events, &end_events)
@@ -581,12 +591,14 @@ pub async fn get_pending_input(
     tag = "actions"
 )]
 pub async fn list_workflow_open_actions(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<WorkflowActionsQuery>,
 ) -> (StatusCode, Json<Value>) {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let Some(client) = runtime_client else {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
@@ -628,11 +640,13 @@ pub async fn list_workflow_open_actions(
     tag = "actions"
 )]
 pub async fn list_workflow_instance_open_actions(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((workflow_id, instance_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let Some(client) = runtime_client else {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
@@ -670,7 +684,7 @@ pub async fn list_workflow_instance_open_actions(
         );
     }
 
-    match list_instance_actions(&client, &workflow_id, &instance_id).await {
+    match list_instance_actions(&tenant_scope, &client, &workflow_id, &instance_id).await {
         Ok(actions) => {
             let count = actions.len();
             (
@@ -710,12 +724,14 @@ pub async fn list_workflow_instance_open_actions(
     tag = "actions"
 )]
 pub async fn submit_workflow_action(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((workflow_id, instance_id, action_id)): Path<(String, String, String)>,
     Json(body): Json<SubmitWorkflowActionRequest>,
 ) -> (StatusCode, Json<Value>) {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let Some(client) = runtime_client else {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
@@ -827,7 +843,7 @@ fn workflow_runtime_error_response(error: WorkflowRuntimeError) -> (StatusCode, 
     tag = "signals"
 )]
 pub async fn submit_signal(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     Path(instance_id): Path<String>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Json(body): Json<SubmitSignalRequest>,
@@ -888,7 +904,12 @@ pub async fn submit_signal(
 
     // Send custom signal
     match client
-        .send_custom_signal(&instance_id, &body.checkpoint_id, Some(&payload_bytes))
+        .send_custom_signal(
+            &tenant_scope,
+            &instance_id,
+            &body.checkpoint_id,
+            Some(&payload_bytes),
+        )
         .await
     {
         Ok(signal_id) => (

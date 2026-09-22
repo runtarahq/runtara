@@ -156,7 +156,7 @@ pub(crate) enum ChatEvent {
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_handler(
-    org_id: crate::middleware::tenant_auth::OrgId,
+    org_id: crate::middleware::tenant_auth::RuntimeTenant,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(engine): State<Arc<ExecutionEngine>>,
@@ -208,7 +208,7 @@ pub async fn chat_handler(
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_start_handler(
-    org_id: crate::middleware::tenant_auth::OrgId,
+    org_id: crate::middleware::tenant_auth::RuntimeTenant,
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(engine): State<Arc<ExecutionEngine>>,
@@ -252,12 +252,14 @@ struct ChatStreamParams {
 
 /// Shared logic for starting a chat SSE stream
 async fn start_chat_stream(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     pool: PgPool,
     runtime_client: Option<Arc<RuntimeClient>>,
     engine: Arc<ExecutionEngine>,
     params: ChatStreamParams,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     let runtime_client = runtime_client.ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -292,7 +294,12 @@ async fn start_chat_stream(
     let instance_id = result.instance_id.to_string();
 
     // Build the SSE stream that polls for events
-    let stream = build_event_stream(runtime_client, instance_id, params.workflow_id);
+    let stream = build_event_stream(
+        tenant_scope,
+        runtime_client,
+        instance_id,
+        params.workflow_id,
+    );
 
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
 
@@ -306,6 +313,7 @@ async fn start_chat_stream(
 }
 
 pub(crate) fn build_event_stream(
+    tenant_scope: runtara_core::TenantId,
     client: Arc<RuntimeClient>,
     instance_id: String,
     _workflow_id: String,
@@ -327,14 +335,14 @@ pub(crate) fn build_event_stream(
 
         while !completed && start_time.elapsed() < max_duration {
             // Check instance status
-            match client.get_instance_info(&instance_id).await {
+            match client.get_instance_info(&tenant_scope, &instance_id).await {
                 Ok(info) => {
                     let status_str = format!("{:?}", info.status);
                     if info.status.is_terminal() {
                         match info.status {
                             crate::runtime_types::InstanceStatus::Completed => {
                                 // Fetch remaining events before sending done
-                                if let Ok(result) = client.list_events(&instance_id, Some(ListEventsOptions {
+                                if let Ok(result) = client.list_events(&tenant_scope, &instance_id, Some(ListEventsOptions {
                                     event_type: Some("custom".to_string()),
                                     sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                                     limit: Some(100),
@@ -424,7 +432,7 @@ pub(crate) fn build_event_stream(
                 ..Default::default()
             };
 
-            match client.list_events(&instance_id, Some(options)).await {
+            match client.list_events(&tenant_scope, &instance_id, Some(options)).await {
                 Ok(result) => {
                     let count = result.events.len() as u32;
                     for event in result.events {

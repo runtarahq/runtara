@@ -50,6 +50,12 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const TENANT_ID: &str = "tenant_reports_corpus";
 
 fn base_database_url() -> String {
+    // Explicit test infrastructure must not read deployment dotenv credentials.
+    if let Ok(url) = std::env::var("TEST_REPORTS_DATABASE_URL")
+        && !url.is_empty()
+    {
+        return url;
+    }
     let _ = dotenvy::from_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.env"));
     for var in [
         "TEST_REPORTS_DATABASE_URL",
@@ -258,6 +264,12 @@ async fn validate_report_snapshots() {
 /// same throwaway tenant DB and migrations.
 #[tokio::test]
 async fn mcp_validate_report_proxies_rest_and_emits_lint() {
+    let caller = runtara_server::auth::AuthContext::new(
+        TENANT_ID.into(),
+        "test-mcp-validate".into(),
+        runtara_server::auth::AuthMethod::Jwt,
+    );
+
     use axum::Router;
     use axum::routing::post;
     use runtara_server::auth::{AuthContext, AuthMethod};
@@ -365,9 +377,12 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
         definition: markdown.clone(),
         mode: Some(ReportValidationMode::All),
     };
-    let response_all = mcp_validate_report(&server, params_all)
-        .await
-        .expect("MCP validate_report (mode=all) succeeded");
+    let response_all = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        mcp_validate_report(&server, params_all),
+    )
+    .await
+    .expect("MCP validate_report (mode=all) succeeded");
     let body_all: serde_json::Value =
         serde_json::from_str(extract_text(&response_all)).expect("MCP response JSON");
     assert_eq!(body_all.get("valid"), Some(&serde_json::json!(true)));
@@ -384,9 +399,12 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
         definition: definition_lint.clone(),
         mode: Some(ReportValidationMode::All),
     };
-    let response_lint = mcp_validate_report(&server, params_all)
-        .await
-        .expect("MCP validate_report (mode=all) with lint succeeded");
+    let response_lint = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        mcp_validate_report(&server, params_all),
+    )
+    .await
+    .expect("MCP validate_report (mode=all) with lint succeeded");
     let body_lint: serde_json::Value =
         serde_json::from_str(extract_text(&response_lint)).expect("MCP response JSON");
     let warnings = body_lint
@@ -405,9 +423,12 @@ async fn mcp_validate_report_proxies_rest_and_emits_lint() {
         definition: markdown.clone(),
         mode: Some(ReportValidationMode::Syntax),
     };
-    let response_syntax = mcp_validate_report(&server, params_syntax)
-        .await
-        .expect("MCP validate_report (mode=syntax) succeeded");
+    let response_syntax = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        mcp_validate_report(&server, params_syntax),
+    )
+    .await
+    .expect("MCP validate_report (mode=syntax) succeeded");
     let body_syntax: serde_json::Value =
         serde_json::from_str(extract_text(&response_syntax)).expect("MCP response JSON");
     assert_eq!(body_syntax.get("mode"), Some(&serde_json::json!("syntax")));
@@ -433,6 +454,12 @@ fn extract_text(result: &rmcp::model::CallToolResult) -> &str {
 /// unit tests; this env runs without `MembershipPolicy::Required` (role: None).
 #[tokio::test]
 async fn mcp_workflow_move_list_folders_delete_round_trip() {
+    let caller = runtara_server::auth::AuthContext::new(
+        TENANT_ID.into(),
+        "owner-user".into(),
+        runtara_server::auth::AuthMethod::Jwt,
+    );
+
     use axum::Router;
     use axum::extract::FromRef;
     use axum::routing::{get, post, put};
@@ -550,13 +577,16 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
     );
 
     // 1. Create a workflow at root.
-    let created = create_workflow(
-        &server,
-        CreateWorkflowParams {
-            name: "MCP Folder Test".to_string(),
-            description: "round-trip".to_string(),
-            slug: None,
-        },
+    let created = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        create_workflow(
+            &server,
+            CreateWorkflowParams {
+                name: "MCP Folder Test".to_string(),
+                description: "round-trip".to_string(),
+                slug: None,
+            },
+        ),
     )
     .await
     .expect("create_workflow");
@@ -568,12 +598,15 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
         .to_string();
 
     // 2. Move it into /Sales/.
-    let moved = move_workflow(
-        &server,
-        MoveWorkflowParams {
-            workflow_id: wf_id.clone(),
-            path: "/Sales/".to_string(),
-        },
+    let moved = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        move_workflow(
+            &server,
+            MoveWorkflowParams {
+                workflow_id: wf_id.clone(),
+                path: "/Sales/".to_string(),
+            },
+        ),
     )
     .await
     .expect("move_workflow");
@@ -594,9 +627,12 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
     assert_eq!(moved_body["data"]["workflowId"], json!(wf_id));
 
     // 3. The folder now shows up in list_workflow_folders.
-    let folders = list_workflow_folders(&server, ListWorkflowFoldersParams {})
-        .await
-        .expect("list_workflow_folders");
+    let folders = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        list_workflow_folders(&server, ListWorkflowFoldersParams {}),
+    )
+    .await
+    .expect("list_workflow_folders");
     let folders_body: serde_json::Value =
         serde_json::from_str(extract_text(&folders)).expect("folders JSON");
     let folder_list = folders_body["folders"]
@@ -623,11 +659,14 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
     );
 
     // 4. Soft-delete the workflow.
-    let deleted = delete_workflow(
-        &server,
-        DeleteWorkflowParams {
-            workflow_id: wf_id.clone(),
-        },
+    let deleted = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        delete_workflow(
+            &server,
+            DeleteWorkflowParams {
+                workflow_id: wf_id.clone(),
+            },
+        ),
     )
     .await
     .expect("delete_workflow");
@@ -641,13 +680,16 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
     assert_eq!(deleted_body["workflowId"], json!(wf_id));
 
     // 5. After deletion the workflow is no longer fetchable (404 → MCP error).
-    let after = get_workflow(
-        &server,
-        GetWorkflowParams {
-            workflow_id: wf_id.clone(),
-            version: None,
-            compact: None,
-        },
+    let after = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        get_workflow(
+            &server,
+            GetWorkflowParams {
+                workflow_id: wf_id.clone(),
+                version: None,
+                compact: None,
+            },
+        ),
     )
     .await;
     assert!(
@@ -693,9 +735,12 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
     );
 
     // The folder materializes in the folders listing with no separate move.
-    let folders = list_workflow_folders(&server, ListWorkflowFoldersParams {})
-        .await
-        .expect("list_workflow_folders after create-with-path");
+    let folders = runtara_server::mcp::tools::internal_api::with_caller_auth(
+        caller.clone(),
+        list_workflow_folders(&server, ListWorkflowFoldersParams {}),
+    )
+    .await
+    .expect("list_workflow_folders after create-with-path");
     let folders_body: serde_json::Value =
         serde_json::from_str(extract_text(&folders)).expect("folders JSON");
     assert!(

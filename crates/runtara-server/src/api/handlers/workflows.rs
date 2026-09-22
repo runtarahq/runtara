@@ -2177,7 +2177,7 @@ pub async fn list_instances_handler(
 )]
 #[instrument(skip(_pool, runtime_client), fields(instance_id = %instance_id))]
 pub async fn list_instance_checkpoints_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(_pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((_workflow_id, instance_id)): Path<(String, String)>,
@@ -2216,7 +2216,7 @@ pub async fn list_instance_checkpoints_handler(
 
     // Fetch checkpoints via runtara management SDK
     match client
-        .list_checkpoints(&instance_id, Some(size), Some(offset))
+        .list_checkpoints(&tenant_scope, &instance_id, Some(size), Some(offset))
         .await
     {
         Ok(result) => {
@@ -2341,11 +2341,11 @@ pub async fn replay_instance_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.stop(&instance_id).await {
+    match engine.stop(&tenant_scope, &instance_id).await {
         Ok(StopOutcome::AlreadyStopped { status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
@@ -2390,11 +2390,11 @@ pub async fn stop_instance_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.pause(&instance_id).await {
+    match engine.pause(&tenant_scope, &instance_id).await {
         Ok(PauseOutcome::AlreadyPaused) => {
             let response = ApiResponse::success_with_message(
                 format!("Instance {} is already paused", instance_id),
@@ -2446,11 +2446,11 @@ pub async fn pause_instance_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.resume(&instance_id).await {
+    match engine.resume(&tenant_scope, &instance_id).await {
         Ok(ResumeOutcome::AlreadyRunning) => {
             let response = ApiResponse::success_with_message(
                 format!("Instance {} is already running", instance_id),
@@ -3285,7 +3285,7 @@ mod create_request_wire_tests {
 #[cfg(test)]
 mod checkpoint_pagination_tests {
     use super::*;
-    use crate::middleware::tenant_auth::OrgId;
+    use crate::middleware::tenant_auth::RuntimeTenant;
     use crate::runtime_client::RuntimeClientConfig;
     use runtara_core::persistence::{Persistence, memory::InMemoryPersistence};
     use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
@@ -3348,7 +3348,6 @@ mod checkpoint_pagination_tests {
             tokio::time::sleep(SAVE_GAP).await;
         }
         let client = Arc::new(RuntimeClient::new(
-            runtara_core::TenantId::new("test-tenant").unwrap(),
             Arc::new(EnvironmentHandlerState::new(
                 lazy_pool(),
                 Arc::clone(&persistence) as Arc<dyn Persistence>,
@@ -3383,7 +3382,7 @@ mod checkpoint_pagination_tests {
 
     async fn checkpoints_page(client: &Arc<RuntimeClient>, page: i32, size: i32) -> Value {
         let (status, Json(body)) = list_instance_checkpoints_handler(
-            OrgId("tenant-1".to_string()),
+            RuntimeTenant(runtara_core::TenantId::new("test-tenant").unwrap()),
             State(lazy_pool()),
             State(Some(Arc::clone(client))),
             Path(("wf-1".to_string(), INSTANCE.to_string())),
@@ -3412,7 +3411,7 @@ mod checkpoint_pagination_tests {
         let mut responses = Vec::new();
         for id in [foreign, missing] {
             let (status, Json(body)) = list_instance_checkpoints_handler(
-                OrgId("test-tenant".into()),
+                RuntimeTenant(runtara_core::TenantId::new("test-tenant").unwrap()),
                 State(lazy_pool()),
                 State(Some(Arc::clone(&client))),
                 Path(("wf-1".into(), id.into())),

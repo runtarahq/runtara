@@ -322,8 +322,17 @@ fn inject_workflow_id(inputs: Value, workflow_id: &str) -> Value {
 }
 
 fn is_runtime_instance_not_found(error: &crate::runtime_client::RuntimeError) -> bool {
-    let message = error.to_string();
-    message.to_ascii_lowercase().contains("not found") || message.contains("InstanceNotFound")
+    matches!(error, RuntimeError::InstanceNotFound(_))
+}
+
+fn map_runtime_operation_error(error: RuntimeError) -> ExecutionError {
+    match error {
+        RuntimeError::InstanceNotFound(id) => {
+            ExecutionError::NotFound(format!("Instance not found: {id}"))
+        }
+        RuntimeError::InvalidInput(message) => ExecutionError::ValidationError(message),
+        other => ExecutionError::RuntimeError(other.to_string()),
+    }
 }
 
 /// Execution engine — the single orchestrator for workflow execution.
@@ -481,6 +490,11 @@ impl ExecutionEngine {
     /// caller past it would start another, and each concurrent count makes the
     /// database slower, which widens the window and starts more of them.
     fn spawn_count_refresh(&self, tenant_id: String, ceiling: u64) {
+        let Ok(tenant_scope) = runtara_core::TenantId::new(tenant_id.clone()) else {
+            tracing::warn!("Invalid tenant assigned to runtime count refresh");
+            return;
+        };
+
         let Some(client) = self.runtime_client.clone() else {
             return;
         };
@@ -498,7 +512,7 @@ impl ExecutionEngine {
             let subsumed = reserved.load(Ordering::SeqCst);
             let statuses = vec!["running".to_string(), "pending".to_string()];
             match client
-                .count_instances_by_status(&tenant_id, &statuses, ceiling.saturating_add(1))
+                .count_instances_by_status(&tenant_scope, &statuses, ceiling.saturating_add(1))
                 .await
             {
                 Ok(count) => {
@@ -885,6 +899,9 @@ impl ExecutionEngine {
     /// Records metrics (including failures) before returning.
     #[instrument(skip(self, req), fields(tenant_id = %req.tenant_id, workflow_id = %req.workflow_id))]
     pub async fn run_sync(&self, req: SyncRequest<'_>) -> Result<SyncExecution, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(req.tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let total_start = Instant::now();
         let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
@@ -954,12 +971,12 @@ impl ExecutionEngine {
         // than treating the expected short-lived `InstanceNotFound` as a
         // synchronous execution failure.
         let execution_result = match self
-            .wait_for_queued_sync_start(runtime_client, &instance_id)
+            .wait_for_queued_sync_start(&tenant_scope, runtime_client, &instance_id)
             .await
         {
             Ok(()) => {
                 runtime_client
-                    .wait_for_completion(&instance_id, None, Some(execution_timeout))
+                    .wait_for_completion(&tenant_scope, &instance_id, None, Some(execution_timeout))
                     .await
             }
             Err(error) => Err(error),
@@ -1056,6 +1073,7 @@ impl ExecutionEngine {
     /// workflow's active-execution deadline.
     async fn wait_for_queued_sync_start(
         &self,
+        tenant_scope: &runtara_core::TenantId,
         runtime_client: &RuntimeClient,
         instance_id: &str,
     ) -> Result<(), RuntimeError> {
@@ -1064,7 +1082,10 @@ impl ExecutionEngine {
         let deadline = self.outbox.policy().request_deadline;
         let started = Instant::now();
         loop {
-            match runtime_client.get_instance_status(instance_id).await {
+            match runtime_client
+                .get_instance_status(tenant_scope, instance_id)
+                .await
+            {
                 Ok(_) => return Ok(()),
                 Err(error) if is_runtime_instance_not_found(&error) => {
                     if started.elapsed() >= deadline {
@@ -1130,6 +1151,9 @@ impl ExecutionEngine {
         event: &TriggerEvent,
         single_instance: bool,
     ) -> Result<DetachedExecution, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(event.tenant_id.as_str())
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let result = self.execute_detached_inner(event, single_instance).await;
 
         // Product analytics: an async execution started. No user context survives into the
@@ -1177,6 +1201,7 @@ impl ExecutionEngine {
                 tokio::time::sleep(ANALYTICS_POLL_INTERVAL).await;
                 let outcome = runtime_client
                     .poll_until_terminal(
+                        &tenant_scope,
                         &instance_id,
                         ANALYTICS_POLL_INTERVAL,
                         Duration::from_secs(24 * 3600),
@@ -1236,6 +1261,9 @@ impl ExecutionEngine {
         event: &TriggerEvent,
         single_instance: bool,
     ) -> Result<DetachedExecution, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(event.tenant_id.as_str())
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
         })?;
@@ -1262,7 +1290,7 @@ impl ExecutionEngine {
         // Start instance (non-blocking)
         let start = match runtime_client
             .start_instance(
-                &event.tenant_id,
+                &tenant_scope,
                 &image_id,
                 &event.workflow_id,
                 Some(event.instance_id.clone()),
@@ -1394,9 +1422,12 @@ impl ExecutionEngine {
         tenant_id: &str,
         instance_id: &str,
     ) -> Result<WorkflowInstanceDto, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let client = self.require_runtime_client()?;
 
-        let info = match client.get_instance_info(instance_id).await {
+        let info = match client.get_instance_info(&tenant_scope, instance_id).await {
             Ok(info) => info,
             Err(e) if is_runtime_instance_not_found(&e) => {
                 if let Some(instance) = self
@@ -1445,6 +1476,9 @@ impl ExecutionEngine {
         instance_id: &str,
         workflow_id: Option<&str>,
     ) -> Result<Option<WorkflowInstanceDto>, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         const PAGE_SIZE: u32 = 100;
         const MAX_PAGES: u32 = 10;
 
@@ -1462,7 +1496,7 @@ impl ExecutionEngine {
             }
 
             let result = client
-                .list_instances_with_options(options)
+                .list_instances_with_options(&tenant_scope, options)
                 .await
                 .map_err(|e| {
                     ExecutionError::DatabaseError(format!(
@@ -1529,6 +1563,9 @@ impl ExecutionEngine {
         tenant_id: &str,
         original_instance_id: &str,
     ) -> Result<QueuedExecution, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let _ = Uuid::parse_str(original_instance_id).map_err(|_| {
             ExecutionError::ValidationError(
                 "Invalid instance ID format. Instance ID must be a valid UUID".to_string(),
@@ -1537,7 +1574,7 @@ impl ExecutionEngine {
 
         let client = self.require_runtime_client()?;
         let info = client
-            .get_instance_info(original_instance_id)
+            .get_instance_info(&tenant_scope, original_instance_id)
             .await
             .map_err(|e| {
                 let error_str = e.to_string();
@@ -1547,7 +1584,7 @@ impl ExecutionEngine {
                     error = %error_str,
                     "Failed to get original instance info for replay"
                 );
-                if error_str.contains("not found") || error_str.contains("InstanceNotFound") {
+                if is_runtime_instance_not_found(&e) {
                     ExecutionError::NotFound(format!(
                         "Instance '{}' not found",
                         original_instance_id
@@ -1629,6 +1666,9 @@ impl ExecutionEngine {
         instance_id: &str,
         tenant_id: &str,
     ) -> Result<ExecutionWithMetadata, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let _ = Uuid::parse_str(instance_id).map_err(|_| {
             ExecutionError::ValidationError(
                 "Invalid instance ID format. Instance ID must be a valid UUID".to_string(),
@@ -1637,23 +1677,29 @@ impl ExecutionEngine {
 
         let client = self.require_runtime_client()?;
 
-        let info = client.get_instance_info(instance_id).await.map_err(|e| {
-            let error_str = e.to_string();
-            warn!(
-                instance_id = %instance_id,
-                workflow_id = %workflow_id,
-                error = %error_str,
-                "Failed to get instance info from Runtara"
-            );
-            if error_str.contains("not found") || error_str.contains("InstanceNotFound") {
-                ExecutionError::NotFound(format!(
-                    "Instance '{}' not found for workflow '{}'",
-                    instance_id, workflow_id
-                ))
-            } else {
-                ExecutionError::DatabaseError(format!("Failed to get instance from Runtara: {}", e))
-            }
-        })?;
+        let info = client
+            .get_instance_info(&tenant_scope, instance_id)
+            .await
+            .map_err(|e| {
+                let error_str = e.to_string();
+                warn!(
+                    instance_id = %instance_id,
+                    workflow_id = %workflow_id,
+                    error = %error_str,
+                    "Failed to get instance info from Runtara"
+                );
+                if is_runtime_instance_not_found(&e) {
+                    ExecutionError::NotFound(format!(
+                        "Instance '{}' not found for workflow '{}'",
+                        instance_id, workflow_id
+                    ))
+                } else {
+                    ExecutionError::DatabaseError(format!(
+                        "Failed to get instance from Runtara: {}",
+                        e
+                    ))
+                }
+            })?;
 
         // Verify the instance belongs to the expected workflow by checking image_name
         let expected_prefix = format!("{}:", workflow_id);
@@ -1690,7 +1736,12 @@ impl ExecutionEngine {
 
         let mut result =
             runtara_info_to_execution_with_metadata(info, workflow_name, workflow_description);
-        enrich_pending_input(std::slice::from_mut(&mut result.instance), client).await;
+        enrich_pending_input(
+            &tenant_scope,
+            std::slice::from_mut(&mut result.instance),
+            client,
+        )
+        .await;
 
         Ok(result)
     }
@@ -1703,6 +1754,9 @@ impl ExecutionEngine {
         page: Option<i32>,
         size: Option<i32>,
     ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let page = crate::api::utils::pagination::normalize_page(page);
         let size = size.unwrap_or(10).clamp(1, 100);
 
@@ -1728,7 +1782,7 @@ impl ExecutionEngine {
         );
 
         let result = client
-            .list_instances_with_options(options)
+            .list_instances_with_options(&tenant_scope, options)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to query Runtara: {}", e))
@@ -1807,7 +1861,7 @@ impl ExecutionEngine {
             })
             .collect();
 
-        enrich_pending_input(&mut instances, client).await;
+        enrich_pending_input(&tenant_scope, &mut instances, client).await;
 
         let total_elements = result.total_count as i64;
         let total_pages = if total_elements == 0 {
@@ -1837,6 +1891,9 @@ impl ExecutionEngine {
         size: Option<i32>,
         filters: ExecutionFilters,
     ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ExecutionError::ValidationError(e.to_string()))?;
+
         let page = crate::api::utils::pagination::normalize_page(page);
         let size = size.unwrap_or(20).clamp(1, 100);
 
@@ -1906,7 +1963,7 @@ impl ExecutionEngine {
         );
 
         let result = client
-            .list_instances_with_options(options)
+            .list_instances_with_options(&tenant_scope, options)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to query Runtara: {}", e))
@@ -2011,7 +2068,7 @@ impl ExecutionEngine {
             })
             .collect();
 
-        enrich_pending_input(&mut instances, client).await;
+        enrich_pending_input(&tenant_scope, &mut instances, client).await;
 
         let total_elements = result.total_count as i64;
         let total_pages = if total_elements == 0 {
@@ -2038,7 +2095,11 @@ impl ExecutionEngine {
     // =========================================================================
 
     /// Stop a running instance.
-    pub async fn stop(&self, instance_id: &str) -> Result<StopOutcome, ExecutionError> {
+    pub async fn stop(
+        &self,
+        tenant_scope: &runtara_core::TenantId,
+        instance_id: &str,
+    ) -> Result<StopOutcome, ExecutionError> {
         let _ = Uuid::parse_str(instance_id).map_err(|_| {
             ExecutionError::ValidationError(
                 "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
@@ -2048,9 +2109,9 @@ impl ExecutionEngine {
         let client = self.require_runtime_client()?;
 
         let runtara_status = client
-            .get_instance_status(instance_id)
+            .get_instance_status(tenant_scope, instance_id)
             .await
-            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
+            .map_err(map_runtime_operation_error)?;
 
         let status_str = format!("{:?}", runtara_status).to_lowercase();
 
@@ -2063,9 +2124,10 @@ impl ExecutionEngine {
             return Ok(StopOutcome::AlreadyStopped { status: status_str });
         }
 
-        client.cancel_instance(instance_id).await.map_err(|e| {
-            ExecutionError::DatabaseError(format!("Failed to cancel instance: {}", e))
-        })?;
+        client
+            .cancel_instance(tenant_scope, instance_id)
+            .await
+            .map_err(map_runtime_operation_error)?;
 
         info!(
             instance_id = %instance_id,
@@ -2079,7 +2141,11 @@ impl ExecutionEngine {
     }
 
     /// Pause a running workflow instance.
-    pub async fn pause(&self, instance_id: &str) -> Result<PauseOutcome, ExecutionError> {
+    pub async fn pause(
+        &self,
+        tenant_scope: &runtara_core::TenantId,
+        instance_id: &str,
+    ) -> Result<PauseOutcome, ExecutionError> {
         let _ = Uuid::parse_str(instance_id).map_err(|_| {
             ExecutionError::ValidationError(
                 "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
@@ -2089,18 +2155,19 @@ impl ExecutionEngine {
         let client = self.require_runtime_client()?;
 
         let runtara_status = client
-            .get_instance_status(instance_id)
+            .get_instance_status(tenant_scope, instance_id)
             .await
-            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
+            .map_err(map_runtime_operation_error)?;
 
         let status_str = format!("{:?}", runtara_status).to_lowercase();
 
         match status_str.as_str() {
             "suspended" => Ok(PauseOutcome::AlreadyPaused),
             "running" => {
-                client.pause_instance(instance_id).await.map_err(|e| {
-                    ExecutionError::DatabaseError(format!("Failed to send pause signal: {}", e))
-                })?;
+                client
+                    .pause_instance(tenant_scope, instance_id)
+                    .await
+                    .map_err(map_runtime_operation_error)?;
 
                 info!(
                     instance_id = %instance_id,
@@ -2116,7 +2183,11 @@ impl ExecutionEngine {
     }
 
     /// Resume a paused/suspended workflow instance.
-    pub async fn resume(&self, instance_id: &str) -> Result<ResumeOutcome, ExecutionError> {
+    pub async fn resume(
+        &self,
+        tenant_scope: &runtara_core::TenantId,
+        instance_id: &str,
+    ) -> Result<ResumeOutcome, ExecutionError> {
         let _ = Uuid::parse_str(instance_id).map_err(|_| {
             ExecutionError::ValidationError(
                 "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
@@ -2126,18 +2197,19 @@ impl ExecutionEngine {
         let client = self.require_runtime_client()?;
 
         let runtara_status = client
-            .get_instance_status(instance_id)
+            .get_instance_status(tenant_scope, instance_id)
             .await
-            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
+            .map_err(map_runtime_operation_error)?;
 
         let status_str = format!("{:?}", runtara_status).to_lowercase();
 
         match status_str.as_str() {
             "running" => Ok(ResumeOutcome::AlreadyRunning),
             "suspended" | "failed" | "cancelled" => {
-                client.resume_instance(instance_id).await.map_err(|e| {
-                    ExecutionError::DatabaseError(format!("Failed to send resume signal: {}", e))
-                })?;
+                client
+                    .resume_instance(tenant_scope, instance_id)
+                    .await
+                    .map_err(map_runtime_operation_error)?;
 
                 info!(
                     instance_id = %instance_id,

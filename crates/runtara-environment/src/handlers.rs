@@ -757,10 +757,7 @@ pub async fn handle_stop_instance(
         .get_instance_meta(tenant_id, &request.instance_id)
         .await?
     else {
-        return Ok(StopInstanceResponse {
-            success: false,
-            error: Some(format!("Instance '{}' not found", request.instance_id)),
-        });
+        return Err(crate::error::Error::InstanceNotFound(request.instance_id));
     };
     if instance.status.is_terminal() {
         return Ok(StopInstanceResponse {
@@ -1006,10 +1003,7 @@ pub async fn handle_resume_instance(
     {
         Some(instance) => crate::core_types::status_name(instance.status),
         None => {
-            return Ok(ResumeInstanceResponse {
-                success: false,
-                error: Some(format!("Instance '{}' not found", request.instance_id)),
-            });
+            return Err(crate::error::Error::InstanceNotFound(request.instance_id));
         }
     };
 

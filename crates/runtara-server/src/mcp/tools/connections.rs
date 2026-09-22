@@ -319,56 +319,66 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_describe_then_resolve_through_runtime_routes() {
-        let captured = CapturedResourceRequest::default();
-        let internal_router = axum::Router::new()
-            .route(
-                "/api/runtime/connections/{connection_id}/metadata",
-                get(describe_fixture),
-            )
-            .route(
-                "/api/runtime/connections/{connection_id}/resources",
-                post(resolve_fixture),
-            )
-            .with_state(captured.clone());
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/runtara_mcp_connection_test")
-            .unwrap();
-        let server = SmoMcpServer::new(
-            pool,
-            Arc::new(ObjectStoreManager::new(String::new())),
-            None,
-            "tenant-1".into(),
-            internal_router,
-        );
+        crate::mcp::tools::internal_api::with_caller_auth(
+            crate::auth::AuthContext::new(
+                "tenant-1".into(),
+                "test-user".into(),
+                crate::auth::AuthMethod::Jwt,
+            ),
+            async {
+                let captured = CapturedResourceRequest::default();
+                let internal_router = axum::Router::new()
+                    .route(
+                        "/api/runtime/connections/{connection_id}/metadata",
+                        get(describe_fixture),
+                    )
+                    .route(
+                        "/api/runtime/connections/{connection_id}/resources",
+                        post(resolve_fixture),
+                    )
+                    .with_state(captured.clone());
+                let pool = PgPoolOptions::new()
+                    .connect_lazy("postgres://localhost/runtara_mcp_connection_test")
+                    .unwrap();
+                let server = SmoMcpServer::new(
+                    pool,
+                    Arc::new(ObjectStoreManager::new(String::new())),
+                    None,
+                    "tenant-1".into(),
+                    internal_router,
+                );
 
-        describe_connection(
-            &server,
-            DescribeConnectionParams {
-                connection_id: "conn-1".into(),
+                describe_connection(
+                    &server,
+                    DescribeConnectionParams {
+                        connection_id: "conn-1".into(),
+                    },
+                )
+                .await
+                .expect("describe_connection result");
+                resolve_connection_resource(
+                    &server,
+                    ResolveConnectionResourceParams {
+                        connection_id: "conn-1".into(),
+                        resource_name: "models".into(),
+                        search: Some("gpt-4".into()),
+                        cursor: None,
+                        limit: Some(10),
+                    },
+                )
+                .await
+                .expect("resolve_connection_resource result");
+
+                assert_eq!(
+                    *captured.0.lock().unwrap(),
+                    Some(serde_json::json!({
+                        "resourceName": "models",
+                        "search": "gpt-4",
+                        "limit": 10
+                    }))
+                );
             },
         )
-        .await
-        .expect("describe_connection result");
-        resolve_connection_resource(
-            &server,
-            ResolveConnectionResourceParams {
-                connection_id: "conn-1".into(),
-                resource_name: "models".into(),
-                search: Some("gpt-4".into()),
-                cursor: None,
-                limit: Some(10),
-            },
-        )
-        .await
-        .expect("resolve_connection_resource result");
-
-        assert_eq!(
-            *captured.0.lock().unwrap(),
-            Some(serde_json::json!({
-                "resourceName": "models",
-                "search": "gpt-4",
-                "limit": 10
-            }))
-        );
+        .await;
     }
 }

@@ -187,6 +187,9 @@ async fn runtime_execution_metric_rows(
     block: &ReportBlockDefinition,
     condition: Option<&Condition>,
 ) -> Result<Vec<Map<String, Value>>, ReportServiceError> {
+    let tenant_scope = runtara_core::TenantId::new(tenant_id)
+        .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
+
     let runtime_client = provider.runtime_client.as_ref().ok_or_else(|| {
         ReportServiceError::Validation(
             "System runtime metric blocks require a configured runtime client".to_string(),
@@ -200,6 +203,7 @@ async fn runtime_execution_metric_rows(
 
     let result = runtime_client
         .get_tenant_metrics(
+            &tenant_scope,
             GetTenantMetricsOptions::new(tenant_id)
                 .with_start_time(start_time)
                 .with_end_time(end_time)

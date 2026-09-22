@@ -1188,15 +1188,16 @@ impl ServerHandler for SmoMcpServer {
             .and_then(|parts| parts.extensions.get::<crate::auth::AuthContext>())
             .cloned();
 
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        match caller {
-            Some(auth) => {
-                tools::internal_api::with_caller_auth(auth, self.tool_router.call(tcc)).await
-            }
-            // No HTTP-derived identity (non-HTTP transport / tests): dispatch without
-            // binding; in-process calls fall back to their role-less synthetic context.
-            None => self.tool_router.call(tcc).await,
-        }
+        let auth = caller.ok_or_else(|| {
+            rmcp::ErrorData::invalid_request("Authenticated tenant is required", None)
+        })?;
+        let tenant = runtara_core::TenantId::new(auth.org_id.clone())
+            .map_err(|_| rmcp::ErrorData::invalid_request("Invalid authenticated tenant", None))?;
+        // Each invocation has its own identity. Never mutate session-shared scope.
+        let mut scoped = self.clone();
+        scoped.tenant_id = tenant.to_string();
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(&scoped, request, context);
+        tools::internal_api::with_caller_auth(auth, scoped.tool_router.call(tcc)).await
     }
 
     fn get_info(&self) -> ServerInfo {

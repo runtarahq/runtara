@@ -209,11 +209,13 @@ pub async fn get_workflow_stats(
     tag = "metrics-controller"
 )]
 pub async fn get_tenant_metrics(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::RuntimeTenant(tenant_scope): crate::middleware::tenant_auth::RuntimeTenant,
     State(_pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Query(query): Query<MetricsQuery>,
 ) -> (StatusCode, Json<Value>) {
+    let tenant_id = tenant_scope.as_str().to_string();
+
     // RuntimeClient is required for tenant metrics (data is in runtara-environment)
     let runtime_client = match runtime_client {
         Some(client) => client,
@@ -265,7 +267,10 @@ pub async fn get_tenant_metrics(
         .with_end_time(end_time)
         .with_granularity(granularity);
 
-    match runtime_client.get_tenant_metrics(options).await {
+    match runtime_client
+        .get_tenant_metrics(&tenant_scope, options)
+        .await
+    {
         Ok(result) => (
             StatusCode::OK,
             Json(json!({

@@ -380,7 +380,9 @@ jobs:
       - name: Create the runtime-schema database
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -c 'CREATE DATABASE runtara_runtime_test;'
+        run: |
+          psql -h localhost -U postgres -c 'CREATE DATABASE runtara_runtime_test;'
+          psql -h localhost -U postgres -c 'CREATE DATABASE runtara_environment_test;'
 
       - name: Run runtara-server tests
         # Explicit features include the Postgres and plaintext-Valkey suites;
@@ -398,6 +400,8 @@ jobs:
           # only safe for a consumer that runs no migrations of its own, which
           # is why object-store can reuse runtara_test below and this cannot.
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_runtime_test
+          # Environment/client tests run the combined migrator; keep its history separate.
+          TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_environment_test
           TEST_REPORTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           VALKEY_HOST: localhost
           VALKEY_PORT: "6379"

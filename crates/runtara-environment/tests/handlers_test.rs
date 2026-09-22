@@ -1053,11 +1053,12 @@ async fn test_stop_instance_not_found() {
         &state,
         request,
     )
-    .await
-    .unwrap();
+    .await;
 
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("not found"));
+    assert!(matches!(
+        response,
+        Err(runtara_environment::error::Error::InstanceNotFound(_))
+    ));
 }
 
 /// A live runner and owned durable handle, without a dispatcher: this
@@ -1682,11 +1683,12 @@ async fn test_resume_instance_not_found() {
         &state,
         request,
     )
-    .await
-    .unwrap();
+    .await;
 
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("not found"));
+    assert!(matches!(
+        response,
+        Err(runtara_environment::error::Error::InstanceNotFound(_))
+    ));
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@ use axum::http::{Method, Request};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use crate::auth::{AuthContext, AuthMethod};
+use crate::auth::AuthContext;
 use crate::mcp::server::SmoMcpServer;
 use crate::product_events::EventSource;
 
@@ -248,7 +248,7 @@ fn build_request(
     path: &str,
     body: Option<serde_json::Value>,
     tenant_id: &str,
-) -> Request<Body> {
+) -> Result<Request<Body>, rmcp::ErrorData> {
     let body = match body {
         Some(b) => Body::from(serde_json::to_vec(&b).unwrap_or_default()),
         None => Body::empty(),
@@ -261,25 +261,21 @@ fn build_request(
         .body(body)
         .expect("valid request");
 
-    // Pre-inject the AuthContext so the auth middleware treats this as a trusted
-    // in-process call. Use the REAL caller identity bound by `with_caller_auth` for
-    // the current tool invocation, so the caller's role and `user_id` drive route-level
-    // authorization and resource-ownership checks. Fall back to a synthetic context
-    // only when no caller is bound (non-HTTP transports, tests) — that context carries
-    // no role, which the gates treat as "enforcement dormant", matching prior behavior.
+    // The transport must have authenticated this tool invocation. A configured
+    // tenant is never a substitute for caller authority, including in spawned tasks.
     let auth_context = CALLER_AUTH
-        .try_with(|caller| caller.clone())
-        .unwrap_or_else(|_| {
-            AuthContext::new(
-                tenant_id.to_string(),
-                "mcp-internal".to_string(),
-                AuthMethod::Jwt,
-            )
-        });
+        .try_with(Clone::clone)
+        .map_err(|_| rmcp::ErrorData::invalid_request("Authenticated tenant is required", None))?;
+    if auth_context.org_id != tenant_id {
+        return Err(rmcp::ErrorData::invalid_request(
+            "MCP operation tenant does not match caller",
+            None,
+        ));
+    }
     request.extensions_mut().insert(auth_context);
     request.extensions_mut().insert(EventSource::Mcp);
 
-    request
+    Ok(request)
 }
 
 /// Make an in-process GET request via the internal router.
@@ -287,7 +283,7 @@ pub async fn api_get(
     server: &SmoMcpServer,
     path: &str,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
-    let request = build_request(Method::GET, path, None, &server.tenant_id);
+    let request = build_request(Method::GET, path, None, &server.tenant_id)?;
 
     let response = server
         .internal_router
@@ -322,7 +318,7 @@ pub async fn api_post(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
-    let request = build_request(Method::POST, path, body, &server.tenant_id);
+    let request = build_request(Method::POST, path, body, &server.tenant_id)?;
 
     let response = server
         .internal_router
@@ -357,7 +353,7 @@ pub async fn api_put(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
-    let request = build_request(Method::PUT, path, body, &server.tenant_id);
+    let request = build_request(Method::PUT, path, body, &server.tenant_id)?;
 
     let response = server
         .internal_router
@@ -392,7 +388,7 @@ pub async fn api_patch(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
-    let request = build_request(Method::PATCH, path, body, &server.tenant_id);
+    let request = build_request(Method::PATCH, path, body, &server.tenant_id)?;
 
     let response = server
         .internal_router
@@ -427,7 +423,7 @@ pub async fn api_delete(
     server: &SmoMcpServer,
     path: &str,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
-    let request = build_request(Method::DELETE, path, None, &server.tenant_id);
+    let request = build_request(Method::DELETE, path, None, &server.tenant_id)?;
 
     let response = server
         .internal_router
@@ -466,7 +462,7 @@ pub async fn api_delete_with_body(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
-    let request = build_request(Method::DELETE, path, body, &server.tenant_id);
+    let request = build_request(Method::DELETE, path, body, &server.tenant_id)?;
 
     let response = server
         .internal_router
@@ -530,7 +526,8 @@ mod tests {
                 "/api/runtime/workflows/create",
                 None,
                 "org_real",
-            );
+            )
+            .unwrap();
             let ctx = req
                 .extensions()
                 .get::<AuthContext>()
@@ -543,20 +540,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_request_falls_back_to_synthetic_context_without_caller() {
-        // No caller bound (non-HTTP transport / tests): the synthetic role-less
-        // context is used, preserving the prior trusted-internal behavior.
-        let req = build_request(Method::GET, "/api/runtime/workflows", None, "org_fallback");
-        let ctx = req
-            .extensions()
-            .get::<AuthContext>()
-            .expect("AuthContext injected");
-        assert_eq!(ctx.user_id, "mcp-internal");
-        assert_eq!(ctx.org_id, "org_fallback");
-        assert_eq!(
-            ctx.role, None,
-            "fallback carries no role (enforcement dormant)"
-        );
+    async fn build_request_rejects_missing_or_conflicting_caller_scope() {
+        assert!(build_request(Method::GET, "/api/runtime/workflows", None, "a").is_err());
+        with_caller_auth(
+            AuthContext::new("b".into(), "user".into(), AuthMethod::Jwt),
+            async {
+                assert!(build_request(Method::GET, "/api/runtime/workflows", None, "a").is_err());
+                assert!(build_request(Method::GET, "/api/runtime/workflows", None, "b").is_ok());
+            },
+        )
+        .await;
     }
 
     // ── 403 entitlement-shape preservation ─────────────────────────────

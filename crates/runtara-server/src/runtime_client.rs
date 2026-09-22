@@ -8,6 +8,7 @@
 //! and nothing to connect to — a `RuntimeClient` exists exactly when the
 //! embedded runtime does.
 
+use runtara_core::TenantId;
 use std::sync::Arc;
 
 use crate::environment_client::{EnvironmentClient, EnvironmentError};
@@ -52,6 +53,9 @@ pub enum RuntimeError {
     #[error("Timeout waiting for instance completion")]
     Timeout,
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("SDK error: {0}")]
     SdkError(String),
 
@@ -71,6 +75,7 @@ impl From<EnvironmentError> for RuntimeError {
             EnvironmentError::ImageNotFound(id)
             | EnvironmentError::Environment(Error::ImageNotFound(id)) => Self::ImageNotFound(id),
             EnvironmentError::SingleInstanceActive => Self::SingleInstanceActive,
+            EnvironmentError::InvalidInput(message) => Self::InvalidInput(message),
             other => Self::SdkError(other.to_string()),
         }
     }
@@ -220,13 +225,9 @@ fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
 
 impl RuntimeClient {
     /// Create a client over the embedded environment's shared handler state.
-    pub fn new(
-        tenant_id: runtara_core::TenantId,
-        state: Arc<EnvironmentHandlerState>,
-        config: RuntimeClientConfig,
-    ) -> Self {
+    pub fn new(state: Arc<EnvironmentHandlerState>, config: RuntimeClientConfig) -> Self {
         Self {
-            client: EnvironmentClient::new(tenant_id, state),
+            client: EnvironmentClient::new(state),
             config,
         }
     }
@@ -260,7 +261,7 @@ impl RuntimeClient {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_instance(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         image_id: &str,
         workflow_id: &str,
         instance_id: Option<String>,
@@ -271,7 +272,7 @@ impl RuntimeClient {
     ) -> Result<StartInstanceOutcome, RuntimeError> {
         let sdk = &self.client;
 
-        let mut options = StartInstanceOptions::new(tenant_id, image_id);
+        let mut options = StartInstanceOptions::new(tenant_id.as_str(), image_id);
 
         // Store instance_id for later use in env vars
         let actual_instance_id = if let Some(ref id) = instance_id {
@@ -321,7 +322,7 @@ impl RuntimeClient {
 
         // Workflow context (always pass these for correlation)
         options = options.with_env_var("WORKFLOW_ID", workflow_id);
-        options = options.with_env_var("TENANT_ID", tenant_id);
+        options = options.with_env_var("TENANT_ID", tenant_id.as_str());
         options = options.with_env_var("INSTANCE_ID", &actual_instance_id);
 
         // Server-side service URLs and tenant ID forwarded to the guest. These
@@ -329,8 +330,7 @@ impl RuntimeClient {
         // environment (set by an unsafe env::set_var in server startup) —
         // passing them explicitly through StartInstanceOptions removes that
         // race-prone pattern and makes the workflow ABI typed.
-        let server_config = crate::config::get();
-        options = options.with_env_var("RUNTARA_TENANT_ID", &server_config.tenant_id);
+        options = options.with_env_var("RUNTARA_TENANT_ID", tenant_id.as_str());
 
         // Debug mode (pause at breakpoints)
         if debug {
@@ -340,11 +340,14 @@ impl RuntimeClient {
             options = options.with_env_var(SINGLE_INSTANCE_LAUNCH_ENV, "true");
         }
 
-        let result = sdk.start_instance(options).await.map_err(|e| match e {
-            EnvironmentError::ImageNotFound(message) => RuntimeError::ImageNotFound(message),
-            EnvironmentError::SingleInstanceActive => RuntimeError::SingleInstanceActive,
-            other => RuntimeError::StartFailed(other.to_string()),
-        })?;
+        let result = sdk
+            .start_instance(tenant_id, options)
+            .await
+            .map_err(|e| match e {
+                EnvironmentError::ImageNotFound(message) => RuntimeError::ImageNotFound(message),
+                EnvironmentError::SingleInstanceActive => RuntimeError::SingleInstanceActive,
+                other => RuntimeError::StartFailed(other.to_string()),
+            })?;
 
         if !result.success {
             return Err(RuntimeError::StartFailed(
@@ -370,12 +373,13 @@ impl RuntimeClient {
     /// Get the status of a workflow instance
     pub async fn get_instance_status(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<InstanceStatus, RuntimeError> {
         let sdk = &self.client;
 
         let info = sdk
-            .get_instance_status(instance_id)
+            .get_instance_status(tenant_id, instance_id)
             .await
             .map_err(RuntimeError::from)?;
 
@@ -390,6 +394,7 @@ impl RuntimeClient {
     /// * `timeout` - Maximum time to wait (default from the shared policy)
     pub async fn wait_for_completion(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         poll_interval_ms: Option<u64>,
         timeout: Option<ExecutionTimeoutSeconds>,
@@ -402,7 +407,7 @@ impl RuntimeClient {
 
         loop {
             let info = sdk
-                .get_instance_status(instance_id)
+                .get_instance_status(tenant_id, instance_id)
                 .await
                 .map_err(RuntimeError::from)?;
 
@@ -465,7 +470,7 @@ impl RuntimeClient {
                     timeout_secs = timeout.as_secs(),
                     "Execution timed out, cancelling instance"
                 );
-                if let Err(e) = self.cancel_instance(instance_id).await {
+                if let Err(e) = self.cancel_instance(tenant_id, instance_id).await {
                     warn!(
                         instance_id = %instance_id,
                         error = %e,
@@ -488,13 +493,14 @@ impl RuntimeClient {
     /// that kills one just because it took a while.
     pub async fn poll_until_terminal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         poll_interval: std::time::Duration,
         max_wait: std::time::Duration,
     ) -> Result<TerminalOutcome, RuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            let info = self.get_instance_info(instance_id).await?;
+            let info = self.get_instance_info(tenant_id, instance_id).await?;
             if let Some(outcome) = classify_observed_status(info) {
                 return Ok(outcome);
             }
@@ -513,14 +519,18 @@ impl RuntimeClient {
     }
 
     /// Request cooperative cancellation with the default whole-run abort grace.
-    pub async fn stop_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+    pub async fn stop_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), RuntimeError> {
         let sdk = &self.client;
 
         let options = crate::runtime_types::StopInstanceOptions::new(instance_id)
             .with_grace_period(5)
             .with_reason("Stopped by runtara-server");
 
-        sdk.stop_instance(options)
+        sdk.stop_instance(tenant_id, options)
             .await
             .map_err(RuntimeError::from)?;
 
@@ -534,14 +544,14 @@ impl RuntimeClient {
     /// also ran the paginated list query, whose rows were then thrown away.
     pub async fn count_instances_by_status(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         statuses: &[String],
         ceiling: u64,
     ) -> Result<u64, RuntimeError> {
         let count = self
             .client
             .count_instances_by_status(
-                Some(tenant_id),
+                tenant_id,
                 statuses,
                 i64::try_from(ceiling).unwrap_or(i64::MAX),
             )
@@ -558,14 +568,14 @@ impl RuntimeClient {
     /// * `limit` - Maximum number of instances to return
     pub async fn list_instances(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         status_filter: Option<InstanceStatus>,
         limit: u32,
     ) -> Result<Vec<InstanceSummary>, RuntimeError> {
         let sdk = &self.client;
 
         let mut options = ListInstancesOptions::new()
-            .with_tenant_id(tenant_id)
+            .with_tenant_id(tenant_id.as_str())
             .with_limit(limit);
 
         if let Some(status) = status_filter {
@@ -573,7 +583,7 @@ impl RuntimeClient {
         }
 
         let result = sdk
-            .list_instances(options)
+            .list_instances(tenant_id, options)
             .await
             .map_err(RuntimeError::from)?;
 
@@ -585,39 +595,57 @@ impl RuntimeClient {
     /// Returns instances matching the provided filters with pagination info.
     pub async fn list_instances_with_options(
         &self,
+        tenant_id: &TenantId,
         options: ListInstancesOptions,
     ) -> Result<ListInstancesResult, RuntimeError> {
         let sdk = &self.client;
 
-        sdk.list_instances(options)
+        sdk.list_instances(tenant_id, options)
             .await
             .map_err(RuntimeError::from)
     }
 
     /// Get detailed instance info including output and error
-    pub async fn get_instance_info(&self, instance_id: &str) -> Result<InstanceInfo, RuntimeError> {
+    pub async fn get_instance_info(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<InstanceInfo, RuntimeError> {
         let sdk = &self.client;
 
-        sdk.get_instance_status(instance_id)
+        sdk.get_instance_status(tenant_id, instance_id)
             .await
             .map_err(RuntimeError::from)
     }
 
     /// Cancel using the same signal and bounded grace as public Stop.
-    pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        self.stop_instance(instance_id).await
+    pub async fn cancel_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), RuntimeError> {
+        self.stop_instance(tenant_id, instance_id).await
     }
 
     /// Pause a running workflow instance
     ///
     /// Sends a pause signal to the instance. The instance will checkpoint its state
     /// and suspend execution until resumed.
-    pub async fn pause_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+    pub async fn pause_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), RuntimeError> {
         let sdk = &self.client;
 
-        sdk.send_signal(instance_id, crate::runtime_types::SignalType::Pause, None)
-            .await
-            .map_err(RuntimeError::from)?;
+        sdk.send_signal(
+            tenant_id,
+            instance_id,
+            crate::runtime_types::SignalType::Pause,
+            None,
+        )
+        .await
+        .map_err(RuntimeError::from)?;
 
         info!(instance_id = %instance_id, "Sent pause signal to workflow instance");
         Ok(())
@@ -627,12 +655,16 @@ impl RuntimeClient {
     ///
     /// Triggers the instance to resume execution from its last checkpoint.
     /// This uses the ResumeInstance request which relaunches the workflow process.
-    pub async fn resume_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
+    pub async fn resume_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), RuntimeError> {
         let sdk = &self.client;
 
         // Use resume_instance() which sends ResumeInstance request to relaunch the workflow
         // Resume is an explicit host launch operation, never a guest lifecycle command.
-        sdk.resume_instance(instance_id)
+        sdk.resume_instance(tenant_id, instance_id)
             .await
             .map_err(RuntimeError::from)?;
 
@@ -647,6 +679,7 @@ impl RuntimeClient {
     /// what the workflow polls. Returns the new retained value's signal ID.
     pub async fn send_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         payload: Option<&[u8]>,
@@ -654,7 +687,7 @@ impl RuntimeClient {
         let sdk = &self.client;
 
         let signal_id = sdk
-            .send_custom_signal(instance_id, checkpoint_id, payload)
+            .send_custom_signal(tenant_id, instance_id, checkpoint_id, payload)
             .await
             .map_err(RuntimeError::from)?;
 
@@ -669,7 +702,7 @@ impl RuntimeClient {
     /// `workflow_id:version@fingerprint`).
     pub async fn get_image(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         image_id: &str,
     ) -> Result<Option<crate::runtime_types::ImageSummary>, RuntimeError> {
         let sdk = &self.client;
@@ -684,16 +717,18 @@ impl RuntimeClient {
     /// Returns a list of images registered for the given tenant.
     pub async fn list_images(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         limit: u32,
     ) -> Result<crate::runtime_types::ListImagesResult, RuntimeError> {
         let sdk = &self.client;
 
         let options = crate::runtime_types::ListImagesOptions::new()
-            .with_tenant_id(tenant_id)
+            .with_tenant_id(tenant_id.as_str())
             .with_limit(limit);
 
-        sdk.list_images(options).await.map_err(RuntimeError::from)
+        sdk.list_images(tenant_id, options)
+            .await
+            .map_err(RuntimeError::from)
     }
 
     /// Find an image by name for a tenant
@@ -701,7 +736,7 @@ impl RuntimeClient {
     /// Returns the image_id if found, None otherwise.
     pub async fn find_image_by_name(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         name: &str,
     ) -> Result<Option<String>, RuntimeError> {
         Ok(self
@@ -711,9 +746,13 @@ impl RuntimeClient {
     }
 
     /// Whether an image's registered artifact is still on disk.
-    pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool, RuntimeError> {
+    pub async fn image_artifact_present(
+        &self,
+        tenant_id: &TenantId,
+        image_id: &str,
+    ) -> Result<bool, RuntimeError> {
         self.client
-            .image_artifact_present(image_id)
+            .image_artifact_present(tenant_id, image_id)
             .await
             .map_err(RuntimeError::from)
     }
@@ -721,7 +760,7 @@ impl RuntimeClient {
     /// Find an image by name for a tenant and return the full summary.
     pub async fn find_image_by_name_summary(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         name: &str,
     ) -> Result<Option<crate::runtime_types::ImageSummary>, RuntimeError> {
         self.client
@@ -736,6 +775,7 @@ impl RuntimeClient {
     /// to hold the entire binary in memory.
     pub async fn register_image_stream<R: tokio::io::AsyncRead + Unpin>(
         &self,
+        tenant_id: &TenantId,
         options: crate::runtime_types::RegisterImageStreamOptions,
         reader: R,
     ) -> Result<crate::runtime_types::RegisterImageResult, RuntimeError> {
@@ -746,7 +786,7 @@ impl RuntimeClient {
 
         let upload_start = std::time::Instant::now();
         let result = sdk
-            .register_image_stream(options, reader)
+            .register_image_stream(tenant_id, options, reader)
             .await
             .map_err(RuntimeError::from);
 
@@ -778,6 +818,7 @@ impl RuntimeClient {
     /// so a paginating caller reads the first page forever.
     pub async fn list_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         limit: Option<u32>,
         offset: Option<u32>,
@@ -792,7 +833,7 @@ impl RuntimeClient {
             options = options.with_offset(o);
         }
 
-        sdk.list_checkpoints(instance_id, options)
+        sdk.list_checkpoints(tenant_id, instance_id, options)
             .await
             .map_err(RuntimeError::from)
     }
@@ -807,6 +848,7 @@ impl RuntimeClient {
     /// * `options` - Optional filtering options (event_type, subtype, limit, etc.)
     pub async fn list_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         options: Option<crate::runtime_types::ListEventsOptions>,
     ) -> Result<crate::runtime_types::ListEventsResult, RuntimeError> {
@@ -814,7 +856,7 @@ impl RuntimeClient {
 
         let opts = options.unwrap_or_default();
 
-        sdk.list_events(instance_id, opts)
+        sdk.list_events(tenant_id, instance_id, opts)
             .await
             .map_err(RuntimeError::from)
     }
@@ -829,6 +871,7 @@ impl RuntimeClient {
     /// * `options` - Optional filtering options (status, step_type, scope_id, limit, etc.)
     pub async fn list_step_summaries(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         options: Option<crate::runtime_types::ListStepSummariesOptions>,
     ) -> Result<crate::runtime_types::ListStepSummariesResult, RuntimeError> {
@@ -836,7 +879,7 @@ impl RuntimeClient {
 
         let opts = options.unwrap_or_default();
 
-        sdk.list_step_summaries(instance_id, opts)
+        sdk.list_step_summaries(tenant_id, instance_id, opts)
             .await
             .map_err(RuntimeError::from)
     }
@@ -848,12 +891,13 @@ impl RuntimeClient {
     /// (Split/While/EmbedWorkflow).
     pub async fn get_scope_ancestors(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         scope_id: &str,
     ) -> Result<Vec<crate::runtime_types::ScopeInfo>, RuntimeError> {
         let sdk = &self.client;
 
-        sdk.get_scope_ancestors(instance_id, scope_id)
+        sdk.get_scope_ancestors(tenant_id, instance_id, scope_id)
             .await
             .map_err(RuntimeError::from)
     }
@@ -867,11 +911,12 @@ impl RuntimeClient {
     /// * `options` - Options including tenant_id, time range, and granularity
     pub async fn get_tenant_metrics(
         &self,
+        tenant_id: &TenantId,
         options: GetTenantMetricsOptions,
     ) -> Result<TenantMetricsResult, RuntimeError> {
         let sdk = &self.client;
 
-        sdk.get_tenant_metrics(options)
+        sdk.get_tenant_metrics(tenant_id, options)
             .await
             .map_err(RuntimeError::from)
     }
@@ -1016,5 +1061,81 @@ mod execution_timeout_tests {
             )),
             RuntimeError::SdkError(_)
         ));
+    }
+}
+
+#[cfg(all(test, feature = "db-integration-tests"))]
+mod tenant_launch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_client_launches_capture_the_supplied_tenant_in_guest_environment() {
+        let url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
+            .expect("isolated runtime database required");
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        runtara_environment::migrations::run(&pool).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(EnvironmentHandlerState::new(
+            pool.clone(),
+            Arc::new(runtara_store_postgres::PostgresPersistence::new(
+                pool.clone(),
+            )),
+            Arc::new(runtara_environment::runner::MockRunner::new()),
+            dir.path().into(),
+        ));
+        let client = RuntimeClient::new(state, RuntimeClientConfig::new(Default::default()));
+        let a = TenantId::new(format!("launch-a-{}", uuid::Uuid::new_v4())).unwrap();
+        let b = TenantId::new(format!("launch-b-{}", uuid::Uuid::new_v4())).unwrap();
+        for (tenant, foreign) in [(&a, &b), (&b, &a)] {
+            let image = client
+                .register_image_stream(
+                    tenant,
+                    crate::runtime_types::RegisterImageStreamOptions::new(
+                        tenant.as_str(),
+                        "launch-fixture",
+                        8,
+                    ),
+                    &b"artifact"[..],
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                client
+                    .start_instance(
+                        foreign,
+                        &image.image_id,
+                        "workflow",
+                        None,
+                        None,
+                        None,
+                        false,
+                        false
+                    )
+                    .await,
+                Err(RuntimeError::ImageNotFound(_))
+            ));
+            let started = client
+                .start_instance(
+                    tenant,
+                    &image.image_id,
+                    "workflow",
+                    None,
+                    None,
+                    None,
+                    false,
+                    false,
+                )
+                .await
+                .unwrap();
+            let (owner, env): (String, serde_json::Value) =
+                sqlx::query_as("SELECT tenant_id, env FROM instance_images WHERE instance_id = $1")
+                    .bind(&started.instance_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(owner, tenant.as_str());
+            assert_eq!(env["TENANT_ID"], tenant.as_str());
+            assert_eq!(env["RUNTARA_TENANT_ID"], tenant.as_str());
+        }
     }
 }

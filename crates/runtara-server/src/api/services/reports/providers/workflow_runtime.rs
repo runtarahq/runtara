@@ -90,6 +90,9 @@ impl WorkflowRuntimeProvider {
         tenant_id: &str,
         block: &ReportBlockDefinition,
     ) -> Result<Vec<WorkflowRuntimeAction>, ReportServiceError> {
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
+
         let workflow_id = workflow_runtime_workflow_id(block)?;
         let engine = self.engine()?;
         let runtime_client = self.runtime_client()?;
@@ -107,7 +110,7 @@ impl WorkflowRuntimeProvider {
             if !should_check_instance_actions(&execution.instance) {
                 return Ok(Vec::new());
             }
-            return list_instance_actions(runtime_client, workflow_id, instance_id)
+            return list_instance_actions(&tenant_scope, runtime_client, workflow_id, instance_id)
                 .await
                 .map_err(Into::into);
         }
@@ -135,6 +138,9 @@ impl ReportSourceProvider for WorkflowRuntimeProvider {
         &self,
         params: FetchParams<'_>,
     ) -> Result<FetchRowsOutput, ReportServiceError> {
+        let tenant_scope = runtara_core::TenantId::new(params.tenant_id)
+            .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
+
         let entity = workflow_runtime_entity(params.block)?;
         match entity {
             ReportWorkflowRuntimeEntity::Instances => {
@@ -153,7 +159,13 @@ impl ReportSourceProvider for WorkflowRuntimeProvider {
                 let mut rows = Vec::with_capacity(result.content.len());
                 for instance in result.content {
                     let actions = if should_check_instance_actions(&instance) {
-                        list_instance_actions(runtime_client, workflow_id, &instance.id).await?
+                        list_instance_actions(
+                            &tenant_scope,
+                            runtime_client,
+                            workflow_id,
+                            &instance.id,
+                        )
+                        .await?
                     } else {
                         Vec::new()
                     };

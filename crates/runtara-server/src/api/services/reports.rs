@@ -597,7 +597,10 @@ impl ReportService {
             .wait_ms
             .unwrap_or(DEFAULT_WAIT_MS)
             .clamp(1, MAX_WAIT_MS);
+        let tenant_scope = runtara_core::TenantId::new(tenant_id)
+            .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
         let terminal = observe_report_execution(
+            &tenant_scope,
             self.require_runtime_client()?,
             &queued.instance_id.to_string(),
             StdDuration::from_millis(wait_ms),
@@ -5463,6 +5466,7 @@ struct ObservedReportExecution {
 }
 
 async fn observe_report_execution(
+    tenant_scope: &runtara_core::TenantId,
     runtime: &RuntimeClient,
     instance_id: &str,
     max_wait: StdDuration,
@@ -5474,7 +5478,12 @@ async fn observe_report_execution(
             return Ok(None);
         }
         match runtime
-            .poll_until_terminal(instance_id, StdDuration::from_millis(25), remaining)
+            .poll_until_terminal(
+                tenant_scope,
+                instance_id,
+                StdDuration::from_millis(25),
+                remaining,
+            )
             .await
         {
             Ok(TerminalOutcome::Completed(output)) => {

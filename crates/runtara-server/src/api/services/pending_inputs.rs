@@ -29,9 +29,10 @@ use crate::runtime_client::RuntimeClient;
 /// Both lookups are needed on every call, so they are issued together instead
 /// of back to back; one instance costs one round trip rather than two.
 pub async fn fetch_input_and_end_events(
+    tenant_scope: &runtara_core::TenantId,
     client: &RuntimeClient,
     instance_id: &str,
-) -> Result<(Vec<EventSummary>, Vec<EventSummary>), String> {
+) -> Result<(Vec<EventSummary>, Vec<EventSummary>), crate::runtime_client::RuntimeError> {
     let input_options = ListEventsOptions::new()
         .with_limit(100)
         .with_event_type("custom")
@@ -44,11 +45,11 @@ pub async fn fetch_input_and_end_events(
         .with_subtype("step_debug_end");
 
     let (input_result, end_result) = tokio::join!(
-        client.list_events(instance_id, Some(input_options)),
-        client.list_events(instance_id, Some(end_options)),
+        client.list_events(tenant_scope, instance_id, Some(input_options)),
+        client.list_events(tenant_scope, instance_id, Some(end_options)),
     );
 
-    let input_events = input_result.map_err(|error| error.to_string())?.events;
+    let input_events = input_result?.events;
 
     let end_events = end_result.map(|result| result.events).unwrap_or_default();
 
@@ -116,8 +117,13 @@ pub fn open_input_events<'a>(
 }
 
 /// Whether the instance still has at least one unresolved input request.
-pub async fn has_open_inputs(client: &RuntimeClient, instance_id: &str) -> Result<bool, String> {
-    let (input_events, end_events) = fetch_input_and_end_events(client, instance_id).await?;
+pub async fn has_open_inputs(
+    tenant_scope: &runtara_core::TenantId,
+    client: &RuntimeClient,
+    instance_id: &str,
+) -> Result<bool, crate::runtime_client::RuntimeError> {
+    let (input_events, end_events) =
+        fetch_input_and_end_events(tenant_scope, client, instance_id).await?;
     Ok(!open_input_events(&input_events, &end_events).is_empty())
 }
 

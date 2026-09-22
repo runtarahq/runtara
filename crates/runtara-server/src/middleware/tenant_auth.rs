@@ -59,6 +59,23 @@ impl<S: Send + Sync> FromRequestParts<S> for OrgId {
     }
 }
 
+/// Runtime scope comes only from the authenticated host context, never a body or query.
+pub struct RuntimeTenant(pub runtara_core::TenantId);
+
+impl<S: Send + Sync> FromRequestParts<S> for RuntimeTenant {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let OrgId(org_id) = OrgId::from_request_parts(parts, state).await?;
+        runtara_core::TenantId::new(org_id).map(Self).map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Unauthorized", "message": "Invalid authenticated tenant"})),
+            )
+        })
+    }
+}
+
 /// Axum extractor for the authenticated caller's user id (Auth0 `sub`, or the synthetic id
 /// for non-JWT modes). Like [`OrgId`], it reads `AuthContext` from request extensions and
 /// requires the `authenticate` middleware to have run.
@@ -163,6 +180,41 @@ mod tests {
 
     fn ctx(method: AuthMethod) -> AuthContext {
         AuthContext::new("org".to_string(), "user".to_string(), method)
+    }
+
+    #[tokio::test]
+    async fn runtime_scope_requires_valid_authenticated_identity() {
+        for tenant in [None, Some(""), Some(" a"), Some("b\n")] {
+            let mut parts = parts_with(|ext| {
+                if let Some(tenant) = tenant {
+                    ext.insert(AuthContext::new(
+                        tenant.into(),
+                        "user".into(),
+                        AuthMethod::Jwt,
+                    ));
+                }
+            });
+            assert!(matches!(
+                RuntimeTenant::from_request_parts(&mut parts, &()).await,
+                Err((StatusCode::UNAUTHORIZED, _))
+            ));
+        }
+        for tenant in ["A", "B"] {
+            let mut parts = parts_with(|ext| {
+                ext.insert(AuthContext::new(
+                    tenant.into(),
+                    "user".into(),
+                    AuthMethod::Jwt,
+                ));
+            });
+            parts
+                .headers
+                .insert("x-tenant-id", "attacker".parse().unwrap());
+            let RuntimeTenant(scope) = RuntimeTenant::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+            assert_eq!(scope.as_str(), tenant);
+        }
     }
 
     #[tokio::test]

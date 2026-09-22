@@ -21,7 +21,7 @@ likewise take tenant identity first.
 | Launch queue | Initial claim/replay, enqueue, claims, promotion, renewal, recovery, reconciliation, expiry, cancellation and terminal transitions require a tenant. Selection filters precede batch limits. Image and instance ownership are checked inside the write transaction. | Foreign work is unavailable. Existing guarded `false`/`None`/empty-batch outcomes remain; a foreign initial instance collision exposes no launch. Storage errors remain errors. |
 | Container registry | Registration requires an owned instance and matching launch. Reads, control delivery, leases and cleanup are scoped; physical handle identity remains checked. | A mismatched supplied handle is rejected before I/O. A foreign ID cannot return, abort, replace or delete a handle. |
 | Workers and recovery | Dispatch, wake, heartbeat, startup recovery, database retention, image cleanup, run cleanup and shutdown use an explicit configured tenant. | A worker for A leaves B's eligible work and artifacts untouched. Tenant enumeration and assignment are still a separate host responsibility. |
-| Server adapters | Dedicated clients pass their bound tenant, reject conflicting optional tenant filters, and preserve typed missing-resource errors. Checkpoint HTTP lookup returns 404 for both missing and foreign parents. | Omitted adapter filters mean the configured tenant, never all tenants. Request-authenticated tenant propagation is the next slice. |
+| Server adapters | Shared clients take `&TenantId` per operation. HTTP/MCP propagate authenticated identity; background callers carry assigned scope. Conflicting legacy option tenants fail before I/O. | Missing and foreign instances retain typed missing errors and HTTP 404 responses. Omitted optional filters remain within the mandatory operation scope. See [server propagation](runtara-server-tenant-propagation.md). |
 
 Instance, image and launch IDs remain globally unique. This change adds no SQL
 migration or RLS policy. Database roles, trusted host code and filesystem access
@@ -65,8 +65,8 @@ cargo test -p runtara-environment --features scoped-workflow-integration-tests \
 
 The latter requires `TEST_ENVIRONMENT_DATABASE_URL` and built components. The local
 HTTP test starts its own disposable PostgreSQL with pgvector and Valkey, boots the
-actual server with A configured and B seeded in the same runtime database, and
-checks reads, stop, worker cleanup, dispatch isolation and restart recovery:
+actual server with A configured and A/B authenticated using throwaway API keys. It
+checks HTTP/MCP reads and controls, worker cleanup, dispatch isolation and restart recovery:
 
 ```sh
 scripts/build-agent-components.sh
@@ -74,7 +74,6 @@ cargo build -p runtara-server
 python3 e2e/test_environment_tenancy.py
 ```
 
-The HTTP test does not establish authenticated A/B request switching; that remains
-part of the server tenant-propagation slice. Tenant directory orchestration,
+Authenticated A/B request switching is covered by the [server propagation slice](runtara-server-tenant-propagation.md). Tenant directory orchestration,
 authenticated instance capabilities, resource fairness, RLS and shared-environment
 admission still require the transition plan's later work.

@@ -429,6 +429,8 @@ async fn session_loop(
     session_mode: &str,
     source_connection_id: &str,
 ) -> anyhow::Result<()> {
+    let tenant_scope = runtara_core::TenantId::new(org_id)?;
+
     // conv_id tracks the current conversation target (channel/thread).
     // Updated when subsequent messages arrive from a different channel,
     // so responses always go where the sender is currently messaging.
@@ -543,7 +545,7 @@ async fn session_loop(
         while !instance_done && !session_ended && start_time.elapsed() < max_duration {
             tokio::select! {
                 _ = sleep(poll_interval) => {
-                    let info_result = client.get_instance_info(&instance_id).await;
+                    let info_result = client.get_instance_info(&tenant_scope, &instance_id).await;
 
                     // Decide ownership once, on the first poll that carries the
                     // instance's persisted input. Never decide on the
@@ -574,7 +576,7 @@ async fn session_loop(
                             // alive for genuinely new turns.
                             if !foreign {
                                 flush_events(
-                                    &client, &channel, &conv_id, &instance_id,
+                                    &tenant_scope, &client, &channel, &conv_id, &instance_id,
                                     &mut event_offset, &mut user_rx,
                                 ).await;
 
@@ -614,7 +616,7 @@ async fn session_loop(
                         ..Default::default()
                     };
 
-                    if let Ok(result) = client.list_events(&instance_id, Some(options)).await {
+                    if let Ok(result) = client.list_events(&tenant_scope, &instance_id, Some(options)).await {
                         for event in result.events {
                             if let Some(payload) = &event.payload {
                                 let subtype = event.subtype.as_deref();
@@ -627,7 +629,7 @@ async fn session_loop(
                                     if has_complex_schema {
                                         waiting_for_input = true;
                                         dispatch_event(
-                                            subtype, payload, &channel, &conv_id,
+                                            &tenant_scope, subtype, payload, &channel, &conv_id,
                                             &instance_id, &mut user_rx, &client,
                                         ).await;
                                     } else {
@@ -639,11 +641,11 @@ async fn session_loop(
                                         match session_queue::pop_event(&mut valkey, org_id, &session_id).await {
                                             Ok(Some(queued)) => {
                                                 let bytes = serde_json::to_vec(&queued).unwrap_or_default();
-                                                if client.send_custom_signal(&instance_id, &signal_id, Some(&bytes)).await.is_ok() {
+                                                if client.send_custom_signal(&tenant_scope, &instance_id, &signal_id, Some(&bytes)).await.is_ok() {
                                                     waiting_for_input = false;
                                                 } else {
                                                     waiting_for_input = true;
-                                                    dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
+                                                    dispatch_event(&tenant_scope, subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
                                                 }
                                             }
                                             _ if !first_signal_handled => {
@@ -657,21 +659,21 @@ async fn session_loop(
                                                 );
                                                 first_signal_handled = true;
                                                 let bytes = serde_json::to_vec(&pending_signal_payload).unwrap_or_default();
-                                                if client.send_custom_signal(&instance_id, &signal_id, Some(&bytes)).await.is_ok() {
+                                                if client.send_custom_signal(&tenant_scope, &instance_id, &signal_id, Some(&bytes)).await.is_ok() {
                                                     waiting_for_input = false;
                                                 } else {
                                                     waiting_for_input = true;
-                                                    dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
+                                                    dispatch_event(&tenant_scope, subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
                                                 }
                                             }
                                             _ => {
                                                 waiting_for_input = true;
-                                                dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
+                                                dispatch_event(&tenant_scope, subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
                                             }
                                         }
                                     }
                                 } else {
-                                    dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
+                                    dispatch_event(&tenant_scope, subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
                                 }
                             }
                             event_offset += 1;
@@ -679,10 +681,10 @@ async fn session_loop(
 
                         if waiting_for_input
                             && let Ok(Some(queued)) = session_queue::pop_event(&mut valkey, org_id, &session_id).await
-                            && let Some(sig) = find_pending_signal_id(&client, &instance_id).await
+                            && let Some(sig) = find_pending_signal_id(&tenant_scope, &client, &instance_id).await
                         {
                             let bytes = serde_json::to_vec(&queued).unwrap_or_default();
-                            if client.send_custom_signal(&instance_id, &sig, Some(&bytes)).await.is_ok() {
+                            if client.send_custom_signal(&tenant_scope, &instance_id, &sig, Some(&bytes)).await.is_ok() {
                                 waiting_for_input = false;
                             }
                         }
@@ -826,6 +828,7 @@ async fn session_loop(
 }
 
 async fn flush_events(
+    tenant_scope: &runtara_core::TenantId,
     client: &Arc<RuntimeClient>,
     channel: &Arc<dyn Channel>,
     conv_id: &str,
@@ -841,10 +844,14 @@ async fn flush_events(
         ..Default::default()
     };
 
-    if let Ok(result) = client.list_events(instance_id, Some(options)).await {
+    if let Ok(result) = client
+        .list_events(tenant_scope, instance_id, Some(options))
+        .await
+    {
         for event in result.events {
             if let Some(payload) = &event.payload {
                 dispatch_event(
+                    tenant_scope,
                     event.subtype.as_deref(),
                     payload,
                     channel,
@@ -860,7 +867,9 @@ async fn flush_events(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_event(
+    tenant_scope: &runtara_core::TenantId,
     subtype: Option<&str>,
     payload: &Value,
     channel: &Arc<dyn Channel>,
@@ -907,6 +916,7 @@ async fn dispatch_event(
                         Ok(payload) => {
                             if let Err(e) = client
                                 .send_custom_signal(
+                                    tenant_scope,
                                     instance_id,
                                     signal_id,
                                     Some(&serde_json::to_vec(&payload).unwrap_or_default()),
@@ -920,6 +930,7 @@ async fn dispatch_event(
                             warn!(error = %e, "Field collection failed");
                             let _ = client
                                 .send_custom_signal(
+                                    tenant_scope,
                                     instance_id,
                                     signal_id,
                                     Some(&serde_json::to_vec(&json!({})).unwrap_or_default()),
@@ -947,14 +958,21 @@ async fn dispatch_event(
     }
 }
 
-async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) -> Option<String> {
+async fn find_pending_signal_id(
+    tenant_scope: &runtara_core::TenantId,
+    client: &Arc<RuntimeClient>,
+    instance_id: &str,
+) -> Option<String> {
     let options = ListEventsOptions::new()
         .with_limit(10)
         .with_event_type("custom")
         .with_subtype("external_input_requested")
         .with_sort_order(crate::runtime_types::EventSortOrder::Desc);
 
-    let result = client.list_events(instance_id, Some(options)).await.ok()?;
+    let result = client
+        .list_events(tenant_scope, instance_id, Some(options))
+        .await
+        .ok()?;
     result
         .events
         .first()

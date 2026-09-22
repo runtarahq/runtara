@@ -109,7 +109,11 @@ fn duration_seconds(
 /// concurrently rather than one row at a time — a page holds up to 100
 /// instances and the executions views poll it on a 10s interval, which would
 /// otherwise make list latency scale with how busy the tenant is.
-pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client: &RuntimeClient) {
+pub async fn enrich_pending_input(
+    tenant_scope: &runtara_core::TenantId,
+    instances: &mut [WorkflowInstanceDto],
+    client: &RuntimeClient,
+) {
     // Bounded rather than unbounded: the executions views poll this endpoint
     // per open tab and per tenant, so a full page fanning out at once would
     // turn one slow list into a burst against the environment service.
@@ -127,7 +131,7 @@ pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client:
         }
 
         lookups.push(async move {
-            match has_open_inputs(client, &instance.id).await {
+            match has_open_inputs(tenant_scope, client, &instance.id).await {
                 Ok(has_open) => instance.has_pending_input = has_open,
                 // The flag stays false, so the indicator is hidden rather than
                 // wrongly shown for every running row during a runtime hiccup —
