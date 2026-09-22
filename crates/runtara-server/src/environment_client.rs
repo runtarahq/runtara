@@ -76,6 +76,7 @@ pub type Result<T> = std::result::Result<T, EnvironmentError>;
 /// In-process client for the embedded environment.
 #[derive(Clone)]
 pub struct EnvironmentClient {
+    tenant_id: runtara_core::TenantId,
     state: Arc<EnvironmentHandlerState>,
 }
 
@@ -87,8 +88,8 @@ impl std::fmt::Debug for EnvironmentClient {
 
 impl EnvironmentClient {
     /// Wrap the running environment's shared handler state.
-    pub fn new(state: Arc<EnvironmentHandlerState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<EnvironmentHandlerState>, tenant_id: runtara_core::TenantId) -> Self {
+        Self { state, tenant_id }
     }
 
     /// The registry that owns the `images` table.
@@ -251,6 +252,7 @@ impl EnvironmentClient {
 
         let resp = handlers::handle_stop_instance(
             &self.state,
+            &self.tenant_id,
             StopInstanceRequest {
                 instance_id: options.instance_id,
                 reason: options.reason,
@@ -269,6 +271,7 @@ impl EnvironmentClient {
 
         let resp = handlers::handle_resume_instance(
             &self.state,
+            &self.tenant_id,
             ResumeInstanceRequest {
                 instance_id: instance_id.to_string(),
             },
@@ -298,7 +301,15 @@ impl EnvironmentClient {
             SignalType::Shutdown => "shutdown",
         };
 
-        match handlers::handle_send_signal(&self.state, instance_id, signal_str, payload).await? {
+        match handlers::handle_send_signal(
+            &self.state,
+            &self.tenant_id,
+            instance_id,
+            signal_str,
+            payload,
+        )
+        .await?
+        {
             SendSignalOutcome::Delivered => Ok(()),
             SendSignalOutcome::InstanceNotFound => {
                 Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
@@ -323,8 +334,14 @@ impl EnvironmentClient {
     ) -> Result<String> {
         info!("Sending custom signal to instance");
 
-        match handlers::handle_send_custom_signal(&self.state, instance_id, checkpoint_id, payload)
-            .await?
+        match handlers::handle_send_custom_signal(
+            &self.state,
+            &self.tenant_id,
+            instance_id,
+            checkpoint_id,
+            payload,
+        )
+        .await?
         {
             SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
             SendCustomSignalOutcome::InstanceNotFound => {
@@ -496,6 +513,7 @@ impl EnvironmentClient {
 
         let result = handlers::handle_list_checkpoints(
             &self.state,
+            &self.tenant_id,
             instance_id,
             &handlers::ListCheckpointsParams {
                 checkpoint_id: options.checkpoint_id,
@@ -572,6 +590,7 @@ impl EnvironmentClient {
 
         let result = handlers::handle_list_events(
             &self.state,
+            &self.tenant_id,
             instance_id,
             &filter,
             i64::from(limit),
@@ -635,6 +654,7 @@ impl EnvironmentClient {
 
         let result = handlers::handle_list_step_summaries(
             &self.state,
+            &self.tenant_id,
             instance_id,
             &filter,
             i64::from(limit),
@@ -678,21 +698,24 @@ impl EnvironmentClient {
     ) -> Result<Vec<ScopeInfo>> {
         debug!("Getting scope ancestors");
 
-        Ok(
-            handlers::handle_get_scope_ancestors(&self.state, instance_id, scope_id)
-                .await?
-                .into_iter()
-                .map(|info| ScopeInfo {
-                    scope_id: info.scope_id,
-                    parent_scope_id: info.parent_scope_id,
-                    step_id: info.step_id,
-                    step_name: info.step_name,
-                    step_type: info.step_type,
-                    index: info.index,
-                    created_at: info.created_at,
-                })
-                .collect(),
+        Ok(handlers::handle_get_scope_ancestors(
+            &self.state,
+            &self.tenant_id,
+            instance_id,
+            scope_id,
         )
+        .await?
+        .into_iter()
+        .map(|info| ScopeInfo {
+            scope_id: info.scope_id,
+            parent_scope_id: info.parent_scope_id,
+            step_id: info.step_id,
+            step_name: info.step_name,
+            step_type: info.step_type,
+            index: info.index,
+            created_at: info.created_at,
+        })
+        .collect())
     }
 
     /// Read a tenant's execution metrics, bucketed.
@@ -906,18 +929,24 @@ mod tests {
     async fn a_signal_payload_is_stored_byte_for_byte() {
         let persistence = Arc::new(InMemoryPersistence::new());
         persistence
-            .register_instance("signal-bytes", "tenant-1")
+            .register_instance(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "signal-bytes",
+            )
             .await
             .unwrap();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
-        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
-            pool,
-            persistence.clone(),
-            Arc::new(MockRunner::new()),
-            std::env::temp_dir(),
-        )));
+        let client = EnvironmentClient::new(
+            Arc::new(EnvironmentHandlerState::new(
+                pool,
+                persistence.clone(),
+                Arc::new(MockRunner::new()),
+                std::env::temp_dir(),
+            )),
+            runtara_core::TenantId::new("tenant-1").unwrap(),
+        );
 
         // Lone continuation bytes and an interior NUL: not valid UTF-8, so
         // `from_utf8_lossy` would substitute replacement characters here.
@@ -933,7 +962,11 @@ mod tests {
             .expect("send custom signal");
 
         let stored = persistence
-            .get_custom_signal("signal-bytes", "cp-1")
+            .get_custom_signal(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "signal-bytes",
+                "cp-1",
+            )
             .await
             .expect("read back")
             .expect("a sent signal is retained");
@@ -956,17 +989,27 @@ mod tests {
             ("suspended", EventType::Suspended),
             ("custom", EventType::Custom),
         ];
+        persistence
+            .register_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                "event-filter-test",
+            )
+            .await
+            .unwrap();
         for (_, event_type) in events {
             persistence
-                .insert_event(&EventRecord {
-                    id: None,
-                    instance_id: "event-filter-test".into(),
-                    event_type,
-                    checkpoint_id: None,
-                    payload: None,
-                    created_at: Utc::now(),
-                    subtype: None,
-                })
+                .insert_event(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &EventRecord {
+                        id: None,
+                        instance_id: "event-filter-test".into(),
+                        event_type,
+                        checkpoint_id: None,
+                        payload: None,
+                        created_at: Utc::now(),
+                        subtype: None,
+                    },
+                )
                 .await
                 .unwrap();
         }
@@ -974,12 +1017,15 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
-        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
-            pool,
-            persistence,
-            Arc::new(MockRunner::new()),
-            std::env::temp_dir(),
-        )));
+        let client = EnvironmentClient::new(
+            Arc::new(EnvironmentHandlerState::new(
+                pool,
+                persistence,
+                Arc::new(MockRunner::new()),
+                std::env::temp_dir(),
+            )),
+            runtara_core::TenantId::new("test-tenant").unwrap(),
+        );
         for (name, _) in events {
             let page = client
                 .list_events(

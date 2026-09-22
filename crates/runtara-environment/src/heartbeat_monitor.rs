@@ -59,6 +59,7 @@ impl Default for HeartbeatMonitorConfig {
 
 /// Background worker that monitors for stale instances.
 pub struct HeartbeatMonitor {
+    tenant_id: runtara_core::TenantId,
     pool: PgPool,
     core_persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
@@ -95,6 +96,7 @@ struct OrphanedInstance {
 impl HeartbeatMonitor {
     /// Create a new heartbeat monitor.
     pub fn new(
+        tenant_id: runtara_core::TenantId,
         pool: PgPool,
         core_persistence: Arc<dyn Persistence>,
         runner: Arc<dyn Runner>,
@@ -102,6 +104,7 @@ impl HeartbeatMonitor {
     ) -> Self {
         let container_registry = ContainerRegistry::new(pool.clone());
         Self {
+            tenant_id,
             pool,
             core_persistence,
             runner,
@@ -170,6 +173,9 @@ impl HeartbeatMonitor {
         // independent of event age, so do not wait for heartbeat_timeout before
         // reconciling that abandoned run.
         for container in self.container_registry.expired_running_owners().await? {
+            if container.tenant_id != self.tenant_id.as_str() {
+                continue;
+            }
             crate::recovery::recover_registered(
                 &self.pool,
                 self.core_persistence.as_ref(),
@@ -267,7 +273,7 @@ impl HeartbeatMonitor {
                 -- instance really is `running` in that window, so the `if_running`
                 -- guard on the failing write does not catch it either: a run that
                 -- goes on to succeed gets recorded as a heartbeat timeout.
-                cr.started_at < $1
+                cr.started_at < $1 AND cr.tenant_id = $2
                 AND (
                     -- Never received any event
                     NOT EXISTS (SELECT 1 FROM instance_events ie WHERE ie.instance_id = cr.instance_id)
@@ -278,6 +284,7 @@ impl HeartbeatMonitor {
             "#,
         )
         .bind(cutoff)
+        .bind(self.tenant_id.as_str())
         .fetch_all(&self.pool)
         .await?
         .into_iter()
@@ -402,6 +409,7 @@ impl HeartbeatMonitor {
         // run that was actually stale.
         self.core_persistence
             .complete_instance(
+                &self.tenant_id,
                 CompleteInstanceParams::new(
                     &container.instance_id,
                     runtara_core::domain::InstanceStatus::Failed,
@@ -437,7 +445,7 @@ impl HeartbeatMonitor {
         let running_instances = self
             .core_persistence
             .list_instances(
-                None,
+                &self.tenant_id,
                 Some(runtara_core::domain::InstanceStatus::Running),
                 1000,
                 0,
@@ -502,6 +510,7 @@ impl HeartbeatMonitor {
         let outcome = crate::recovery::recover_or_fail(
             &self.pool,
             self.core_persistence.as_ref(),
+            &self.tenant_id,
             &instance.instance_id,
             crate::recovery::auto_recover_enabled(),
         )

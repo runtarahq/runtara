@@ -254,7 +254,12 @@ async fn test_cleanup_old_terminal_instances() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     // Run worker for a short time
@@ -334,7 +339,12 @@ async fn test_cleanup_disabled_by_default() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -502,7 +512,12 @@ async fn test_e2e_cascade_deletion_checkpoints_and_events() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -581,7 +596,12 @@ async fn test_e2e_batch_processing() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -640,7 +660,12 @@ async fn test_e2e_cancelled_instances_deleted() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -699,7 +724,12 @@ async fn test_e2e_suspended_instances_not_deleted() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -758,7 +788,12 @@ async fn test_e2e_pending_instances_not_deleted() {
         // sweep has its own window and is covered separately.
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -857,7 +892,12 @@ async fn debug_events_age_out_before_their_instance_does() {
         batch_size: 100,
         debug_event_max_age: Some(Duration::from_secs(24 * 3600)),
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
     let handle = tokio::spawn(async move { worker.run().await });
 
@@ -918,7 +958,12 @@ async fn debug_sweep_is_off_when_no_window_is_configured() {
         batch_size: 100,
         debug_event_max_age: None,
     };
-    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let worker = DbCleanupWorker::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+        pool.clone(),
+        persistence,
+        config,
+    );
     let shutdown = worker.shutdown_handle();
     let handle = tokio::spawn(async move { worker.run().await });
     tokio::time::sleep(Duration::from_secs(2)).await;

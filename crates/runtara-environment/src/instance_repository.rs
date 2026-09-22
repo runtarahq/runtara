@@ -410,6 +410,7 @@ impl InstanceRepository {
     /// the next recovery is what distinguishes "made progress" from "stuck".
     pub async fn mark_for_recovery(
         &self,
+        tenant_id: &runtara_core::TenantId,
         instance_id: &str,
         attempt: i32,
         marker: Option<&str>,
@@ -421,11 +422,12 @@ impl InstanceRepository {
                  sleep_until = NOW(), \
                  recovery_attempts = $2, \
                  recovery_marker = $3 \
-             WHERE instance_id = $1 AND status = 'running'::instance_status",
+             WHERE instance_id = $1 AND tenant_id = $4 AND status = 'running'::instance_status",
         )
         .bind(instance_id)
         .bind(attempt)
         .bind(marker)
+        .bind(tenant_id.as_str())
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Other(format!("mark_for_recovery: {e}")))?;

@@ -98,11 +98,15 @@ pub(crate) async fn running_instance(prefix: &str) -> (Arc<dyn Persistence>, Str
     let persistence = persistence().await;
     let instance_id = unique_id(prefix);
     persistence
-        .register_instance(&instance_id, &format!("{prefix}-tenant"))
+        .register_instance(
+            &runtara_core::TenantId::new(format!("{prefix}-tenant")).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("register instance");
     persistence
         .update_instance_status(
+            &runtara_core::TenantId::new(format!("{prefix}-tenant")).unwrap(),
             &instance_id,
             runtara_core::domain::InstanceStatus::Running,
             None,

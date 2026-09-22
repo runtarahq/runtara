@@ -1,5 +1,6 @@
 //! Independent in-memory implementation of the atomic invocation contract.
 use super::*;
+use crate::TenantId;
 use crate::persistence::invocations::*;
 
 fn denied(reason: FenceRejection) -> InvocationFenceError {
@@ -100,11 +101,11 @@ fn checkpoint(
 impl InvocationFences for InMemoryPersistence {
     async fn get_invocation_lease(
         &self,
-        tenant: &str,
+        tenant_id: &TenantId,
         instance: &str,
     ) -> FenceResult<Option<InvocationLeaseState>> {
         let store = self.store.lock().unwrap();
-        root(&store, tenant, instance, false)?;
+        root(&store, tenant_id.as_str(), instance, false)?;
         Ok(store
             .invocation_leases
             .get(instance)
@@ -116,7 +117,7 @@ impl InvocationFences for InMemoryPersistence {
 
     async fn claim_invocation_lease(
         &self,
-        tenant: &str,
+        tenant_id: &TenantId,
         instance: &str,
         owner: &str,
         expected_epoch: Option<i64>,
@@ -126,7 +127,7 @@ impl InvocationFences for InMemoryPersistence {
             return Err(denied(FenceRejection::InvalidIdentity));
         }
         let mut store = self.store.lock().unwrap();
-        root(&store, tenant, instance, true)?;
+        root(&store, tenant_id.as_str(), instance, true)?;
         let next = expected_epoch.unwrap_or(0) + 1;
         if let Some((current, active)) = store.invocation_leases.get(instance) {
             if current.owner == owner && current.epoch == next && *active {
@@ -139,7 +140,7 @@ impl InvocationFences for InMemoryPersistence {
             return Err(denied(FenceRejection::LeaseMismatch));
         }
         let token = InvocationLease {
-            tenant_id: tenant.into(),
+            tenant_id: tenant_id.to_string(),
             instance_id: instance.into(),
             owner: owner.into(),
             epoch: next,
@@ -149,7 +150,12 @@ impl InvocationFences for InMemoryPersistence {
             .insert(instance.into(), (token.clone(), true));
         Ok(token)
     }
-    async fn revoke_invocation_lease(&self, token: &InvocationLease) -> FenceResult<()> {
+    async fn revoke_invocation_lease(
+        &self,
+        tenant_id: &TenantId,
+        token: &InvocationLease,
+    ) -> FenceResult<()> {
+        token.require_tenant(tenant_id)?;
         let mut store = self.store.lock().unwrap();
         lease(&store, token, false)?;
         store
@@ -161,10 +167,12 @@ impl InvocationFences for InMemoryPersistence {
     }
     async fn begin_invocation_attempt(
         &self,
+        tenant_id: &TenantId,
         token: &InvocationLease,
         path: &str,
         start_id: &str,
     ) -> FenceResult<InvocationAttempt> {
+        token.require_tenant(tenant_id)?;
         validate_identity(path)?;
         validate_identity(start_id)?;
         let mut store = self.store.lock().unwrap();
@@ -212,7 +220,12 @@ impl InvocationFences for InMemoryPersistence {
         store.invocation_attempts.push(result.clone());
         Ok(result)
     }
-    async fn cancel_invocation_attempt(&self, token: &AttemptFence) -> FenceResult<AttemptState> {
+    async fn cancel_invocation_attempt(
+        &self,
+        tenant_id: &TenantId,
+        token: &AttemptFence,
+    ) -> FenceResult<AttemptState> {
+        token.lease.require_tenant(tenant_id)?;
         let mut store = self.store.lock().unwrap();
         root(
             &store,
@@ -229,9 +242,11 @@ impl InvocationFences for InMemoryPersistence {
     }
     async fn settle_invocation_attempt(
         &self,
+        tenant_id: &TenantId,
         token: &AttemptFence,
         write: Option<&InvocationCheckpoint>,
     ) -> FenceResult<InvocationSettlement> {
+        token.lease.require_tenant(tenant_id)?;
         if let Some(write) = write {
             validate_identity(&write.checkpoint_id)?;
         }
@@ -252,9 +267,11 @@ impl InvocationFences for InMemoryPersistence {
     }
     async fn invocation_checkpoint(
         &self,
+        tenant_id: &TenantId,
         token: &AttemptFence,
         write: &InvocationCheckpoint,
     ) -> FenceResult<InvocationCheckpointResult> {
+        token.lease.require_tenant(tenant_id)?;
         validate_identity(&write.checkpoint_id)?;
         let mut store = self.store.lock().unwrap();
         active_attempt(&store, token)?;
@@ -262,9 +279,11 @@ impl InvocationFences for InMemoryPersistence {
     }
     async fn invocation_sleep_checkpoint(
         &self,
+        tenant_id: &TenantId,
         token: &AttemptFence,
         write: &InvocationCheckpoint,
     ) -> FenceResult<()> {
+        token.lease.require_tenant(tenant_id)?;
         validate_identity(&write.checkpoint_id)?;
         let mut store = self.store.lock().unwrap();
         active_attempt(&store, token)?;
@@ -283,9 +302,11 @@ impl InvocationFences for InMemoryPersistence {
     }
     async fn invocation_retry(
         &self,
+        tenant_id: &TenantId,
         token: &AttemptFence,
         retry: &InvocationRetry,
     ) -> FenceResult<()> {
+        token.lease.require_tenant(tenant_id)?;
         let key = retry.storage_key()?;
         let mut store = self.store.lock().unwrap();
         active_attempt(&store, token)?;
@@ -296,9 +317,11 @@ impl InvocationFences for InMemoryPersistence {
     }
     async fn invocation_event(
         &self,
+        tenant_id: &TenantId,
         token: &AttemptFence,
         event: &InvocationEvent,
     ) -> FenceResult<()> {
+        token.lease.require_tenant(tenant_id)?;
         let mut store = self.store.lock().unwrap();
         active_attempt(&store, token)?;
         let (event_type, subtype) = match &event.kind {

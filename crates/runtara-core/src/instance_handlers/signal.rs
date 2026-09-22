@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Signal handlers: polling and acknowledgement.
 
+use crate::TenantId;
 #[cfg(test)]
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 #[cfg(test)]
@@ -28,18 +29,19 @@ use super::types::{
 ))]
 pub async fn handle_poll_signals(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     request: PollSignalsRequest,
 ) -> Result<PollSignalsResponse> {
     debug!("Instance polling for signals");
 
     let pending = state
         .persistence
-        .get_pending_signal(&request.instance_id)
+        .get_pending_signal(tenant_id, &request.instance_id)
         .await?;
     let custom = if let Some(checkpoint_id) = request.checkpoint_id.as_deref() {
         state
             .persistence
-            .get_custom_signal(&request.instance_id, checkpoint_id)
+            .get_custom_signal(tenant_id, &request.instance_id, checkpoint_id)
             .await?
     } else {
         None
@@ -79,13 +81,20 @@ pub async fn handle_poll_signals(
 /// Acknowledge the delivered command and its lifecycle transition atomically.
 /// False means the receipt is stale or the requested transition is no longer valid.
 #[instrument(skip(state, ack), fields(instance_id = %ack.instance_id, command_id = %ack.command_id))]
-pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<bool> {
-    Ok(handle_signal_ack_decision(state, ack).await?.accepted())
+pub async fn handle_signal_ack(
+    state: &InstanceHandlerState,
+    tenant_id: &TenantId,
+    ack: SignalAck,
+) -> Result<bool> {
+    Ok(handle_signal_ack_decision(state, tenant_id, ack)
+        .await?
+        .accepted())
 }
 
 /// Acknowledge a command while retaining its typed lifecycle disposition.
 pub async fn handle_signal_ack_decision(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     ack: SignalAck,
 ) -> Result<crate::lifecycle::Decision> {
     if !ack.acknowledged {
@@ -95,7 +104,12 @@ pub async fn handle_signal_ack_decision(
         .ok_or_else(|| anyhow::anyhow!("Unknown lifecycle signal type: {}", ack.signal_type))?;
     Ok(state
         .persistence
-        .apply_lifecycle_command(&ack.instance_id, &ack.command_id, signal_type.into())
+        .apply_lifecycle_command(
+            tenant_id,
+            &ack.instance_id,
+            &ack.command_id,
+            signal_type.into(),
+        )
         .await?)
 }
 
@@ -109,20 +123,30 @@ mod tests {
 
     #[tokio::test]
     async fn retired_resume_value_cannot_acknowledge_a_command() {
+        let tenant_scope = crate::TenantId::new("test").unwrap();
         let backend = Arc::new(crate::persistence::memory::InMemoryPersistence::new());
-        backend.register_instance("retired", "test").await.unwrap();
         backend
-            .insert_signal("retired", crate::domain::SignalType::Pause, b"")
+            .register_instance(&tenant_scope, "retired")
+            .await
+            .unwrap();
+        backend
+            .insert_signal(
+                &tenant_scope,
+                "retired",
+                crate::domain::SignalType::Pause,
+                b"",
+            )
             .await
             .unwrap();
         let command = backend
-            .get_pending_signal("retired")
+            .get_pending_signal(&tenant_scope, "retired")
             .await
             .unwrap()
             .unwrap();
         let state = InstanceHandlerState::new(backend.clone());
         let result = handle_signal_ack(
             &state,
+            &tenant_scope,
             SignalAck {
                 instance_id: "retired".into(),
                 command_id: command.command_id.clone(),
@@ -134,7 +158,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             backend
-                .get_pending_signal("retired")
+                .get_pending_signal(&tenant_scope, "retired")
                 .await
                 .unwrap()
                 .unwrap()
@@ -145,6 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_and_poll_deliver_every_signal_identically() {
+        let tenant_scope = crate::TenantId::new("tenant").unwrap();
         use crate::domain::{InstanceStatus, SignalType as StoredSignal};
         use crate::instance_handlers::{CheckpointRequest, handle_checkpoint};
         for signal_type in [
@@ -160,6 +185,7 @@ mod tests {
             let state = InstanceHandlerState::new(persistence);
             let poll = handle_poll_signals(
                 &state,
+                &tenant_scope,
                 PollSignalsRequest {
                     instance_id: "instance".into(),
                     checkpoint_id: None,
@@ -171,6 +197,7 @@ mod tests {
             .unwrap();
             let checkpoint = handle_checkpoint(
                 &state,
+                &tenant_scope,
                 CheckpointRequest {
                     instance_id: "instance".into(),
                     checkpoint_id: "cp".into(),
@@ -188,6 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_and_poll_report_signal_read_failures() {
+        let tenant_scope = crate::TenantId::new("tenant").unwrap();
         use crate::domain::InstanceStatus;
         use crate::instance_handlers::{CheckpointRequest, handle_checkpoint};
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
@@ -199,6 +227,7 @@ mod tests {
         let state = InstanceHandlerState::new(persistence);
         let poll = handle_poll_signals(
             &state,
+            &tenant_scope,
             PollSignalsRequest {
                 instance_id: "instance".into(),
                 checkpoint_id: None,
@@ -207,6 +236,7 @@ mod tests {
         .await;
         let checkpoint = handle_checkpoint(
             &state,
+            &tenant_scope,
             CheckpointRequest {
                 instance_id: "instance".into(),
                 checkpoint_id: "cp".into(),
@@ -226,6 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_signals_no_signal() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -238,12 +269,15 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_poll_signals(&state, request).await.unwrap();
+        let result = handle_poll_signals(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.signal.is_none());
     }
 
     #[tokio::test]
     async fn test_poll_signals_with_pending_signal() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -260,7 +294,9 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_poll_signals(&state, request).await.unwrap();
+        let result = handle_poll_signals(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.signal.is_some());
         let signal = result.signal.unwrap();
         assert_eq!(signal.signal_type, SignalType::SignalPause as i32);
@@ -268,6 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_signal_ack_success() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -281,7 +318,7 @@ mod tests {
 
         let request = SignalAck {
             command_id: persistence
-                .get_pending_signal("inst-1")
+                .get_pending_signal(&tenant_scope, "inst-1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -292,12 +329,14 @@ mod tests {
         };
 
         // handle_signal_ack returns Result<()>
-        handle_signal_ack(&state, request).await.unwrap();
+        handle_signal_ack(&state, &tenant_scope, request)
+            .await
+            .unwrap();
 
         // Verify signal was acknowledged (removed from pending)
         assert!(
             persistence
-                .get_pending_signal("inst-1")
+                .get_pending_signal(&tenant_scope, "inst-1")
                 .await
                 .unwrap()
                 .is_none()
@@ -310,16 +349,23 @@ mod tests {
     /// run would record as a clean success despite having been cancelled.
     #[tokio::test]
     async fn test_signal_ack_leaves_signal_pending_when_the_transition_fails() {
-        // No instance registered, so `complete_instance` fails with
-        // InstanceNotFound — the transition never lands.
+        let tenant_scope = crate::TenantId::new("test-tenant").unwrap();
+        // Inject a storage failure before the atomic transition.
         let persistence = Arc::new(
-            MockPersistence::new().with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
+            MockPersistence::new()
+                .with_instance(make_instance(
+                    "inst-1",
+                    "test-tenant",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
         );
         let state = InstanceHandlerState::new(persistence.clone());
 
+        persistence.set_fail_lifecycle();
         let ack = SignalAck {
             command_id: persistence
-                .get_pending_signal("inst-1")
+                .get_pending_signal(&tenant_scope, "inst-1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -329,13 +375,13 @@ mod tests {
             acknowledged: true,
         };
 
-        handle_signal_ack(&state, ack)
+        handle_signal_ack(&state, &tenant_scope, ack)
             .await
             .expect_err("a failed status transition must surface as an error");
 
         assert!(
             persistence
-                .get_pending_signal("inst-1")
+                .get_pending_signal(&tenant_scope, "inst-1")
                 .await
                 .unwrap()
                 .is_some(),
@@ -345,6 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_signal_ack_shutdown_persists_suspended() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -358,7 +405,7 @@ mod tests {
 
         let ack = SignalAck {
             command_id: persistence
-                .get_pending_signal("inst-1")
+                .get_pending_signal(&tenant_scope, "inst-1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -368,12 +415,12 @@ mod tests {
             acknowledged: true,
         };
 
-        handle_signal_ack(&state, ack).await.unwrap();
+        handle_signal_ack(&state, &tenant_scope, ack).await.unwrap();
 
         // Instance should be suspended with termination_reason=shutdown_requested,
         // NOT cancelled or failed.
         let inst = persistence
-            .get_instance("inst-1")
+            .get_instance(&tenant_scope, "inst-1")
             .await
             .unwrap()
             .expect("instance still present");

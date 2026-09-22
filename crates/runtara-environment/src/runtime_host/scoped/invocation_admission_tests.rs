@@ -9,15 +9,28 @@ struct Fixture {
 impl Fixture {
     async fn new(timeout: Duration) -> Self {
         let (persistence, id) = crate::test_support::running_instance("admission").await;
-        let root = persistence.get_instance(&id).await.unwrap().unwrap();
+        let root = persistence
+            .get_instance(
+                &runtara_core::TenantId::new("admission-tenant").unwrap(),
+                &id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let lease = persistence
             .invocation_fences()
             .unwrap()
-            .claim_invocation_lease(&root.tenant_id, &id, "test-launch", None)
+            .claim_invocation_lease(
+                &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+                &id,
+                "test-launch",
+                None,
+            )
             .await
             .unwrap();
         let admission = Arc::new(InvocationAdmission::new(
             persistence,
+            runtara_core::TenantId::new("admission-tenant").unwrap(),
             lease,
             "parent/child".into(),
             timeout,
@@ -53,13 +66,19 @@ impl Fixture {
             .persistence
             .invocation_fences()
             .unwrap()
-            .revoke_invocation_lease(&self.admission.lease)
+            .revoke_invocation_lease(
+                &runtara_core::TenantId::new("admission-tenant").unwrap(),
+                &self.admission.lease,
+            )
             .await
             .unwrap();
         let root = self
             .admission
             .persistence
-            .get_instance(&self.admission.lease.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("admission-tenant").unwrap(),
+                &self.admission.lease.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -198,7 +217,10 @@ async fn initial_admission_recovers_dropped_reply_and_fences_failure_or_panic() 
                 .persistence
                 .invocation_fences()
                 .unwrap()
-                .cancel_invocation_attempt(&stored.fence)
+                .cancel_invocation_attempt(
+                    &runtara_core::TenantId::new("admission-tenant").unwrap(),
+                    &stored.fence,
+                )
                 .await
                 .unwrap();
         }
@@ -227,7 +249,7 @@ async fn initial_admission_recovers_dropped_reply_and_fences_failure_or_panic() 
                     .invocation_fences()
                     .unwrap()
                     .get_invocation_lease(
-                        &fx.admission.lease.tenant_id,
+                        &runtara_core::TenantId::new(&fx.admission.lease.tenant_id).unwrap(),
                         &fx.admission.lease.instance_id
                     )
                     .await
@@ -275,14 +297,23 @@ async fn initial_admission_observes_old_lease_cancel_tombstone_without_child_io(
     let mut fx = Fixture::new(Duration::from_secs(3)).await;
     let fences = fx.admission.persistence.invocation_fences().unwrap();
     let old = fx.admission.begin().await.unwrap();
-    fences.cancel_invocation_attempt(&old.fence).await.unwrap();
     fences
-        .revoke_invocation_lease(&old.fence.lease)
+        .cancel_invocation_attempt(
+            &runtara_core::TenantId::new("admission-tenant").unwrap(),
+            &old.fence,
+        )
+        .await
+        .unwrap();
+    fences
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("admission-tenant").unwrap(),
+            &old.fence.lease,
+        )
         .await
         .unwrap();
     let lease = fences
         .claim_invocation_lease(
-            &old.fence.lease.tenant_id,
+            &runtara_core::TenantId::new(&old.fence.lease.tenant_id).unwrap(),
             &old.fence.lease.instance_id,
             "replay",
             Some(old.fence.lease.epoch),
@@ -291,6 +322,7 @@ async fn initial_admission_observes_old_lease_cancel_tombstone_without_child_io(
         .unwrap();
     fx.admission = Arc::new(InvocationAdmission::new(
         fx.admission.persistence.clone(),
+        runtara_core::TenantId::new("admission-tenant").unwrap(),
         lease,
         old.fence.path.clone(),
         Duration::from_secs(3),
@@ -322,7 +354,7 @@ async fn initial_admission_observes_old_lease_cancel_tombstone_without_child_io(
             .invocation_fences()
             .unwrap()
             .get_invocation_lease(
-                &fx.admission.lease.tenant_id,
+                &runtara_core::TenantId::new(&fx.admission.lease.tenant_id).unwrap(),
                 &fx.admission.lease.instance_id
             )
             .await
@@ -369,7 +401,7 @@ async fn initial_admission_timeout_fails_shutdown_until_root_fencing_can_be_retr
             .invocation_fences()
             .unwrap()
             .get_invocation_lease(
-                &fx.admission.lease.tenant_id,
+                &runtara_core::TenantId::new(&fx.admission.lease.tenant_id).unwrap(),
                 &fx.admission.lease.instance_id
             )
             .await

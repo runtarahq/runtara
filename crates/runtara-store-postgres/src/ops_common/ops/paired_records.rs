@@ -26,8 +26,10 @@ macro_rules! impl_paired_record_ops {
         impl $Backend {
             /// List paired start/end events as
             /// [`::runtara_core::persistence::PairedRecordSummary`] entries.
+            #[allow(clippy::too_many_arguments)]
             pub(crate) async fn op_list_paired_records(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 vocabulary: &::runtara_core::persistence::EventVocabulary,
                 filter: &::runtara_core::persistence::ListPairedRecordsFilter,
@@ -56,6 +58,8 @@ macro_rules! impl_paired_record_ops {
                     .map(|ids| ::serde_json::to_string(ids).expect("string vec serializes"));
                 let sql_vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
                 let sql = <$Dialect>::sql_list_paired_records(&sql_vocabulary, order_direction);
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
 
                 let rows = ::sqlx::query(&sql)
                     .bind(instance_id)
@@ -67,10 +71,11 @@ macro_rules! impl_paired_record_ops {
                     .bind(limit)
                     .bind(offset)
                     .bind(correlation_ids_json)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *tx)
                     .await
                     .db()?;
 
+                tx.commit().await.db()?;
                 let mut records = ::std::vec::Vec::with_capacity(rows.len());
                 for row in rows {
                     let status_str: &str = row.get("status");
@@ -109,6 +114,7 @@ macro_rules! impl_paired_record_ops {
             /// COUNT paired records under the same filter.
             pub(crate) async fn op_count_paired_records(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 vocabulary: &::runtara_core::persistence::EventVocabulary,
                 filter: &::runtara_core::persistence::ListPairedRecordsFilter,
@@ -123,6 +129,8 @@ macro_rules! impl_paired_record_ops {
                     .map(|ids| ::serde_json::to_string(ids).expect("string vec serializes"));
                 let sql_vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
                 let sql = <$Dialect>::sql_count_paired_records(&sql_vocabulary);
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let count: (i64,) = ::sqlx::query_as(&sql)
                     .bind(instance_id)
                     .bind(status_filter)
@@ -131,9 +139,10 @@ macro_rules! impl_paired_record_ops {
                     .bind(&filter.parent_scope_id)
                     .bind(filter.root_scopes_only)
                     .bind(correlation_ids_json)
-                    .fetch_one(pool)
+                    .fetch_one(&mut *tx)
                     .await
                     .db()?;
+                tx.commit().await.db()?;
                 Ok(count.0)
             }
         }

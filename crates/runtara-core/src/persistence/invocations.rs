@@ -7,6 +7,7 @@
 //! a durable control command requires a tombstone. A backend must provide every
 //! operation atomically; checking a token and later issuing an unfenced write
 //! does not implement this contract.
+use crate::TenantId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -67,6 +68,19 @@ pub struct InvocationLease {
     pub owner: String,
     /// Monotonic root lease generation, allocated by the store.
     pub epoch: i64,
+}
+
+impl InvocationLease {
+    /// Reject a lease outside the tenant supplied by the trusted host.
+    ///
+    /// Call before storage access. A mismatch reveals no root or lease state.
+    pub fn require_tenant(&self, tenant_id: &TenantId) -> FenceResult<()> {
+        if self.tenant_id == tenant_id.as_str() {
+            Ok(())
+        } else {
+            Err(InvocationFenceError::Rejected(FenceRejection::UnknownRoot))
+        }
+    }
 }
 
 /// Durable owner facts for crash recovery before an exact revocation/CAS claim.
@@ -196,7 +210,7 @@ pub trait InvocationFences: Send + Sync {
     /// no mutation authority by itself; subsequent transitions still use CAS.
     async fn get_invocation_lease(
         &self,
-        tenant: &str,
+        tenant_id: &TenantId,
         instance: &str,
     ) -> FenceResult<Option<InvocationLeaseState>>;
 
@@ -205,13 +219,17 @@ pub trait InvocationFences: Send + Sync {
     /// Running owners cannot be silently displaced, and epochs never repeat.
     async fn claim_invocation_lease(
         &self,
-        tenant: &str,
+        tenant_id: &TenantId,
         instance: &str,
         owner: &str,
         expected_epoch: Option<i64>,
     ) -> FenceResult<InvocationLease>;
     /// Revoke exactly this owner, idempotently. Works after root termination.
-    async fn revoke_invocation_lease(&self, lease: &InvocationLease) -> FenceResult<()>;
+    async fn revoke_invocation_lease(
+        &self,
+        tenant_id: &TenantId,
+        lease: &InvocationLease,
+    ) -> FenceResult<()>;
     /// Admit a queued durable invocation before constructing a Store. Retrying
     /// the same start ID in this lease returns its original attempt. A different
     /// start may follow settlement, or reclaim an abandoned older lease, using
@@ -219,6 +237,7 @@ pub trait InvocationFences: Send + Sync {
     /// of admitting another generation, including after a root relaunch.
     async fn begin_invocation_attempt(
         &self,
+        tenant_id: &TenantId,
         lease: &InvocationLease,
         path: &str,
         start_id: &str,
@@ -226,12 +245,17 @@ pub trait InvocationFences: Send + Sync {
     /// Record exact-attempt cancellation, including while its root is parked.
     /// Completion wins over late cancel. An old generation cannot affect a new
     /// one. Command ID deduplication belongs to the execution-control layer.
-    async fn cancel_invocation_attempt(&self, fence: &AttemptFence) -> FenceResult<AttemptState>;
+    async fn cancel_invocation_attempt(
+        &self,
+        tenant_id: &TenantId,
+        fence: &AttemptFence,
+    ) -> FenceResult<AttemptState>;
     /// Commit an invocation outcome and optional existing logical checkpoint in
     /// one transaction. Cancellation returns Cancelled without writing bytes.
     /// Repeated settlement is a no-op; this ledger never stores result bytes.
     async fn settle_invocation_attempt(
         &self,
+        tenant_id: &TenantId,
         fence: &AttemptFence,
         checkpoint: Option<&InvocationCheckpoint>,
     ) -> FenceResult<InvocationSettlement>;
@@ -240,6 +264,7 @@ pub trait InvocationFences: Send + Sync {
     /// state is a probe and does not create an empty replay hit.
     async fn invocation_checkpoint(
         &self,
+        tenant_id: &TenantId,
         fence: &AttemptFence,
         checkpoint: &InvocationCheckpoint,
     ) -> FenceResult<InvocationCheckpointResult>;
@@ -249,6 +274,7 @@ pub trait InvocationFences: Send + Sync {
     /// Does not park the root, schedule a wake or wait out the duration.
     async fn invocation_sleep_checkpoint(
         &self,
+        tenant_id: &TenantId,
         fence: &AttemptFence,
         checkpoint: &InvocationCheckpoint,
     ) -> FenceResult<()>;
@@ -257,6 +283,7 @@ pub trait InvocationFences: Send + Sync {
     /// overflow and a derived key longer than the identity limit are rejected.
     async fn invocation_retry(
         &self,
+        tenant_id: &TenantId,
         fence: &AttemptFence,
         retry: &InvocationRetry,
     ) -> FenceResult<()>;
@@ -265,6 +292,7 @@ pub trait InvocationFences: Send + Sync {
     /// Notify any external observer only after a successful commit.
     async fn invocation_event(
         &self,
+        tenant_id: &TenantId,
         fence: &AttemptFence,
         event: &InvocationEvent,
     ) -> FenceResult<()>;

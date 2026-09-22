@@ -203,9 +203,13 @@ fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
 
 impl RuntimeClient {
     /// Create a client over the embedded environment's shared handler state.
-    pub fn new(state: Arc<EnvironmentHandlerState>, config: RuntimeClientConfig) -> Self {
+    pub fn new(
+        state: Arc<EnvironmentHandlerState>,
+        tenant_id: runtara_core::TenantId,
+        config: RuntimeClientConfig,
+    ) -> Self {
         Self {
-            client: EnvironmentClient::new(state),
+            client: EnvironmentClient::new(state, tenant_id),
             config,
         }
     }

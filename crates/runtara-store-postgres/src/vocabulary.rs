@@ -130,15 +130,32 @@ mod tests {
         let filter = ListPairedRecordsFilter::default();
         let results = [
             backend
-                .list_paired_records("instance", &vocabulary, &filter, 10, 0)
+                .list_paired_records(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    "instance",
+                    &vocabulary,
+                    &filter,
+                    10,
+                    0,
+                )
                 .await
                 .map(|_| ()),
             backend
-                .count_paired_records("instance", &vocabulary, &filter)
+                .count_paired_records(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    "instance",
+                    &vocabulary,
+                    &filter,
+                )
                 .await
                 .map(|_| ()),
             backend
-                .delete_paired_events_older_than(&vocabulary, chrono::Utc::now(), 10)
+                .delete_paired_events_older_than(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &vocabulary,
+                    chrono::Utc::now(),
+                    10,
+                )
                 .await
                 .map(|_| ()),
         ];

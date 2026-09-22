@@ -26,16 +26,19 @@ impl PostgresDialect {
     /// fragments.
     pub(crate) async fn exec_delete_instances_batch(
         pool: &sqlx::PgPool,
+        tenant_id: &runtara_core::TenantId,
         instance_ids: &[String],
     ) -> Result<u64, CoreError> {
         if instance_ids.is_empty() {
             return Ok(0);
         }
-        let result = sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1)")
-            .bind(instance_ids)
-            .execute(pool)
-            .await
-            .db()?;
+        let result =
+            sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1) AND tenant_id = $2")
+                .bind(instance_ids)
+                .bind(tenant_id.as_str())
+                .execute(pool)
+                .await
+                .db()?;
         Ok(result.rows_affected())
     }
 }

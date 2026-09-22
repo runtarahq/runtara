@@ -3,19 +3,38 @@ use runtara_component_host::InvokeExit;
 use runtara_component_host::isolated_tasks::TaskError;
 
 async fn io(fx: &Fixture) -> Arc<InvocationIo> {
-    let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    let root = fx
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     let fences = fx.persistence.invocation_fences().unwrap();
     let lease = fences
-        .claim_invocation_lease(&root.tenant_id, &fx.id, "io-test", None)
+        .claim_invocation_lease(
+            &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+            &fx.id,
+            "io-test",
+            None,
+        )
         .await
         .unwrap();
     let attempt = fences
-        .begin_invocation_attempt(&lease, "parent/child", "one")
+        .begin_invocation_attempt(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &lease,
+            "parent/child",
+            "one",
+        )
         .await
         .unwrap();
     Arc::new(
         InvocationIo::new(
             fx.persistence.clone(),
+            runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
             attempt.fence,
             Duration::from_secs(5),
         )
@@ -38,7 +57,10 @@ async fn revoke(fx: &Fixture, io: &InvocationIo) {
     fx.persistence
         .invocation_fences()
         .unwrap()
-        .revoke_invocation_lease(&io.fence().lease)
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &io.fence().lease,
+        )
         .await
         .unwrap();
 }
@@ -49,11 +71,21 @@ async fn fenced_child_preserves_checkpoint_signal_retry_and_event_semantics() {
     let io = io(&fx).await;
     let child = child(&fx, io.clone()).await;
     fx.persistence
-        .insert_signal(&fx.id, CoreSignal::Pause, b"")
+        .insert_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            CoreSignal::Pause,
+            b"",
+        )
         .await
         .unwrap();
     fx.persistence
-        .put_custom_signal(&fx.id, "child/key", b"custom")
+        .put_custom_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            "child/key",
+            b"custom",
+        )
         .await
         .unwrap();
     let probe = child.checkpoint("child/key".into(), vec![]).await.unwrap();
@@ -85,7 +117,11 @@ async fn fenced_child_preserves_checkpoint_signal_retry_and_event_semantics() {
         .unwrap();
     assert!(
         fx.persistence
-            .load_checkpoint(&fx.id, "child/key::retry::1")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "child/key::retry::1"
+            )
             .await
             .unwrap()
             .is_some()
@@ -97,7 +133,13 @@ async fn fenced_child_preserves_checkpoint_signal_retry_and_event_semantics() {
     child.heartbeat().await.unwrap();
     let events = fx
         .persistence
-        .list_events(&fx.id, &ListEventsFilter::default(), 10, 0)
+        .list_events(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            &ListEventsFilter::default(),
+            10,
+            0,
+        )
         .await
         .unwrap();
     assert_eq!(events.len(), 2);
@@ -111,7 +153,10 @@ async fn fenced_child_preserves_checkpoint_signal_retry_and_event_semantics() {
     assert_eq!(fx.status().await, InstanceStatus::Running);
     assert!(
         fx.persistence
-            .get_instance(&fx.id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -120,7 +165,10 @@ async fn fenced_child_preserves_checkpoint_signal_retry_and_event_semantics() {
     );
     assert!(
         fx.persistence
-            .get_pending_signal(&fx.id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .is_some()
@@ -136,10 +184,19 @@ async fn fenced_child_rejections_prevent_all_writes_and_latch_host_failure() {
         let child = child(&fx, io.clone()).await;
         let fences = fx.persistence.invocation_fences().unwrap();
         if cancel {
-            fences.cancel_invocation_attempt(io.fence()).await.unwrap();
+            fences
+                .cancel_invocation_attempt(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    io.fence(),
+                )
+                .await
+                .unwrap();
         } else {
             fences
-                .revoke_invocation_lease(&io.fence().lease)
+                .revoke_invocation_lease(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &io.fence().lease,
+                )
                 .await
                 .unwrap();
         }
@@ -170,14 +227,24 @@ async fn fenced_child_rejections_prevent_all_writes_and_latch_host_failure() {
         assert!(child.complete(b"ignore error".to_vec()).await.is_err());
         assert_eq!(
             fx.persistence
-                .count_checkpoints(&fx.id, None, None, None)
+                .count_checkpoints(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    None,
+                    None,
+                    None
+                )
                 .await
                 .unwrap(),
             0
         );
         assert_eq!(
             fx.persistence
-                .count_events(&fx.id, &ListEventsFilter::default())
+                .count_events(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    &ListEventsFilter::default()
+                )
                 .await
                 .unwrap(),
             0
@@ -201,7 +268,11 @@ async fn fenced_sleep_heartbeats_stop_after_persisted_cancellation_or_revocation
             loop {
                 if fx
                     .persistence
-                    .load_checkpoint(&fx.id, "child/sleep")
+                    .load_checkpoint(
+                        &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        &fx.id,
+                        "child/sleep",
+                    )
                     .await
                     .unwrap()
                     .is_some()
@@ -215,10 +286,19 @@ async fn fenced_sleep_heartbeats_stop_after_persisted_cancellation_or_revocation
         .unwrap();
         let fences = fx.persistence.invocation_fences().unwrap();
         if cancel {
-            fences.cancel_invocation_attempt(io.fence()).await.unwrap();
+            fences
+                .cancel_invocation_attempt(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    io.fence(),
+                )
+                .await
+                .unwrap();
         } else {
             fences
-                .revoke_invocation_lease(&io.fence().lease)
+                .revoke_invocation_lease(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &io.fence().lease,
+                )
                 .await
                 .unwrap();
         }
@@ -232,12 +312,24 @@ async fn fenced_sleep_heartbeats_stop_after_persisted_cancellation_or_revocation
         assert_eq!(io.failed(), !cancel);
         assert_eq!(
             fx.persistence
-                .count_events(&fx.id, &ListEventsFilter::default())
+                .count_events(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    &ListEventsFilter::default()
+                )
                 .await
                 .unwrap(),
             0
         );
-        let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let root = fx
+            .persistence
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(root.status, InstanceStatus::Running);
         assert!(root.sleep_until.is_none());
         assert_eq!(root.checkpoint_id.as_deref(), Some("child/sleep"));
@@ -253,7 +345,12 @@ async fn fenced_sleep_observes_root_commands_without_consuming_them() {
         let child = child(&fx, io.clone()).await;
         assert!(!child.check_signals().await.unwrap());
         fx.persistence
-            .insert_signal(&fx.id, command, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                command,
+                b"",
+            )
             .await
             .unwrap();
         tokio::time::timeout(
@@ -266,7 +363,10 @@ async fn fenced_sleep_observes_root_commands_without_consuming_them() {
         assert!(child.check_signals().await.unwrap());
         assert!(
             fx.persistence
-                .get_pending_signal(&fx.id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -275,7 +375,11 @@ async fn fenced_sleep_observes_root_commands_without_consuming_them() {
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert_eq!(
             fx.persistence
-                .count_events(&fx.id, &ListEventsFilter::default())
+                .count_events(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    &ListEventsFilter::default()
+                )
                 .await
                 .unwrap(),
             1
@@ -291,7 +395,7 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
     use std::sync::atomic::AtomicUsize;
     struct Observer(AtomicUsize);
     impl InstanceEventObserver for Observer {
-        fn on_event_persisted(&self, _: Option<&str>) {
+        fn on_event_persisted(&self, _: &runtara_core::TenantId, _: Option<&str>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -301,7 +405,12 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
     let mut state = InstanceHandlerState::new(fx.persistence.clone());
     state.event_observer = Some(observer.clone());
     let owner = Arc::new(ScopedRuntimeOwner::new(Arc::new(
-        PersistenceRuntimeHost::new(Arc::new(state), fx.id.clone(), false),
+        PersistenceRuntimeHost::new(
+            Arc::new(state),
+            runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            fx.id.clone(),
+            false,
+        ),
     )));
     let run_owner = owner.clone();
     let run_io = io.clone();
@@ -341,7 +450,11 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
     assert_eq!(
         fx.persistence
-            .count_events(&fx.id, &ListEventsFilter::default())
+            .count_events(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                &ListEventsFilter::default()
+            )
             .await
             .unwrap(),
         1
@@ -350,7 +463,10 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
         !fx.persistence
             .invocation_fences()
             .unwrap()
-            .get_invocation_lease(&io.fence().lease.tenant_id, &fx.id)
+            .get_invocation_lease(
+                &runtara_core::TenantId::new(&io.fence().lease.tenant_id).unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -371,12 +487,23 @@ async fn fenced_io_rejects_another_root_and_default_children_do_not_create_lease
     live.checkpoint("child/live".into(), b"live".to_vec())
         .await
         .unwrap();
-    let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    let root = fx
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         fx.persistence
             .invocation_fences()
             .unwrap()
-            .get_invocation_lease(&root.tenant_id, &fx.id)
+            .get_invocation_lease(
+                &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .is_none()
@@ -439,7 +566,10 @@ async fn managed_fenced_io_cancellation_overrides_a_caught_error_and_success() {
     fx.persistence
         .invocation_fences()
         .unwrap()
-        .cancel_invocation_attempt(io.fence())
+        .cancel_invocation_attempt(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            io.fence(),
+        )
         .await
         .unwrap();
     release.send(()).unwrap();
@@ -454,14 +584,22 @@ async fn managed_fenced_io_cancellation_overrides_a_caught_error_and_success() {
     assert!(!io.failed());
     assert!(
         fx.persistence
-            .load_checkpoint(&fx.id, "child/late")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "child/late"
+            )
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         fx.persistence
-            .load_checkpoint(&fx.id, "child/zero")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "child/zero"
+            )
             .await
             .unwrap()
             .unwrap()
@@ -470,7 +608,11 @@ async fn managed_fenced_io_cancellation_overrides_a_caught_error_and_success() {
     );
     assert_eq!(
         fx.persistence
-            .count_events(&fx.id, &ListEventsFilter::default())
+            .count_events(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                &ListEventsFilter::default()
+            )
             .await
             .unwrap(),
         0
@@ -485,6 +627,7 @@ async fn managed_fenced_io_bounds_blocked_control_and_retains_failure_for_root_c
     let io = Arc::new(
         InvocationIo::new(
             fx.persistence.clone(),
+            runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
             admitted.fence().clone(),
             Duration::from_millis(50),
         )
@@ -528,14 +671,20 @@ async fn managed_fenced_io_bounds_blocked_control_and_retains_failure_for_root_c
     fx.persistence
         .invocation_fences()
         .unwrap()
-        .revoke_invocation_lease(&io.fence().lease)
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &io.fence().lease,
+        )
         .await
         .unwrap();
     assert!(
         !fx.persistence
             .invocation_fences()
             .unwrap()
-            .get_invocation_lease(&io.fence().lease.tenant_id, &fx.id)
+            .get_invocation_lease(
+                &runtara_core::TenantId::new(&io.fence().lease.tenant_id).unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .unwrap()

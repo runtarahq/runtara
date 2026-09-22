@@ -3321,9 +3321,21 @@ mod checkpoint_pagination_tests {
     /// A client over [`WRITE_ORDER`], plus the store behind it.
     async fn client_and_store() -> (Arc<RuntimeClient>, Arc<InMemoryPersistence>) {
         let persistence = Arc::new(InMemoryPersistence::new());
+        persistence
+            .register_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                INSTANCE,
+            )
+            .await
+            .unwrap();
         for id in WRITE_ORDER {
             persistence
-                .save_checkpoint(INSTANCE, id, b"{}")
+                .save_checkpoint(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    INSTANCE,
+                    id,
+                    b"{}",
+                )
                 .await
                 .expect("save checkpoint");
             tokio::time::sleep(SAVE_GAP).await;
@@ -3335,6 +3347,7 @@ mod checkpoint_pagination_tests {
                 Arc::new(MockRunner::new()),
                 std::env::temp_dir(),
             )),
+            runtara_core::TenantId::new("test-tenant").unwrap(),
             RuntimeClientConfig::new(ExecutionTimeoutPolicy::default()),
         ));
         (client, persistence)
@@ -3345,7 +3358,15 @@ mod checkpoint_pagination_tests {
     /// handler's behavior and not a particular backend's choice of order.
     async fn store_order(persistence: &Arc<InMemoryPersistence>) -> Vec<String> {
         persistence
-            .list_checkpoints(INSTANCE, None, 1000, 0, None, None)
+            .list_checkpoints(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                INSTANCE,
+                None,
+                1000,
+                0,
+                None,
+                None,
+            )
             .await
             .expect("list checkpoints")
             .into_iter()

@@ -269,7 +269,12 @@ async fn scope_factory_real_launcher_validates_child_results_without_root_effect
     );
     let launcher = launcher(&fx, scopes).await;
     fx.persistence
-        .insert_signal(&fx.id, CoreSignal::Pause, b"")
+        .insert_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            CoreSignal::Pause,
+            b"",
+        )
         .await
         .unwrap();
     for cap in ["copy", "mismatch", "double", "trap"] {
@@ -299,7 +304,10 @@ async fn scope_factory_real_launcher_validates_child_results_without_root_effect
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert!(
             fx.persistence
-                .get_instance(&fx.id)
+                .get_instance(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -309,7 +317,10 @@ async fn scope_factory_real_launcher_validates_child_results_without_root_effect
     }
     assert!(
         fx.persistence
-            .get_pending_signal(&fx.id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .is_some()
@@ -368,7 +379,13 @@ async fn scope_factory_root_cancel_deadline_and_task_cancel_prevent_initializers
     }
     let events = fx
         .persistence
-        .list_events(&fx.id, &ListEventsFilter::default(), 100, 0)
+        .list_events(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            &ListEventsFilter::default(),
+            100,
+            0,
+        )
         .await
         .unwrap();
     assert!(
@@ -522,7 +539,11 @@ async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
             );
             assert!(
                 fx.persistence
-                    .load_checkpoint(&fx.id, key)
+                    .load_checkpoint(
+                        &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        &fx.id,
+                        key
+                    )
                     .await
                     .unwrap()
                     .is_none()
@@ -540,7 +561,12 @@ async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
                 Some(b"owned".to_vec())
             );
             fx.persistence
-                .put_custom_signal(&fx.id, &own, b"owned signal")
+                .put_custom_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    &own,
+                    b"owned signal",
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -639,9 +665,22 @@ async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
         );
         assert!(scopes.prepare_child(&req).unwrap().lifecycle.is_none());
         let fences = fx.persistence.invocation_fences().unwrap();
-        let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let root = fx
+            .persistence
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let lease = fences
-            .claim_invocation_lease(&root.tenant_id, &fx.id, "durability-test", None)
+            .claim_invocation_lease(
+                &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+                &fx.id,
+                "durability-test",
+                None,
+            )
             .await
             .unwrap();
         let automatic = ScopedInvocationFactory::new(
@@ -659,12 +698,18 @@ async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
             durable == Some(true)
         );
         let attempt = fences
-            .begin_invocation_attempt(&lease, &req.context.path, "one")
+            .begin_invocation_attempt(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &lease,
+                &req.context.path,
+                "one",
+            )
             .await
             .unwrap();
         let io = Arc::new(
             InvocationIo::new(
                 fx.persistence.clone(),
+                runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
                 attempt.fence,
                 Duration::from_secs(5),
             )
@@ -677,11 +722,21 @@ async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
             assert!(matches!(prepared, Err(ExecutionError::InvalidContext)));
         }
         fences
-            .settle_invocation_attempt(io.fence(), None)
+            .settle_invocation_attempt(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                io.fence(),
+                None,
+            )
             .await
             .unwrap();
         fx.close().await;
-        fences.revoke_invocation_lease(&lease).await.unwrap();
+        fences
+            .revoke_invocation_lease(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &lease,
+            )
+            .await
+            .unwrap();
     }
 }
 

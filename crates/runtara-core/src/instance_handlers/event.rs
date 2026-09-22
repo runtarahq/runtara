@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Instance event handlers: generic event ingestion and retry-attempt logging.
 
+use crate::TenantId;
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 
 use anyhow::Result;
@@ -31,15 +32,17 @@ use crate::persistence::{CompleteInstanceParams, EventRecord};
 ))]
 pub async fn handle_instance_event(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     event: InstanceEvent,
 ) -> Result<InstanceEventResponse> {
-    handle_instance_event_with_run_label(state, event, None).await
+    handle_instance_event_with_run_label(state, tenant_id, event, None).await
 }
 
 /// Complete an execution with optional label metadata in the guarded update.
 /// Other event types must not supply a label.
 pub async fn handle_instance_event_with_run_label(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     event: InstanceEvent,
     run_label: Option<&str>,
 ) -> Result<InstanceEventResponse> {
@@ -88,7 +91,10 @@ pub async fn handle_instance_event_with_run_label(
         created_at,
         subtype: event.subtype.clone(),
     };
-    state.persistence.insert_event(&event_record).await?;
+    state
+        .persistence
+        .insert_event(tenant_id, &event_record)
+        .await?;
 
     // Report the event where every event is already passing. Doing it here
     // rather than at a call site means a new event kind cannot be added
@@ -96,7 +102,7 @@ pub async fn handle_instance_event_with_run_label(
     // that undercounts reads as a stall. Which subtypes are worth counting is
     // the observer's decision, not this crate's.
     if let Some(observer) = &state.event_observer {
-        observer.on_event_persisted(event.subtype.as_deref());
+        observer.on_event_persisted(tenant_id, event.subtype.as_deref());
     }
 
     // 5. Update instance status based on event type
@@ -126,7 +132,10 @@ pub async fn handle_instance_event_with_run_label(
             if let Some(label) = run_label.as_deref() {
                 params = params.with_run_label(label);
             }
-            let applied = state.persistence.complete_instance(params).await?;
+            let applied = state
+                .persistence
+                .complete_instance(tenant_id, params)
+                .await?;
             if applied {
                 info!("Instance completed successfully");
             } else {
@@ -145,6 +154,7 @@ pub async fn handle_instance_event_with_run_label(
             let applied = state
                 .persistence
                 .complete_instance(
+                    tenant_id,
                     CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Failed)
                         .if_running()
                         .with_error(error),
@@ -177,6 +187,7 @@ pub async fn handle_instance_event_with_run_label(
             let applied = state
                 .persistence
                 .complete_instance(
+                    tenant_id,
                     CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Suspended)
                         .if_running(),
                 )
@@ -214,6 +225,7 @@ pub async fn handle_instance_event_with_run_label(
 ))]
 pub async fn handle_retry_attempt(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     event: RetryAttemptEvent,
 ) -> Result<()> {
     debug!(timestamp_ms = event.timestamp_ms, "Recording retry attempt");
@@ -222,6 +234,7 @@ pub async fn handle_retry_attempt(
     state
         .persistence
         .save_retry_attempt(
+            tenant_id,
             &event.instance_id,
             &event.checkpoint_id,
             event.attempt_number as i32,
@@ -255,6 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_event_heartbeat() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -271,7 +285,9 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, event).await.unwrap();
+        let result = handle_instance_event(&state, &tenant_scope, event)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Verify event was inserted
@@ -282,6 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_event_completed() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -298,16 +315,23 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, event).await.unwrap();
+        let result = handle_instance_event(&state, &tenant_scope, event)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Verify instance was completed
-        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        let inst = persistence
+            .get_instance(&tenant_scope, "inst-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Completed);
     }
 
     #[tokio::test]
     async fn test_handle_event_failed() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -324,16 +348,23 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, event).await.unwrap();
+        let result = handle_instance_event(&state, &tenant_scope, event)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Verify instance was failed
-        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        let inst = persistence
+            .get_instance(&tenant_scope, "inst-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Failed);
     }
 
     #[tokio::test]
     async fn test_handle_event_suspended() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -350,11 +381,17 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, event).await.unwrap();
+        let result = handle_instance_event(&state, &tenant_scope, event)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Verify instance was suspended
-        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        let inst = persistence
+            .get_instance(&tenant_scope, "inst-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
     }
 
@@ -368,11 +405,12 @@ mod tests {
     /// reporting "not measured" forever.
     #[tokio::test]
     async fn every_persisted_event_reaches_the_observer_with_its_subtype() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         use std::sync::Mutex;
 
         struct Recording(Mutex<Vec<Option<String>>>);
         impl super::super::InstanceEventObserver for Recording {
-            fn on_event_persisted(&self, subtype: Option<&str>) {
+            fn on_event_persisted(&self, _tenant_id: &TenantId, subtype: Option<&str>) {
                 self.0.lock().unwrap().push(subtype.map(str::to_string));
             }
         }
@@ -396,7 +434,7 @@ mod tests {
         };
 
         for subtype in [Some("step_debug_start"), Some("workflow_log"), None] {
-            handle_instance_event(&state, custom_event(subtype))
+            handle_instance_event(&state, &tenant_scope, custom_event(subtype))
                 .await
                 .unwrap();
         }
@@ -420,6 +458,7 @@ mod tests {
     /// and none of them should be forced to supply one.
     #[tokio::test]
     async fn events_are_handled_normally_without_an_observer() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -429,6 +468,7 @@ mod tests {
 
         let result = handle_instance_event(
             &state,
+            &tenant_scope,
             InstanceEvent {
                 instance_id: "inst-1".to_string(),
                 event_type: InstanceEventType::EventCustom as i32,
@@ -451,6 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_event_custom() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -467,7 +508,9 @@ mod tests {
             subtype: Some("my_custom_type".to_string()),
         };
 
-        let result = handle_instance_event(&state, event).await.unwrap();
+        let result = handle_instance_event(&state, &tenant_scope, event)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Verify event was inserted with subtype
@@ -479,6 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_event_suspended_with_payload_arms_no_sleep() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -502,18 +546,24 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, event).await.unwrap();
+        let result = handle_instance_event(&state, &tenant_scope, event)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Plain suspend: no wake armed, no "sleeping" termination, no
         // checkpoint written out of the payload.
-        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        let inst = persistence
+            .get_instance(&tenant_scope, "inst-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(inst.sleep_until.is_none());
         assert_ne!(inst.termination_reason.as_deref(), Some("sleeping"));
         assert!(
             persistence
-                .load_checkpoint("inst-1", "sleep-cp-1")
+                .load_checkpoint(&tenant_scope, "inst-1", "sleep-cp-1")
                 .await
                 .unwrap()
                 .is_none()

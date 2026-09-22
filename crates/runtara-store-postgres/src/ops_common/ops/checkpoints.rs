@@ -34,26 +34,31 @@ macro_rules! impl_checkpoint_ops {
             /// attached.
             pub(crate) async fn op_save_checkpoint(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 checkpoint_id: &str,
                 state: &[u8],
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;
                 use crate::ops_common::error::wrap_checkpoint_save;
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let sql = <$Dialect>::sql_save_checkpoint();
                 ::sqlx::query(sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .bind(state)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(|e| wrap_checkpoint_save(e, instance_id))?;
+                tx.commit().await.db()?;
                 Ok(())
             }
 
             /// SELECT a single checkpoint by `(instance_id, checkpoint_id)`.
             pub(crate) async fn op_load_checkpoint(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<
@@ -61,6 +66,8 @@ macro_rules! impl_checkpoint_ops {
                 ::runtara_core::error::CoreError,
             > {
                 use crate::dialect::Dialect;
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
@@ -71,12 +78,13 @@ macro_rules! impl_checkpoint_ops {
                 let record = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(&sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
-                    .fetch_optional(pool)
+                    .fetch_optional(&mut *tx)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "load_checkpoint".into(),
                         details: e.to_string(),
                     })?;
+                tx.commit().await.db()?;
                 Ok(record.map(|r| r.0))
             }
 
@@ -85,6 +93,7 @@ macro_rules! impl_checkpoint_ops {
             #[allow(clippy::too_many_arguments)]
             pub(crate) async fn op_list_checkpoints(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 checkpoint_id: ::core::option::Option<&str>,
                 limit: i64,
@@ -97,6 +106,8 @@ macro_rules! impl_checkpoint_ops {
             > {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_list_checkpoints();
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let rows = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(&sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
@@ -104,9 +115,10 @@ macro_rules! impl_checkpoint_ops {
                     .bind(created_before)
                     .bind(limit)
                     .bind(offset)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *tx)
                     .await
                     .db()?;
+                tx.commit().await.db()?;
                 Ok(rows.into_iter().map(|r| r.0).collect())
             }
 
@@ -114,6 +126,7 @@ macro_rules! impl_checkpoint_ops {
             /// semantics as `op_list_checkpoints`.
             pub(crate) async fn op_count_checkpoints(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 checkpoint_id: ::core::option::Option<&str>,
                 created_after: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
@@ -121,14 +134,17 @@ macro_rules! impl_checkpoint_ops {
             ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_count_checkpoints();
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .bind(created_after)
                     .bind(created_before)
-                    .fetch_one(pool)
+                    .fetch_one(&mut *tx)
                     .await
                     .db()?;
+                tx.commit().await.db()?;
                 Ok(count.0)
             }
         }

@@ -84,12 +84,12 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- register + get -----------------------------------------------------
     backend
-        .register_instance(&instance_id, tenant_id)
+        .register_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("register_instance failed");
 
     let record = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance failed")
         .expect("instance should exist immediately after register");
@@ -102,7 +102,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // replay has to report "already taken" rather than erroring or clobbering
     // the row that is already mid-launch.
     let claimed_again = backend
-        .try_register_instance(&instance_id, tenant_id, Some(b"{\"stolen\":true}"))
+        .try_register_instance(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Some(b"{\"stolen\":true}"),
+        )
         .await
         .expect("try_register_instance on an existing id should not error");
     assert!(
@@ -110,7 +114,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "try_register_instance must report false for an id that already exists"
     );
     let unchanged = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance failed")
         .expect("instance should still exist after a losing claim");
@@ -122,7 +126,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // A losing claim must not smuggle its own input onto the existing row.
     assert!(
         backend
-            .get_instance(&instance_id)
+            .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
             .await
             .expect("get_instance failed")
             .expect("instance should still exist")
@@ -137,13 +141,17 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let fresh_input = b"{\"data\":{\"claimed\":true}}".to_vec();
     assert!(
         backend
-            .try_register_instance(&fresh_id, tenant_id, Some(&fresh_input))
+            .try_register_instance(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &fresh_id,
+                Some(&fresh_input)
+            )
             .await
             .expect("try_register_instance on a fresh id failed"),
         "try_register_instance must report true when it creates the row"
     );
     let created = backend
-        .get_instance(&fresh_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &fresh_id)
         .await
         .expect("get_instance failed")
         .expect("a winning claim must actually insert the row");
@@ -158,13 +166,17 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let no_input_id = Uuid::new_v4().to_string();
     assert!(
         backend
-            .try_register_instance(&no_input_id, tenant_id, None)
+            .try_register_instance(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &no_input_id,
+                None
+            )
             .await
             .expect("try_register_instance without input failed")
     );
     assert!(
         backend
-            .get_instance(&no_input_id)
+            .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &no_input_id)
             .await
             .expect("get_instance failed")
             .expect("row should exist")
@@ -179,12 +191,16 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // Default here would be a silent data bug at the call sites that swapped.
     let payload = b"{\"data\":{\"conformance\":true}}".to_vec();
     backend
-        .store_instance_input(&instance_id, &payload)
+        .store_instance_input(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            &payload,
+        )
         .await
         .expect("store_instance_input failed");
 
     let full = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance failed")
         .expect("instance should exist");
@@ -195,7 +211,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     let meta = backend
-        .get_instance_meta(&instance_id)
+        .get_instance_meta(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance_meta failed")
         .expect("instance should exist");
@@ -222,7 +238,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     assert!(
         backend
-            .get_instance_meta("no-such-instance-for-conformance")
+            .get_instance_meta(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                "no-such-instance-for-conformance"
+            )
             .await
             .expect("get_instance_meta on a missing id should not error")
             .is_none(),
@@ -237,15 +256,24 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // deadline on the row so it simply becomes due again.
     let sleeper = Uuid::new_v4().to_string();
     backend
-        .register_instance(&sleeper, tenant_id)
+        .register_instance(&crate::TenantId::new(tenant_id).unwrap(), &sleeper)
         .await
         .expect("register sleeper failed");
     backend
-        .update_instance_status(&sleeper, CoreInstanceStatus::Suspended, None)
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &sleeper,
+            CoreInstanceStatus::Suspended,
+            None,
+        )
         .await
         .expect("suspend sleeper failed");
     backend
-        .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(30))
+        .set_instance_sleep(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &sleeper,
+            Utc::now() - chrono::Duration::seconds(30),
+        )
         .await
         .expect("set_instance_sleep failed");
 
@@ -257,7 +285,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let mut claimed_by_us = false;
     for _ in 0..10 {
         let batch = backend
-            .claim_sleeping_instances_due(200, lease_until)
+            .claim_sleeping_instances_due(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                200,
+                lease_until,
+            )
             .await
             .expect("claim_sleeping_instances_due failed");
         if batch.iter().any(|r| r.instance_id == sleeper) {
@@ -270,7 +302,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     }
 
     let leased = backend
-        .get_instance(&sleeper)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &sleeper)
         .await
         .expect("get_instance failed")
         .expect("sleeper should exist");
@@ -283,7 +315,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     if claimed_by_us {
         assert!(
             !backend
-                .get_sleeping_instances_due(200)
+                .get_sleeping_instances_due(&crate::TenantId::new(tenant_id).unwrap(), 200)
                 .await
                 .expect("get_sleeping_instances_due failed")
                 .iter()
@@ -295,13 +327,21 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // Expired: the interrupted-wake recovery path. Nothing else runs here, so
     // this stands in for the process that claimed it never coming back.
     backend
-        .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(1))
+        .set_instance_sleep(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &sleeper,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
         .await
         .expect("expire lease failed");
     let mut reclaimed = false;
     for _ in 0..10 {
         let batch = backend
-            .claim_sleeping_instances_due(200, Utc::now() + chrono::Duration::seconds(120))
+            .claim_sleeping_instances_due(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                200,
+                Utc::now() + chrono::Duration::seconds(120),
+            )
             .await
             .expect("reclaim failed");
         if batch.iter().any(|r| r.instance_id == sleeper) {
@@ -316,7 +356,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         reclaimed || {
             // A rival may have taken it; it still must not be left deadline-less.
             backend
-                .get_instance(&sleeper)
+                .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &sleeper)
                 .await
                 .expect("get_instance failed")
                 .expect("sleeper should exist")
@@ -333,6 +373,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let first_started = Utc::now() - chrono::Duration::seconds(120);
     backend
         .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
             &instance_id,
             CoreInstanceStatus::Running,
             Some(first_started),
@@ -345,13 +386,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // only prove that a field nothing ever wrote is still empty.
     backend
         .complete_instance(
+            &crate::TenantId::new(tenant_id).unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
                 .with_termination("sleeping", None),
         )
         .await
         .expect("suspend failed");
     let before = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance failed")
         .expect("instance should exist");
@@ -366,11 +408,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     backend
-        .mark_instance_running(&instance_id, Utc::now())
+        .mark_instance_running(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Utc::now(),
+        )
         .await
         .expect("mark_instance_running failed");
     let promoted = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance failed")
         .expect("instance should exist");
@@ -401,17 +447,23 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // helpers is still pinned here.
     backend
         .complete_instance(
+            &crate::TenantId::new(tenant_id).unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
                 .with_termination("sleeping", None),
         )
         .await
         .expect("re-park before the raw status write failed");
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
         .await
         .expect("update_instance_status running failed");
     let record = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance after update failed")
         .expect("instance must still exist");
@@ -430,11 +482,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let checkpoint_id = "ckpt-1";
     let state = b"opaque-state".to_vec();
     backend
-        .save_checkpoint(&instance_id, checkpoint_id, &state)
+        .save_checkpoint(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            &state,
+        )
         .await
         .expect("save_checkpoint failed");
     let loaded = backend
-        .load_checkpoint(&instance_id, checkpoint_id)
+        .load_checkpoint(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+        )
         .await
         .expect("load_checkpoint failed")
         .expect("checkpoint should load immediately after save");
@@ -442,7 +503,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(loaded.state, state);
 
     let checkpoints = backend
-        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            50,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("list_checkpoints failed");
     assert!(
@@ -451,25 +520,53 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     let count = backend
-        .count_checkpoints(&instance_id, None, None, None)
+        .count_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            None,
+            None,
+        )
         .await
         .expect("count_checkpoints failed");
     assert!(count >= 1);
 
     // Filter: positive match by checkpoint_id.
     let filtered = backend
-        .list_checkpoints(&instance_id, Some(checkpoint_id), 50, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Some(checkpoint_id),
+            50,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("list_checkpoints with filter failed");
     assert!(filtered.iter().all(|c| c.checkpoint_id == checkpoint_id));
     // Filter: negative match by checkpoint_id returns empty.
     let empty = backend
-        .list_checkpoints(&instance_id, Some("ckpt-does-not-exist"), 50, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Some("ckpt-does-not-exist"),
+            50,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("list_checkpoints with non-matching filter failed");
     assert!(empty.is_empty());
     let filtered_count = backend
-        .count_checkpoints(&instance_id, Some(checkpoint_id), None, None)
+        .count_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Some(checkpoint_id),
+            None,
+            None,
+        )
         .await
         .expect("count_checkpoints with filter failed");
     assert!(filtered_count >= 1);
@@ -481,11 +578,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // fails here on the save itself.
     let refreshed_state = b"opaque-state-v2".to_vec();
     backend
-        .save_checkpoint(&instance_id, checkpoint_id, &refreshed_state)
+        .save_checkpoint(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            &refreshed_state,
+        )
         .await
         .expect("re-saving an existing checkpoint key must succeed");
     let reloaded = backend
-        .load_checkpoint(&instance_id, checkpoint_id)
+        .load_checkpoint(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+        )
         .await
         .expect("load_checkpoint after re-save failed")
         .expect("checkpoint must still exist after re-save");
@@ -494,7 +600,13 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "re-save must refresh the stored state, not keep the original"
     );
     let count_after_resave = backend
-        .count_checkpoints(&instance_id, Some(checkpoint_id), None, None)
+        .count_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Some(checkpoint_id),
+            None,
+            None,
+        )
         .await
         .expect("count_checkpoints after re-save failed");
     assert_eq!(
@@ -502,7 +614,13 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "re-save must replace the row, not add a second one"
     );
     let total_after_resave = backend
-        .count_checkpoints(&instance_id, None, None, None)
+        .count_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            None,
+            None,
+        )
         .await
         .expect("unfiltered count_checkpoints after re-save failed");
     assert_eq!(
@@ -518,13 +636,26 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // or not two writes land in the same clock tick.
     for id in ["ckpt-2", "ckpt-3"] {
         backend
-            .save_checkpoint(&instance_id, id, id.as_bytes())
+            .save_checkpoint(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                id,
+                id.as_bytes(),
+            )
             .await
             .expect("save_checkpoint failed (ordering fixture)");
     }
 
     let ordered = backend
-        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            50,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("list_checkpoints for ordering failed");
     let ids: Vec<String> = ordered.iter().map(|c| c.checkpoint_id.clone()).collect();
@@ -540,7 +671,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let mut one_at_a_time = Vec::new();
     for offset in 0..3 {
         let page = backend
-            .list_checkpoints(&instance_id, None, 1, offset, None, None)
+            .list_checkpoints(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                None,
+                1,
+                offset,
+                None,
+                None,
+            )
             .await
             .expect("single-row page of list_checkpoints failed");
         assert_eq!(
@@ -556,11 +695,27 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     let first_page = backend
-        .list_checkpoints(&instance_id, None, 2, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            2,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("first page of list_checkpoints failed");
     let second_page = backend
-        .list_checkpoints(&instance_id, None, 2, 2, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            2,
+            2,
+            None,
+            None,
+        )
         .await
         .expect("second page of list_checkpoints failed");
     let tiled: Vec<String> = first_page
@@ -582,11 +737,24 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // same-tick writes is conformant.
     let newest_before_resave = ordered[0].created_at;
     backend
-        .save_checkpoint(&instance_id, checkpoint_id, &refreshed_state)
+        .save_checkpoint(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            &refreshed_state,
+        )
         .await
         .expect("re-saving for the restamp check failed");
     let restamped = backend
-        .list_checkpoints(&instance_id, Some(checkpoint_id), 50, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Some(checkpoint_id),
+            50,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("list_checkpoints after re-save failed");
     assert_eq!(restamped.len(), 1, "a re-save must not add a second row");
@@ -596,18 +764,30 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
          the checkpoints written after it, so it pages as the oldest"
     );
     let reordered = backend
-        .list_checkpoints(&instance_id, None, 50, 0, None, None)
+        .list_checkpoints(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            None,
+            50,
+            0,
+            None,
+            None,
+        )
         .await
         .expect("list_checkpoints after re-save failed");
     assert_checkpoints_ordered(&reordered);
 
     // --- update instance checkpoint pointer --------------------------------
     backend
-        .update_instance_checkpoint(&instance_id, checkpoint_id)
+        .update_instance_checkpoint(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+        )
         .await
         .expect("update_instance_checkpoint failed");
     let record = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance after checkpoint update failed")
         .expect("instance must still exist");
@@ -630,13 +810,19 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         subtype: Some("conformance-test".to_string()),
     };
     backend
-        .insert_event(&event)
+        .insert_event(&crate::TenantId::new(tenant_id).unwrap(), &event)
         .await
         .expect("insert_event failed");
 
     let filter = ListEventsFilter::default();
     let events = backend
-        .list_events(&instance_id, &filter, 50, 0)
+        .list_events(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            &filter,
+            50,
+            0,
+        )
         .await
         .expect("list_events failed");
     assert!(
@@ -658,7 +844,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     let event_count = backend
-        .count_events(&instance_id, &filter)
+        .count_events(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            &filter,
+        )
         .await
         .expect("count_events failed");
     assert!(event_count >= 1);
@@ -666,17 +856,27 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- signals ------------------------------------------------------------
     let signal_payload = br#"{"reason":"parity"}"#.to_vec();
     backend
-        .insert_signal(&instance_id, CoreSignalType::Cancel, &signal_payload)
+        .insert_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreSignalType::Cancel,
+            &signal_payload,
+        )
         .await
         .expect("insert_signal failed");
     let pending = backend
-        .get_pending_signal(&instance_id)
+        .get_pending_signal(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_pending_signal failed")
         .expect("signal should be pending after insert");
     assert_eq!(pending.signal_type, CoreSignalType::Cancel);
     backend
-        .acknowledge_signal(&instance_id, &pending.command_id, pending.signal_type)
+        .acknowledge_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            &pending.command_id,
+            pending.signal_type,
+        )
         .await
         .expect("acknowledge_signal failed");
     // The ack consumes the signal: a second read must come back empty.
@@ -685,7 +885,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // already handled.
     assert!(
         backend
-            .get_pending_signal(&instance_id)
+            .get_pending_signal(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
             .await
             .expect("get_pending_signal after ack failed")
             .is_none(),
@@ -694,11 +894,16 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // A genuinely new signal for the same instance is still delivered: the
     // insert resets the acknowledgement.
     backend
-        .insert_signal(&instance_id, CoreSignalType::Shutdown, b"drain")
+        .insert_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreSignalType::Shutdown,
+            b"drain",
+        )
         .await
         .expect("insert_signal after ack failed");
     let reinserted = backend
-        .get_pending_signal(&instance_id)
+        .get_pending_signal(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_pending_signal after re-insert failed")
         .expect("a freshly inserted signal must be pending again");
@@ -708,11 +913,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- custom checkpoint signals -----------------------------------------
     let custom_payload = br#"{"wait-key":"payment"}"#.to_vec();
     let first_signal_id = backend
-        .put_custom_signal(&instance_id, checkpoint_id, &custom_payload)
+        .put_custom_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            &custom_payload,
+        )
         .await
         .expect("put_custom_signal failed");
     let taken = backend
-        .get_custom_signal(&instance_id, checkpoint_id)
+        .get_custom_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+        )
         .await
         .expect("get_custom_signal failed")
         .expect("custom signal should be readable");
@@ -721,7 +935,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // signal after a drain/resume, so a second read returns the row again
     // rather than None. Instance deletion reclaims the signal.
     let taken_again = backend
-        .get_custom_signal(&instance_id, checkpoint_id)
+        .get_custom_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+        )
         .await
         .expect("get_custom_signal second call failed")
         .expect("custom signal must remain re-readable (non-destructive)");
@@ -732,19 +950,33 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_ne!(first_signal_id, checkpoint_id);
     // Identical retries create a new value identity: no implicit deduplication.
     let retry_id = backend
-        .put_custom_signal(&instance_id, checkpoint_id, &custom_payload)
+        .put_custom_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            &custom_payload,
+        )
         .await
         .unwrap();
     assert_ne!(retry_id, first_signal_id);
     let replacement = b"replacement";
     let replacement_id = backend
-        .put_custom_signal(&instance_id, checkpoint_id, replacement)
+        .put_custom_signal(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            replacement,
+        )
         .await
         .unwrap();
     assert_ne!(replacement_id, retry_id);
     for _ in 0..2 {
         let value = backend
-            .get_custom_signal(&instance_id, checkpoint_id)
+            .get_custom_signal(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                checkpoint_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -753,7 +985,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     }
     assert!(
         backend
-            .get_custom_signal(&instance_id, "different-address")
+            .get_custom_signal(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                "different-address"
+            )
             .await
             .unwrap()
             .is_none()
@@ -779,13 +1015,25 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     .expect("valid vocabulary");
     let paired_filter = ListPairedRecordsFilter::default();
     let paired_records = backend
-        .list_paired_records(&instance_id, &vocabulary, &paired_filter, 50, 0)
+        .list_paired_records(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            &vocabulary,
+            &paired_filter,
+            50,
+            0,
+        )
         .await
         .expect("list_paired_records failed");
     assert!(paired_records.is_empty());
     assert_eq!(
         backend
-            .count_paired_records(&instance_id, &vocabulary, &paired_filter)
+            .count_paired_records(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                &vocabulary,
+                &paired_filter
+            )
             .await
             .expect("count_paired_records failed"),
         0,
@@ -796,7 +1044,12 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // Restore running for the independent sleep contract after cancellation.
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            None,
+        )
         .await
         .unwrap();
 
@@ -807,11 +1060,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // gone by, so a running instance parked in the past stays invisible.
     let wake_at = Utc::now() - Duration::seconds(30);
     backend
-        .set_instance_sleep(&instance_id, wake_at)
+        .set_instance_sleep(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            wake_at,
+        )
         .await
         .expect("set_instance_sleep failed");
     let due = backend
-        .get_sleeping_instances_due(50)
+        .get_sleeping_instances_due(&crate::TenantId::new(tenant_id).unwrap(), 50)
         .await
         .expect("get_sleeping_instances_due failed");
     assert!(
@@ -819,11 +1076,16 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "instance in 'running' must not appear as due to wake"
     );
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Suspended,
+            None,
+        )
         .await
         .expect("update_instance_status suspended failed");
     let due = backend
-        .get_sleeping_instances_due(50)
+        .get_sleeping_instances_due(&crate::TenantId::new(tenant_id).unwrap(), 50)
         .await
         .expect("get_sleeping_instances_due failed (after suspend)");
     assert!(
@@ -837,12 +1099,12 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // stops two wakers (or two Environments sharing this store) from
     // launching the same instance twice.
     let first_claim = backend
-        .claim_sleeping_instance(&instance_id)
+        .claim_sleeping_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("claim_sleeping_instance (first) failed");
     assert!(first_claim, "first claim of a due instance must win");
     let due_after_claim = backend
-        .get_sleeping_instances_due(50)
+        .get_sleeping_instances_due(&crate::TenantId::new(tenant_id).unwrap(), 50)
         .await
         .expect("get_sleeping_instances_due failed (after claim)");
     assert!(
@@ -850,7 +1112,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "a claimed instance must no longer be due to wake"
     );
     let second_claim = backend
-        .claim_sleeping_instance(&instance_id)
+        .claim_sleeping_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("claim_sleeping_instance (second) failed");
     assert!(
@@ -863,7 +1125,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // `run_concurrent_claim_sequence` is where it is asked.
 
     backend
-        .clear_instance_sleep(&instance_id)
+        .clear_instance_sleep(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("clear_instance_sleep failed");
 
@@ -874,11 +1136,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // faster than its launcher returns gets resurrected as `running` with no
     // process behind it — which the container monitor then fails as a crash.
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Suspended,
+            None,
+        )
         .await
         .expect("update_instance_status suspended failed (start guard setup)");
     let promoted_parked = backend
-        .mark_instance_started(&instance_id, Utc::now())
+        .mark_instance_started(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Utc::now(),
+        )
         .await
         .expect("mark_instance_started failed (suspended)");
     assert!(
@@ -886,7 +1157,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "a suspended instance must not be promoted back to running"
     );
     let parked = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance failed (start guard)")
         .expect("instance must still exist");
@@ -897,11 +1168,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
         .await
         .expect("update_instance_status running failed (start guard reset)");
     let promoted_running = backend
-        .mark_instance_started(&instance_id, Utc::now())
+        .mark_instance_started(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Utc::now(),
+        )
         .await
         .expect("mark_instance_started failed (running)");
     assert!(
@@ -911,7 +1191,12 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // Hand the next section the `suspended` instance it expects.
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Suspended,
+            None,
+        )
         .await
         .expect("update_instance_status suspended failed (start guard teardown)");
 
@@ -922,12 +1207,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // Re-arm the instance, then assert the batch call both returns it and
     // takes it out of the candidate set in one go.
     backend
-        .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(60))
+        .set_instance_sleep(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Utc::now() - Duration::seconds(60),
+        )
         .await
         .expect("set_instance_sleep failed (batch claim re-arm)");
 
     let claimed_batch = backend
-        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
+        .claim_sleeping_instances_due(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            50,
+            Utc::now() + chrono::Duration::seconds(120),
+        )
         .await
         .expect("claim_sleeping_instances_due failed");
     assert!(
@@ -939,7 +1232,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // subsequent single claim must lose, exactly as if the per-row claim had
     // run. This is the double-launch guarantee the scheduler relies on.
     let due_after_batch = backend
-        .get_sleeping_instances_due(50)
+        .get_sleeping_instances_due(&crate::TenantId::new(tenant_id).unwrap(), 50)
         .await
         .expect("get_sleeping_instances_due failed (after batch claim)");
     assert!(
@@ -947,7 +1240,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "an instance claimed by the batch call must no longer be due to wake"
     );
     let claim_after_batch = backend
-        .claim_sleeping_instance(&instance_id)
+        .claim_sleeping_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("claim_sleeping_instance (after batch) failed");
     assert!(
@@ -958,7 +1251,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // A second batch call with nothing due must come back empty rather than
     // re-returning an already-claimed row.
     let empty_batch = backend
-        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
+        .claim_sleeping_instances_due(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            50,
+            Utc::now() + chrono::Duration::seconds(120),
+        )
         .await
         .expect("claim_sleeping_instances_due (drained) failed");
     assert!(
@@ -967,7 +1264,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     backend
-        .clear_instance_sleep(&instance_id)
+        .clear_instance_sleep(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("clear_instance_sleep failed (after batch claim)");
 
@@ -977,15 +1274,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // parked, count again once it is back to `running`, and require the slot
     // to appear only in the second reading.
     let parked = backend
-        .count_active_instances()
+        .count_active_instances(&crate::TenantId::new(tenant_id).unwrap())
         .await
         .expect("count_active_instances (suspended) failed");
     backend
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
+        .update_instance_status(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            None,
+        )
         .await
         .expect("update_instance_status running (re-run) failed");
     let active = backend
-        .count_active_instances()
+        .count_active_instances(&crate::TenantId::new(tenant_id).unwrap())
         .await
         .expect("count_active_instances (running) failed");
     assert_eq!(
@@ -994,7 +1296,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "a suspended instance must not hold a concurrency slot"
     );
     let listed = backend
-        .list_instances(Some(tenant_id), None, 50, 0)
+        .list_instances(&crate::TenantId::new(tenant_id).unwrap(), None, 50, 0)
         .await
         .expect("list_instances failed");
     assert!(listed.iter().any(|r| r.instance_id == instance_id));
@@ -1032,13 +1334,13 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .collect();
     for id in &ordered_ids {
         backend
-            .register_instance(id, &order_tenant)
+            .register_instance(&crate::TenantId::new(&order_tenant).unwrap(), id)
             .await
             .expect("register_instance failed (ordering fixture)");
     }
 
     let listed_order = backend
-        .list_instances(Some(&order_tenant), None, 50, 0)
+        .list_instances(&crate::TenantId::new(&order_tenant).unwrap(), None, 50, 0)
         .await
         .expect("list_instances for ordering failed");
     let listed_order_ids: Vec<String> =
@@ -1055,7 +1357,12 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let mut one_at_a_time = Vec::new();
     for offset in 0..4 {
         let page = backend
-            .list_instances(Some(&order_tenant), None, 1, offset)
+            .list_instances(
+                &crate::TenantId::new(&order_tenant).unwrap(),
+                None,
+                1,
+                offset,
+            )
             .await
             .expect("single-row page of list_instances failed");
         assert_eq!(
@@ -1071,11 +1378,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     let first_page = backend
-        .list_instances(Some(&order_tenant), None, 2, 0)
+        .list_instances(&crate::TenantId::new(&order_tenant).unwrap(), None, 2, 0)
         .await
         .expect("first page of list_instances failed");
     let second_page = backend
-        .list_instances(Some(&order_tenant), None, 2, 2)
+        .list_instances(&crate::TenantId::new(&order_tenant).unwrap(), None, 2, 2)
         .await
         .expect("second page of list_instances failed");
     let tiled: Vec<String> = first_page
@@ -1092,7 +1399,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // four are still `pending`, so this must return the same sequence.
     let filtered = backend
         .list_instances(
-            Some(&order_tenant),
+            &crate::TenantId::new(&order_tenant).unwrap(),
             Some(CoreInstanceStatus::Pending),
             50,
             0,
@@ -1107,13 +1414,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- retry attempt ------------------------------------------------------
     backend
-        .save_retry_attempt(&instance_id, checkpoint_id, 1, Some("transient-parity"))
+        .save_retry_attempt(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            checkpoint_id,
+            1,
+            Some("transient-parity"),
+        )
         .await
         .expect("save_retry_attempt failed");
 
     // --- completion ---------------------------------------------------------
     backend
         .complete_instance(
+            &crate::TenantId::new(tenant_id).unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                 .with_output(b"{\"result\":42}")
                 .with_checkpoint(checkpoint_id),
@@ -1121,7 +1435,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("complete_instance failed");
     let record = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance after complete failed")
         .expect("instance must still exist post-complete");
@@ -1134,6 +1448,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // was pinned here.
     backend
         .complete_instance(
+            &crate::TenantId::new(tenant_id).unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
                 .with_error("boom")
                 .with_termination("crashed", Some(137)),
@@ -1141,7 +1456,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("complete_instance (replace) failed");
     let record = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance after replace failed")
         .expect("instance must still exist");
@@ -1160,14 +1475,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // The merging fields keep their value when the next transition omits them.
     backend
-        .complete_instance(CompleteInstanceParams::new(
-            &instance_id,
-            CoreInstanceStatus::Failed,
-        ))
+        .complete_instance(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed),
+        )
         .await
         .expect("complete_instance (merge) failed");
     let record = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance after merge failed")
         .expect("instance must still exist");
@@ -1183,7 +1498,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // guarantees it appears in the terminal sweep. An empty-list delete
     // is a no-op (returns 0).
     let empty_deleted = backend
-        .delete_instances_batch(&[])
+        .delete_instances_batch(&crate::TenantId::new(tenant_id).unwrap(), &[])
         .await
         .expect("delete_instances_batch with empty slice failed");
     assert_eq!(empty_deleted, 0);
@@ -1197,7 +1512,11 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let cutoff = Utc::now() + Duration::seconds(60);
     let sweep_limit = 100_000;
     let terminal = backend
-        .get_terminal_instances_older_than(cutoff, sweep_limit)
+        .get_terminal_instances_older_than(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            cutoff,
+            sweep_limit,
+        )
         .await
         .expect("get_terminal_instances_older_than failed");
     assert!(
@@ -1209,13 +1528,16 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     let deleted = backend
-        .delete_instances_batch(std::slice::from_ref(&instance_id))
+        .delete_instances_batch(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            std::slice::from_ref(&instance_id),
+        )
         .await
         .expect("delete_instances_batch failed");
     assert_eq!(deleted, 1, "exactly one instance should be deleted");
 
     let post_delete = backend
-        .get_instance(&instance_id)
+        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
         .await
         .expect("get_instance after delete failed");
     assert!(
@@ -1230,50 +1552,61 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 /// Receipt identity, cancellation precedence, and idempotent lifecycle transitions.
 /// Run unchanged against each persistence implementation.
 pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
+    let tenant_scope = crate::TenantId::new("command-contract").unwrap();
     terminal_cancel_races(backend).await;
     use crate::domain::{InstanceStatus as Status, SignalType as Kind};
     let id = Uuid::new_v4().to_string();
+    backend.register_instance(&tenant_scope, &id).await.unwrap();
     backend
-        .register_instance(&id, "command-contract")
+        .update_instance_status(&tenant_scope, &id, Status::Running, None)
         .await
         .unwrap();
     backend
-        .update_instance_status(&id, Status::Running, None)
+        .insert_signal(&tenant_scope, &id, Kind::Pause, b"first")
         .await
+        .unwrap();
+    let first = backend
+        .get_pending_signal(&tenant_scope, &id)
+        .await
+        .unwrap()
         .unwrap();
     backend
-        .insert_signal(&id, Kind::Pause, b"first")
+        .insert_signal(&tenant_scope, &id, Kind::Pause, b"replacement")
         .await
         .unwrap();
-    let first = backend.get_pending_signal(&id).await.unwrap().unwrap();
-    backend
-        .insert_signal(&id, Kind::Pause, b"replacement")
+    let second = backend
+        .get_pending_signal(&tenant_scope, &id)
         .await
+        .unwrap()
         .unwrap();
-    let second = backend.get_pending_signal(&id).await.unwrap().unwrap();
     assert_ne!(
         first.command_id, second.command_id,
         "same-kind commands need distinct receipts"
     );
     assert!(
         !backend
-            .acknowledge_signal(&id, &first.command_id, Kind::Pause)
+            .acknowledge_signal(&tenant_scope, &id, &first.command_id, Kind::Pause)
             .await
             .unwrap()
     );
     assert!(
         !backend
-            .acknowledge_signal(&id, &second.command_id, Kind::Cancel)
+            .acknowledge_signal(&tenant_scope, &id, &second.command_id, Kind::Cancel)
             .await
             .unwrap()
     );
     assert_eq!(
-        backend.get_instance(&id).await.unwrap().unwrap().status,
+        backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         Status::Running
     );
     assert_eq!(
         backend
-            .get_pending_signal(&id)
+            .get_pending_signal(&tenant_scope, &id)
             .await
             .unwrap()
             .unwrap()
@@ -1282,32 +1615,48 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
     );
     assert!(
         backend
-            .acknowledge_signal(&id, &second.command_id, Kind::Pause)
+            .acknowledge_signal(&tenant_scope, &id, &second.command_id, Kind::Pause)
             .await
             .unwrap()
     );
     assert_eq!(
-        backend.get_instance(&id).await.unwrap().unwrap().status,
+        backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         Status::Suspended
     );
-    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+    assert!(
+        backend
+            .get_pending_signal(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     // A retry after resume must not apply the old pause again.
     backend
-        .update_instance_status(&id, Status::Running, None)
+        .update_instance_status(&tenant_scope, &id, Status::Running, None)
         .await
         .unwrap();
     assert!(
         backend
-            .acknowledge_signal(&id, &second.command_id, Kind::Pause)
+            .acknowledge_signal(&tenant_scope, &id, &second.command_id, Kind::Pause)
             .await
             .unwrap()
     );
     assert_eq!(
-        backend.get_instance(&id).await.unwrap().unwrap().status,
+        backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         Status::Running
     );
     let events = backend
-        .list_events(&id, &ListEventsFilter::default(), 100, 0)
+        .list_events(&tenant_scope, &id, &ListEventsFilter::default(), 100, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -1317,17 +1666,25 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
     );
     assert_eq!(events[0].event_type, crate::domain::EventType::Suspended);
     backend
-        .insert_signal(&id, Kind::Shutdown, b"")
+        .insert_signal(&tenant_scope, &id, Kind::Shutdown, b"")
         .await
         .unwrap();
-    let shutdown = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    let shutdown = backend
+        .get_pending_signal(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         backend
-            .acknowledge_signal(&id, &shutdown.command_id, Kind::Shutdown)
+            .acknowledge_signal(&tenant_scope, &id, &shutdown.command_id, Kind::Shutdown)
             .await
             .unwrap()
     );
-    let suspended = backend.get_instance(&id).await.unwrap().unwrap();
+    let suspended = backend
+        .get_instance(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(suspended.status, Status::Suspended);
     assert_eq!(
         suspended.termination_reason.as_deref(),
@@ -1335,15 +1692,22 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
     );
     assert!(suspended.sleep_until.is_some());
     backend
-        .insert_signal(&id, Kind::Cancel, b"cancel")
+        .insert_signal(&tenant_scope, &id, Kind::Cancel, b"cancel")
         .await
         .unwrap();
-    let cancel = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    let cancel = backend
+        .get_pending_signal(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     for kind in [Kind::Pause, Kind::Shutdown, Kind::Cancel] {
-        backend.insert_signal(&id, kind, b"later").await.unwrap();
+        backend
+            .insert_signal(&tenant_scope, &id, kind, b"later")
+            .await
+            .unwrap();
         assert_eq!(
             backend
-                .get_pending_signal(&id)
+                .get_pending_signal(&tenant_scope, &id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1353,93 +1717,135 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
     }
     assert!(
         !backend
-            .acknowledge_signal(&id, &shutdown.command_id, Kind::Shutdown)
+            .acknowledge_signal(&tenant_scope, &id, &shutdown.command_id, Kind::Shutdown)
             .await
             .unwrap()
     );
     assert!(
         backend
-            .acknowledge_signal(&id, &cancel.command_id, Kind::Cancel)
+            .acknowledge_signal(&tenant_scope, &id, &cancel.command_id, Kind::Cancel)
             .await
             .unwrap()
     );
-    let cancelled = backend.get_instance(&id).await.unwrap().unwrap();
+    let cancelled = backend
+        .get_instance(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(cancelled.status, Status::Cancelled);
     assert!(cancelled.finished_at.is_some());
     assert!(cancelled.sleep_until.is_none());
-    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
-    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
-    let late = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    assert!(
+        backend
+            .get_pending_signal(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    backend
+        .insert_signal(&tenant_scope, &id, Kind::Pause, b"")
+        .await
+        .unwrap();
+    let late = backend
+        .get_pending_signal(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         !backend
-            .acknowledge_signal(&id, &late.command_id, Kind::Pause)
+            .acknowledge_signal(&tenant_scope, &id, &late.command_id, Kind::Pause)
             .await
             .unwrap()
     );
     assert_eq!(
-        backend.get_instance(&id).await.unwrap().unwrap().status,
+        backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         Status::Cancelled
     );
 }
 
 /// Parked cancellation is atomic, repeatable, and recoverable without a deadline.
 pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
+    let tenant_scope = crate::TenantId::new("park-contract").unwrap();
     use crate::domain::{InstanceStatus as Status, SignalType as Kind};
     for deadline in [None, Some(Utc::now() + Duration::hours(24))] {
         let id = Uuid::new_v4().to_string();
+        backend.register_instance(&tenant_scope, &id).await.unwrap();
         backend
-            .register_instance(&id, "park-contract")
+            .update_instance_status(&tenant_scope, &id, Status::Running, None)
             .await
             .unwrap();
         backend
-            .update_instance_status(&id, Status::Running, None)
+            .insert_signal(&tenant_scope, &id, Kind::Cancel, b"")
             .await
             .unwrap();
-        backend.insert_signal(&id, Kind::Cancel, b"").await.unwrap();
         assert!(
             backend
-                .cancel_suspended_instances(Some(&id), 1)
+                .cancel_suspended_instances(&tenant_scope, Some(&id), 1)
                 .await
                 .unwrap()
                 .is_empty(),
             "a running guest retains its command"
         );
-        assert!(backend.get_pending_signal(&id).await.unwrap().is_some());
+        assert!(
+            backend
+                .get_pending_signal(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         // Model a cancel arriving just before the guest parks.
         backend
-            .update_instance_status(&id, Status::Suspended, None)
+            .update_instance_status(&tenant_scope, &id, Status::Suspended, None)
             .await
             .unwrap();
         if let Some(deadline) = deadline {
-            backend.set_instance_sleep(&id, deadline).await.unwrap();
+            backend
+                .set_instance_sleep(&tenant_scope, &id, deadline)
+                .await
+                .unwrap();
         }
         let cancelled = backend
-            .cancel_suspended_instances(Some(&id), 1)
+            .cancel_suspended_instances(&tenant_scope, Some(&id), 1)
             .await
             .unwrap();
         assert_eq!(cancelled.len(), 1);
         assert_eq!(cancelled[0].instance_id, id);
         assert_eq!(cancelled[0].tenant_id, "park-contract");
-        let instance = backend.get_instance(&id).await.unwrap().unwrap();
+        let instance = backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, Status::Cancelled);
         assert!(instance.finished_at.is_some());
         assert!(instance.sleep_until.is_none());
-        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
         assert!(
             backend
-                .cancel_suspended_instances(Some(&id), 1)
+                .get_pending_signal(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            backend
+                .cancel_suspended_instances(&tenant_scope, Some(&id), 1)
                 .await
                 .unwrap()
                 .is_empty()
         );
         // A park or wake retry that lost the race cannot put its deadline back.
         backend
-            .set_instance_sleep(&id, Utc::now() + Duration::hours(1))
+            .set_instance_sleep(&tenant_scope, &id, Utc::now() + Duration::hours(1))
             .await
             .unwrap();
         assert!(
             backend
-                .get_instance(&id)
+                .get_instance(&tenant_scope, &id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1447,33 +1853,37 @@ pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
                 .is_none()
         );
     }
+    let tenant_scope = crate::TenantId::new("park-recovery").unwrap();
     let id = Uuid::new_v4().to_string();
+    backend.register_instance(&tenant_scope, &id).await.unwrap();
     backend
-        .register_instance(&id, "park-recovery")
+        .update_instance_status(&tenant_scope, &id, Status::Suspended, None)
         .await
         .unwrap();
     backend
-        .update_instance_status(&id, Status::Suspended, None)
+        .insert_signal(&tenant_scope, &id, Kind::Pause, b"")
         .await
         .unwrap();
-    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
     assert!(
         backend
-            .cancel_suspended_instances(Some(&id), 1)
+            .cancel_suspended_instances(&tenant_scope, Some(&id), 1)
             .await
             .unwrap()
             .is_empty()
     );
-    backend.insert_signal(&id, Kind::Cancel, b"").await.unwrap();
+    backend
+        .insert_signal(&tenant_scope, &id, Kind::Cancel, b"")
+        .await
+        .unwrap();
     assert!(
         backend
-            .cancel_suspended_instances(None, 0)
+            .cancel_suspended_instances(&tenant_scope, None, 0)
             .await
             .unwrap()
             .is_empty()
     );
     let recovered = backend
-        .cancel_suspended_instances(None, 1000)
+        .cancel_suspended_instances(&tenant_scope, None, 1000)
         .await
         .unwrap();
     assert!(
@@ -1485,6 +1895,7 @@ pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
 /// Observable lifecycle matrix shared by every backend. Expected values are
 /// specified independently of the pure policy implementation.
 pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
+    let tenant_scope = crate::TenantId::new("policy-matrix").unwrap();
     use crate::{
         domain::{InstanceStatus as S, SignalType as K},
         lifecycle::{Decision, ParkReason, ParkRequest},
@@ -1501,12 +1912,10 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
     for status in statuses {
         for kind in kinds {
             let id = Uuid::new_v4().to_string();
-            backend
-                .register_instance(&id, "policy-matrix")
-                .await
-                .unwrap();
+            backend.register_instance(&tenant_scope, &id).await.unwrap();
             backend
                 .complete_instance(
+                    &tenant_scope,
                     CompleteInstanceParams::new(&id, status)
                         .with_output(b"previous-output")
                         .with_error("previous-error")
@@ -1515,11 +1924,22 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 )
                 .await
                 .unwrap();
-            backend.insert_signal(&id, kind, b"payload").await.unwrap();
-            let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
-            let before = backend.get_instance(&id).await.unwrap().unwrap();
+            backend
+                .insert_signal(&tenant_scope, &id, kind, b"payload")
+                .await
+                .unwrap();
+            let command = backend
+                .get_pending_signal(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            let before = backend
+                .get_instance(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
             let decision = backend
-                .apply_lifecycle_command(&id, &command.command_id, kind)
+                .apply_lifecycle_command(&tenant_scope, &id, &command.command_id, kind)
                 .await
                 .unwrap();
             let rejects = matches!(status, S::Completed | S::Failed | S::Cancelled);
@@ -1528,7 +1948,11 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
             } else {
                 assert!(matches!(decision, Decision::Applied(_)));
             }
-            let after = backend.get_instance(&id).await.unwrap().unwrap();
+            let after = backend
+                .get_instance(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
             let expected_status = if rejects {
                 status
             } else {
@@ -1562,7 +1986,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 }
             );
             let event_count = backend
-                .count_events(&id, &ListEventsFilter::default())
+                .count_events(&tenant_scope, &id, &ListEventsFilter::default())
                 .await
                 .unwrap();
             assert_eq!(
@@ -1570,20 +1994,30 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 i64::from(!rejects && matches!(kind, K::Pause | K::Shutdown))
             );
             if !rejects {
-                assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+                assert!(
+                    backend
+                        .get_pending_signal(&tenant_scope, &id)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
                 assert_eq!(
                     backend
-                        .apply_lifecycle_command(&id, &command.command_id, kind)
+                        .apply_lifecycle_command(&tenant_scope, &id, &command.command_id, kind)
                         .await
                         .unwrap(),
                     Decision::AlreadyApplied
                 );
-                let repeated = backend.get_instance(&id).await.unwrap().unwrap();
+                let repeated = backend
+                    .get_instance(&tenant_scope, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(repeated.finished_at, after.finished_at);
                 assert_eq!(repeated.sleep_until, after.sleep_until);
                 assert_eq!(
                     backend
-                        .count_events(&id, &ListEventsFilter::default())
+                        .count_events(&tenant_scope, &id, &ListEventsFilter::default())
                         .await
                         .unwrap(),
                     event_count
@@ -1591,7 +2025,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
             } else {
                 assert_eq!(
                     backend
-                        .get_pending_signal(&id)
+                        .get_pending_signal(&tenant_scope, &id)
                         .await
                         .unwrap()
                         .unwrap()
@@ -1599,17 +2033,22 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                     command.command_id
                 );
             }
-            backend.delete_instances_batch(&[id]).await.unwrap();
+            backend
+                .delete_instances_batch(&tenant_scope, &[id])
+                .await
+                .unwrap();
         }
         for reason in [ParkReason::Timer, ParkReason::Signal] {
             for with_deadline in [false, true] {
+                let tenant_scope = crate::TenantId::new("park-policy-matrix").unwrap();
                 let id = Uuid::new_v4().to_string();
                 backend
-                    .register_instance(&id, "park-policy-matrix")
+                    .register_instance(&crate::TenantId::new("park-policy-matrix").unwrap(), &id)
                     .await
                     .unwrap();
                 backend
                     .complete_instance(
+                        &tenant_scope,
                         CompleteInstanceParams::new(&id, status)
                             .with_output(b"old-result")
                             .with_error("old-error")
@@ -1618,15 +2057,30 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                     )
                     .await
                     .unwrap();
-                backend.insert_signal(&id, K::Cancel, b"").await.unwrap();
-                let receipt = backend.get_pending_signal(&id).await.unwrap().unwrap();
-                let before = backend.get_instance(&id).await.unwrap().unwrap();
-                let deadline = with_deadline.then(|| Utc::now() + Duration::hours(1));
-                let result = backend
-                    .park_instance(&id, ParkRequest { reason, deadline })
+                backend
+                    .insert_signal(&tenant_scope, &id, K::Cancel, b"")
                     .await
                     .unwrap();
-                let after = backend.get_instance(&id).await.unwrap().unwrap();
+                let receipt = backend
+                    .get_pending_signal(&tenant_scope, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let before = backend
+                    .get_instance(&tenant_scope, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let deadline = with_deadline.then(|| Utc::now() + Duration::hours(1));
+                let result = backend
+                    .park_instance(&tenant_scope, &id, ParkRequest { reason, deadline })
+                    .await
+                    .unwrap();
+                let after = backend
+                    .get_instance(&tenant_scope, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 if status == S::Running {
                     assert!(matches!(result, Decision::Applied(_)));
                     assert_eq!(after.status, S::Suspended);
@@ -1657,7 +2111,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 assert_eq!(after.exit_code, before.exit_code);
                 assert_eq!(
                     backend
-                        .get_pending_signal(&id)
+                        .get_pending_signal(&tenant_scope, &id)
                         .await
                         .unwrap()
                         .unwrap()
@@ -1666,12 +2120,15 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 );
                 assert_eq!(
                     backend
-                        .count_events(&id, &ListEventsFilter::default())
+                        .count_events(&tenant_scope, &id, &ListEventsFilter::default())
                         .await
                         .unwrap(),
                     0
                 );
-                backend.delete_instances_batch(&[id]).await.unwrap();
+                backend
+                    .delete_instances_batch(&tenant_scope, &[id])
+                    .await
+                    .unwrap();
             }
         }
     }
@@ -1679,6 +2136,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
 
 /// Wake causes survive claiming and re-launching, and never become guest commands.
 pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
+    let tenant_scope = crate::TenantId::new("wake-contract").unwrap();
     use crate::domain::{InstanceStatus, WakeReason};
     for reason in [
         WakeReason::Timer,
@@ -1687,19 +2145,24 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
         WakeReason::Recovery,
     ] {
         let id = uuid::Uuid::new_v4().to_string();
+        backend.register_instance(&tenant_scope, &id).await.unwrap();
         backend
-            .register_instance(&id, "wake-contract")
+            .update_instance_status(&tenant_scope, &id, InstanceStatus::Suspended, None)
             .await
             .unwrap();
         backend
-            .update_instance_status(&id, InstanceStatus::Suspended, None)
+            .schedule_wake(
+                &tenant_scope,
+                &id,
+                Utc::now() - Duration::seconds(1),
+                reason,
+            )
             .await
             .unwrap();
-        backend
-            .schedule_wake(&id, Utc::now() - Duration::seconds(1), reason)
+        let due = backend
+            .get_sleeping_instances_due(&tenant_scope, 1000)
             .await
             .unwrap();
-        let due = backend.get_sleeping_instances_due(1000).await.unwrap();
         assert_eq!(
             due.iter()
                 .find(|row| row.instance_id == id)
@@ -1707,26 +2170,48 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
                 .wake_reason,
             Some(reason)
         );
-        assert!(backend.claim_sleeping_instance(&id).await.unwrap());
+        assert!(
+            backend
+                .claim_sleeping_instance(&tenant_scope, &id)
+                .await
+                .unwrap()
+        );
         backend
-            .mark_instance_running(&id, Utc::now())
+            .mark_instance_running(&tenant_scope, &id, Utc::now())
             .await
             .unwrap();
-        let running = backend.get_instance(&id).await.unwrap().unwrap();
+        let running = backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(running.wake_reason, Some(reason));
-        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+        assert!(
+            backend
+                .get_pending_signal(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         backend
-            .update_instance_status(&id, InstanceStatus::Completed, None)
+            .update_instance_status(&tenant_scope, &id, InstanceStatus::Completed, None)
             .await
             .unwrap();
         backend
-            .schedule_wake(&id, Utc::now(), reason)
+            .schedule_wake(&tenant_scope, &id, Utc::now(), reason)
             .await
             .unwrap();
-        let ended = backend.get_instance(&id).await.unwrap().unwrap();
+        let ended = backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(ended.sleep_until.is_none());
         assert!(ended.wake_reason.is_none());
-        backend.delete_instances_batch(&[id]).await.unwrap();
+        backend
+            .delete_instances_batch(&tenant_scope, &[id])
+            .await
+            .unwrap();
     }
 }
 
@@ -1736,26 +2221,25 @@ pub mod invocations;
 // Exercise both orderings and real concurrent writers against each backend.
 // Expected outcomes are independent of the lifecycle policy implementation.
 async fn terminal_cancel_races<P: Persistence>(backend: &P) {
+    let tenant_scope = crate::TenantId::new("terminal-cancel").unwrap();
     use crate::domain::{InstanceStatus as S, SignalType as K};
     for terminal in [S::Completed, S::Failed, S::Cancelled] {
         for cancel_before_completion in [false, true] {
             let id = Uuid::new_v4().to_string();
+            backend.register_instance(&tenant_scope, &id).await.unwrap();
             backend
-                .register_instance(&id, "terminal-cancel")
-                .await
-                .unwrap();
-            backend
-                .update_instance_status(&id, S::Running, None)
+                .update_instance_status(&tenant_scope, &id, S::Running, None)
                 .await
                 .unwrap();
             if cancel_before_completion {
                 backend
-                    .insert_signal(&id, K::Cancel, b"request")
+                    .insert_signal(&tenant_scope, &id, K::Cancel, b"request")
                     .await
                     .unwrap();
             }
             backend
                 .complete_instance(
+                    &tenant_scope,
                     CompleteInstanceParams::new(&id, terminal)
                         .if_running()
                         .with_output(b"accepted output")
@@ -1764,60 +2248,86 @@ async fn terminal_cancel_races<P: Persistence>(backend: &P) {
                 )
                 .await
                 .unwrap();
-            let before = backend.get_instance(&id).await.unwrap().unwrap();
+            let before = backend
+                .get_instance(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
             if !cancel_before_completion {
                 backend
-                    .insert_signal(&id, K::Cancel, b"request")
+                    .insert_signal(&tenant_scope, &id, K::Cancel, b"request")
                     .await
                     .unwrap();
             }
-            let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+            let command = backend
+                .get_pending_signal(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
             for _ in 0..2 {
                 assert!(
                     !backend
-                        .acknowledge_signal(&id, &command.command_id, K::Cancel)
+                        .acknowledge_signal(&tenant_scope, &id, &command.command_id, K::Cancel)
                         .await
                         .unwrap()
                 );
             }
-            let after = backend.get_instance(&id).await.unwrap().unwrap();
+            let after = backend
+                .get_instance(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(after.status, terminal);
             assert_eq!(after.output, before.output);
             assert_eq!(after.error, before.error);
             assert_eq!(after.finished_at, before.finished_at);
             assert_eq!(after.termination_reason, before.termination_reason);
             assert_eq!(after.exit_code, before.exit_code);
-            let pending = backend.get_pending_signal(&id).await.unwrap().unwrap();
+            let pending = backend
+                .get_pending_signal(&tenant_scope, &id)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(pending.command_id, command.command_id);
             assert!(pending.acknowledged_at.is_none());
         }
     }
+    let tenant_scope = crate::TenantId::new("cancel-first").unwrap();
     // Pin cancellation-first as well as completion-first, rather than relying
     // on the scheduler to produce both winners in the concurrent exercise.
     let id = Uuid::new_v4().to_string();
     backend
-        .register_instance(&id, "cancel-first")
+        .register_instance(&crate::TenantId::new("cancel-first").unwrap(), &id)
         .await
         .unwrap();
     backend
-        .update_instance_status(&id, S::Running, None)
+        .update_instance_status(&tenant_scope, &id, S::Running, None)
         .await
         .unwrap();
     backend
-        .insert_signal(&id, K::Cancel, b"request")
+        .insert_signal(&tenant_scope, &id, K::Cancel, b"request")
         .await
         .unwrap();
-    let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    let command = backend
+        .get_pending_signal(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         backend
-            .acknowledge_signal(&id, &command.command_id, K::Cancel)
+            .acknowledge_signal(&tenant_scope, &id, &command.command_id, K::Cancel)
             .await
             .unwrap()
     );
-    let before = backend.get_instance(&id).await.unwrap().unwrap();
+    let before = backend
+        .get_instance(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         !backend
             .complete_instance(
+                &tenant_scope,
                 CompleteInstanceParams::new(&id, S::Completed)
                     .if_running()
                     .with_output(b"late output")
@@ -1825,42 +2335,58 @@ async fn terminal_cancel_races<P: Persistence>(backend: &P) {
             .await
             .unwrap()
     );
-    let after = backend.get_instance(&id).await.unwrap().unwrap();
+    let after = backend
+        .get_instance(&tenant_scope, &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(after.status, S::Cancelled);
     assert_eq!(after.output, None);
     assert_eq!(after.finished_at, before.finished_at);
     assert!(
         backend
-            .acknowledge_signal(&id, &command.command_id, K::Cancel)
+            .acknowledge_signal(&tenant_scope, &id, &command.command_id, K::Cancel)
             .await
             .unwrap()
     );
     for _ in 0..16 {
+        let tenant_scope = crate::TenantId::new("concurrent-terminal-cancel").unwrap();
         let id = Uuid::new_v4().to_string();
         backend
-            .register_instance(&id, "concurrent-terminal-cancel")
+            .register_instance(
+                &crate::TenantId::new("concurrent-terminal-cancel").unwrap(),
+                &id,
+            )
             .await
             .unwrap();
         backend
-            .update_instance_status(&id, S::Running, None)
+            .update_instance_status(&tenant_scope, &id, S::Running, None)
             .await
             .unwrap();
         backend
-            .insert_signal(&id, K::Cancel, b"request")
+            .insert_signal(&tenant_scope, &id, K::Cancel, b"request")
             .await
             .unwrap();
-        let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+        let command = backend
+            .get_pending_signal(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap();
         let params = CompleteInstanceParams::new(&id, S::Completed)
             .if_running()
             .with_output(b"result");
         let (completed, cancelled) = tokio::join!(
-            backend.complete_instance(params),
-            backend.acknowledge_signal(&id, &command.command_id, K::Cancel)
+            backend.complete_instance(&tenant_scope, params),
+            backend.acknowledge_signal(&tenant_scope, &id, &command.command_id, K::Cancel)
         );
         let completed = completed.unwrap();
         let cancelled = cancelled.unwrap();
         assert_ne!(completed, cancelled, "exactly one terminal transition wins");
-        let result = backend.get_instance(&id).await.unwrap().unwrap();
+        let result = backend
+            .get_instance(&tenant_scope, &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             result.status,
             if completed {
@@ -1879,7 +2405,7 @@ async fn terminal_cancel_races<P: Persistence>(backend: &P) {
         );
         assert_eq!(
             backend
-                .acknowledge_signal(&id, &command.command_id, K::Cancel)
+                .acknowledge_signal(&tenant_scope, &id, &command.command_id, K::Cancel)
                 .await
                 .unwrap(),
             cancelled
@@ -1917,15 +2443,24 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
     for round in 0..ROUNDS {
         let instance_id = Uuid::new_v4().to_string();
         backend
-            .register_instance(&instance_id, tenant_id)
+            .register_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
             .await
             .expect("register_instance failed (concurrent claim)");
         backend
-            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .update_instance_status(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                CoreInstanceStatus::Suspended,
+                None,
+            )
             .await
             .expect("update_instance_status suspended failed (concurrent claim)");
         backend
-            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(30))
+            .set_instance_sleep(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                Utc::now() - Duration::seconds(30),
+            )
             .await
             .expect("set_instance_sleep failed (concurrent claim)");
 
@@ -1939,7 +2474,12 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
             let instance_id = instance_id.clone();
             contenders.push(tokio::spawn(async move {
                 gate.wait().await;
-                backend.claim_sleeping_instance(&instance_id).await
+                backend
+                    .claim_sleeping_instance(
+                        &crate::TenantId::new(tenant_id).unwrap(),
+                        &instance_id,
+                    )
+                    .await
             }));
         }
 
@@ -1982,12 +2522,20 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
     // wake scan (`sleep_until` present) will ever collect.
     for instance_id in &claimed_instances {
         backend
-            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .update_instance_status(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                instance_id,
+                CoreInstanceStatus::Completed,
+                None,
+            )
             .await
             .expect("update_instance_status failed (concurrent claim cleanup)");
     }
     backend
-        .delete_instances_batch(&claimed_instances)
+        .delete_instances_batch(
+            &crate::TenantId::new(tenant_id).unwrap(),
+            &claimed_instances,
+        )
         .await
         .expect("delete_instances_batch failed (concurrent claim cleanup)");
 }
@@ -2035,15 +2583,24 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
     for _ in 0..SLEEPERS {
         let instance_id = Uuid::new_v4().to_string();
         backend
-            .register_instance(&instance_id, tenant_id)
+            .register_instance(&crate::TenantId::new(tenant_id).unwrap(), &instance_id)
             .await
             .expect("register_instance failed (batch lease)");
         backend
-            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .update_instance_status(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                CoreInstanceStatus::Suspended,
+                None,
+            )
             .await
             .expect("update_instance_status suspended failed (batch lease)");
         backend
-            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(BACKDATE))
+            .set_instance_sleep(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                &instance_id,
+                Utc::now() - Duration::seconds(BACKDATE),
+            )
             .await
             .expect("set_instance_sleep failed (batch lease)");
         sleepers.push(instance_id);
@@ -2081,7 +2638,10 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
             let mut gate = Some(observing);
             loop {
                 for instance_id in &watched {
-                    let Ok(Some(record)) = backend.get_instance(instance_id).await else {
+                    let Ok(Some(record)) = backend
+                        .get_instance(&crate::TenantId::new(tenant_id).unwrap(), instance_id)
+                        .await
+                    else {
                         continue;
                     };
                     samples.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2141,7 +2701,11 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
         // claim is global, so a larger limit would lease an unrelated backlog
         // 120s into the future on a shared store and delay real wakes.
         let batch = backend
-            .claim_sleeping_instances_due(SLEEPERS as i64, Utc::now() + Duration::seconds(120))
+            .claim_sleeping_instances_due(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                SLEEPERS as i64,
+                Utc::now() + Duration::seconds(120),
+            )
             .await
             .expect("claim_sleeping_instances_due failed (batch lease)");
         if batch.is_empty() {
@@ -2204,7 +2768,7 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
     let mut leased_by_someone = 0usize;
     for instance_id in &sleepers {
         let record = backend
-            .get_instance(instance_id)
+            .get_instance(&crate::TenantId::new(tenant_id).unwrap(), instance_id)
             .await
             .expect("get_instance failed (batch lease liveness)")
             .expect("sleeper should exist");
@@ -2223,12 +2787,20 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
 
     for instance_id in &sleepers {
         backend
-            .update_instance_status(instance_id, CoreInstanceStatus::Completed, None)
+            .update_instance_status(
+                &crate::TenantId::new(tenant_id).unwrap(),
+                instance_id,
+                CoreInstanceStatus::Completed,
+                None,
+            )
             .await
             .expect("update_instance_status failed (batch lease cleanup)");
     }
     backend
-        .delete_instances_batch(&sleepers)
+        .delete_instances_batch(&crate::TenantId::new(tenant_id).unwrap(), &sleepers)
         .await
         .expect("delete_instances_batch failed (batch lease cleanup)");
 }
+
+/// Shared-store tenant isolation conformance.
+pub mod tenancy;

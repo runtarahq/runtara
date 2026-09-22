@@ -17,6 +17,32 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use ::runtara_core::error::CoreError;
+use runtara_core::TenantId;
+
+/// Hold the tenant-owned parent stable for the entire child operation. FOR SHARE
+/// prevents deletion, ID reuse, and ownership updates until the transaction ends.
+/// All child SQL must execute on this transaction, never back on the pool.
+pub(crate) async fn begin_tenant_operation(
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    instance_id: &str,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, CoreError> {
+    let mut tx = pool.begin().await.db()?;
+    let owned: Option<String> = sqlx::query_scalar(
+        "SELECT instance_id FROM instances WHERE instance_id = $1 AND tenant_id = $2 FOR SHARE",
+    )
+    .bind(instance_id)
+    .bind(tenant_id.as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .db()?;
+    if owned.is_none() {
+        return Err(CoreError::InstanceNotFound {
+            instance_id: instance_id.into(),
+        });
+    }
+    Ok(tx)
+}
 use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 
 /// PostgreSQL-backed persistence implementation.
@@ -77,22 +103,25 @@ impl TryFrom<InstanceMetricRow> for InstanceCompletionMetrics {
 
 async fn fetch_instance_status(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
         r#"
         SELECT status::text
         FROM instances
-        WHERE instance_id = $1
+        WHERE instance_id = $1 AND tenant_id = $2
         "#,
     )
     .bind(instance_id)
+    .bind(tenant_id.as_str())
     .fetch_optional(pool)
     .await
 }
 
 async fn fetch_instance_metric_row(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
 ) -> Result<Option<InstanceMetricRow>, sqlx::Error> {
     sqlx::query_as::<_, InstanceMetricRow>(
@@ -106,10 +135,11 @@ async fn fetch_instance_metric_row(
             memory_peak_bytes,
             cpu_usage_usec
         FROM instances
-        WHERE instance_id = $1
+        WHERE instance_id = $1 AND tenant_id = $2
         "#,
     )
     .bind(instance_id)
+    .bind(tenant_id.as_str())
     .fetch_optional(pool)
     .await
 }
@@ -123,8 +153,13 @@ fn is_reportable_terminal_status(status: &str) -> bool {
 ///
 /// A missing row or a read error is logged and dropped: reporting must never
 /// fail a completion.
-async fn report_completion(sink: &dyn InstanceMetricsSink, pool: &PgPool, instance_id: &str) {
-    match fetch_instance_metric_row(pool, instance_id).await {
+async fn report_completion(
+    sink: &dyn InstanceMetricsSink,
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    instance_id: &str,
+) {
+    match fetch_instance_metric_row(pool, tenant_id, instance_id).await {
         Ok(Some(row)) => match row.try_into() {
             Ok(metrics) => sink.on_terminal(&metrics),
             Err(error) => tracing::warn!(%error, "Invalid completion metric state"),
@@ -215,8 +250,10 @@ crate::ops_common::ops::impl_retention_ops!(
 /// Load the latest checkpoint for an instance.
 pub async fn load_latest_checkpoint(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
 ) -> Result<Option<CheckpointRecord>, CoreError> {
+    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
     let record = sqlx::query_as::<_, crate::rows::CheckpointRow>(
         r#"
         SELECT instance_id, checkpoint_id, state, created_at
@@ -227,10 +264,11 @@ pub async fn load_latest_checkpoint(
         "#,
     )
     .bind(instance_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .db()?;
 
+    tx.commit().await.db()?;
     Ok(record.map(|r| r.0))
 }
 
@@ -253,6 +291,7 @@ struct RetryAttemptRecord {
 /// Retry attempts are stored in the checkpoints table with a unique checkpoint_id.
 async fn save_retry_attempt(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
     checkpoint_id: &str,
     attempt_number: i32,
@@ -260,6 +299,7 @@ async fn save_retry_attempt(
 ) -> Result<(), CoreError> {
     // Create a unique checkpoint_id for this retry attempt
     let retry_checkpoint_id = format!("{}::retry::{}", checkpoint_id, attempt_number);
+    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
 
     sqlx::query(
         r#"
@@ -275,13 +315,14 @@ async fn save_retry_attempt(
     .bind(&retry_checkpoint_id)
     .bind(attempt_number)
     .bind(error_message)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| CoreError::CheckpointSaveFailed {
         instance_id: instance_id.to_string(),
         reason: e.to_string(),
     })?;
 
+    tx.commit().await.db()?;
     Ok(())
 }
 
@@ -289,9 +330,11 @@ async fn save_retry_attempt(
 #[cfg(all(test, feature = "db-integration-tests"))]
 async fn load_retry_history(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
     checkpoint_id: &str,
 ) -> Result<Vec<RetryAttemptRecord>, CoreError> {
+    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
     let pattern = format!("{}::retry::%", checkpoint_id);
 
     let records = sqlx::query_as::<_, RetryAttemptRecord>(
@@ -306,10 +349,11 @@ async fn load_retry_history(
     )
     .bind(instance_id)
     .bind(&pattern)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .db()?;
 
+    tx.commit().await.db()?;
     Ok(records)
 }
 
@@ -318,7 +362,12 @@ async fn load_retry_history(
 // ============================================================================
 
 /// Insert an instance event.
-async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreError> {
+async fn insert_event(
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    event: &EventRecord,
+) -> Result<(), CoreError> {
+    let mut tx = begin_tenant_operation(pool, tenant_id, &event.instance_id).await?;
     sqlx::query(
         r#"
         INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
@@ -331,9 +380,10 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
     .bind(&event.payload)
     .bind(event.created_at)
     .bind(&event.subtype)
-    .execute(pool)
+    .execute(&mut *tx)
     .await.db()?;
 
+    tx.commit().await.db()?;
     Ok(())
 }
 
@@ -351,12 +401,13 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
 /// Replaces the previous command unless an unacknowledged cancellation dominates.
 async fn insert_signal(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
     signal_type: CoreSignalType,
     payload: &[u8],
 ) -> Result<(), CoreError> {
     let mut tx = pool.begin().await.db()?;
-    crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+    crate::lifecycle::lock_instance(&mut tx, tenant_id, instance_id).await?;
     let commands = crate::lifecycle::lock_commands(&mut tx, &[instance_id.to_owned()]).await?;
     if !runtara_core::lifecycle::may_replace_command(commands.first().map(|c| c.command())) {
         return Ok(());
@@ -383,6 +434,7 @@ async fn insert_signal(
 /// Insert or update a pending custom signal scoped to a checkpoint.
 async fn put_custom_signal(
     pool: &PgPool,
+    tenant_id: &TenantId,
     instance_id: &str,
     checkpoint_id: &str,
     payload: &[u8],
@@ -393,6 +445,7 @@ async fn put_custom_signal(
         Some(payload)
     };
 
+    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
     let signal_id = sqlx::query_scalar(
         r#"
         INSERT INTO pending_checkpoint_signals (instance_id, checkpoint_id, payload, created_at)
@@ -406,10 +459,11 @@ async fn put_custom_signal(
     .bind(instance_id)
     .bind(checkpoint_id)
     .bind(payload_opt)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .db()?;
 
+    tx.commit().await.db()?;
     Ok(signal_id)
 }
 
@@ -431,49 +485,62 @@ impl Persistence for PostgresPersistence {
         Some(self)
     }
 
-    async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
-        Self::op_register_instance(&self.pool, instance_id, tenant_id).await
+    async fn register_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError> {
+        Self::op_register_instance(&self.pool, tenant_id, instance_id).await
     }
 
     async fn try_register_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-        tenant_id: &str,
         input: Option<&[u8]>,
     ) -> Result<bool, CoreError> {
-        Self::op_try_register_instance(&self.pool, instance_id, tenant_id, input).await
+        Self::op_try_register_instance(&self.pool, tenant_id, instance_id, input).await
     }
 
-    async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
-        Self::op_get_instance(&self.pool, instance_id).await
+    async fn get_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        Self::op_get_instance(&self.pool, tenant_id, instance_id).await
     }
 
     async fn get_instance_meta(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<InstanceRecord>, CoreError> {
-        Self::op_get_instance_meta(&self.pool, instance_id).await
+        Self::op_get_instance_meta(&self.pool, tenant_id, instance_id).await
     }
 
     async fn update_instance_status(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
-        Self::op_update_instance_status(&self.pool, instance_id, status, started_at).await
+        Self::op_update_instance_status(&self.pool, tenant_id, instance_id, status, started_at)
+            .await
     }
 
     async fn update_instance_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
-        Self::op_update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
+        Self::op_update_instance_checkpoint(&self.pool, tenant_id, instance_id, checkpoint_id).await
     }
 
     async fn complete_instance(
         &self,
+        tenant_id: &TenantId,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
         let instance_id = params.instance_id.to_string();
@@ -486,7 +553,7 @@ impl Persistence for PostgresPersistence {
         let records_metric =
             self.metrics_sink.is_some() && is_reportable_terminal_status(target_status);
         let previous_was_terminal = if records_metric {
-            match fetch_instance_status(&self.pool, &instance_id).await {
+            match fetch_instance_status(&self.pool, tenant_id, &instance_id).await {
                 Ok(Some(status)) => is_reportable_terminal_status(&status),
                 Ok(None) => false,
                 Err(error) => {
@@ -502,11 +569,11 @@ impl Persistence for PostgresPersistence {
             false
         };
 
-        let applied = Self::op_complete_instance_unified(&self.pool, params).await?;
+        let applied = Self::op_complete_instance_unified(&self.pool, tenant_id, params).await?;
         if applied && records_metric && !previous_was_terminal {
             // `records_metric` is only true when a sink is wired.
             if let Some(sink) = &self.metrics_sink {
-                report_completion(sink.as_ref(), &self.pool, &instance_id).await;
+                report_completion(sink.as_ref(), &self.pool, tenant_id, &instance_id).await;
             }
         }
 
@@ -515,23 +582,27 @@ impl Persistence for PostgresPersistence {
 
     async fn save_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
-        Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
+        Self::op_save_checkpoint(&self.pool, tenant_id, instance_id, checkpoint_id, state).await
     }
 
     async fn load_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        Self::op_load_checkpoint(&self.pool, instance_id, checkpoint_id).await
+        Self::op_load_checkpoint(&self.pool, tenant_id, instance_id, checkpoint_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: Option<&str>,
         limit: i64,
@@ -541,6 +612,7 @@ impl Persistence for PostgresPersistence {
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
         Self::op_list_checkpoints(
             &self.pool,
+            tenant_id,
             instance_id,
             checkpoint_id,
             limit,
@@ -553,6 +625,7 @@ impl Persistence for PostgresPersistence {
 
     async fn count_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: Option<&str>,
         created_after: Option<DateTime<Utc>>,
@@ -560,6 +633,7 @@ impl Persistence for PostgresPersistence {
     ) -> Result<i64, CoreError> {
         Self::op_count_checkpoints(
             &self.pool,
+            tenant_id,
             instance_id,
             checkpoint_id,
             created_after,
@@ -568,35 +642,42 @@ impl Persistence for PostgresPersistence {
         .await
     }
 
-    async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
-        insert_event(&self.pool, event).await
+    async fn insert_event(
+        &self,
+        tenant_id: &TenantId,
+        event: &EventRecord,
+    ) -> Result<(), CoreError> {
+        insert_event(&self.pool, tenant_id, event).await
     }
 
     async fn insert_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         signal_type: CoreSignalType,
         payload: &[u8],
     ) -> Result<(), CoreError> {
-        insert_signal(&self.pool, instance_id, signal_type, payload).await
+        insert_signal(&self.pool, tenant_id, instance_id, signal_type, payload).await
     }
 
     async fn get_pending_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        Self::op_get_pending_signal(&self.pool, instance_id).await
+        Self::op_get_pending_signal(&self.pool, tenant_id, instance_id).await
     }
 
     async fn apply_lifecycle_command(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         command_id: &str,
         signal_type: CoreSignalType,
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         use runtara_core::lifecycle::{self, Decision, Receipt};
         let mut tx = self.pool.begin().await.db()?;
-        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let status = crate::lifecycle::lock_instance(&mut tx, tenant_id, instance_id).await?;
         let ids = [instance_id.to_owned()];
         let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
         let decision = lifecycle::acknowledge(
@@ -615,18 +696,19 @@ impl Persistence for PostgresPersistence {
             && effects.report_completion
             && let Some(sink) = &self.metrics_sink
         {
-            report_completion(sink.as_ref(), &self.pool, instance_id).await;
+            report_completion(sink.as_ref(), &self.pool, tenant_id, instance_id).await;
         }
         Ok(decision)
     }
 
     async fn park_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         request: runtara_core::lifecycle::ParkRequest,
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
-        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let status = crate::lifecycle::lock_instance(&mut tx, tenant_id, instance_id).await?;
         let decision = runtara_core::lifecycle::park(status, request);
         if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
             crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
@@ -637,6 +719,7 @@ impl Persistence for PostgresPersistence {
 
     async fn cancel_suspended_instances(
         &self,
+        tenant_id: &TenantId,
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
@@ -648,13 +731,14 @@ impl Persistence for PostgresPersistence {
             r#"
             SELECT i.instance_id, i.tenant_id, i.status::text
             FROM instances i JOIN pending_signals s USING (instance_id)
-            WHERE i.status = 'suspended' AND s.signal_type = 'cancel'
+            WHERE i.tenant_id = $3 AND i.status = 'suspended' AND s.signal_type = 'cancel'
               AND s.acknowledged_at IS NULL AND ($1::text IS NULL OR i.instance_id = $1)
             ORDER BY i.instance_id LIMIT $2 FOR UPDATE OF i SKIP LOCKED
         "#,
         )
         .bind(instance_id)
         .bind(limit.max(0))
+        .bind(tenant_id.as_str())
         .fetch_all(&mut *tx)
         .await
         .db()?;
@@ -691,7 +775,7 @@ impl Persistence for PostgresPersistence {
                 && let Some(sink) = &self.metrics_sink
             {
                 for id in ids {
-                    report_completion(sink.as_ref(), &self.pool, &id).await;
+                    report_completion(sink.as_ref(), &self.pool, tenant_id, &id).await;
                 }
             }
         }
@@ -700,23 +784,26 @@ impl Persistence for PostgresPersistence {
 
     async fn put_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
     ) -> Result<String, CoreError> {
-        put_custom_signal(&self.pool, instance_id, checkpoint_id, payload).await
+        put_custom_signal(&self.pool, tenant_id, instance_id, checkpoint_id, payload).await
     }
 
     async fn get_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        Self::op_get_custom_signal(&self.pool, instance_id, checkpoint_id).await
+        Self::op_get_custom_signal(&self.pool, tenant_id, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         attempt: i32,
@@ -724,6 +811,7 @@ impl Persistence for PostgresPersistence {
     ) -> Result<(), CoreError> {
         save_retry_attempt(
             &self.pool,
+            tenant_id,
             instance_id,
             checkpoint_id,
             attempt,
@@ -734,7 +822,7 @@ impl Persistence for PostgresPersistence {
 
     async fn list_instances(
         &self,
-        tenant_id: Option<&str>,
+        tenant_id: &TenantId,
         status: Option<CoreInstanceStatus>,
         limit: i64,
         offset: i64,
@@ -746,120 +834,159 @@ impl Persistence for PostgresPersistence {
         Self::op_health_check(&self.pool).await
     }
 
-    async fn count_active_instances(&self) -> Result<i64, CoreError> {
-        Self::op_count_active_instances(&self.pool).await
+    async fn count_active_instances(&self, tenant_id: &TenantId) -> Result<i64, CoreError> {
+        Self::op_count_active_instances(&self.pool, tenant_id).await
     }
 
     async fn schedule_wake(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         deadline: DateTime<Utc>,
         reason: runtara_core::domain::WakeReason,
     ) -> Result<(), CoreError> {
-        Self::op_set_instance_sleep(&self.pool, instance_id, deadline, reason).await
+        Self::op_set_instance_sleep(&self.pool, tenant_id, instance_id, deadline, reason).await
     }
 
     async fn mark_instance_running(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        Self::op_mark_instance_running(&self.pool, instance_id, started_at).await
+        Self::op_mark_instance_running(&self.pool, tenant_id, instance_id, started_at).await
     }
 
     async fn mark_instance_started(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<bool, CoreError> {
-        Self::op_mark_instance_started(&self.pool, instance_id, started_at).await
+        Self::op_mark_instance_started(&self.pool, tenant_id, instance_id, started_at).await
     }
 
-    async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
-        Self::op_clear_instance_sleep(&self.pool, instance_id).await
+    async fn clear_instance_sleep(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError> {
+        Self::op_clear_instance_sleep(&self.pool, tenant_id, instance_id).await
     }
 
-    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
-        Self::op_claim_sleeping_instance(&self.pool, instance_id).await
+    async fn claim_sleeping_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<bool, CoreError> {
+        Self::op_claim_sleeping_instance(&self.pool, tenant_id, instance_id).await
     }
 
     async fn get_sleeping_instances_due(
         &self,
+        tenant_id: &TenantId,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_get_sleeping_instances_due(&self.pool, limit).await
+        Self::op_get_sleeping_instances_due(&self.pool, tenant_id, limit).await
     }
 
     async fn claim_sleeping_instances_due(
         &self,
+        tenant_id: &TenantId,
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at).await
+        Self::op_claim_sleeping_instances_due(&self.pool, tenant_id, limit, retry_at).await
     }
 
     async fn list_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         filter: &ListEventsFilter,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EventRecord>, CoreError> {
-        Self::op_list_events(&self.pool, instance_id, filter, limit, offset).await
+        Self::op_list_events(&self.pool, tenant_id, instance_id, filter, limit, offset).await
     }
 
     async fn count_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
-        Self::op_count_events(&self.pool, instance_id, filter).await
+        Self::op_count_events(&self.pool, tenant_id, instance_id, filter).await
     }
 
     async fn list_paired_records(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PairedRecordSummary>, CoreError> {
-        Self::op_list_paired_records(&self.pool, instance_id, vocabulary, filter, limit, offset)
-            .await
+        Self::op_list_paired_records(
+            &self.pool,
+            tenant_id,
+            instance_id,
+            vocabulary,
+            filter,
+            limit,
+            offset,
+        )
+        .await
     }
 
     async fn count_paired_records(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
-        Self::op_count_paired_records(&self.pool, instance_id, vocabulary, filter).await
+        Self::op_count_paired_records(&self.pool, tenant_id, instance_id, vocabulary, filter).await
     }
 
-    async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
-        Self::op_store_instance_input(&self.pool, instance_id, input).await
+    async fn store_instance_input(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        input: &[u8],
+    ) -> Result<(), CoreError> {
+        Self::op_store_instance_input(&self.pool, tenant_id, instance_id, input).await
     }
 
     async fn get_terminal_instances_older_than(
         &self,
+        tenant_id: &TenantId,
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
-        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
+        Self::op_get_terminal_instances_older_than(&self.pool, tenant_id, older_than, limit).await
     }
 
-    async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
-        Self::op_delete_instances_batch(&self.pool, instance_ids).await
+    async fn delete_instances_batch(
+        &self,
+        tenant_id: &TenantId,
+        instance_ids: &[String],
+    ) -> Result<u64, CoreError> {
+        Self::op_delete_instances_batch(&self.pool, tenant_id, instance_ids).await
     }
 
     async fn delete_paired_events_older_than(
         &self,
+        tenant_id: &TenantId,
         vocabulary: &EventVocabulary,
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<u64, CoreError> {
-        Self::op_delete_paired_events_older_than(&self.pool, vocabulary, older_than, limit).await
+        Self::op_delete_paired_events_older_than(
+            &self.pool, tenant_id, vocabulary, older_than, limit,
+        )
+        .await
     }
 }
 
@@ -901,21 +1028,34 @@ mod tests {
         let mut ids = Vec::with_capacity(ROWS);
         for _ in 0..ROWS {
             let id = uuid::Uuid::new_v4().to_string();
-            backend.register_instance(&id, &tenant).await.unwrap();
             backend
-                .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+                .register_instance(&TenantId::new(&tenant).unwrap(), &id)
                 .await
                 .unwrap();
-            backend.set_instance_sleep(&id, due_at).await.unwrap();
+            backend
+                .update_instance_status(
+                    &TenantId::new(&tenant).unwrap(),
+                    &id,
+                    CoreInstanceStatus::Suspended,
+                    None,
+                )
+                .await
+                .unwrap();
+            backend
+                .set_instance_sleep(&TenantId::new(&tenant).unwrap(), &id, due_at)
+                .await
+                .unwrap();
             ids.push(id);
         }
 
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..CLAIMERS {
             let backend = std::sync::Arc::clone(&backend);
+            let tenant = tenant.clone();
             tasks.spawn(async move {
                 backend
                     .claim_sleeping_instances_due(
+                        &TenantId::new(&tenant).unwrap(),
                         ROWS as i64,
                         Utc::now() + chrono::Duration::seconds(120),
                     )
@@ -961,6 +1101,7 @@ mod tests {
         for _ in 0..10 {
             let batch = backend
                 .claim_sleeping_instances_due(
+                    &TenantId::new(&tenant).unwrap(),
                     ROWS as i64,
                     Utc::now() + chrono::Duration::seconds(120),
                 )
@@ -986,7 +1127,11 @@ mod tests {
         let now = Utc::now();
         let mut stranded = Vec::new();
         for id in &ids {
-            let inst = backend.get_instance(id).await.unwrap().unwrap();
+            let inst = backend
+                .get_instance(&TenantId::new(&tenant).unwrap(), id)
+                .await
+                .unwrap()
+                .unwrap();
             match inst.sleep_until {
                 None => stranded.push(format!("{id} (no deadline)")),
                 Some(due) if due <= now => stranded.push(format!("{id} (still overdue)")),
@@ -1001,7 +1146,9 @@ mod tests {
             &stranded[..stranded.len().min(3)]
         );
 
-        let _ = backend.delete_instances_batch(&ids).await;
+        let _ = backend
+            .delete_instances_batch(&TenantId::new(&tenant).unwrap(), &ids)
+            .await;
     }
 
     /// The paired-event sweep must remove the caller's paired payloads past
@@ -1033,7 +1180,7 @@ mod tests {
         let backend = PostgresPersistence::new(test_pool().await);
         let id = uuid::Uuid::new_v4().to_string();
         backend
-            .register_instance(&id, "sweep-tenant")
+            .register_instance(&TenantId::new("sweep-tenant").unwrap(), &id)
             .await
             .unwrap();
 
@@ -1050,23 +1197,38 @@ mod tests {
         };
 
         backend
-            .insert_event(&event(Some("step_debug_start"), "custom", old))
+            .insert_event(
+                &TenantId::new("sweep-tenant").unwrap(),
+                &event(Some("step_debug_start"), "custom", old),
+            )
             .await
             .unwrap();
         backend
-            .insert_event(&event(Some("step_debug_end"), "custom", old))
+            .insert_event(
+                &TenantId::new("sweep-tenant").unwrap(),
+                &event(Some("step_debug_end"), "custom", old),
+            )
             .await
             .unwrap();
         backend
-            .insert_event(&event(Some("step_debug_start"), "custom", recent))
+            .insert_event(
+                &TenantId::new("sweep-tenant").unwrap(),
+                &event(Some("step_debug_start"), "custom", recent),
+            )
             .await
             .unwrap();
         backend
-            .insert_event(&event(None, "completed", old))
+            .insert_event(
+                &TenantId::new("sweep-tenant").unwrap(),
+                &event(None, "completed", old),
+            )
             .await
             .unwrap();
         backend
-            .insert_event(&event(Some("workflow_log"), "custom", old))
+            .insert_event(
+                &TenantId::new("sweep-tenant").unwrap(),
+                &event(Some("workflow_log"), "custom", old),
+            )
             .await
             .unwrap();
 
@@ -1076,7 +1238,12 @@ mod tests {
         // what proves the subtypes come from the parameter rather than from a
         // literal inside the kernel.
         let swept_by_a_foreign_vocabulary = backend
-            .delete_paired_events_older_than(&vocabulary("unit_start", "unit_end"), cutoff, 100)
+            .delete_paired_events_older_than(
+                &TenantId::new("sweep-tenant").unwrap(),
+                &vocabulary("unit_start", "unit_end"),
+                cutoff,
+                100,
+            )
             .await
             .expect("sweep failed");
         assert_eq!(
@@ -1086,6 +1253,7 @@ mod tests {
 
         let deleted = backend
             .delete_paired_events_older_than(
+                &TenantId::new("sweep-tenant").unwrap(),
                 &vocabulary("step_debug_start", "step_debug_end"),
                 cutoff,
                 100,
@@ -1095,7 +1263,10 @@ mod tests {
         assert_eq!(deleted, 2, "only the two aged paired events may go");
 
         let filter = ::runtara_core::persistence::ListEventsFilter::default();
-        let left = backend.list_events(&id, &filter, 50, 0).await.unwrap();
+        let left = backend
+            .list_events(&TenantId::new("sweep-tenant").unwrap(), &id, &filter, 50, 0)
+            .await
+            .unwrap();
         let subtypes: Vec<_> = left
             .iter()
             .map(|e| {
@@ -1120,7 +1291,10 @@ mod tests {
         );
 
         let _ = backend
-            .delete_instances_batch(std::slice::from_ref(&id))
+            .delete_instances_batch(
+                &TenantId::new("sweep-tenant").unwrap(),
+                std::slice::from_ref(&id),
+            )
             .await;
     }
 
@@ -1173,7 +1347,12 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string()).await;
+        let result = PostgresPersistence::op_get_instance(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await;
         assert!(result.is_ok());
         let instance = result.unwrap();
         assert!(instance.is_some());
@@ -1193,6 +1372,7 @@ mod tests {
 
         let result = PostgresPersistence::op_update_instance_status(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             CoreInstanceStatus::Running,
             Some(Utc::now()),
@@ -1200,10 +1380,14 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
+        let instance = PostgresPersistence::op_get_instance(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Running);
         assert!(instance.started_at.is_some());
 
@@ -1219,16 +1403,21 @@ mod tests {
 
         let result = PostgresPersistence::op_update_instance_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "checkpoint-1",
         )
         .await;
         assert!(result.is_ok());
 
-        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
+        let instance = PostgresPersistence::op_get_instance(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(instance.checkpoint_id, Some("checkpoint-1".to_string()));
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1245,16 +1434,21 @@ mod tests {
         let instance_id_str = instance_id.to_string();
         let result = PostgresPersistence::op_complete_instance_unified(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             CompleteInstanceParams::new(&instance_id_str, CoreInstanceStatus::Completed)
                 .with_output(output_data),
         )
         .await;
         assert!(result.is_ok());
 
-        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
+        let instance = PostgresPersistence::op_get_instance(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Completed);
         assert_eq!(instance.output, Some(output_data.to_vec()));
         assert!(instance.finished_at.is_some());
@@ -1272,16 +1466,21 @@ mod tests {
         let instance_id_str = instance_id.to_string();
         let result = PostgresPersistence::op_complete_instance_unified(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             CompleteInstanceParams::new(&instance_id_str, CoreInstanceStatus::Failed)
                 .with_error("test error"),
         )
         .await;
         assert!(result.is_ok());
 
-        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
+        let instance = PostgresPersistence::op_get_instance(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Failed);
         assert_eq!(instance.error, Some("test error".to_string()));
         assert!(instance.finished_at.is_some());
@@ -1297,15 +1496,24 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let state = b"test state data";
-        let result =
-            PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state)
-                .await;
+        let result = PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "cp-1",
+            state,
+        )
+        .await;
         assert!(result.is_ok());
 
-        let checkpoint =
-            PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
-                .await
-                .unwrap();
+        let checkpoint = PostgresPersistence::op_load_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "cp-1",
+        )
+        .await
+        .unwrap();
         assert!(checkpoint.is_some());
         assert_eq!(checkpoint.unwrap().state, state.to_vec());
 
@@ -1322,6 +1530,7 @@ mod tests {
         // Save first checkpoint
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-1",
             b"state-1",
@@ -1332,6 +1541,7 @@ mod tests {
         // Save again with same ID (should update)
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-1",
             b"state-2",
@@ -1339,11 +1549,15 @@ mod tests {
         .await
         .unwrap();
 
-        let checkpoint =
-            PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
-                .await
-                .unwrap()
-                .unwrap();
+        let checkpoint = PostgresPersistence::op_load_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "cp-1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(checkpoint.state, b"state-2".to_vec());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1358,6 +1572,7 @@ mod tests {
 
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-1",
             b"state-1",
@@ -1366,6 +1581,7 @@ mod tests {
         .unwrap();
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-2",
             b"state-2",
@@ -1373,16 +1589,26 @@ mod tests {
         .await
         .unwrap();
 
-        let cp1 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
-            .await
-            .unwrap()
-            .unwrap();
+        let cp1 = PostgresPersistence::op_load_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "cp-1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(cp1.state, b"state-1".to_vec());
 
-        let cp2 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-2")
-            .await
-            .unwrap()
-            .unwrap();
+        let cp2 = PostgresPersistence::op_load_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "cp-2",
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(cp2.state, b"state-2".to_vec());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1397,6 +1623,7 @@ mod tests {
 
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-1",
             b"state-1",
@@ -1407,6 +1634,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-2",
             b"state-2",
@@ -1416,6 +1644,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         PostgresPersistence::op_save_checkpoint(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             "cp-3",
             b"state-3",
@@ -1423,10 +1652,14 @@ mod tests {
         .await
         .unwrap();
 
-        let latest = load_latest_checkpoint(&pool, &instance_id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
+        let latest = load_latest_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(latest.checkpoint_id, "cp-3");
         assert_eq!(latest.state, b"state-3".to_vec());
 
@@ -1440,10 +1673,14 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result =
-            PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
-                .await
-                .unwrap();
+        let result = PostgresPersistence::op_load_checkpoint(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "nonexistent",
+        )
+        .await
+        .unwrap();
         assert!(result.is_none());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1466,7 +1703,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = insert_event(&pool, &event).await;
+        let result = insert_event(&pool, &TenantId::new("test-tenant").unwrap(), &event).await;
         assert!(result.is_ok());
 
         // Verify event was inserted
@@ -1490,6 +1727,7 @@ mod tests {
 
         let result = insert_signal(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance_id.to_string(),
             CoreSignalType::Cancel,
             b"reason",
@@ -1497,9 +1735,13 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
-            .await
-            .unwrap();
+        let signal = PostgresPersistence::op_get_pending_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap();
         assert!(signal.is_some());
         let signal = signal.unwrap();
         assert_eq!(signal.signal_type, CoreSignalType::Cancel);
@@ -1515,13 +1757,23 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        insert_signal(&pool, &instance_id.to_string(), CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
+        insert_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
 
-        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
-            .await
-            .unwrap();
+        let signal = PostgresPersistence::op_get_pending_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap();
         assert!(signal.is_some());
         assert_eq!(signal.unwrap().signal_type, CoreSignalType::Pause);
 
@@ -1535,9 +1787,13 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
-            .await
-            .unwrap();
+        let signal = PostgresPersistence::op_get_pending_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap();
         assert!(signal.is_none());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1550,18 +1806,28 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        insert_signal(&pool, &instance_id.to_string(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        insert_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
         let backend = PostgresPersistence::new(pool.clone());
         let signal = backend
-            .get_pending_signal(&instance_id.to_string())
+            .get_pending_signal(
+                &TenantId::new("test-tenant").unwrap(),
+                &instance_id.to_string(),
+            )
             .await
             .unwrap()
             .unwrap();
         assert!(
             backend
                 .acknowledge_signal(
+                    &TenantId::new("test-tenant").unwrap(),
                     &instance_id.to_string(),
                     &signal.command_id,
                     signal.signal_type
@@ -1571,9 +1837,13 @@ mod tests {
         );
 
         // Should no longer return as pending
-        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
-            .await
-            .unwrap();
+        let signal = PostgresPersistence::op_get_pending_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+        )
+        .await
+        .unwrap();
         assert!(signal.is_none());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1586,16 +1856,26 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        put_custom_signal(&pool, &instance_id.to_string(), "wait-1", b"custom-payload")
-            .await
-            .unwrap();
+        put_custom_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "wait-1",
+            b"custom-payload",
+        )
+        .await
+        .unwrap();
 
         // First read retrieves the signal.
-        let signal =
-            PostgresPersistence::op_get_custom_signal(&pool, &instance_id.to_string(), "wait-1")
-                .await
-                .unwrap()
-                .expect("custom signal should exist");
+        let signal = PostgresPersistence::op_get_custom_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "wait-1",
+        )
+        .await
+        .unwrap()
+        .expect("custom signal should exist");
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
@@ -1603,11 +1883,15 @@ mod tests {
         // replay-from-start) returns the same signal, not None — this is what
         // lets a drained/resumed WaitForSignal re-read its retained signal
         // instead of dead-hanging.
-        let signal =
-            PostgresPersistence::op_get_custom_signal(&pool, &instance_id.to_string(), "wait-1")
-                .await
-                .unwrap()
-                .expect("custom signal should still exist (non-destructive read)");
+        let signal = PostgresPersistence::op_get_custom_signal(
+            &pool,
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id.to_string(),
+            "wait-1",
+        )
+        .await
+        .unwrap()
+        .expect("custom signal should still exist (non-destructive read)");
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
@@ -1626,6 +1910,7 @@ mod tests {
         // Set one running, one suspended: only the running one is counted.
         PostgresPersistence::op_update_instance_status(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance1.to_string(),
             CoreInstanceStatus::Running,
             None,
@@ -1634,6 +1919,7 @@ mod tests {
         .unwrap();
         PostgresPersistence::op_update_instance_status(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance2.to_string(),
             CoreInstanceStatus::Suspended,
             None,
@@ -1667,9 +1953,12 @@ mod tests {
 
         // The global counter must see it too, whatever else is running.
         assert!(
-            PostgresPersistence::op_count_active_instances(&pool)
-                .await
-                .unwrap()
+            PostgresPersistence::op_count_active_instances(
+                &pool,
+                &TenantId::new("test-tenant").unwrap()
+            )
+            .await
+            .unwrap()
                 >= 1
         );
 
@@ -1677,6 +1966,7 @@ mod tests {
         // so parked work cannot hold a cap closed against fresh registrations.
         PostgresPersistence::op_update_instance_status(
             &pool,
+            &TenantId::new("test-tenant").unwrap(),
             &instance1.to_string(),
             CoreInstanceStatus::Suspended,
             None,
@@ -1774,11 +2064,12 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
 
         p.complete_instance(
+            &TenantId::new("test-tenant").unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                 .with_output(b"output data")
                 .with_stderr("stderr output")
@@ -1812,15 +2103,21 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
-        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
-            .await
-            .unwrap();
+        p.update_instance_status(
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
+        .await
+        .unwrap();
 
         let applied = p
             .complete_instance(
+                &TenantId::new("test-tenant").unwrap(),
                 CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                     .if_running()
                     .with_output(b"done"),
@@ -1830,7 +2127,11 @@ mod tests {
 
         assert!(applied);
 
-        let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
+        let instance = p
+            .get_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Completed);
 
         ci_cleanup(&pool, &instance_id).await;
@@ -1842,13 +2143,14 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
         // Status is 'pending', not 'running'
 
         let applied = p
             .complete_instance(
+                &TenantId::new("test-tenant").unwrap(),
                 CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                     .if_running()
                     .with_output(b"done"),
@@ -1858,7 +2160,11 @@ mod tests {
 
         assert!(!applied);
 
-        let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
+        let instance = p
+            .get_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Pending); // unchanged
 
         ci_cleanup(&pool, &instance_id).await;
@@ -1878,10 +2184,10 @@ mod tests {
         let missing = ci_instance_id();
 
         let err = p
-            .complete_instance(CompleteInstanceParams::new(
-                &missing,
-                CoreInstanceStatus::Completed,
-            ))
+            .complete_instance(
+                &TenantId::new("test-tenant").unwrap(),
+                CompleteInstanceParams::new(&missing, CoreInstanceStatus::Completed),
+            )
             .await
             .expect_err("must error when unguarded update finds nothing");
 
@@ -1898,15 +2204,15 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
 
         let applied = p
-            .complete_instance(CompleteInstanceParams::new(
-                &instance_id,
-                CoreInstanceStatus::Completed,
-            ))
+            .complete_instance(
+                &TenantId::new("test-tenant").unwrap(),
+                CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed),
+            )
             .await
             .expect("unguarded success should not error");
         assert!(applied, "unguarded update on existing row returns true");
@@ -1928,6 +2234,7 @@ mod tests {
 
         let applied = p
             .complete_instance(
+                &TenantId::new("test-tenant").unwrap(),
                 CompleteInstanceParams::new(&missing, CoreInstanceStatus::Completed).if_running(),
             )
             .await
@@ -1943,20 +2250,24 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
 
         let applied = p
-            .complete_instance(CompleteInstanceParams::new(
-                &instance_id,
-                CoreInstanceStatus::Running,
-            ))
+            .complete_instance(
+                &TenantId::new("test-tenant").unwrap(),
+                CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Running),
+            )
             .await
             .expect("non-terminal transition should succeed");
         assert!(applied);
 
-        let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
+        let instance = p
+            .get_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Running);
         assert!(
             instance.finished_at.is_none(),
@@ -1978,35 +2289,54 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
-        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
-            .await
-            .unwrap();
+        p.update_instance_status(
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
+        .await
+        .unwrap();
 
         // Suspend the way a drain / durable sleep does: stamps finished_at +
         // termination_reason. 'sleeping' is a member of the Postgres
         // `termination_reason` ENUM, so the `$3::termination_reason` cast in
         // the unified op resolves.
         p.complete_instance(
+            &TenantId::new("test-tenant").unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
                 .with_termination("sleeping", None),
         )
         .await
         .expect("suspend should succeed");
-        let suspended = p.get_instance(&instance_id).await.unwrap().unwrap();
+        let suspended = p
+            .get_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             suspended.finished_at.is_some(),
             "precondition: suspend stamps finished_at"
         );
 
         // Relaunch: re-register into running with a later started_at.
-        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
-            .await
-            .unwrap();
+        p.update_instance_status(
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
+        .await
+        .unwrap();
 
-        let running = p.get_instance(&instance_id).await.unwrap().unwrap();
+        let running = p
+            .get_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(running.status, CoreInstanceStatus::Running);
         assert!(
             running.finished_at.is_none(),
@@ -2032,16 +2362,22 @@ mod tests {
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = ci_instance_id();
-        p.register_instance(&instance_id, "test-tenant")
+        p.register_instance(&TenantId::new("test-tenant").unwrap(), &instance_id)
             .await
             .unwrap();
-        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
-            .await
-            .unwrap();
+        p.update_instance_status(
+            &TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
+        .await
+        .unwrap();
 
         // First write sets both termination fields. 'crashed' is a member of
         // the Postgres `termination_reason` ENUM.
         p.complete_instance(
+            &TenantId::new("test-tenant").unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
                 .with_termination("crashed", Some(137)),
         )
@@ -2053,10 +2389,10 @@ mod tests {
         assert_eq!(code, Some(137));
 
         // Second write without termination/exit fields must not clobber.
-        p.complete_instance(CompleteInstanceParams::new(
-            &instance_id,
-            CoreInstanceStatus::Failed,
-        ))
+        p.complete_instance(
+            &TenantId::new("test-tenant").unwrap(),
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed),
+        )
         .await
         .expect("second completion should succeed");
 
@@ -2121,7 +2457,7 @@ mod tests {
         let missing = misc_instance_id("absent");
 
         let result = p
-            .get_instance(&missing)
+            .get_instance(&TenantId::new("test-tenant").unwrap(), &missing)
             .await
             .expect("Query should succeed");
 
@@ -2130,26 +2466,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_checkpoints() {
+        let tenant = misc_tenant_id("list-cps");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("list-cps");
-        p.register_instance(&instance_id, &misc_tenant_id("list-cps"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
-        p.save_checkpoint(&instance_id, "cp-1", b"state-1")
-            .await
-            .unwrap();
-        p.save_checkpoint(&instance_id, "cp-2", b"state-2")
-            .await
-            .unwrap();
-        p.save_checkpoint(&instance_id, "cp-3", b"state-3")
-            .await
-            .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-1",
+            b"state-1",
+        )
+        .await
+        .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-2",
+            b"state-2",
+        )
+        .await
+        .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-3",
+            b"state-3",
+        )
+        .await
+        .unwrap();
 
         let checkpoints = p
-            .list_checkpoints(&instance_id, None, 10, 0, None, None)
+            .list_checkpoints(
+                &TenantId::new(&tenant).unwrap(),
+                &instance_id,
+                None,
+                10,
+                0,
+                None,
+                None,
+            )
             .await
             .expect("Failed to list checkpoints");
 
@@ -2162,23 +2522,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_checkpoints_with_filter() {
+        let tenant = misc_tenant_id("filter-cps");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("filter-cps");
-        p.register_instance(&instance_id, &misc_tenant_id("filter-cps"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
-        p.save_checkpoint(&instance_id, "cp-1", b"state-1")
-            .await
-            .unwrap();
-        p.save_checkpoint(&instance_id, "cp-2", b"state-2")
-            .await
-            .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-1",
+            b"state-1",
+        )
+        .await
+        .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-2",
+            b"state-2",
+        )
+        .await
+        .unwrap();
 
         let checkpoints = p
-            .list_checkpoints(&instance_id, Some("cp-1"), 10, 0, None, None)
+            .list_checkpoints(
+                &TenantId::new(&tenant).unwrap(),
+                &instance_id,
+                Some("cp-1"),
+                10,
+                0,
+                None,
+                None,
+            )
             .await
             .expect("Failed to list checkpoints");
 
@@ -2190,23 +2569,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_count_checkpoints() {
+        let tenant = misc_tenant_id("count-cps");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("count-cps");
-        p.register_instance(&instance_id, &misc_tenant_id("count-cps"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
-        p.save_checkpoint(&instance_id, "cp-1", b"state-1")
-            .await
-            .unwrap();
-        p.save_checkpoint(&instance_id, "cp-2", b"state-2")
-            .await
-            .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-1",
+            b"state-1",
+        )
+        .await
+        .unwrap();
+        p.save_checkpoint(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "cp-2",
+            b"state-2",
+        )
+        .await
+        .unwrap();
 
         let count = p
-            .count_checkpoints(&instance_id, None, None, None)
+            .count_checkpoints(
+                &TenantId::new(&tenant).unwrap(),
+                &instance_id,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("Failed to count checkpoints");
 
@@ -2218,23 +2614,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_signal_upsert() {
+        let tenant = misc_tenant_id("sig-upsert");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("sig-upsert");
-        p.register_instance(&instance_id, &misc_tenant_id("sig-upsert"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
-        p.insert_signal(&instance_id, CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
-        p.insert_signal(&instance_id, CoreSignalType::Cancel, b"new reason")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
+        p.insert_signal(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            CoreSignalType::Cancel,
+            b"new reason",
+        )
+        .await
+        .unwrap();
 
         let signal = p
-            .get_pending_signal(&instance_id)
+            .get_pending_signal(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap()
             .expect("upserted signal should be pending");
@@ -2249,11 +2656,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_signal_empty_payload_stored_as_null() {
+        let tenant = misc_tenant_id("sig-empty");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("sig-empty");
-        p.register_instance(&instance_id, &misc_tenant_id("sig-empty"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
@@ -2261,12 +2669,17 @@ mod tests {
         // `&[u8]` to `None` before binding, so the column goes NULL rather
         // than holding a zero-length blob, and a reader sees `None` and never
         // `Some(vec![])`. Nothing else covers that mapping, so pin it here.
-        p.insert_signal(&instance_id, CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
 
         let signal = p
-            .get_pending_signal(&instance_id)
+            .get_pending_signal(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap()
             .expect("signal should be pending");
@@ -2282,23 +2695,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_signal_upsert() {
+        let tenant = misc_tenant_id("custom-upsert");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("custom-upsert");
-        p.register_instance(&instance_id, &misc_tenant_id("custom-upsert"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
-        p.put_custom_signal(&instance_id, "wait-1", b"payload-1")
-            .await
-            .unwrap();
-        p.put_custom_signal(&instance_id, "wait-1", b"payload-2")
-            .await
-            .unwrap();
+        p.put_custom_signal(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "wait-1",
+            b"payload-1",
+        )
+        .await
+        .unwrap();
+        p.put_custom_signal(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "wait-1",
+            b"payload-2",
+        )
+        .await
+        .unwrap();
 
         let signal = p
-            .get_custom_signal(&instance_id, "wait-1")
+            .get_custom_signal(&TenantId::new(&tenant).unwrap(), &instance_id, "wait-1")
             .await
             .unwrap()
             .expect("custom signal should exist");
@@ -2312,21 +2736,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_retry_attempt() {
+        let tenant = misc_tenant_id("retry");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("retry");
-        p.register_instance(&instance_id, &misc_tenant_id("retry"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
-        p.save_retry_attempt(&instance_id, "durable-fn-1", 1, Some("connection error"))
-            .await
-            .expect("Failed to save retry attempt");
+        p.save_retry_attempt(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "durable-fn-1",
+            1,
+            Some("connection error"),
+        )
+        .await
+        .expect("Failed to save retry attempt");
 
         // The synthetic `::retry::N` checkpoint exists.
         let checkpoint = p
-            .load_checkpoint(&instance_id, "durable-fn-1::retry::1")
+            .load_checkpoint(
+                &TenantId::new(&tenant).unwrap(),
+                &instance_id,
+                "durable-fn-1::retry::1",
+            )
             .await
             .unwrap();
         assert!(checkpoint.is_some());
@@ -2348,13 +2783,24 @@ mod tests {
 
         // A second attempt writes a distinct row, and the audit trail reads
         // back in attempt order.
-        p.save_retry_attempt(&instance_id, "durable-fn-1", 2, Some("timeout"))
-            .await
-            .unwrap();
+        p.save_retry_attempt(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "durable-fn-1",
+            2,
+            Some("timeout"),
+        )
+        .await
+        .unwrap();
 
-        let history = load_retry_history(&pool, &instance_id, "durable-fn-1")
-            .await
-            .expect("Failed to load retry history");
+        let history = load_retry_history(
+            &pool,
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "durable-fn-1",
+        )
+        .await
+        .expect("Failed to load retry history");
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].attempt_number, 1);
         assert_eq!(history[1].attempt_number, 2);
@@ -2362,13 +2808,24 @@ mod tests {
 
         // Re-saving the same attempt upserts in place (ON CONFLICT DO UPDATE)
         // instead of adding a row.
-        p.save_retry_attempt(&instance_id, "durable-fn-1", 2, Some("timeout again"))
-            .await
-            .unwrap();
+        p.save_retry_attempt(
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "durable-fn-1",
+            2,
+            Some("timeout again"),
+        )
+        .await
+        .unwrap();
 
-        let history = load_retry_history(&pool, &instance_id, "durable-fn-1")
-            .await
-            .unwrap();
+        let history = load_retry_history(
+            &pool,
+            &TenantId::new(&tenant).unwrap(),
+            &instance_id,
+            "durable-fn-1",
+        )
+        .await
+        .unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].error_message, Some("timeout again".to_string()));
 
@@ -2385,28 +2842,15 @@ mod tests {
         let instance1 = misc_instance_id("list-a");
         let instance2 = misc_instance_id("list-b");
 
-        p.register_instance(&instance1, &tenant1).await.unwrap();
-        p.register_instance(&instance2, &tenant2).await.unwrap();
-
-        // An exact count over `list_instances(None, None, ..)` would be a
-        // whole-database assertion and cannot hold against the shared
-        // `runtara_test` database, so the unfiltered path is exercised with a
-        // membership check instead. It is sound because the listing is
-        // `ORDER BY created_at DESC`, the suite runs `--test-threads=1`, and
-        // every test deletes its rows — so these two are the newest rows in the
-        // table at query time and are well inside the limit.
-        let all = p
-            .list_instances(None, None, 100, 0)
+        p.register_instance(&TenantId::new(&tenant1).unwrap(), &instance1)
             .await
-            .expect("Failed to list instances");
-        let all_ids: Vec<&str> = all.iter().map(|i| i.instance_id.as_str()).collect();
-        assert!(all_ids.contains(&instance1.as_str()));
-        assert!(all_ids.contains(&instance2.as_str()));
+            .unwrap();
+        p.register_instance(&TenantId::new(&tenant2).unwrap(), &instance2)
+            .await
+            .unwrap();
 
-        // The exact-count assertion survives once it is scoped to a tenant that
-        // only this test uses.
         let tenant1_only = p
-            .list_instances(Some(&tenant1), None, 10, 0)
+            .list_instances(&TenantId::new(&tenant1).unwrap(), None, 10, 0)
             .await
             .expect("Failed to list instances");
         assert_eq!(tenant1_only.len(), 1);
@@ -2414,7 +2858,7 @@ mod tests {
         assert_eq!(tenant1_only[0].tenant_id, tenant1);
 
         let tenant2_only = p
-            .list_instances(Some(&tenant2), None, 10, 0)
+            .list_instances(&TenantId::new(&tenant2).unwrap(), None, 10, 0)
             .await
             .expect("Failed to list instances");
         assert_eq!(tenant2_only.len(), 1);
@@ -2436,15 +2880,29 @@ mod tests {
         let instance1 = misc_instance_id("by-status-1");
         let instance2 = misc_instance_id("by-status-2");
 
-        p.register_instance(&instance1, &tenant).await.unwrap();
-        p.register_instance(&instance2, &tenant).await.unwrap();
-
-        p.update_instance_status(&instance1, CoreInstanceStatus::Running, None)
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance1)
+            .await
+            .unwrap();
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance2)
             .await
             .unwrap();
 
+        p.update_instance_status(
+            &TenantId::new(&tenant).unwrap(),
+            &instance1,
+            CoreInstanceStatus::Running,
+            None,
+        )
+        .await
+        .unwrap();
+
         let running = p
-            .list_instances(Some(&tenant), Some(CoreInstanceStatus::Running), 10, 0)
+            .list_instances(
+                &TenantId::new(&tenant).unwrap(),
+                Some(CoreInstanceStatus::Running),
+                10,
+                0,
+            )
             .await
             .expect("Failed to list instances");
 
@@ -2454,7 +2912,12 @@ mod tests {
 
         // The still-pending sibling is excluded by the status filter.
         let pending = p
-            .list_instances(Some(&tenant), Some(CoreInstanceStatus::Pending), 10, 0)
+            .list_instances(
+                &TenantId::new(&tenant).unwrap(),
+                Some(CoreInstanceStatus::Pending),
+                10,
+                0,
+            )
             .await
             .expect("Failed to list instances");
         assert_eq!(pending.len(), 1);
@@ -2466,16 +2929,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_instance_input() {
+        let tenant = misc_tenant_id("input");
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
         let instance_id = misc_instance_id("input");
-        p.register_instance(&instance_id, &misc_tenant_id("input"))
+        p.register_instance(&TenantId::new(&tenant).unwrap(), &instance_id)
             .await
             .unwrap();
 
         let input_data = br#"{"key": "value"}"#;
-        p.store_instance_input(&instance_id, input_data)
+        p.store_instance_input(&TenantId::new(&tenant).unwrap(), &instance_id, input_data)
             .await
             .expect("Failed to store input");
 
@@ -2490,7 +2954,7 @@ mod tests {
         // `store_instance_input` is a plain overwrite (no COALESCE), unlike the
         // metrics/stderr writers above.
         let replacement = br#"{"key": "replaced"}"#;
-        p.store_instance_input(&instance_id, replacement)
+        p.store_instance_input(&TenantId::new(&tenant).unwrap(), &instance_id, replacement)
             .await
             .expect("Failed to store input");
 
@@ -2565,13 +3029,14 @@ mod tests {
     async fn register_step_summary_instance(
         persistence: &PostgresPersistence,
         family: &str,
-    ) -> String {
+    ) -> (TenantId, String) {
+        let tenant_scope = TenantId::new(format!("pg-stepsum-tenant-{family}")).unwrap();
         let instance_id = step_summary_instance_id(family);
         persistence
-            .register_instance(&instance_id, &format!("pg-stepsum-tenant-{family}"))
+            .register_instance(&TenantId::new(tenant_scope.as_str()).unwrap(), &instance_id)
             .await
             .unwrap();
-        instance_id
+        (tenant_scope, instance_id)
     }
 
     /// Delete a step-summary test instance (its `instance_events` rows go with
@@ -2594,6 +3059,7 @@ mod tests {
     /// `convert_from(payload, 'UTF8')::jsonb` under the `subtype` predicate.
     #[allow(clippy::too_many_arguments)]
     async fn insert_step_start_pg(
+        tenant_scope: &TenantId,
         persistence: &PostgresPersistence,
         instance_id: &str,
         step_id: &str,
@@ -2629,11 +3095,15 @@ mod tests {
             created_at: Utc::now(),
             subtype: Some("step_debug_start".to_string()),
         };
-        persistence.insert_event(&event).await.unwrap();
+        persistence
+            .insert_event(tenant_scope, &event)
+            .await
+            .unwrap();
     }
 
     /// Helper to insert a step_debug_end event.
     async fn insert_step_end_pg(
+        tenant_scope: &TenantId,
         persistence: &PostgresPersistence,
         instance_id: &str,
         step_id: &str,
@@ -2663,7 +3133,10 @@ mod tests {
             created_at: Utc::now(),
             subtype: Some("step_debug_end".to_string()),
         };
-        persistence.insert_event(&event).await.unwrap();
+        persistence
+            .insert_event(tenant_scope, &event)
+            .await
+            .unwrap();
     }
 
     /// Default (unfiltered) paired-record filter.
@@ -2693,7 +3166,8 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "foreign-vocab").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "foreign-vocab").await;
 
         let vocabulary = EventVocabulary::new(EventVocabularySpec {
             start_subtype: "unit_start",
@@ -2712,18 +3186,22 @@ mod tests {
 
         let insert = |subtype: &'static str, payload: serde_json::Value| {
             let persistence = &persistence;
+            let tenant_scope = tenant_scope.clone();
             let instance_id = instance_id.clone();
             async move {
                 persistence
-                    .insert_event(&EventRecord {
-                        id: None,
-                        instance_id,
-                        event_type: CoreEventType::Custom,
-                        checkpoint_id: None,
-                        payload: Some(serde_json::to_vec(&payload).unwrap()),
-                        created_at: Utc::now(),
-                        subtype: Some(subtype.to_string()),
-                    })
+                    .insert_event(
+                        &tenant_scope,
+                        &EventRecord {
+                            id: None,
+                            instance_id,
+                            event_type: CoreEventType::Custom,
+                            checkpoint_id: None,
+                            payload: Some(serde_json::to_vec(&payload).unwrap()),
+                            created_at: Utc::now(),
+                            subtype: Some(subtype.to_string()),
+                        },
+                    )
                     .await
                     .unwrap();
             }
@@ -2777,7 +3255,7 @@ mod tests {
 
         let filter = step_summary_filter(StepSummarySortOrder::Asc);
         let records = persistence
-            .list_paired_records(&instance_id, &vocabulary, &filter, 100, 0)
+            .list_paired_records(&tenant_scope, &instance_id, &vocabulary, &filter, 100, 0)
             .await
             .unwrap();
 
@@ -2812,7 +3290,7 @@ mod tests {
 
         assert_eq!(
             persistence
-                .count_paired_records(&instance_id, &vocabulary, &filter)
+                .count_paired_records(&tenant_scope, &instance_id, &vocabulary, &filter)
                 .await
                 .unwrap(),
             2
@@ -2822,7 +3300,14 @@ mod tests {
         let mut kind_filter = step_summary_filter(StepSummarySortOrder::Asc);
         kind_filter.kind = Some("Call".to_string());
         let filtered = persistence
-            .list_paired_records(&instance_id, &vocabulary, &kind_filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &vocabulary,
+                &kind_filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(filtered.len(), 1);
@@ -2830,7 +3315,14 @@ mod tests {
 
         // ...and the DSL vocabulary sees only its own half-open record.
         let dsl_records = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(dsl_records.len(), 1);
@@ -2845,21 +3337,29 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "empty").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "empty").await;
 
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         // Both queries are scoped to `instance_id`, so an empty result here is
         // unaffected by rows other tests leave in the shared database.
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
         assert!(steps.is_empty());
 
         let count = persistence
-            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
+            .count_paired_records(&tenant_scope, &instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
 
@@ -2873,10 +3373,12 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "completed").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "completed").await;
 
         // Insert a completed step (start + end events)
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-1",
@@ -2893,6 +3395,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-1",
@@ -2905,7 +3408,14 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -2951,53 +3461,67 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "longdur").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "longdur").await;
 
         let completed_at = Utc::now();
         let started_at = completed_at - chrono::Duration::seconds(90);
 
         persistence
-            .insert_event(&EventRecord {
-                id: None,
-                instance_id: instance_id.clone(),
-                event_type: CoreEventType::Custom,
-                checkpoint_id: None,
-                payload: Some(
-                    serde_json::to_vec(&serde_json::json!({
-                        "step_id": "slow-step",
-                        "step_type": "DurableSleep",
-                    }))
-                    .unwrap(),
-                ),
-                created_at: started_at,
-                subtype: Some("step_debug_start".to_string()),
-            })
+            .insert_event(
+                &tenant_scope,
+                &EventRecord {
+                    id: None,
+                    instance_id: instance_id.clone(),
+                    event_type: CoreEventType::Custom,
+                    checkpoint_id: None,
+                    payload: Some(
+                        serde_json::to_vec(&serde_json::json!({
+                            "step_id": "slow-step",
+                            "step_type": "DurableSleep",
+                        }))
+                        .unwrap(),
+                    ),
+                    created_at: started_at,
+                    subtype: Some("step_debug_start".to_string()),
+                },
+            )
             .await
             .unwrap();
 
         persistence
-            .insert_event(&EventRecord {
-                id: None,
-                instance_id: instance_id.clone(),
-                event_type: CoreEventType::Custom,
-                checkpoint_id: None,
-                payload: Some(
-                    serde_json::to_vec(&serde_json::json!({
-                        "step_id": "slow-step",
-                        "outputs": {"slept": true},
-                    }))
-                    .unwrap(),
-                ),
-                created_at: completed_at,
-                subtype: Some("step_debug_end".to_string()),
-            })
+            .insert_event(
+                &tenant_scope,
+                &EventRecord {
+                    id: None,
+                    instance_id: instance_id.clone(),
+                    event_type: CoreEventType::Custom,
+                    checkpoint_id: None,
+                    payload: Some(
+                        serde_json::to_vec(&serde_json::json!({
+                            "step_id": "slow-step",
+                            "outputs": {"slept": true},
+                        }))
+                        .unwrap(),
+                    ),
+                    created_at: completed_at,
+                    subtype: Some("step_debug_end".to_string()),
+                },
+            )
             .await
             .unwrap();
 
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3021,9 +3545,11 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "launchsettle").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "launchsettle").await;
 
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "branch-b",
@@ -3046,22 +3572,32 @@ mod tests {
             "settled_at_ms": 1_700_000_000_500_i64,
         });
         persistence
-            .insert_event(&EventRecord {
-                id: None,
-                instance_id: instance_id.clone(),
-                event_type: CoreEventType::Custom,
-                checkpoint_id: None,
-                payload: Some(serde_json::to_vec(&payload).unwrap()),
-                created_at: Utc::now(),
-                subtype: Some("step_debug_end".to_string()),
-            })
+            .insert_event(
+                &tenant_scope,
+                &EventRecord {
+                    id: None,
+                    instance_id: instance_id.clone(),
+                    event_type: CoreEventType::Custom,
+                    checkpoint_id: None,
+                    payload: Some(serde_json::to_vec(&payload).unwrap()),
+                    created_at: Utc::now(),
+                    subtype: Some("step_debug_end".to_string()),
+                },
+            )
             .await
             .unwrap();
 
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3079,10 +3615,12 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "running").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "running").await;
 
         // Insert only start event (no end = running)
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-running",
@@ -3097,7 +3635,14 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3115,10 +3660,12 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "failed").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "failed").await;
 
         // Insert a failed step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-failed",
@@ -3131,6 +3678,7 @@ mod tests {
         .await;
 
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-failed",
@@ -3143,7 +3691,14 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3167,9 +3722,11 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "outputerr").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "outputerr").await;
 
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "agent-step",
@@ -3182,6 +3739,7 @@ mod tests {
         .await;
 
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "agent-step",
@@ -3197,7 +3755,14 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3217,7 +3782,12 @@ mod tests {
         // Count is instance-scoped, so this is not a whole-table count.
         assert_eq!(
             persistence
-                .count_paired_records(&instance_id, &workflow_vocabulary(), &failed_filter)
+                .count_paired_records(
+                    &tenant_scope,
+                    &instance_id,
+                    &workflow_vocabulary(),
+                    &failed_filter
+                )
                 .await
                 .unwrap(),
             1
@@ -3231,10 +3801,12 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "bystatus").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "bystatus").await;
 
         // Insert completed step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-1",
@@ -3246,6 +3818,7 @@ mod tests {
         )
         .await;
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-1",
@@ -3257,6 +3830,7 @@ mod tests {
 
         // Insert running step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-2",
@@ -3270,6 +3844,7 @@ mod tests {
 
         // Insert failed step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-3",
@@ -3281,6 +3856,7 @@ mod tests {
         )
         .await;
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-3",
@@ -3297,7 +3873,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3311,7 +3894,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3325,7 +3915,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3340,10 +3937,12 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "bytype").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "bytype").await;
 
         // Insert Http step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-http",
@@ -3354,10 +3953,20 @@ mod tests {
             None,
         )
         .await;
-        insert_step_end_pg(&persistence, &instance_id, "step-http", None, None, None).await;
+        insert_step_end_pg(
+            &tenant_scope,
+            &persistence,
+            &instance_id,
+            "step-http",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         // Insert Transform step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-transform",
@@ -3369,6 +3978,7 @@ mod tests {
         )
         .await;
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-transform",
@@ -3384,7 +3994,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3400,13 +4017,15 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "byids").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "byids").await;
 
         // The quoted id proves the filter binds ids as data (a JSON array
         // expanded by `jsonb_array_elements_text`) rather than splicing them
         // into the SQL text.
         for step_id in ["step-a", "step-b", "step-\"quoted\""] {
             insert_step_start_pg(
+                &tenant_scope,
                 &persistence,
                 &instance_id,
                 step_id,
@@ -3417,7 +4036,16 @@ mod tests {
                 None,
             )
             .await;
-            insert_step_end_pg(&persistence, &instance_id, step_id, None, None, None).await;
+            insert_step_end_pg(
+                &tenant_scope,
+                &persistence,
+                &instance_id,
+                step_id,
+                None,
+                None,
+                None,
+            )
+            .await;
         }
 
         let filter = ListPairedRecordsFilter {
@@ -3426,7 +4054,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3437,7 +4072,7 @@ mod tests {
         assert_eq!(steps[1].correlation_id, "step-\"quoted\"");
 
         let count = persistence
-            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
+            .count_paired_records(&tenant_scope, &instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
         assert_eq!(count, 2);
@@ -3448,13 +4083,20 @@ mod tests {
             ..filter
         };
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(steps.is_empty());
         assert_eq!(
             persistence
-                .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
+                .count_paired_records(&tenant_scope, &instance_id, &workflow_vocabulary(), &filter)
                 .await
                 .unwrap(),
             0
@@ -3468,7 +4110,8 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "pagination").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "pagination").await;
 
         // Insert 5 steps back to back, with no sleeps to separate their
         // timestamps: paging is by the start event's BIGSERIAL `id`, so
@@ -3476,6 +4119,7 @@ mod tests {
         // values cannot make the pages overlap.
         for i in 1..=5 {
             insert_step_start_pg(
+                &tenant_scope,
                 &persistence,
                 &instance_id,
                 &format!("step-{}", i),
@@ -3487,6 +4131,7 @@ mod tests {
             )
             .await;
             insert_step_end_pg(
+                &tenant_scope,
                 &persistence,
                 &instance_id,
                 &format!("step-{}", i),
@@ -3502,14 +4147,21 @@ mod tests {
         // Total count for THIS instance only (other tests' rows live in the
         // same table).
         let count = persistence
-            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
+            .count_paired_records(&tenant_scope, &instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
         assert_eq!(count, 5);
 
         // Get first page (limit 2)
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 2, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                2,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(steps.len(), 2);
@@ -3518,7 +4170,14 @@ mod tests {
 
         // Get second page
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 2, 2)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                2,
+                2,
+            )
             .await
             .unwrap();
         assert_eq!(steps.len(), 2);
@@ -3533,10 +4192,12 @@ mod tests {
         let pool = test_pool().await;
         let persistence = PostgresPersistence::new(pool.clone());
 
-        let instance_id = register_step_summary_instance(&persistence, "scopes").await;
+        let (tenant_scope, instance_id) =
+            register_step_summary_instance(&persistence, "scopes").await;
 
         // Root level step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-root",
@@ -3547,10 +4208,20 @@ mod tests {
             None,
         )
         .await;
-        insert_step_end_pg(&persistence, &instance_id, "step-root", None, None, None).await;
+        insert_step_end_pg(
+            &tenant_scope,
+            &persistence,
+            &instance_id,
+            "step-root",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         // Step in scope
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-scoped",
@@ -3562,6 +4233,7 @@ mod tests {
         )
         .await;
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-scoped",
@@ -3573,6 +4245,7 @@ mod tests {
 
         // Nested step
         insert_step_start_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-nested",
@@ -3584,6 +4257,7 @@ mod tests {
         )
         .await;
         insert_step_end_pg(
+            &tenant_scope,
             &persistence,
             &instance_id,
             "step-nested",
@@ -3600,7 +4274,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3619,7 +4300,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -3635,7 +4323,14 @@ mod tests {
         };
 
         let steps = persistence
-            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .list_paired_records(
+                &tenant_scope,
+                &instance_id,
+                &workflow_vocabulary(),
+                &filter,
+                100,
+                0,
+            )
             .await
             .unwrap();
 

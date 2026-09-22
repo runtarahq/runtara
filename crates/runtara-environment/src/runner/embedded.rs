@@ -63,11 +63,15 @@ use super::traits::{
 ///
 /// The existing `started_at` is re-used rather than restamped, so a run that
 /// suspends and wakes still reports when it first began.
-async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
+async fn mark_running(
+    tenant_id: &runtara_core::TenantId,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+) {
     // One statement: the COALESCE inside `mark_instance_running` carries the
     // original `started_at` forward, which this used to read the row to do.
     if let Err(e) = persistence
-        .mark_instance_running(instance_id, chrono::Utc::now())
+        .mark_instance_running(tenant_id, instance_id, chrono::Utc::now())
         .await
     {
         warn!(instance_id, error = %e, "Failed to mark invoke instance running");
@@ -968,9 +972,11 @@ impl EmbeddedWasmRunner {
         env
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_spec(
         &self,
         options: &LaunchOptions,
+        tenant_id: runtara_core::TenantId,
         env: HashMap<String, String>,
         stderr: Option<std::fs::File>,
         timeout: Duration,
@@ -988,6 +994,7 @@ impl EmbeddedWasmRunner {
         let debug_mode = env.get("DEBUG_MODE").is_some_and(|value| value == "true");
         let mut host = crate::runtime_host::PersistenceRuntimeHost::new(
             Arc::clone(&self.handler_state),
+            tenant_id,
             options.instance_id.clone(),
             debug_mode,
         )
@@ -1036,7 +1043,11 @@ impl EmbeddedWasmRunner {
         }
         let instance = self
             .persistence
-            .get_instance(&options.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new(options.tenant_id.clone())
+                    .map_err(|error| RunnerError::StartFailed(error.to_string()))?,
+                &options.instance_id,
+            )
             .await
             .map_err(|error| RunnerError::StartFailed(format!("load instance input: {error}")))?
             .ok_or_else(|| {
@@ -1392,18 +1403,20 @@ fn on_signal_checkpoint_ids(
 ///
 /// Returns true when it woke the instance.
 async fn wake_if_signal_already_arrived(
+    tenant_id: &runtara_core::TenantId,
     persistence: &dyn Persistence,
     instance_id: &str,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
 ) -> bool {
     for checkpoint_id in on_signal_checkpoint_ids(wakes) {
         match persistence
-            .get_custom_signal(instance_id, checkpoint_id)
+            .get_custom_signal(tenant_id, instance_id, checkpoint_id)
             .await
         {
             Ok(Some(_)) => {
                 if let Err(e) = persistence
                     .schedule_wake(
+                        tenant_id,
                         instance_id,
                         chrono::Utc::now(),
                         runtara_core::domain::WakeReason::CustomSignal,
@@ -1431,14 +1444,19 @@ async fn wake_if_signal_already_arrived(
 /// Record an unacknowledged cancellation after the guest has exited. Preserve
 /// accepted terminal outcomes. The host cannot provide a guest cleanup receipt:
 /// leave the command pending and mark an unclean exit only if still running.
-async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
-    match persistence.get_pending_signal(instance_id).await {
+async fn record_unacknowledged_cancel_exit(
+    tenant_id: &runtara_core::TenantId,
+    persistence: &Arc<dyn Persistence>,
+    instance_id: &str,
+) {
+    match persistence.get_pending_signal(tenant_id, instance_id).await {
         Ok(Some(signal))
             if signal.signal_type == runtara_core::domain::SignalType::Cancel
                 && signal.acknowledged_at.is_none() =>
         {
             let result = persistence
                 .complete_instance(
+                    tenant_id,
                     CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
                         .if_running()
                         .with_termination("aborted", None),
@@ -1467,8 +1485,12 @@ async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, i
 
 /// A cleanup alarm ends the whole Store without acknowledging any command.
 /// Preserve accepted terminal state and distinguish this from a normal timeout.
-async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
-    let status = match persistence.get_pending_signal(instance_id).await {
+async fn record_cleanup_aborted_exit(
+    tenant_id: &runtara_core::TenantId,
+    persistence: &Arc<dyn Persistence>,
+    instance_id: &str,
+) {
+    let status = match persistence.get_pending_signal(tenant_id, instance_id).await {
         Ok(Some(signal)) if signal.signal_type == runtara_core::domain::SignalType::Cancel => {
             CoreInstanceStatus::Cancelled
         }
@@ -1480,6 +1502,7 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
     };
     if let Err(error) = persistence
         .complete_instance(
+            tenant_id,
             CompleteInstanceParams::new(instance_id, status)
                 .if_running()
                 .with_error("Cooperative cleanup grace expired; whole execution aborted")
@@ -1514,6 +1537,7 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 /// `sleeping` for pure timed parks. Relaunch clears the marker with the
 /// running transition.
 async fn park_invoke_suspend(
+    tenant_id: &runtara_core::TenantId,
     persistence: &dyn Persistence,
     instance_id: &str,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
@@ -1541,7 +1565,10 @@ async fn park_invoke_suspend(
         },
         deadline,
     };
-    match persistence.park_instance(instance_id, request).await {
+    match persistence
+        .park_instance(tenant_id, instance_id, request)
+        .await
+    {
         Ok(Decision::Applied(_)) => {}
         Ok(_) => {
             warn!(
@@ -1557,7 +1584,7 @@ async fn park_invoke_suspend(
     }
     // Close the arrival-before-park race. Later arrivals observe suspended state
     // and schedule their own immediate wake. Never overwrite it with the timer.
-    wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+    wake_if_signal_already_arrived(tenant_id, persistence, instance_id, wakes).await;
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
@@ -1726,8 +1753,11 @@ impl Runner for EmbeddedWasmRunner {
         // its epoch/watchdog rings cover guest work after the start gate
         // opens. `Duration::MAX` overflows its monotonic HTTP deadline and
         // lets an otherwise healthy gated run panic before it can park.
+        let tenant_id = runtara_core::TenantId::new(options.tenant_id.clone())
+            .map_err(|error| RunnerError::StartFailed(error.to_string()))?;
         let (spec, runtime_host) = self.run_spec(
             options,
+            tenant_id.clone(),
             env,
             // Durable prepared launches intentionally do not create a
             // per-run stderr file in the parent. See `prepare_embedded_launch`:
@@ -1799,7 +1829,7 @@ impl Runner for EmbeddedWasmRunner {
                 // before the run permit. Only guest invocation remains after
                 // the durable gate confirmation.
                 if !supervisor_owns_lifecycle {
-                    mark_running(persistence.as_ref(), &instance_id).await;
+                    mark_running(&tenant_id, persistence.as_ref(), &instance_id).await;
                 }
                 let run = if let Some(authority) = scoped_authority {
                     scoped::execute(
@@ -1837,7 +1867,8 @@ impl Runner for EmbeddedWasmRunner {
                         // Store-freeing durable sleep: the guest exited with a
                         // timed wake instead of blocking; park it so the wake
                         // scheduler relaunches at the deadline.
-                        park_invoke_suspend(persistence.as_ref(), &instance_id, wakes).await;
+                        park_invoke_suspend(&tenant_id, persistence.as_ref(), &instance_id, wakes)
+                            .await;
                     }
                     InvokeExit::Failed(_) => {
                         warn!(instance_id = %instance_id, "Embedded workflow run returned error");
@@ -1852,7 +1883,7 @@ impl Runner for EmbeddedWasmRunner {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
                     InvokeExit::CleanupAborted => {
-                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                        record_cleanup_aborted_exit(&tenant_id, &persistence, &instance_id).await;
                     }
                 }
                 if matches!(&run.exit, InvokeExit::Suspended(_)) {
@@ -1860,20 +1891,20 @@ impl Runner for EmbeddedWasmRunner {
                     // it parks. Resolve it now; the scheduler recovers this if
                     // the process stops before reaching this point.
                     if let Err(error) = persistence
-                        .cancel_suspended_instances(Some(&instance_id), 1)
+                        .cancel_suspended_instances(&tenant_id, Some(&instance_id), 1)
                         .await
                     {
                         warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
                     }
                 } else {
-                    record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
+                    record_unacknowledged_cancel_exit(&tenant_id, &persistence, &instance_id).await;
                 }
             } else if let Some(pre) = workflow.command() {
                 // Generic non-workflow components retain their established
                 // wasi:cli/run ABI. Generated direct workflows were rejected
                 // during preparation if they lack lifecycle.invoke.
                 if !supervisor_owns_lifecycle {
-                    mark_running(persistence.as_ref(), &instance_id).await;
+                    mark_running(&tenant_id, persistence.as_ref(), &instance_id).await;
                 }
                 let run = executor
                     .execute_with_start_confirmation(pre, spec, start_confirmation.clone())
@@ -1899,10 +1930,10 @@ impl Runner for EmbeddedWasmRunner {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
                     WorkflowExit::CleanupAborted => {
-                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                        record_cleanup_aborted_exit(&tenant_id, &persistence, &instance_id).await;
                     }
                 }
-                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
+                record_unacknowledged_cancel_exit(&tenant_id, &persistence, &instance_id).await;
             } else {
                 error!(
                     instance_id = %instance_id,
@@ -2536,6 +2567,7 @@ mod tests {
         let (persistence, instance_id) = running_instance().await;
         let deadline_ms = 1_900_000_000_000u64; // a fixed absolute epoch-ms
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::At(deadline_ms)],
@@ -2543,7 +2575,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2571,6 +2606,7 @@ mod tests {
         // ack; park must NOT stamp a premature sleep_until that would wake it.
         let (persistence, instance_id) = running_instance().await;
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnResume],
@@ -2578,7 +2614,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2600,6 +2639,7 @@ mod tests {
         // find it, but with NO sleep_until (the waker stamps it on arrival).
         let (persistence, instance_id) = running_instance().await;
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnSignal(SignalWait {
@@ -2610,7 +2650,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2641,11 +2684,17 @@ mod tests {
         // forever with its signal already in the table.
         let (persistence, instance_id) = running_instance().await;
         persistence
-            .put_custom_signal(&instance_id, "raced-sig", b"{}")
+            .put_custom_signal(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+                "raced-sig",
+                b"{}",
+            )
             .await
             .expect("insert signal");
 
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnSignal(SignalWait {
@@ -2656,7 +2705,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2673,7 +2725,11 @@ mod tests {
         // Non-destructive: the replayed guest still observes the signal.
         assert!(
             persistence
-                .get_custom_signal(&instance_id, "raced-sig")
+                .get_custom_signal(
+                    &runtara_core::TenantId::new("park-tenant").unwrap(),
+                    &instance_id,
+                    "raced-sig"
+                )
                 .await
                 .expect("read signal")
                 .is_some(),
@@ -2687,6 +2743,7 @@ mod tests {
         // The ordinary case must be untouched by the re-check above.
         let (persistence, instance_id) = running_instance().await;
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnSignal(SignalWait {
@@ -2697,7 +2754,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2718,6 +2778,7 @@ mod tests {
         let (persistence, instance_id) = running_instance().await;
         persistence
             .complete_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
                 runtara_core::persistence::CompleteInstanceParams::new(
                     &instance_id,
                     CoreInstanceStatus::Completed,
@@ -2728,6 +2789,7 @@ mod tests {
             .expect("complete");
 
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::At(1_900_000_000_000u64)],
@@ -2735,7 +2797,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2756,6 +2821,7 @@ mod tests {
         let (persistence, instance_id) = running_instance().await;
         let deadline_ms = 1_950_000_000_000u64;
         park_invoke_suspend(
+            &runtara_core::TenantId::new("park-tenant").unwrap(),
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnSignal(SignalWait {
@@ -2766,7 +2832,10 @@ mod tests {
         .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("park-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2791,12 +2860,29 @@ mod tests {
             let (persistence, id) = backstop_fixture().await;
             if requested_cancel {
                 persistence
-                    .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+                    .insert_signal(
+                        &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                        &id,
+                        runtara_core::domain::SignalType::Cancel,
+                        b"",
+                    )
                     .await
                     .unwrap();
             }
-            record_cleanup_aborted_exit(&persistence, &id).await;
-            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            record_cleanup_aborted_exit(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &persistence,
+                &id,
+            )
+            .await;
+            let after = persistence
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(
                 after.status,
                 if requested_cancel {
@@ -2814,7 +2900,13 @@ mod tests {
                     .contains("cleanup grace expired")
             );
             assert!(after.finished_at.is_some());
-            let pending = persistence.get_pending_signal(&id).await.unwrap();
+            let pending = persistence
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                )
+                .await
+                .unwrap();
             if requested_cancel {
                 assert!(pending.unwrap().acknowledged_at.is_none());
             } else {
@@ -2834,6 +2926,7 @@ mod tests {
             let (persistence, id) = backstop_fixture().await;
             persistence
                 .complete_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
                     CompleteInstanceParams::new(&id, status)
                         .with_output(b"accepted output")
                         .with_error("accepted error")
@@ -2841,9 +2934,28 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let before = persistence.get_instance(&id).await.unwrap().unwrap();
-            record_cleanup_aborted_exit(&persistence, &id).await;
-            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            let before = persistence
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            record_cleanup_aborted_exit(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &persistence,
+                &id,
+            )
+            .await;
+            let after = persistence
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(after.status, before.status);
             assert_eq!(after.output, before.output);
             assert_eq!(after.error, before.error);
@@ -2863,11 +2975,17 @@ mod tests {
         ] {
             let (persistence, id) = backstop_fixture().await;
             persistence
-                .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+                .insert_signal(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                    runtara_core::domain::SignalType::Cancel,
+                    b"",
+                )
                 .await
                 .unwrap();
             persistence
                 .complete_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
                     CompleteInstanceParams::new(&id, status)
                         .with_output(b"result")
                         .with_error("error")
@@ -2875,9 +2993,28 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let before = persistence.get_instance(&id).await.unwrap().unwrap();
-            record_unacknowledged_cancel_exit(&persistence, &id).await;
-            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            let before = persistence
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            record_unacknowledged_cancel_exit(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &persistence,
+                &id,
+            )
+            .await;
+            let after = persistence
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(after.status, status);
             assert_eq!(after.output, before.output);
             assert_eq!(after.error, before.error);
@@ -2886,7 +3023,10 @@ mod tests {
             assert_eq!(after.exit_code, before.exit_code);
             assert!(
                 persistence
-                    .get_pending_signal(&id)
+                    .get_pending_signal(
+                        &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                        &id
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -2901,22 +3041,61 @@ mod tests {
     async fn unacknowledged_cancel_exit_does_not_fabricate_a_guest_receipt() {
         let (persistence, id) = backstop_fixture().await;
         persistence
-            .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &id,
+                runtara_core::domain::SignalType::Cancel,
+                b"",
+            )
             .await
             .unwrap();
-        let command = persistence.get_pending_signal(&id).await.unwrap().unwrap();
-        record_unacknowledged_cancel_exit(&persistence, &id).await;
-        let after = persistence.get_instance(&id).await.unwrap().unwrap();
+        let command = persistence
+            .get_pending_signal(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        record_unacknowledged_cancel_exit(
+            &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+            &persistence,
+            &id,
+        )
+        .await;
+        let after = persistence
+            .get_instance(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(after.status, CoreInstanceStatus::Cancelled);
         assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
         assert!(after.finished_at.is_some());
-        let pending = persistence.get_pending_signal(&id).await.unwrap().unwrap();
+        let pending = persistence
+            .get_pending_signal(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                &id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(pending.command_id, command.command_id);
         assert!(pending.acknowledged_at.is_none());
-        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        record_unacknowledged_cancel_exit(
+            &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+            &persistence,
+            &id,
+        )
+        .await;
         assert_eq!(
             persistence
-                .get_instance(&id)
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    &id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -2935,6 +3114,7 @@ mod tests {
         let (persistence, instance_id) = backstop_fixture().await;
         persistence
             .insert_signal(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
                 instance_id.as_str(),
                 runtara_core::domain::SignalType::Cancel,
                 b"",
@@ -2943,9 +3123,13 @@ mod tests {
             .unwrap();
         persistence
             .acknowledge_signal(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
                 instance_id.as_str(),
                 &persistence
-                    .get_pending_signal(instance_id.as_str())
+                    .get_pending_signal(
+                        &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                        instance_id.as_str(),
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -2955,18 +3139,29 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                instance_id.as_str(),
-                CoreInstanceStatus::Completed,
-            ))
+            .complete_instance(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                runtara_core::persistence::CompleteInstanceParams::new(
+                    instance_id.as_str(),
+                    CoreInstanceStatus::Completed,
+                ),
+            )
             .await
             .unwrap();
 
-        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(
+            &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+            &persistence,
+            instance_id.as_str(),
+        )
+        .await;
 
         assert_eq!(
             persistence
-                .get_instance(instance_id.as_str())
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    instance_id.as_str()
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -2982,18 +3177,29 @@ mod tests {
     async fn a_run_with_no_cancel_is_untouched() {
         let (persistence, instance_id) = backstop_fixture().await;
         persistence
-            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                instance_id.as_str(),
-                CoreInstanceStatus::Completed,
-            ))
+            .complete_instance(
+                &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                runtara_core::persistence::CompleteInstanceParams::new(
+                    instance_id.as_str(),
+                    CoreInstanceStatus::Completed,
+                ),
+            )
             .await
             .unwrap();
 
-        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(
+            &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+            &persistence,
+            instance_id.as_str(),
+        )
+        .await;
 
         assert_eq!(
             persistence
-                .get_instance(instance_id.as_str())
+                .get_instance(
+                    &runtara_core::TenantId::new("backstop-tenant").unwrap(),
+                    instance_id.as_str()
+                )
                 .await
                 .unwrap()
                 .unwrap()

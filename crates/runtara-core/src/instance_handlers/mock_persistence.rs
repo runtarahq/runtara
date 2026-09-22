@@ -1,129 +1,103 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! In-memory `Persistence` mock used by the handler unit tests.
-//!
-//! Compiled under `#[cfg(test)]` or the `test-support` feature, so it carries
-//! zero cost in an ordinary release build. Each handler submodule's `mod tests`
-//! imports the mock via `crate::instance_handlers::mock_persistence::*`;
-//! `runtara-server` reaches it as
-//! `runtara_core::instance_handlers::mock_persistence` to drive the instance
-//! HTTP router.
+//! Handler fixtures and fault injection over the tenant-enforcing reference backend.
 
+use crate::TenantId;
 use crate::domain::InstanceStatus as CoreInstanceStatus;
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-
+use crate::domain::{InstanceStatus, SignalType};
+use crate::error::CoreError;
+use crate::persistence::memory::InMemoryPersistence;
+use crate::persistence::*;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use std::sync::Mutex;
 
-use crate::error::CoreError;
-use crate::persistence::{
-    CheckpointRecord, CompleteInstanceGuard, CompleteInstanceParams, CustomSignalRecord,
-    EventRecord, EventVocabulary, InstanceRecord, ListEventsFilter, ListPairedRecordsFilter,
-    PairedRecordSummary, Persistence, SignalRecord,
-};
-
-/// Mock persistence for handler unit tests.
+/// Test backend with explicit fault injection and reference storage semantics.
+#[derive(Default)]
 pub struct MockPersistence {
-    instances: Mutex<HashMap<String, InstanceRecord>>,
-    checkpoints: Mutex<HashMap<(String, String), CheckpointRecord>>,
-    signals: Mutex<HashMap<String, SignalRecord>>,
-    events: Mutex<Vec<EventRecord>>,
-    custom_signals: Mutex<HashMap<(String, String), CustomSignalRecord>>,
-    fail_signal_read: Mutex<bool>,
+    inner: InMemoryPersistence,
     fail_register: Mutex<bool>,
     fail_status_update: Mutex<bool>,
+    fail_signal_read: Mutex<bool>,
+    fail_instance_read: Mutex<bool>,
+    fail_count: Mutex<bool>,
+    fail_lifecycle: Mutex<bool>,
+    remove_parent_before_event: Mutex<bool>,
     active_instance_count: Mutex<Option<i64>>,
 }
 
-impl Default for MockPersistence {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl MockPersistence {
-    /// An empty store: no instances, checkpoints, signals or events.
+    /// Create an empty backend.
     pub fn new() -> Self {
-        Self {
-            instances: Mutex::new(HashMap::new()),
-            checkpoints: Mutex::new(HashMap::new()),
-            signals: Mutex::new(HashMap::new()),
-            events: Mutex::new(Vec::new()),
-            custom_signals: Mutex::new(HashMap::new()),
-            fail_signal_read: Mutex::new(false),
-            fail_register: Mutex::new(false),
-            fail_status_update: Mutex::new(false),
-            active_instance_count: Mutex::new(None),
-        }
+        Self::default()
     }
-
-    /// Override the value returned by `count_active_instances` (default: 0).
+    /// Override the admission count for handler tests.
     pub fn with_active_count(self, count: i64) -> Self {
         *self.active_instance_count.lock().unwrap() = Some(count);
         self
     }
-
-    /// Seed one instance, keyed by its `instance_id`.
+    /// Seed an instance fixture.
     pub fn with_instance(self, instance: InstanceRecord) -> Self {
-        self.instances
-            .lock()
-            .unwrap()
-            .insert(instance.instance_id.clone(), instance);
+        self.inner.seed_instance(instance);
         self
     }
-
-    /// Seed one checkpoint, keyed by `(instance_id, checkpoint_id)`.
+    /// Seed a checkpoint fixture.
     pub fn with_checkpoint(self, checkpoint: CheckpointRecord) -> Self {
-        self.checkpoints.lock().unwrap().insert(
-            (
-                checkpoint.instance_id.clone(),
-                checkpoint.checkpoint_id.clone(),
-            ),
-            checkpoint,
-        );
+        self.inner.seed_checkpoint(checkpoint);
         self
     }
-
-    /// Seed one pending lifecycle signal for an instance.
+    /// Seed a lifecycle signal fixture.
     pub fn with_signal(self, signal: SignalRecord) -> Self {
-        self.signals
-            .lock()
-            .unwrap()
-            .insert(signal.instance_id.clone(), signal);
+        self.inner.seed_signal(signal);
         self
     }
-
-    /// Seed one pending custom signal, keyed by `(instance_id, checkpoint_id)`.
+    /// Seed a custom signal fixture.
     pub fn with_custom_signal(self, signal: CustomSignalRecord) -> Self {
-        self.custom_signals.lock().unwrap().insert(
-            (signal.instance_id.clone(), signal.checkpoint_id.clone()),
-            signal,
-        );
+        self.inner.seed_custom_signal(signal);
         self
     }
-
-    /// Make pending signal reads fail.
-    pub fn set_fail_signal_read(&self) {
-        *self.fail_signal_read.lock().unwrap() = true;
-    }
-
-    /// Make every subsequent `register_instance` fail.
-    #[allow(dead_code)]
+    /// Fail subsequent registrations.
     pub fn set_fail_register(&self) {
         *self.fail_register.lock().unwrap() = true;
     }
-
-    /// Make every subsequent `update_instance_status` fail.
-    #[allow(dead_code)]
+    /// Fail subsequent status updates.
     pub fn set_fail_status_update(&self) {
         *self.fail_status_update.lock().unwrap() = true;
     }
-
-    /// Every event recorded so far, in insertion order.
+    /// Fail subsequent signal reads.
+    pub fn set_fail_signal_read(&self) {
+        *self.fail_signal_read.lock().unwrap() = true;
+    }
+    /// Fail subsequent instance reads.
+    pub fn set_fail_instance_read(&self) {
+        *self.fail_instance_read.lock().unwrap() = true;
+    }
+    /// Fail subsequent admission counts.
+    pub fn set_fail_count(&self) {
+        *self.fail_count.lock().unwrap() = true;
+    }
+    /// Fail lifecycle command application before any mutation.
+    pub fn set_fail_lifecycle(&self) {
+        *self.fail_lifecycle.lock().unwrap() = true;
+    }
+    /// Simulate a parent disappearing between a handler's read and event write.
+    pub fn set_remove_parent_before_event(&self) {
+        *self.remove_parent_before_event.lock().unwrap() = true;
+    }
+    /// Inspect all recorded events in this test fixture.
     pub fn get_events(&self) -> Vec<EventRecord> {
-        self.events.lock().unwrap().clone()
+        self.inner.recorded_events()
+    }
+
+    fn fail_if(&self, flag: &Mutex<bool>, operation: &str) -> Result<(), CoreError> {
+        if *flag.lock().unwrap() {
+            Err(CoreError::PersistenceError {
+                operation: operation.into(),
+                details: "injected storage failure".into(),
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -184,401 +158,426 @@ pub fn make_signal(instance_id: &str, signal_type: crate::domain::SignalType) ->
 impl Persistence for MockPersistence {
     async fn register_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-        tenant_id: &str,
-    ) -> std::result::Result<(), CoreError> {
-        if *self.fail_register.lock().unwrap() {
-            return Err(CoreError::PersistenceError {
-                operation: "register_instance".to_string(),
-                details: "Mock register failure".to_string(),
-            });
-        }
-        let instance = make_instance(instance_id, tenant_id, CoreInstanceStatus::Pending);
-        self.instances
-            .lock()
-            .unwrap()
-            .insert(instance_id.to_string(), instance);
-        Ok(())
+    ) -> Result<(), CoreError> {
+        self.fail_if(&self.fail_register, "register_instance")?;
+        self.inner.register_instance(tenant_id, instance_id).await
     }
-
+    async fn try_register_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        input: Option<&[u8]>,
+    ) -> Result<bool, CoreError> {
+        self.fail_if(&self.fail_register, "register_instance")?;
+        self.inner
+            .try_register_instance(tenant_id, instance_id, input)
+            .await
+    }
     async fn get_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-    ) -> std::result::Result<Option<InstanceRecord>, CoreError> {
-        Ok(self.instances.lock().unwrap().get(instance_id).cloned())
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        self.fail_if(&self.fail_instance_read, "get_instance")?;
+        self.inner.get_instance(tenant_id, instance_id).await
     }
-
+    async fn get_instance_meta(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        self.fail_if(&self.fail_instance_read, "get_instance")?;
+        self.inner.get_instance_meta(tenant_id, instance_id).await
+    }
     async fn update_instance_status(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-        status: CoreInstanceStatus,
+        status: InstanceStatus,
         started_at: Option<DateTime<Utc>>,
-    ) -> std::result::Result<(), CoreError> {
-        if *self.fail_status_update.lock().unwrap() {
-            return Err(CoreError::PersistenceError {
-                operation: "update_instance_status".to_string(),
-                details: "Mock status update failure".to_string(),
-            });
-        }
-        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.status = status;
-            inst.started_at = started_at;
-        }
-        Ok(())
+    ) -> Result<(), CoreError> {
+        self.fail_if(&self.fail_status_update, "update_instance_status")?;
+        self.inner
+            .update_instance_status(tenant_id, instance_id, status, started_at)
+            .await
     }
-
     async fn update_instance_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
-    ) -> std::result::Result<(), CoreError> {
-        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.checkpoint_id = Some(checkpoint_id.to_string());
-        }
-        Ok(())
+    ) -> Result<(), CoreError> {
+        self.inner
+            .update_instance_checkpoint(tenant_id, instance_id, checkpoint_id)
+            .await
     }
-
     async fn complete_instance(
         &self,
+        tenant_id: &TenantId,
         params: CompleteInstanceParams<'_>,
-    ) -> std::result::Result<bool, CoreError> {
-        let run_label = params.normalized_run_label()?;
-        let mut instances = self.instances.lock().unwrap();
-        let Some(inst) = instances.get_mut(params.instance_id) else {
-            return match params.guard {
-                // The contract requires an unguarded miss to be a hard error,
-                // guarded miss is just a skipped Ok(false).
-                CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
-                    instance_id: params.instance_id.to_string(),
-                }),
-                CompleteInstanceGuard::OnlyRunning => Ok(false),
-            };
-        };
-        if matches!(params.guard, CompleteInstanceGuard::OnlyRunning)
-            && inst.status != CoreInstanceStatus::Running
-        {
-            return Ok(false);
-        }
-        inst.status = params.status;
-        inst.run_label = run_label;
-        // Output and error are replaced, including when the caller passes None.
-        inst.output = params.output.map(|o| o.to_vec());
-        inst.error = params.error.map(|e| e.to_string());
-        // Optional metadata is merged: only overwrite supplied values.
-        if let Some(cp) = params.checkpoint_id {
-            inst.checkpoint_id = Some(cp.to_string());
-        }
-        if let Some(reason) = params.termination_reason {
-            inst.termination_reason = Some(reason.to_string());
-        }
-        if let Some(code) = params.exit_code {
-            inst.exit_code = Some(code);
-        }
-        if matches!(
-            params.status,
-            CoreInstanceStatus::Completed
-                | CoreInstanceStatus::Failed
-                | CoreInstanceStatus::Cancelled
-                | CoreInstanceStatus::Suspended
-        ) {
-            inst.finished_at = Some(Utc::now());
-        }
-        Ok(true)
+    ) -> Result<bool, CoreError> {
+        self.inner.complete_instance(tenant_id, params).await
     }
-
+    async fn store_instance_input(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        input: &[u8],
+    ) -> Result<(), CoreError> {
+        self.inner
+            .store_instance_input(tenant_id, instance_id, input)
+            .await
+    }
     async fn save_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         state: &[u8],
-    ) -> std::result::Result<(), CoreError> {
-        let cp = make_checkpoint(instance_id, checkpoint_id, state);
-        self.checkpoints
-            .lock()
-            .unwrap()
-            .insert((instance_id.to_string(), checkpoint_id.to_string()), cp);
-        Ok(())
+    ) -> Result<(), CoreError> {
+        self.inner
+            .save_checkpoint(tenant_id, instance_id, checkpoint_id, state)
+            .await
     }
-
     async fn load_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
-    ) -> std::result::Result<Option<CheckpointRecord>, CoreError> {
-        Ok(self
-            .checkpoints
-            .lock()
-            .unwrap()
-            .get(&(instance_id.to_string(), checkpoint_id.to_string()))
-            .cloned())
+    ) -> Result<Option<CheckpointRecord>, CoreError> {
+        self.inner
+            .load_checkpoint(tenant_id, instance_id, checkpoint_id)
+            .await
     }
-
+    #[allow(clippy::too_many_arguments)] // Existing filters plus explicit tenant scope.
     async fn list_checkpoints(
         &self,
-        _instance_id: &str,
-        _checkpoint_id: Option<&str>,
-        _limit: i64,
-        _offset: i64,
-        _created_after: Option<DateTime<Utc>>,
-        _created_before: Option<DateTime<Utc>>,
-    ) -> std::result::Result<Vec<CheckpointRecord>, CoreError> {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        instance_id: &str,
+        checkpoint_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+        created_after: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
+    ) -> Result<Vec<CheckpointRecord>, CoreError> {
+        self.inner
+            .list_checkpoints(
+                tenant_id,
+                instance_id,
+                checkpoint_id,
+                limit,
+                offset,
+                created_after,
+                created_before,
+            )
+            .await
     }
-
     async fn count_checkpoints(
         &self,
-        _instance_id: &str,
-        _checkpoint_id: Option<&str>,
-        _created_after: Option<DateTime<Utc>>,
-        _created_before: Option<DateTime<Utc>>,
-    ) -> std::result::Result<i64, CoreError> {
-        Ok(0)
+        tenant_id: &TenantId,
+        instance_id: &str,
+        checkpoint_id: Option<&str>,
+        created_after: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
+    ) -> Result<i64, CoreError> {
+        self.inner
+            .count_checkpoints(
+                tenant_id,
+                instance_id,
+                checkpoint_id,
+                created_after,
+                created_before,
+            )
+            .await
     }
-
-    async fn insert_event(&self, event: &EventRecord) -> std::result::Result<(), CoreError> {
-        self.events.lock().unwrap().push(event.clone());
-        Ok(())
+    async fn insert_event(
+        &self,
+        tenant_id: &TenantId,
+        event: &EventRecord,
+    ) -> Result<(), CoreError> {
+        if *self.remove_parent_before_event.lock().unwrap() {
+            self.inner
+                .delete_instances_batch(tenant_id, std::slice::from_ref(&event.instance_id))
+                .await?;
+        }
+        self.inner.insert_event(tenant_id, event).await
     }
-
     async fn insert_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-        signal_type: crate::domain::SignalType,
-        _payload: &[u8],
-    ) -> std::result::Result<(), CoreError> {
-        let signal = make_signal(instance_id, signal_type);
-        self.signals
-            .lock()
-            .unwrap()
-            .insert(instance_id.to_string(), signal);
-        Ok(())
+        signal_type: SignalType,
+        payload: &[u8],
+    ) -> Result<(), CoreError> {
+        self.inner
+            .insert_signal(tenant_id, instance_id, signal_type, payload)
+            .await
     }
-
     async fn get_pending_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-    ) -> std::result::Result<Option<SignalRecord>, CoreError> {
-        if *self.fail_signal_read.lock().unwrap() {
-            return Err(CoreError::PersistenceError {
-                operation: "get_pending_signal".into(),
-                details: "Mock signal read failure".into(),
-            });
-        }
-        Ok(self.signals.lock().unwrap().get(instance_id).cloned())
+    ) -> Result<Option<SignalRecord>, CoreError> {
+        self.fail_if(&self.fail_signal_read, "get_pending_signal")?;
+        self.inner.get_pending_signal(tenant_id, instance_id).await
     }
-
-    async fn apply_lifecycle_command(
+    async fn acknowledge_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         command_id: &str,
-        signal_type: crate::domain::SignalType,
-    ) -> std::result::Result<crate::lifecycle::Decision, CoreError> {
-        use crate::domain::SignalType;
-        let mut instances = self.instances.lock().unwrap();
-        let mut signals = self.signals.lock().unwrap();
-        let Some(signal) = signals.get(instance_id) else {
-            return Ok(crate::lifecycle::Decision::Rejected);
-        };
-        if signal.command_id != command_id || signal.signal_type != signal_type {
-            return Ok(crate::lifecycle::Decision::Rejected);
-        }
-        let instance =
-            instances
-                .get_mut(instance_id)
-                .ok_or_else(|| CoreError::InstanceNotFound {
-                    instance_id: instance_id.into(),
-                })?;
-        if instance.status.is_terminal() && signal_type != SignalType::Cancel {
-            return Ok(crate::lifecycle::Decision::Rejected);
-        }
-        let decision = crate::lifecycle::acknowledge(
-            instance.status,
-            Some(signal.command()),
-            crate::lifecycle::Receipt {
-                id: command_id,
-                kind: signal_type,
-            },
-        );
-        match signal_type {
-            SignalType::Cancel => {
-                instance.status = CoreInstanceStatus::Cancelled;
-                instance.finished_at = Some(Utc::now());
-                instance.sleep_until = None;
-            }
-            SignalType::Pause | SignalType::Shutdown => {
-                instance.status = CoreInstanceStatus::Suspended;
-                instance.finished_at = Some(Utc::now());
-                instance.sleep_until = (signal_type == SignalType::Shutdown).then(Utc::now);
-                instance.termination_reason =
-                    (signal_type == SignalType::Shutdown).then(|| "shutdown_requested".into());
-            }
-        }
-        signals.remove(instance_id);
-        Ok(decision)
+        signal_type: SignalType,
+    ) -> Result<bool, CoreError> {
+        self.inner
+            .acknowledge_signal(tenant_id, instance_id, command_id, signal_type)
+            .await
     }
-
+    async fn apply_lifecycle_command(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        self.fail_if(&self.fail_lifecycle, "apply_lifecycle_command")?;
+        self.inner
+            .apply_lifecycle_command(tenant_id, instance_id, command_id, signal_type)
+            .await
+    }
     async fn park_instance(
         &self,
-        _instance_id: &str,
-        _request: crate::lifecycle::ParkRequest,
-    ) -> std::result::Result<crate::lifecycle::Decision, crate::error::CoreError> {
-        Ok(crate::lifecycle::Decision::Rejected)
+        tenant_id: &TenantId,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        self.inner
+            .park_instance(tenant_id, instance_id, request)
+            .await
     }
-
     async fn cancel_suspended_instances(
         &self,
-        _instance_id: Option<&str>,
-        _limit: i64,
-    ) -> std::result::Result<Vec<crate::persistence::CancelledInstance>, crate::error::CoreError>
-    {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<CancelledInstance>, CoreError> {
+        self.inner
+            .cancel_suspended_instances(tenant_id, instance_id, limit)
+            .await
     }
-
     async fn put_custom_signal(
         &self,
-        _instance_id: &str,
-        _checkpoint_id: &str,
-        _payload: &[u8],
-    ) -> std::result::Result<String, CoreError> {
-        Ok("mock-custom-signal".into())
-    }
-
-    async fn get_custom_signal(
-        &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
-    ) -> std::result::Result<Option<CustomSignalRecord>, CoreError> {
-        // Non-destructive read: retain the signal so a
-        // replayed WaitForSignal re-reads the same signal idempotently.
-        Ok(self
-            .custom_signals
-            .lock()
-            .unwrap()
-            .get(&(instance_id.to_string(), checkpoint_id.to_string()))
-            .cloned())
+        payload: &[u8],
+    ) -> Result<String, CoreError> {
+        self.inner
+            .put_custom_signal(tenant_id, instance_id, checkpoint_id, payload)
+            .await
     }
-
+    async fn get_custom_signal(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<CustomSignalRecord>, CoreError> {
+        self.inner
+            .get_custom_signal(tenant_id, instance_id, checkpoint_id)
+            .await
+    }
     async fn save_retry_attempt(
         &self,
-        _instance_id: &str,
-        _checkpoint_id: &str,
-        _attempt: i32,
-        _error_message: Option<&str>,
-    ) -> std::result::Result<(), CoreError> {
-        Ok(())
+        tenant_id: &TenantId,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        error_message: Option<&str>,
+    ) -> Result<(), CoreError> {
+        self.inner
+            .save_retry_attempt(
+                tenant_id,
+                instance_id,
+                checkpoint_id,
+                attempt,
+                error_message,
+            )
+            .await
     }
-
     async fn list_instances(
         &self,
-        _tenant_id: Option<&str>,
-        _status: Option<CoreInstanceStatus>,
-        _limit: i64,
-        _offset: i64,
-    ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        status: Option<InstanceStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        self.inner
+            .list_instances(tenant_id, status, limit, offset)
+            .await
     }
-
-    async fn health_check(&self) -> std::result::Result<bool, CoreError> {
-        Ok(true)
+    async fn health_check(&self) -> Result<bool, CoreError> {
+        self.inner.health_check().await
     }
-
-    async fn count_active_instances(&self) -> std::result::Result<i64, CoreError> {
-        Ok(self.active_instance_count.lock().unwrap().unwrap_or(0))
+    async fn count_active_instances(&self, tenant_id: &TenantId) -> Result<i64, CoreError> {
+        self.fail_if(&self.fail_count, "count_active_instances")?;
+        if let Some(count) = *self.active_instance_count.lock().unwrap() {
+            return Ok(count);
+        }
+        self.inner.count_active_instances(tenant_id).await
     }
-
-    async fn schedule_wake(
+    async fn mark_instance_running(
         &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        self.inner
+            .mark_instance_running(tenant_id, instance_id, started_at)
+            .await
+    }
+    async fn mark_instance_started(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<bool, CoreError> {
+        self.inner
+            .mark_instance_started(tenant_id, instance_id, started_at)
+            .await
+    }
+    async fn set_instance_sleep(
+        &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
-        _reason: crate::domain::WakeReason,
-    ) -> std::result::Result<(), CoreError> {
-        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.sleep_until = Some(sleep_until);
-        }
-        Ok(())
+    ) -> Result<(), CoreError> {
+        self.inner
+            .set_instance_sleep(tenant_id, instance_id, sleep_until)
+            .await
     }
-
-    /// Clears the map, matching `schedule_wake` above. A no-op here would let
-    /// a test assert sleep state against a mock that never cleared anything.
-    async fn clear_instance_sleep(&self, instance_id: &str) -> std::result::Result<(), CoreError> {
-        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.sleep_until = None;
-        }
-        Ok(())
+    async fn schedule_wake(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        deadline: DateTime<Utc>,
+        reason: crate::domain::WakeReason,
+    ) -> Result<(), CoreError> {
+        self.inner
+            .schedule_wake(tenant_id, instance_id, deadline, reason)
+            .await
     }
-
-    /// Claimed under the instance map's lock, so two concurrent callers cannot
-    /// both win.
+    async fn clear_instance_sleep(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError> {
+        self.inner
+            .clear_instance_sleep(tenant_id, instance_id)
+            .await
+    }
     async fn claim_sleeping_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-    ) -> std::result::Result<bool, CoreError> {
-        let mut instances = self.instances.lock().unwrap();
-        let Some(instance) = instances.get_mut(instance_id) else {
-            return Ok(false);
-        };
-        if instance.status != CoreInstanceStatus::Suspended
-            || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
-        {
-            return Ok(false);
-        }
-        instance.sleep_until = None;
-        Ok(true)
+    ) -> Result<bool, CoreError> {
+        self.inner
+            .claim_sleeping_instance(tenant_id, instance_id)
+            .await
     }
-
     async fn get_sleeping_instances_due(
         &self,
-        _limit: i64,
-    ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        self.inner
+            .get_sleeping_instances_due(tenant_id, limit)
+            .await
     }
-
-    /// Empty, because the due scan above is. These tests drive the instance
-    /// handlers, not the wake path; a batch claim that selected rows the scan
-    /// never offers would be an invention, not a mock.
     async fn claim_sleeping_instances_due(
         &self,
-        _limit: i64,
-        _retry_at: DateTime<Utc>,
-    ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        self.inner
+            .claim_sleeping_instances_due(tenant_id, limit, retry_at)
+            .await
     }
-
     async fn list_events(
         &self,
-        _instance_id: &str,
-        _filter: &ListEventsFilter,
-        _limit: i64,
-        _offset: i64,
-    ) -> std::result::Result<Vec<EventRecord>, CoreError> {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<EventRecord>, CoreError> {
+        self.inner
+            .list_events(tenant_id, instance_id, filter, limit, offset)
+            .await
     }
-
     async fn count_events(
         &self,
-        _instance_id: &str,
-        _filter: &ListEventsFilter,
-    ) -> std::result::Result<i64, CoreError> {
-        Ok(0)
+        tenant_id: &TenantId,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+    ) -> Result<i64, CoreError> {
+        self.inner
+            .count_events(tenant_id, instance_id, filter)
+            .await
     }
-
     async fn list_paired_records(
         &self,
-        _instance_id: &str,
-        _vocabulary: &EventVocabulary,
-        _filter: &ListPairedRecordsFilter,
-        _limit: i64,
-        _offset: i64,
-    ) -> std::result::Result<Vec<PairedRecordSummary>, CoreError> {
-        Ok(Vec::new())
+        tenant_id: &TenantId,
+        instance_id: &str,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<PairedRecordSummary>, CoreError> {
+        self.inner
+            .list_paired_records(tenant_id, instance_id, vocabulary, filter, limit, offset)
+            .await
     }
-
     async fn count_paired_records(
         &self,
-        _instance_id: &str,
-        _vocabulary: &EventVocabulary,
-        _filter: &ListPairedRecordsFilter,
-    ) -> std::result::Result<i64, CoreError> {
-        Ok(0)
+        tenant_id: &TenantId,
+        instance_id: &str,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
+    ) -> Result<i64, CoreError> {
+        self.inner
+            .count_paired_records(tenant_id, instance_id, vocabulary, filter)
+            .await
+    }
+    async fn get_terminal_instances_older_than(
+        &self,
+        tenant_id: &TenantId,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<String>, CoreError> {
+        self.inner
+            .get_terminal_instances_older_than(tenant_id, older_than, limit)
+            .await
+    }
+    async fn delete_instances_batch(
+        &self,
+        tenant_id: &TenantId,
+        instance_ids: &[String],
+    ) -> Result<u64, CoreError> {
+        self.inner
+            .delete_instances_batch(tenant_id, instance_ids)
+            .await
+    }
+    async fn delete_paired_events_older_than(
+        &self,
+        tenant_id: &TenantId,
+        vocabulary: &EventVocabulary,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<u64, CoreError> {
+        self.inner
+            .delete_paired_events_older_than(tenant_id, vocabulary, older_than, limit)
+            .await
     }
 }

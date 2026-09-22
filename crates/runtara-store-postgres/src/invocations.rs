@@ -182,9 +182,10 @@ async fn checkpoint(
 impl InvocationFences for PostgresPersistence {
     async fn get_invocation_lease(
         &self,
-        tenant: &str,
+        tenant_id: &runtara_core::TenantId,
         instance: &str,
     ) -> FenceResult<Option<InvocationLeaseState>> {
+        let tenant = tenant_id.as_str();
         let mut tx = self.invocation_transaction(tenant, instance, false).await?;
         let row = load_lease(&mut tx, instance).await?;
         tx.commit().await.map_err(storage)?;
@@ -201,11 +202,12 @@ impl InvocationFences for PostgresPersistence {
 
     async fn claim_invocation_lease(
         &self,
-        tenant: &str,
+        tenant_id: &runtara_core::TenantId,
         instance: &str,
         owner: &str,
         expected_epoch: Option<i64>,
     ) -> FenceResult<InvocationLease> {
+        let tenant = tenant_id.as_str();
         validate_identity(owner)?;
         if expected_epoch.is_some_and(|epoch| epoch <= 0 || epoch == i64::MAX) {
             return Err(denied(FenceRejection::InvalidIdentity));
@@ -238,7 +240,12 @@ impl InvocationFences for PostgresPersistence {
             epoch: next,
         })
     }
-    async fn revoke_invocation_lease(&self, token: &InvocationLease) -> FenceResult<()> {
+    async fn revoke_invocation_lease(
+        &self,
+        tenant_id: &runtara_core::TenantId,
+        token: &InvocationLease,
+    ) -> FenceResult<()> {
+        token.require_tenant(tenant_id)?;
         let mut tx = self
             .invocation_transaction(&token.tenant_id, &token.instance_id, false)
             .await?;
@@ -252,10 +259,12 @@ impl InvocationFences for PostgresPersistence {
     }
     async fn begin_invocation_attempt(
         &self,
+        tenant_id: &runtara_core::TenantId,
         token: &InvocationLease,
         path: &str,
         start_id: &str,
     ) -> FenceResult<InvocationAttempt> {
+        token.require_tenant(tenant_id)?;
         validate_identity(path)?;
         validate_identity(start_id)?;
         let mut tx = self
@@ -304,7 +313,12 @@ impl InvocationFences for PostgresPersistence {
             state: AttemptState::Active,
         })
     }
-    async fn cancel_invocation_attempt(&self, token: &AttemptFence) -> FenceResult<AttemptState> {
+    async fn cancel_invocation_attempt(
+        &self,
+        tenant_id: &runtara_core::TenantId,
+        token: &AttemptFence,
+    ) -> FenceResult<AttemptState> {
+        token.lease.require_tenant(tenant_id)?;
         let mut tx = self
             .invocation_transaction(&token.lease.tenant_id, &token.lease.instance_id, false)
             .await?;
@@ -318,9 +332,11 @@ impl InvocationFences for PostgresPersistence {
     }
     async fn settle_invocation_attempt(
         &self,
+        tenant_id: &runtara_core::TenantId,
         token: &AttemptFence,
         write: Option<&InvocationCheckpoint>,
     ) -> FenceResult<InvocationSettlement> {
+        token.lease.require_tenant(tenant_id)?;
         if let Some(write) = write {
             validate_identity(&write.checkpoint_id)?;
         }
@@ -345,9 +361,11 @@ impl InvocationFences for PostgresPersistence {
     }
     async fn invocation_checkpoint(
         &self,
+        tenant_id: &runtara_core::TenantId,
         token: &AttemptFence,
         write: &InvocationCheckpoint,
     ) -> FenceResult<InvocationCheckpointResult> {
+        token.lease.require_tenant(tenant_id)?;
         validate_identity(&write.checkpoint_id)?;
         let mut tx = self.invocation_write_transaction(token).await?;
         let result = checkpoint(&mut tx, token, write).await?;
@@ -356,9 +374,11 @@ impl InvocationFences for PostgresPersistence {
     }
     async fn invocation_sleep_checkpoint(
         &self,
+        tenant_id: &runtara_core::TenantId,
         token: &AttemptFence,
         write: &InvocationCheckpoint,
     ) -> FenceResult<()> {
+        token.lease.require_tenant(tenant_id)?;
         validate_identity(&write.checkpoint_id)?;
         let mut tx = self.invocation_write_transaction(token).await?;
         sqlx::query(PostgresDialect::sql_save_checkpoint())
@@ -378,9 +398,11 @@ impl InvocationFences for PostgresPersistence {
     }
     async fn invocation_retry(
         &self,
+        tenant_id: &runtara_core::TenantId,
         token: &AttemptFence,
         retry: &InvocationRetry,
     ) -> FenceResult<()> {
+        token.lease.require_tenant(tenant_id)?;
         let key = retry.storage_key()?;
         let mut tx = self.invocation_write_transaction(token).await?;
         sqlx::query("INSERT INTO checkpoints (instance_id,checkpoint_id,state,is_retry_attempt,attempt_number,error_message,created_at) VALUES ($1,$2,'',true,$3,$4,NOW()) ON CONFLICT (instance_id,checkpoint_id) DO UPDATE SET attempt_number=EXCLUDED.attempt_number,error_message=EXCLUDED.error_message,created_at=NOW()")
@@ -389,9 +411,11 @@ impl InvocationFences for PostgresPersistence {
     }
     async fn invocation_event(
         &self,
+        tenant_id: &runtara_core::TenantId,
         token: &AttemptFence,
         event: &InvocationEvent,
     ) -> FenceResult<()> {
+        token.lease.require_tenant(tenant_id)?;
         let mut tx = self.invocation_write_transaction(token).await?;
         let (kind, subtype) = match &event.kind {
             InvocationEventKind::Heartbeat => (runtara_core::domain::EventType::Heartbeat, None),

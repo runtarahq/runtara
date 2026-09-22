@@ -3,6 +3,7 @@
 //! Checkpoint-related handlers: save/resume, read-only lookup, and durable
 //! sleep.
 
+use crate::TenantId;
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 #[cfg(test)]
 use crate::domain::SignalType as CoreSignalType;
@@ -32,6 +33,7 @@ use crate::persistence::{EventRecord, Persistence};
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_checkpoint(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     request: CheckpointRequest,
 ) -> Result<CheckpointResponse> {
     debug!(
@@ -40,12 +42,12 @@ pub async fn handle_checkpoint(
     );
 
     // 1. Validate instance exists and is running
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    ensure_instance_running(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
 
     // 2. Check if checkpoint already exists
     if let Some(existing) = state
         .persistence
-        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .load_checkpoint(tenant_id, &request.instance_id, &request.checkpoint_id)
         .await?
     {
         debug!(
@@ -56,10 +58,10 @@ pub async fn handle_checkpoint(
 
         // Check for pending signal even when returning existing checkpoint
         let pending_signal =
-            get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
+            get_pending_signal(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
         let custom_signal = state
             .persistence
-            .get_custom_signal(&request.instance_id, &request.checkpoint_id)
+            .get_custom_signal(tenant_id, &request.instance_id, &request.checkpoint_id)
             .await?
             .map(|sig| CustomSignal {
                 signal_id: sig.signal_id,
@@ -84,29 +86,38 @@ pub async fn handle_checkpoint(
         return Ok(CheckpointResponse {
             found: false,
             state: vec![],
-            pending_signal: get_pending_signal(state.persistence.as_ref(), &request.instance_id)
-                .await?,
+            pending_signal: get_pending_signal(
+                state.persistence.as_ref(),
+                tenant_id,
+                &request.instance_id,
+            )
+            .await?,
             custom_signal: None,
         });
     }
 
     state
         .persistence
-        .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
+        .save_checkpoint(
+            tenant_id,
+            &request.instance_id,
+            &request.checkpoint_id,
+            &request.state,
+        )
         .await?;
 
     // 4. Update instance's current checkpoint_id
     state
         .persistence
-        .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .update_instance_checkpoint(tenant_id, &request.instance_id, &request.checkpoint_id)
         .await?;
 
     // 5. Check for pending signals to include in response
     let pending_signal =
-        get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
+        get_pending_signal(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
     let custom_signal = state
         .persistence
-        .get_custom_signal(&request.instance_id, &request.checkpoint_id)
+        .get_custom_signal(tenant_id, &request.instance_id, &request.checkpoint_id)
         .await?
         .map(|sig| CustomSignal {
             signal_id: sig.signal_id,
@@ -138,9 +149,13 @@ pub async fn handle_checkpoint(
 /// caller error rather than an implementation-specific storage failure.
 async fn ensure_instance_running(
     persistence: &dyn Persistence,
+    tenant_id: &TenantId,
     instance_id: &str,
 ) -> std::result::Result<(), CoreError> {
-    match persistence.get_instance_meta(instance_id).await? {
+    match persistence
+        .get_instance_meta(tenant_id, instance_id)
+        .await?
+    {
         Some(inst) if inst.status == CoreInstanceStatus::Running => Ok(()),
         Some(inst) => Err(CoreError::InvalidInstanceState {
             instance_id: instance_id.to_string(),
@@ -156,10 +171,11 @@ async fn ensure_instance_running(
 /// Helper to get the pending instance-wide signal for an instance.
 async fn get_pending_signal(
     persistence: &dyn Persistence,
+    tenant_id: &TenantId,
     instance_id: &str,
 ) -> std::result::Result<Option<Signal>, CoreError> {
     Ok(persistence
-        .get_pending_signal(instance_id)
+        .get_pending_signal(tenant_id, instance_id)
         .await?
         .map(|signal| Signal {
             command_id: signal.command_id,
@@ -175,6 +191,7 @@ async fn get_pending_signal(
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_get_checkpoint(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     request: GetCheckpointRequest,
 ) -> Result<GetCheckpointResponse> {
     debug!("Looking up checkpoint (read-only)");
@@ -182,7 +199,7 @@ pub async fn handle_get_checkpoint(
     // 1. Validate instance exists
     let instance = state
         .persistence
-        .get_instance_meta(&request.instance_id)
+        .get_instance_meta(tenant_id, &request.instance_id)
         .await?;
     if instance.is_none() {
         return Err(CoreError::InstanceNotFound {
@@ -194,7 +211,7 @@ pub async fn handle_get_checkpoint(
     // 2. Look up checkpoint
     if let Some(checkpoint) = state
         .persistence
-        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .load_checkpoint(tenant_id, &request.instance_id, &request.checkpoint_id)
         .await?
     {
         debug!(
@@ -241,6 +258,7 @@ pub const SLEEP_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_sleep(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     request: SleepRequest,
 ) -> Result<SleepResponse> {
     debug!(
@@ -255,19 +273,24 @@ pub async fn handle_sleep(
     // failure — a retryable-looking error for a caller mistake. The check is
     // unconditional: sleeping out the clock on behalf of an instance that
     // isn't running is just as wrong when there is no checkpoint to save.
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    ensure_instance_running(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
 
     // 2. Save checkpoint before sleeping (for durability)
     if !request.checkpoint_id.is_empty() {
         state
             .persistence
-            .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
+            .save_checkpoint(
+                tenant_id,
+                &request.instance_id,
+                &request.checkpoint_id,
+                &request.state,
+            )
             .await?;
 
         // Update instance's current checkpoint_id
         state
             .persistence
-            .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
+            .update_instance_checkpoint(tenant_id, &request.instance_id, &request.checkpoint_id)
             .await?;
 
         debug!(checkpoint_id = %request.checkpoint_id, "Sleep checkpoint saved");
@@ -295,11 +318,12 @@ pub async fn handle_sleep(
 
         // Proof of life for the staleness reaper, which judges liveness from
         // `instance_events` and counts any event.
-        record_sleep_heartbeat(state, &request.instance_id).await;
+        record_sleep_heartbeat(state, tenant_id, &request.instance_id).await?;
 
-        if let Some(signal) = get_pending_signal(state.persistence.as_ref(), &request.instance_id)
-            .await?
-            .filter(interrupts_sleep)
+        if let Some(signal) =
+            get_pending_signal(state.persistence.as_ref(), tenant_id, &request.instance_id)
+                .await?
+                .filter(interrupts_sleep)
         {
             debug!(
                 signal_type = signal.signal_type,
@@ -325,7 +349,11 @@ fn interrupts_sleep(signal: &Signal) -> bool {
 /// Best-effort: a heartbeat that fails to persist must not fail the sleep, since
 /// the sleep itself is still perfectly valid. The worst case is the instance
 /// looking stale, which is exactly the pre-existing behaviour.
-async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str) {
+async fn record_sleep_heartbeat(
+    state: &InstanceHandlerState,
+    tenant_id: &TenantId,
+    instance_id: &str,
+) -> Result<()> {
     let event = EventRecord {
         id: None,
         instance_id: instance_id.to_string(),
@@ -335,9 +363,13 @@ async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str)
         created_at: Utc::now(),
         subtype: None,
     };
-    if let Err(error) = state.persistence.insert_event(&event).await {
+    if let Err(error) = state.persistence.insert_event(tenant_id, &event).await {
+        if matches!(error, CoreError::InstanceNotFound { .. }) {
+            return Err(error.into());
+        }
         debug!(%error, "Failed to record sleep heartbeat");
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,6 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_instance_not_found() {
+        let tenant_scope = crate::TenantId::new("test-tenant").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
@@ -363,12 +396,13 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, request).await;
+        let result = handle_checkpoint(&state, &tenant_scope, request).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_checkpoint_instance_not_running() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -382,12 +416,13 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, request).await;
+        let result = handle_checkpoint(&state, &tenant_scope, request).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_checkpoint_new_saves_state() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -401,12 +436,15 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, request).await.unwrap();
+        let result = handle_checkpoint(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(!result.found); // New checkpoint, not found
     }
 
     #[tokio::test]
     async fn test_checkpoint_existing_returns_state() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -424,13 +462,16 @@ mod tests {
             state: b"new state".to_vec(), // This should be ignored
         };
 
-        let result = handle_checkpoint(&state, request).await.unwrap();
+        let result = handle_checkpoint(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.found);
         assert_eq!(result.state, b"existing state");
     }
 
     #[tokio::test]
     async fn test_checkpoint_returns_pending_signal() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -448,7 +489,9 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, request).await.unwrap();
+        let result = handle_checkpoint(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.pending_signal.is_some());
         let signal = result.pending_signal.unwrap();
         assert_eq!(signal.signal_type, SignalType::SignalCancel as i32);
@@ -456,6 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_returns_custom_signal() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let custom_signal = CustomSignalRecord {
             signal_id: "test-signal-value".into(),
             instance_id: "inst-1".to_string(),
@@ -480,7 +524,9 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, request).await.unwrap();
+        let result = handle_checkpoint(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.custom_signal.is_some());
         let cs = result.custom_signal.unwrap();
         assert_eq!(cs.checkpoint_id, "cp-1");
@@ -491,6 +537,7 @@ mod tests {
     /// regardless of whether the backend itself checks instance existence.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_instance_not_found() {
+        let tenant_scope = crate::TenantId::new("test-tenant").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence.clone());
 
@@ -500,7 +547,7 @@ mod tests {
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
         };
-        let Err(error) = handle_sleep(&state, request).await else {
+        let Err(error) = handle_sleep(&state, &tenant_scope, request).await else {
             panic!("an unknown instance must be rejected, not slept on");
         };
 
@@ -513,10 +560,9 @@ mod tests {
         );
         assert!(
             persistence
-                .load_checkpoint("does-not-exist", "delay-1")
+                .load_checkpoint(&tenant_scope, "does-not-exist", "delay-1")
                 .await
-                .unwrap()
-                .is_none(),
+                .is_err(),
             "nothing may be written for an instance that does not exist"
         );
     }
@@ -526,10 +572,11 @@ mod tests {
     /// wrong, and returning `Ok` after it would be worse.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_without_checkpoint_still_validates_instance() {
+        let tenant_scope = crate::TenantId::new("test-tenant").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
-        let Err(error) = handle_sleep(&state, sleep_request(30_000)).await else {
+        let Err(error) = handle_sleep(&state, &tenant_scope, sleep_request(30_000)).await else {
             panic!("an unknown instance must be rejected even with no checkpoint to save");
         };
 
@@ -546,6 +593,7 @@ mod tests {
     /// reports: the sleep would park on a run nobody is waiting for.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_instance_not_running() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -553,7 +601,7 @@ mod tests {
         )));
         let state = InstanceHandlerState::new(persistence);
 
-        let Err(error) = handle_sleep(&state, sleep_request(30_000)).await else {
+        let Err(error) = handle_sleep(&state, &tenant_scope, sleep_request(30_000)).await else {
             panic!("a terminal instance must be rejected");
         };
 
@@ -590,6 +638,7 @@ mod tests {
     /// to its natural end. It must now wake early and report the signal.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_wakes_early_on_pending_cancel() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -602,7 +651,9 @@ mod tests {
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
-        let response = handle_sleep(&state, sleep_request(30_000)).await.unwrap();
+        let response = handle_sleep(&state, &tenant_scope, sleep_request(30_000))
+            .await
+            .unwrap();
         let elapsed = started.elapsed();
 
         let signal = response
@@ -619,6 +670,7 @@ mod tests {
     /// sleeping out the clock serves nobody.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_wakes_early_on_pending_shutdown() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -630,7 +682,9 @@ mod tests {
         );
         let state = InstanceHandlerState::new(persistence);
 
-        let response = handle_sleep(&state, sleep_request(30_000)).await.unwrap();
+        let response = handle_sleep(&state, &tenant_scope, sleep_request(30_000))
+            .await
+            .unwrap();
         let signal = response
             .pending_signal
             .expect("a pending shutdown must be reported back");
@@ -641,6 +695,7 @@ mod tests {
     /// the delay — otherwise the step would silently finish early.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_ignores_pending_pause() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -653,7 +708,9 @@ mod tests {
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
-        let response = handle_sleep(&state, sleep_request(5_000)).await.unwrap();
+        let response = handle_sleep(&state, &tenant_scope, sleep_request(5_000))
+            .await
+            .unwrap();
 
         assert!(response.pending_signal.is_none());
         assert_eq!(
@@ -667,6 +724,7 @@ mod tests {
     /// requested duration, no early exit.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_without_signal_runs_full_duration() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -675,7 +733,9 @@ mod tests {
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
-        let response = handle_sleep(&state, sleep_request(5_000)).await.unwrap();
+        let response = handle_sleep(&state, &tenant_scope, sleep_request(5_000))
+            .await
+            .unwrap();
 
         assert!(response.pending_signal.is_none());
         assert_eq!(started.elapsed(), Duration::from_millis(5_000));
@@ -687,6 +747,7 @@ mod tests {
     /// reaped as `failed`.
     #[tokio::test(start_paused = true)]
     async fn test_long_sleep_emits_heartbeats() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -694,7 +755,9 @@ mod tests {
         )));
         let state = InstanceHandlerState::new(persistence.clone());
 
-        handle_sleep(&state, sleep_request(5_000)).await.unwrap();
+        handle_sleep(&state, &tenant_scope, sleep_request(5_000))
+            .await
+            .unwrap();
 
         // One per elapsed poll tick; the final tick lands on the deadline and
         // returns instead of beating.
@@ -706,6 +769,7 @@ mod tests {
     /// and no persistence traffic at all.
     #[tokio::test(start_paused = true)]
     async fn test_short_sleep_does_not_poll_or_heartbeat() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -718,7 +782,9 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let started = Instant::now();
-        let response = handle_sleep(&state, sleep_request(25)).await.unwrap();
+        let response = handle_sleep(&state, &tenant_scope, sleep_request(25))
+            .await
+            .unwrap();
 
         assert_eq!(started.elapsed(), Duration::from_millis(25));
         assert!(
@@ -732,6 +798,7 @@ mod tests {
     /// durability must not regress just because the sleep can now end early.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_saves_checkpoint_before_waking_early() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -749,11 +816,11 @@ mod tests {
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
         };
-        let response = handle_sleep(&state, request).await.unwrap();
+        let response = handle_sleep(&state, &tenant_scope, request).await.unwrap();
 
         assert!(response.pending_signal.is_some());
         let saved = persistence
-            .load_checkpoint("inst-1", "delay-1")
+            .load_checkpoint(&tenant_scope, "inst-1", "delay-1")
             .await
             .unwrap()
             .expect("the sleep checkpoint must be persisted");

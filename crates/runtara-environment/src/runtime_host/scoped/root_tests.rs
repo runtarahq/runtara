@@ -112,7 +112,12 @@ async fn root_and_children_acknowledge_commands_only_after_teardown() {
         let (child, _) = fx.child().await;
         if let Some(command) = command {
             fx.persistence
-                .insert_signal(&fx.id, command, b"")
+                .insert_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    command,
+                    b"",
+                )
                 .await
                 .unwrap();
             assert!(child.check_signals().await.unwrap());
@@ -138,7 +143,10 @@ async fn root_and_children_acknowledge_commands_only_after_teardown() {
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert!(
             fx.persistence
-                .get_instance(&fx.id)
+                .get_instance(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -148,7 +156,10 @@ async fn root_and_children_acknowledge_commands_only_after_teardown() {
         if command.is_some() {
             assert!(
                 fx.persistence
-                    .get_pending_signal(&fx.id)
+                    .get_pending_signal(
+                        &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        &fx.id
+                    )
                     .await
                     .unwrap()
                     .is_some()
@@ -175,12 +186,23 @@ async fn root_and_children_acknowledge_commands_only_after_teardown() {
         }
         assert!(
             fx.persistence
-                .get_pending_signal(&fx.id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .is_none()
         );
-        let persisted = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let persisted = fx
+            .persistence
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         if command == Some(CoreSignal::Shutdown) {
             assert_eq!(
                 persisted.termination_reason.as_deref(),
@@ -232,7 +254,12 @@ async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_confli
         let fx = Fixture::new().await;
         let root = fx.owner.root_runtime();
         fx.persistence
-            .insert_signal(&fx.id, CoreSignal::Pause, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                CoreSignal::Pause,
+                b"",
+            )
             .await
             .unwrap();
         if mode == "cleanup" {
@@ -258,7 +285,10 @@ async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_confli
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert!(
             fx.persistence
-                .get_pending_signal(&fx.id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .is_some()

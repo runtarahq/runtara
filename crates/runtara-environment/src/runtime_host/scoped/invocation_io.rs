@@ -12,6 +12,7 @@ use runtara_core::persistence::invocations::*;
 /// Root launch/recovery ownership remains the embedding's responsibility.
 pub struct InvocationIo {
     pub(super) persistence: Arc<dyn Persistence>,
+    tenant_id: TenantId,
     fence: AttemptFence,
     failed: AtomicBool,
     cancelled: AtomicBool,
@@ -24,9 +25,14 @@ impl InvocationIo {
     /// settlement and any failure revocation), independently of guest execution.
     pub fn new(
         persistence: Arc<dyn Persistence>,
+        tenant_id: TenantId,
         fence: AttemptFence,
         control_timeout: Duration,
     ) -> Result<Self, String> {
+        fence
+            .lease
+            .require_tenant(&tenant_id)
+            .map_err(|e| e.to_string())?;
         if control_timeout.is_zero() {
             return Err("invocation control timeout must be nonzero".into());
         }
@@ -35,6 +41,7 @@ impl InvocationIo {
         }
         Ok(Self {
             persistence,
+            tenant_id,
             fence,
             failed: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
@@ -91,6 +98,7 @@ impl InvocationIo {
                 .invocation_fences()
                 .unwrap()
                 .invocation_checkpoint(
+                    &self.tenant_id,
                     &self.fence,
                     &InvocationCheckpoint {
                         checkpoint_id,
@@ -112,6 +120,7 @@ impl InvocationIo {
                 .invocation_fences()
                 .unwrap()
                 .invocation_retry(
+                    &self.tenant_id,
                     &self.fence,
                     &InvocationRetry {
                         checkpoint_id,
@@ -136,6 +145,7 @@ impl TaskLifecycle for InvocationIo {
                 .invocation_fences()
                 .unwrap()
                 .begin_invocation_attempt(
+                    &self.tenant_id,
                     &self.fence.lease,
                     &self.fence.path,
                     &self.fence.start_id,
@@ -170,7 +180,7 @@ impl TaskLifecycle for InvocationIo {
                 self.persistence
                     .invocation_fences()
                     .unwrap()
-                    .settle_invocation_attempt(&self.fence, None),
+                    .settle_invocation_attempt(&self.tenant_id, &self.fence, None),
             )
             .await;
             if let Ok(Ok(settlement)) = result {
@@ -189,7 +199,7 @@ impl TaskLifecycle for InvocationIo {
             self.persistence
                 .invocation_fences()
                 .unwrap()
-                .revoke_invocation_lease(&self.fence.lease),
+                .revoke_invocation_lease(&self.tenant_id, &self.fence.lease),
         )
         .await;
         Err(TaskError::WorkerLost)
@@ -210,6 +220,7 @@ impl ScopedRuntimeHost {
         let signals = io.read_result(
             handle_poll_signals(
                 &self.owner.root.state,
+                &self.owner.root.tenant_id,
                 PollSignalsRequest {
                     instance_id: self.owner.root.instance_id.clone(),
                     checkpoint_id: (stored.found || !probe).then_some(key),
@@ -250,6 +261,7 @@ impl ScopedRuntimeHost {
                 .invocation_fences()
                 .unwrap()
                 .invocation_event(
+                    &self.owner.root.tenant_id,
                     io.fence(),
                     &InvocationEvent {
                         kind,
@@ -260,7 +272,7 @@ impl ScopedRuntimeHost {
                 .await,
         )?;
         if let Some(observer) = &self.owner.root.state.event_observer {
-            observer.on_event_persisted(subtype.as_deref());
+            observer.on_event_persisted(&self.owner.root.tenant_id, subtype.as_deref());
         }
         Ok(())
     }
@@ -282,6 +294,7 @@ impl ScopedRuntimeHost {
                 .invocation_fences()
                 .unwrap()
                 .invocation_sleep_checkpoint(
+                    &self.owner.root.tenant_id,
                     io.fence(),
                     &InvocationCheckpoint {
                         checkpoint_id,
@@ -312,6 +325,7 @@ impl ScopedRuntimeHost {
             let signals = io.read_result(
                 handle_poll_signals(
                     &self.owner.root.state,
+                    &self.owner.root.tenant_id,
                     PollSignalsRequest {
                         instance_id: self.owner.root.instance_id.clone(),
                         checkpoint_id: None,

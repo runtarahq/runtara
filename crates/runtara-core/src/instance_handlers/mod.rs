@@ -47,3 +47,6 @@ pub use self::signal::{handle_poll_signals, handle_signal_ack, handle_signal_ack
 pub use self::state::{InstanceEventObserver, InstanceHandlerState};
 pub use self::status::handle_get_instance_status;
 pub use self::types::*;
+
+#[cfg(test)]
+mod tenancy_tests;

@@ -80,23 +80,6 @@ pub struct InstanceFull {
     pub exit_code: Option<i32>,
 }
 
-/// The stored status and owning tenant of one instance.
-///
-/// Returns the status as the column spells it rather than a decoded enum:
-/// its one caller interpolates the label into a message a user reads.
-pub async fn instance_identity(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<(String, String)>, sqlx::Error> {
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT status::TEXT, tenant_id FROM instances WHERE instance_id = $1")
-            .bind(instance_id)
-            .fetch_optional(pool)
-            .await?;
-
-    Ok(row)
-}
-
 /// Get full instance details including image name and heartbeat.
 pub async fn get_instance_full(
     pool: &PgPool,

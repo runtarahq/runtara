@@ -18,6 +18,7 @@ pub mod invocations;
 
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
+use crate::TenantId;
 use crate::domain::{EventType, InstanceStatus, SignalType};
 use crate::error::CoreError;
 
@@ -473,6 +474,18 @@ impl<'a> CompleteInstanceParams<'a> {
 }
 
 /// Persistence interface used by core handlers.
+///
+/// Every data operation takes the tenant established by the embedding host.
+/// Implementations must enforce it in the actual storage read/mutation, including
+/// joins and cascades. A detached ownership precheck is insufficient. A child
+/// operation may instead lock the scoped parent against deletion/ownership changes
+/// and execute on that same transaction until commit.
+/// Missing and foreign parents are indistinguishable. Optional instance lookups
+/// return `None`; child operations return [`CoreError::InstanceNotFound`] for a
+/// missing parent, even when absence of an owned child normally returns `None`.
+/// Guarded/no-op operations retain their documented no-match result for both.
+/// Storage failures must never become empty results or successful no-ops.
+/// Tenant enumeration belongs to the host, not this trait.
 #[async_trait]
 pub trait Persistence: Send + Sync {
     /// Optional atomic invocation fencing. Callers requiring durable fences must
@@ -489,7 +502,11 @@ pub trait Persistence: Send + Sync {
     /// error, not an update. A caller that treats the id as an idempotency key
     /// and needs to know which way the race went should use
     /// [`Self::try_register_instance`], which reports it.
-    async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError>;
+    async fn register_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError>;
 
     /// Register an instance, reporting whether this call created the row.
     ///
@@ -501,24 +518,15 @@ pub trait Persistence: Send + Sync {
     /// `input` is persisted by the same statement on the backends that can,
     /// rather than by a follow-up `store_instance_input`.
     ///
-    /// This default is the naive read-then-insert and is *not* atomic; it
-    /// exists so in-memory and test backends need no change. Backends that can
-    /// do it in one statement should override it.
+    /// Creation and input persistence must be atomic. `false` means the ID
+    /// already belongs to this tenant; a foreign collision returns sanitized
+    /// [`CoreError::InstanceAlreadyExists`] without adopting the foreign row.
     async fn try_register_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
-        tenant_id: &str,
         input: Option<&[u8]>,
-    ) -> Result<bool, CoreError> {
-        if self.get_instance(instance_id).await?.is_some() {
-            return Ok(false);
-        }
-        self.register_instance(instance_id, tenant_id).await?;
-        if let Some(input) = input {
-            self.store_instance_input(instance_id, input).await?;
-        }
-        Ok(true)
-    }
+    ) -> Result<bool, CoreError>;
 
     /// Read an instance's full row, launch input included.
     ///
@@ -526,7 +534,11 @@ pub trait Persistence: Send + Sync {
     /// an answer here, not an error. Use [`Self::get_instance_meta`] instead
     /// whenever the input is not what the caller came for; that blob is the
     /// expensive part of this row.
-    async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError>;
+    async fn get_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError>;
 
     /// Like [`Self::get_instance`] but without the `input` blob, for callers
     /// that only need status/tenant/recovery state.
@@ -543,12 +555,16 @@ pub trait Persistence: Send + Sync {
     /// trying to avoid loading.
     async fn get_instance_meta(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<InstanceRecord>, CoreError> {
-        Ok(self.get_instance(instance_id).await?.map(|mut instance| {
-            instance.input = None;
-            instance
-        }))
+        Ok(self
+            .get_instance(tenant_id, instance_id)
+            .await?
+            .map(|mut instance| {
+                instance.input = None;
+                instance
+            }))
     }
 
     /// Set an instance's status, stamping `started_at` when one is supplied
@@ -581,6 +597,7 @@ pub trait Persistence: Send + Sync {
     /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_status(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         status: InstanceStatus,
         started_at: Option<DateTime<Utc>>,
@@ -592,6 +609,7 @@ pub trait Persistence: Send + Sync {
     /// Errors with [`CoreError::InstanceNotFound`] if no row matched.
     async fn update_instance_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError>;
@@ -625,21 +643,20 @@ pub trait Persistence: Send + Sync {
     ///   a missing row.
     async fn complete_instance(
         &self,
+        tenant_id: &TenantId,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError>;
 
     /// Store input data for an instance.
     ///
     /// This is an environment-specific operation for storing instance input.
-    /// Core implementations can ignore this (default is no-op).
+    /// Implementations must scope the write to an owned parent or return an error.
     async fn store_instance_input(
         &self,
-        _instance_id: &str,
-        _input: &[u8],
-    ) -> Result<(), CoreError> {
-        // Default: no-op (Core doesn't store input)
-        Ok(())
-    }
+        tenant_id: &TenantId,
+        instance_id: &str,
+        input: &[u8],
+    ) -> Result<(), CoreError>;
 
     /// Write the serialized `state` for `(instance_id, checkpoint_id)`.
     ///
@@ -655,6 +672,7 @@ pub trait Persistence: Send + Sync {
     /// different order than one that does not.
     async fn save_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         state: &[u8],
@@ -666,6 +684,7 @@ pub trait Persistence: Send + Sync {
     /// yet, which is what a replaying instance is asking about.
     async fn load_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError>;
@@ -693,8 +712,10 @@ pub trait Persistence: Send + Sync {
     /// single id, `created_after` inclusive, `created_before` exclusive — a
     /// half-open window, so back-to-back pages tile a time range without
     /// double-counting the boundary.
+    #[allow(clippy::too_many_arguments)] // Existing filters plus explicit tenant scope.
     async fn list_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: Option<&str>,
         limit: i64,
@@ -710,6 +731,7 @@ pub trait Persistence: Send + Sync {
     /// just read.
     async fn count_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: Option<&str>,
         created_after: Option<DateTime<Utc>>,
@@ -725,12 +747,17 @@ pub trait Persistence: Send + Sync {
     /// the delta between a record's paired start and end events, so a
     /// receive-time stamp silently reorders the timeline and rewrites every
     /// duration into the interval between two writes.
-    async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError>;
+    async fn insert_event(
+        &self,
+        tenant_id: &TenantId,
+        event: &EventRecord,
+    ) -> Result<(), CoreError>;
 
     /// Store a fresh lifecycle command, replacing the previous slot. An unacknowledged
     /// cancellation dominates subsequent commands and retains its identity and payload.
     async fn insert_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         signal_type: SignalType,
         payload: &[u8],
@@ -745,6 +772,7 @@ pub trait Persistence: Send + Sync {
     /// instance on a command it already handled.
     async fn get_pending_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError>;
 
@@ -756,12 +784,13 @@ pub trait Persistence: Send + Sync {
     /// overwrite an accepted terminal outcome, including cancellation receipts.
     async fn acknowledge_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         command_id: &str,
         signal_type: SignalType,
     ) -> Result<bool, CoreError> {
         Ok(self
-            .apply_lifecycle_command(instance_id, command_id, signal_type)
+            .apply_lifecycle_command(tenant_id, instance_id, command_id, signal_type)
             .await?
             .accepted())
     }
@@ -770,6 +799,7 @@ pub trait Persistence: Send + Sync {
     /// effects. Return the typed disposition, retaining idempotency information.
     async fn apply_lifecycle_command(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         command_id: &str,
         signal_type: SignalType,
@@ -779,6 +809,7 @@ pub trait Persistence: Send + Sync {
     /// deadline atomically. A concurrent terminal transition cannot be overwritten.
     async fn park_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         request: crate::lifecycle::ParkRequest,
     ) -> Result<crate::lifecycle::Decision, CoreError>;
@@ -790,6 +821,7 @@ pub trait Persistence: Send + Sync {
     /// bounded batches. Locked instances may be skipped for the next recovery pass.
     async fn cancel_suspended_instances(
         &self,
+        tenant_id: &TenantId,
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<CancelledInstance>, CoreError>;
@@ -799,6 +831,7 @@ pub trait Persistence: Send + Sync {
     /// payloads. This is neither a queue nor retry deduplication. Returns that ID.
     async fn put_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
@@ -809,6 +842,7 @@ pub trait Persistence: Send + Sync {
     /// ID is an address; the returned signal ID identifies the stored value.
     async fn get_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError>;
@@ -820,14 +854,15 @@ pub trait Persistence: Send + Sync {
     /// updates that record in place rather than appending a duplicate.
     async fn save_retry_attempt(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         attempt: i32,
         error_message: Option<&str>,
     ) -> Result<(), CoreError>;
 
-    /// Page through instances, newest first, optionally narrowed to one
-    /// tenant and/or one status.
+    /// Page through this tenant's instances, newest first, optionally narrowed
+    /// to one status. There is no all-tenant wildcard.
     ///
     /// Ordered by `(created_at, instance_id)` descending, comparing the id
     /// **bytewise**. Without a total order, `offset` walks a set the store is
@@ -850,7 +885,7 @@ pub trait Persistence: Send + Sync {
     /// payload would pay for the one field none of its callers want.
     async fn list_instances(
         &self,
-        tenant_id: Option<&str>,
+        tenant_id: &TenantId,
         status: Option<InstanceStatus>,
         limit: i64,
         offset: i64,
@@ -872,7 +907,7 @@ pub trait Persistence: Send + Sync {
     /// A row left `running` by a crashed host still counts, and nothing in
     /// this crate reaps one — the heartbeat monitor that does lives in the
     /// embedding host.
-    async fn count_active_instances(&self) -> Result<i64, CoreError>;
+    async fn count_active_instances(&self, tenant_id: &TenantId) -> Result<i64, CoreError>;
 
     /// Promote an instance to `running` on a relaunch, preserving its
     /// original `started_at`.
@@ -883,14 +918,19 @@ pub trait Persistence: Send + Sync {
     /// should.
     async fn mark_instance_running(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        let started_at = match self.get_instance(instance_id).await {
-            Ok(Some(instance)) => instance.started_at.unwrap_or(started_at),
-            _ => started_at,
-        };
+        let instance = self
+            .get_instance(tenant_id, instance_id)
+            .await?
+            .ok_or_else(|| CoreError::InstanceNotFound {
+                instance_id: instance_id.to_owned(),
+            })?;
+        let started_at = instance.started_at.unwrap_or(started_at);
         self.update_instance_status(
+            tenant_id,
             instance_id,
             crate::domain::InstanceStatus::Running,
             Some(started_at),
@@ -915,10 +955,11 @@ pub trait Persistence: Send + Sync {
     /// should override it.
     async fn mark_instance_started(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<bool, CoreError> {
-        match self.get_instance(instance_id).await? {
+        match self.get_instance(tenant_id, instance_id).await? {
             Some(inst)
                 if matches!(
                     inst.status,
@@ -926,6 +967,7 @@ pub trait Persistence: Send + Sync {
                 ) =>
             {
                 self.update_instance_status(
+                    tenant_id,
                     instance_id,
                     crate::domain::InstanceStatus::Running,
                     Some(inst.started_at.unwrap_or(started_at)),
@@ -942,24 +984,35 @@ pub trait Persistence: Send + Sync {
     /// races with cancellation or completion.
     async fn set_instance_sleep(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        self.schedule_wake(instance_id, sleep_until, crate::domain::WakeReason::Timer)
-            .await
+        self.schedule_wake(
+            tenant_id,
+            instance_id,
+            sleep_until,
+            crate::domain::WakeReason::Timer,
+        )
+        .await
     }
 
     /// Atomically persist a wake deadline and its host-side cause. Terminal
     /// instances retain no scheduled wake. A wake reason is never a guest signal.
     async fn schedule_wake(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         deadline: DateTime<Utc>,
         reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError>;
 
     /// Clear the sleep_until timestamp for an instance.
-    async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;
+    async fn clear_instance_sleep(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError>;
 
     /// Atomically claim one due sleeping instance before waking it.
     ///
@@ -993,7 +1046,11 @@ pub trait Persistence: Send + Sync {
     /// its own store executes indivisibly. A backend that genuinely cannot do
     /// that must say so by never claiming (`Ok(false)`), which parks instances
     /// rather than running them twice.
-    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError>;
+    async fn claim_sleeping_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<bool, CoreError>;
 
     /// Get instances that are due to wake (sleep_until <= now).
     ///
@@ -1002,6 +1059,7 @@ pub trait Persistence: Send + Sync {
     /// [`Persistence::claim_sleeping_instances_due`].
     async fn get_sleeping_instances_due(
         &self,
+        tenant_id: &TenantId,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
@@ -1059,6 +1117,7 @@ pub trait Persistence: Send + Sync {
     /// no error, no metric, no failed instance.
     async fn claim_sleeping_instances_due(
         &self,
+        tenant_id: &TenantId,
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
@@ -1068,6 +1127,7 @@ pub trait Persistence: Send + Sync {
     /// Events are returned in reverse chronological order (newest first).
     async fn list_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         filter: &ListEventsFilter,
         limit: i64,
@@ -1077,6 +1137,7 @@ pub trait Persistence: Send + Sync {
     /// Count events for an instance with filtering.
     async fn count_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError>;
@@ -1092,6 +1153,7 @@ pub trait Persistence: Send + Sync {
     /// protocol; this crate reads them and interprets none of them.
     async fn list_paired_records(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
@@ -1102,6 +1164,7 @@ pub trait Persistence: Send + Sync {
     /// Count an instance's paired records under the same filter.
     async fn count_paired_records(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
@@ -1117,6 +1180,7 @@ pub trait Persistence: Send + Sync {
     /// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
     async fn get_terminal_instances_older_than(
         &self,
+        _tenant_id: &TenantId,
         _older_than: DateTime<Utc>,
         _limit: i64,
     ) -> Result<Vec<String>, CoreError> {
@@ -1131,7 +1195,11 @@ pub trait Persistence: Send + Sync {
     /// associations must be cleaned up by the host as part of its deletion flow.
     ///
     /// Returns the count of deleted instances.
-    async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {
+    async fn delete_instances_batch(
+        &self,
+        _tenant_id: &TenantId,
+        _instance_ids: &[String],
+    ) -> Result<u64, CoreError> {
         // Default: no-op (no deletion supported)
         Ok(0)
     }
@@ -1154,6 +1222,7 @@ pub trait Persistence: Send + Sync {
     /// Returns the count of deleted events.
     async fn delete_paired_events_older_than(
         &self,
+        _tenant_id: &TenantId,
         _vocabulary: &EventVocabulary,
         _older_than: DateTime<Utc>,
         _limit: i64,

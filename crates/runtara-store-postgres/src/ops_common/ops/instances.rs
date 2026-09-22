@@ -34,8 +34,8 @@ macro_rules! impl_instance_ops {
             /// expression.
             pub(crate) async fn op_register_instance(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
-                tenant_id: &str,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
@@ -48,12 +48,18 @@ macro_rules! impl_instance_ops {
                 );
                 ::sqlx::query(&sql)
                     .bind(instance_id)
-                    .bind(tenant_id)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
-                        operation: "register_instance".into(),
-                        details: e.to_string(),
+                    .map_err(|e| {
+                        if e.as_database_error().is_some_and(|e| e.is_unique_violation()) {
+                            ::runtara_core::error::CoreError::InstanceAlreadyExists { instance_id: instance_id.into() }
+                        } else {
+                            ::runtara_core::error::CoreError::PersistenceError {
+                                operation: "register_instance".into(),
+                                details: e.to_string(),
+                            }
+                        }
                     })?;
                 Ok(())
             }
@@ -70,8 +76,8 @@ macro_rules! impl_instance_ops {
             /// which is right: the row that already exists owns its input.
             pub(crate) async fn op_try_register_instance(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
-                tenant_id: &str,
                 input: ::core::option::Option<&[u8]>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 use crate::dialect::{Dialect, EnumKind};
@@ -88,7 +94,7 @@ macro_rules! impl_instance_ops {
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
-                    .bind(tenant_id)
+                    .bind(tenant_id.as_str())
                     .bind(input)
                     .execute(pool)
                     .await
@@ -96,7 +102,16 @@ macro_rules! impl_instance_ops {
                         operation: "try_register_instance".into(),
                         details: e.to_string(),
                     })?;
-                Ok(result.rows_affected() == 1)
+                if result.rows_affected() == 1 {
+                    return Ok(true);
+                }
+                // A duplicate is idempotent only within the requested tenant.
+                // Never return or adopt the existing row's owner or input.
+                if Self::op_get_instance_meta(pool, tenant_id, instance_id).await?.is_some() {
+                    Ok(false)
+                } else {
+                    Err(::runtara_core::error::CoreError::InstanceAlreadyExists { instance_id: instance_id.into() })
+                }
             }
 
             /// SELECT a single instance by id, WITHOUT the `input` BLOB.
@@ -112,6 +127,7 @@ macro_rules! impl_instance_ops {
             /// means a TOAST read on every call.
             pub(crate) async fn op_get_instance_meta(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
             ) -> ::core::result::Result<
                 ::core::option::Option<::runtara_core::persistence::InstanceRecord>,
@@ -128,10 +144,11 @@ macro_rules! impl_instance_ops {
                             created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
-                     WHERE instance_id = {p1}"
+                     WHERE instance_id = {p1} AND tenant_id = $2"
                 );
                 let record = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(instance_id)
+                    .bind(tenant_id.as_str())
                     .fetch_optional(pool)
                     .await.db()?;
                 Ok(record.map(|r| r.0))
@@ -140,6 +157,7 @@ macro_rules! impl_instance_ops {
             /// SELECT a single instance by id, including the `input` BLOB.
             pub(crate) async fn op_get_instance(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
             ) -> ::core::result::Result<
                 ::core::option::Option<::runtara_core::persistence::InstanceRecord>,
@@ -156,10 +174,11 @@ macro_rules! impl_instance_ops {
                             created_at, started_at, finished_at, input, output, run_label, error, sleep_until, wake_reason, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
-                     WHERE instance_id = {p1}"
+                     WHERE instance_id = {p1} AND tenant_id = $2"
                 );
                 let record = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(instance_id)
+                    .bind(tenant_id.as_str())
                     .fetch_optional(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -180,6 +199,7 @@ macro_rules! impl_instance_ops {
             /// run that suspends and wakes still reports when it first began.
             pub(crate) async fn op_mark_instance_running(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 started_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
@@ -192,18 +212,19 @@ macro_rules! impl_instance_ops {
                      SET status = 'running'{status_cast}, \
                          started_at = COALESCE(started_at, {p2}), \
                          finished_at = NULL, termination_reason = NULL \
-                     WHERE instance_id = {p1}"
+                     WHERE instance_id = {p1} AND tenant_id = $3"
                 );
-                ::sqlx::query(&sql)
+                let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(started_at)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "mark_instance_running".into(),
                         details: e.to_string(),
                     })?;
-                Ok(())
+                crate::ops_common::error::not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
             /// Promote an instance to `running` **only while it has not already
@@ -222,6 +243,7 @@ macro_rules! impl_instance_ops {
             /// and wakes should still report when it first began.
             pub(crate) async fn op_mark_instance_started(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 started_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
@@ -234,12 +256,13 @@ macro_rules! impl_instance_ops {
                      SET status = 'running'{status_cast}, \
                          started_at = COALESCE(started_at, {p2}), \
                          finished_at = NULL, termination_reason = NULL \
-                     WHERE instance_id = {p1} \
+                     WHERE instance_id = {p1} AND tenant_id = $3 \
                        AND status IN ('pending'{status_cast}, 'running'{status_cast})"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(started_at)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -262,6 +285,7 @@ macro_rules! impl_instance_ops {
             /// and render a negative duration for any resumed run.
             pub(crate) async fn op_update_instance_status(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 status: ::runtara_core::domain::InstanceStatus,
                 started_at: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
@@ -277,12 +301,13 @@ macro_rules! impl_instance_ops {
                         "UPDATE instances \
                          SET status = {p2}{status_cast}, started_at = {p3}, \
                              finished_at = NULL, termination_reason = NULL \
-                         WHERE instance_id = {p1}"
+                         WHERE instance_id = {p1} AND tenant_id = $4"
                     );
                     ::sqlx::query(&sql)
                         .bind(instance_id)
                         .bind(crate::encoding::status_to_str(status))
                         .bind(ts)
+                        .bind(tenant_id.as_str())
                         .execute(pool)
                         .await
                         .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -293,11 +318,12 @@ macro_rules! impl_instance_ops {
                     let sql = format!(
                         "UPDATE instances \
                          SET status = {p2}{status_cast} \
-                         WHERE instance_id = {p1}"
+                         WHERE instance_id = {p1} AND tenant_id = $3"
                     );
                     ::sqlx::query(&sql)
                         .bind(instance_id)
                         .bind(crate::encoding::status_to_str(status))
+                        .bind(tenant_id.as_str())
                         .execute(pool)
                         .await
                         .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -312,6 +338,7 @@ macro_rules! impl_instance_ops {
             /// `InstanceNotFound` if no row matched.
             pub(crate) async fn op_update_instance_checkpoint(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
@@ -320,11 +347,12 @@ macro_rules! impl_instance_ops {
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
-                    "UPDATE instances SET checkpoint_id = {p2} WHERE instance_id = {p1}"
+                    "UPDATE instances SET checkpoint_id = {p2} WHERE instance_id = {p1} AND tenant_id = $3"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await.db()?;
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
@@ -353,6 +381,7 @@ macro_rules! impl_instance_ops {
             ///   success or `Err(InstanceNotFound)` on miss.
             pub(crate) async fn op_complete_instance_unified(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 params: ::runtara_core::persistence::CompleteInstanceParams<'_>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 let run_label = params.normalized_run_label()?;
@@ -388,7 +417,7 @@ macro_rules! impl_instance_ops {
                              WHEN {p2} IN ('completed', 'failed', 'cancelled', 'suspended') THEN {now} \
                              ELSE finished_at \
                          END \
-                     WHERE instance_id = {p1}{guard_clause}"
+                     WHERE instance_id = {p1} AND tenant_id = $10{guard_clause}"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(params.instance_id)
@@ -400,6 +429,7 @@ macro_rules! impl_instance_ops {
                     .bind(params.stderr)
                     .bind(params.checkpoint_id)
                     .bind(run_label.as_deref())
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -424,6 +454,7 @@ macro_rules! impl_instance_ops {
             /// rather than an error.
             pub(crate) async fn op_store_instance_input(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 input: &[u8],
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
@@ -431,17 +462,18 @@ macro_rules! impl_instance_ops {
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
-                    "UPDATE instances SET input = {p2} WHERE instance_id = {p1}"
+                    "UPDATE instances SET input = {p2} WHERE instance_id = {p1} AND tenant_id = $3"
                 );
-                ::sqlx::query(&sql)
+                let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(input)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await.db()?;
-                Ok(())
+                crate::ops_common::error::not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
-            /// SELECT instances with optional tenant/status filters,
+            /// SELECT this tenant's instances with an optional status filter,
             /// ordered by `(created_at, instance_id)` descending with the id
             /// compared bytewise — the total order `Persistence::list_instances`
             /// documents, without which `OFFSET` pages a set the planner is
@@ -452,7 +484,7 @@ macro_rules! impl_instance_ops {
             /// `#[sqlx(default)]`.
             pub(crate) async fn op_list_instances(
                 pool: &$Pool,
-                tenant_id: ::core::option::Option<&str>,
+                tenant_id: &::runtara_core::TenantId,
                 status: ::core::option::Option<::runtara_core::domain::InstanceStatus>,
                 limit: i64,
                 offset: i64,
@@ -479,13 +511,13 @@ macro_rules! impl_instance_ops {
                             attempt, max_attempts, \
                             created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason \
                      FROM instances \
-                     WHERE ({p1} IS NULL OR tenant_id = {p1}) \
+                     WHERE tenant_id = {p1} \
                        AND ({p2} IS NULL OR status = {p2}{status_cast}) \
                      ORDER BY created_at DESC, {id_tiebreak} DESC \
                      LIMIT {p3} OFFSET {p4}"
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
-                    .bind(tenant_id)
+                    .bind(tenant_id.as_str())
                     .bind(status.map(crate::encoding::status_to_str))
                     .bind(limit)
                     .bind(offset)
@@ -526,9 +558,11 @@ macro_rules! impl_instance_ops {
             /// the embedding host.
             pub(crate) async fn op_count_active_instances(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
             ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
                 let row: (i64,) =
-                    ::sqlx::query_as("SELECT COUNT(*) FROM instances WHERE status = 'running'")
+                    ::sqlx::query_as("SELECT COUNT(*) FROM instances WHERE status = 'running' AND tenant_id = $1")
+                        .bind(tenant_id.as_str())
                         .fetch_one(pool)
                         .await.db()?;
                 Ok(row.0)

@@ -107,6 +107,7 @@ pub(crate) fn concurrency_within_pool(requested: usize, pool_max_connections: us
 
 /// Wake scheduler that runs as a background task.
 pub struct WakeScheduler {
+    tenant_id: runtara_core::TenantId,
     pool: PgPool,
     /// Core persistence layer for querying sleeping instances.
     persistence: Arc<dyn Persistence>,
@@ -123,6 +124,7 @@ impl WakeScheduler {
     /// The scheduler queries `sleep_until` from Core's instances table
     /// via the provided persistence layer.
     pub fn new(
+        tenant_id: runtara_core::TenantId,
         pool: PgPool,
         persistence: Arc<dyn Persistence>,
         config: WakeSchedulerConfig,
@@ -140,6 +142,7 @@ impl WakeScheduler {
             config.concurrency = bounded;
         }
         Self {
+            tenant_id,
             pool,
             persistence,
             config,
@@ -248,7 +251,7 @@ impl WakeScheduler {
 
         let cancelled = self
             .persistence
-            .cancel_suspended_instances(None, self.config.batch_size)
+            .cancel_suspended_instances(&self.tenant_id, None, self.config.batch_size)
             .await?;
         let cancelled_count = cancelled.len();
         for instance in cancelled {
@@ -265,6 +268,7 @@ impl WakeScheduler {
         let sleeping_instances = self
             .persistence
             .claim_sleeping_instances_due(
+                &self.tenant_id,
                 self.config.batch_size,
                 chrono::Utc::now()
                     + chrono::Duration::from_std(self.config.claim_lease)
@@ -312,6 +316,7 @@ impl WakeScheduler {
                     if let Err(e) = scheduler
                         .persistence
                         .schedule_wake(
+                            &scheduler.tenant_id,
                             &instance.instance_id,
                             chrono::Utc::now(),
                             instance
@@ -355,7 +360,7 @@ impl WakeScheduler {
     async fn cancel_without_launch(&self, instance_id: &str) -> crate::error::Result<bool> {
         Ok(!self
             .persistence
-            .cancel_suspended_instances(Some(instance_id), 1)
+            .cancel_suspended_instances(&self.tenant_id, Some(instance_id), 1)
             .await?
             .is_empty())
     }
@@ -394,6 +399,7 @@ impl WakeScheduler {
             && let Err(restore_err) = self
                 .persistence
                 .schedule_wake(
+                    &self.tenant_id,
                     &instance.instance_id,
                     self.retry_deadline(),
                     instance
@@ -463,6 +469,7 @@ impl WakeScheduler {
                 warn!(instance_id = %instance.instance_id, "Failing wake without image association");
                 self.persistence
                     .complete_instance(
+                        &self.tenant_id,
                         CompleteInstanceParams::new(
                             &instance.instance_id,
                             runtara_core::domain::InstanceStatus::Failed,
@@ -519,6 +526,7 @@ impl WakeScheduler {
                 // discarding its due wake.
                 self.persistence
                     .schedule_wake(
+                        &self.tenant_id,
                         &instance.instance_id,
                         self.retry_deadline(),
                         instance
@@ -537,6 +545,7 @@ impl WakeScheduler {
                 warn!(instance_id = %instance.instance_id, "Failing wake with invalid image binding");
                 self.persistence
                     .complete_instance(
+                        &self.tenant_id,
                         CompleteInstanceParams::new(
                             &instance.instance_id,
                             runtara_core::domain::InstanceStatus::Failed,

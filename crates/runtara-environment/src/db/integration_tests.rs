@@ -26,17 +26,22 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     let other_tenant = format!("run-label-other-{}", Uuid::new_v4());
     for index in 0..28 {
         let id = format!("{tenant}-{index:02}");
+        let tenant_scope =
+            runtara_core::TenantId::new(if index == 27 { &other_tenant } else { &tenant }).unwrap();
         persistence
-            .register_instance(&id, if index == 27 { &other_tenant } else { &tenant })
+            .register_instance(&tenant_scope, &id)
             .await
             .unwrap();
         let params = CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"{}");
         persistence
-            .complete_instance(if index % 3 == 0 {
-                params.with_run_label("Order/12 [done] (v1.2)")
-            } else {
-                params
-            })
+            .complete_instance(
+                &tenant_scope,
+                if index % 3 == 0 {
+                    params.with_run_label("Order/12 [done] (v1.2)")
+                } else {
+                    params
+                },
+            )
             .await
             .unwrap();
         // Identical timestamps exercise the ordering tie-breaker.
@@ -159,7 +164,10 @@ async fn seed_terminal_instance(
 ) -> String {
     let instance_id = format!("metrics-{}", Uuid::new_v4());
     PostgresPersistence::new(pool.clone())
-        .register_instance(&instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to register instance");
 

@@ -19,6 +19,7 @@ macro_rules! impl_retention_ops {
             /// ordered oldest-first for batch-cleanup workers.
             pub(crate) async fn op_get_terminal_instances_older_than(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
                 limit: i64,
             ) -> ::core::result::Result<
@@ -31,7 +32,7 @@ macro_rules! impl_retention_ops {
                 let sql = format!(
                     "SELECT instance_id \
                      FROM instances \
-                     WHERE status IN ('completed', 'failed', 'cancelled') \
+                     WHERE tenant_id = $3 AND status IN ('completed', 'failed', 'cancelled') \
                        AND finished_at IS NOT NULL \
                        AND finished_at < {p1} \
                      ORDER BY finished_at ASC \
@@ -40,6 +41,7 @@ macro_rules! impl_retention_ops {
                 let rows: ::std::vec::Vec<(::std::string::String,)> = ::sqlx::query_as(&sql)
                     .bind(older_than)
                     .bind(limit)
+                    .bind(tenant_id.as_str())
                     .fetch_all(pool)
                     .await
                     .db()?;
@@ -52,9 +54,10 @@ macro_rules! impl_retention_ops {
             /// `TEXT[]` for `= ANY($1)`.
             pub(crate) async fn op_delete_instances_batch(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_ids: &[::std::string::String],
             ) -> ::core::result::Result<u64, ::runtara_core::error::CoreError> {
-                <$Dialect>::exec_delete_instances_batch(pool, instance_ids).await
+                <$Dialect>::exec_delete_instances_batch(pool, tenant_id, instance_ids).await
             }
 
             /// DELETE the vocabulary's paired events older than
@@ -80,6 +83,7 @@ macro_rules! impl_retention_ops {
             /// large backlog never becomes one long-running DELETE.
             pub(crate) async fn op_delete_paired_events_older_than(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 vocabulary: &::runtara_core::persistence::EventVocabulary,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
                 limit: i64,
@@ -94,7 +98,8 @@ macro_rules! impl_retention_ops {
                     "DELETE FROM instance_events \
                      WHERE id IN ( \
                          SELECT id FROM instance_events \
-                         WHERE subtype IN ('{start_subtype}', '{end_subtype}') \
+                         WHERE instance_id IN (SELECT instance_id FROM instances WHERE tenant_id = $3) \
+                           AND subtype IN ('{start_subtype}', '{end_subtype}') \
                            AND created_at < {p1} \
                          ORDER BY id \
                          LIMIT {p2} \
@@ -103,6 +108,7 @@ macro_rules! impl_retention_ops {
                 let result = ::sqlx::query(&sql)
                     .bind(older_than)
                     .bind(limit)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {

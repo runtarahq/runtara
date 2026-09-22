@@ -1,6 +1,14 @@
 # Runtara Core: current and proposed tenant-scoped APIs
 
-Proposed design, based on the current source at commit `849cf856`. No runtime changes are implemented here. This refines the [shared-tenancy transition plan](shared-tenancy-transition.md): tenant enumeration belongs to the embedding environment; scheduling, recovery, and maintenance then use the same tenant-scoped operations as other callers. There is no second, unrestricted lifecycle API.
+API comparison against the source at commit `849cf856`. The initial implementation adds mandatory `TenantId` parameters to core, its in-memory and PostgreSQL backends, and their callers. This refines the [shared-tenancy transition plan](shared-tenancy-transition.md): tenant enumeration belongs to the embedding environment; scheduling, recovery, and maintenance use the same tenant-scoped core operations as other callers. There is no second, unrestricted core lifecycle API.
+
+**Initial implementation boundary**
+
+Core validates tenant representation and enforces scope on durable state, including child records, wake claims, retention, and invocation fences. PostgreSQL child operations hold a tenant-owned parent lock and use the same transaction for the child read/write; a detached ownership check would not be sufficient. Instance IDs remain globally unique, and no schema migration or RLS policy is introduced.
+
+The embedded SDK and guest host retain a validated tenant supplied by their caller. Environment workers and the dedicated HTTP instance listener require an explicit configured tenant. Registration's body tenant must match the listener's host-selected tenant. This retains the dedicated deployment model while eliminating unrestricted core calls; the host still needs a tenant directory and assignment orchestration to schedule multiple tenants.
+
+This is not a complete shared-environment rollout. Environment/server repositories and direct SQL, public authentication and instance capability binding, filesystem/cache namespaces, quotas, and resource fairness still need the transition plan's separate audits. The dedicated HTTP listener's tenant binding is not authentication between individual instances. Suggested improvements in the tables remain suggestions unless explicitly described above.
 
 **API convention used in these tables**
 
@@ -8,10 +16,10 @@ Core accepts an externally established tenant identity. It does not authenticate
 
 Keep the existing `Persistence` trait and `InstanceHandlerState`. Every tenant-specific operation receives a mandatory `tenant_id: &TenantId`: first after `&self` for persistence methods, and after `state` for handlers. In the proposed signatures below, every `tenant_id` argument has type `&TenantId`; it is never optional. Names in the second column are proposals. Arguments abbreviated as `…` remain unchanged. Persistence methods implicitly take `&self`.
 
-The persistence implementation and connection pool can be shared across tenants. Every actual query/mutation must enforce the supplied tenant, including trait defaults, child-table joins, and nested helper calls. An ownership precheck followed by an unrestricted write is insufficient. `health_check` and capability discovery remain infrastructure operations without a tenant argument. No tenant-bound persistence wrapper is required.
+The persistence implementation and connection pool can be shared across tenants. Every actual query/mutation must enforce the supplied tenant, including trait defaults, child-table joins, and nested helper calls. A detached ownership precheck followed by an unrestricted write is insufficient; holding the scoped parent stable in the same transaction is valid. `health_check` and capability discovery remain infrastructure operations without a tenant argument. No tenant-bound persistence wrapper is required.
 
 ```rust
-// Proposed shape; not code that exists today.
+// Implemented core API; tenant-directory orchestration below is illustrative.
 // tenant_id: TenantId, supplied by the trusted host.
 handle_checkpoint(&state, &tenant_id, request).await?;
 persistence.get_instance(&tenant_id, &instance_id).await?;

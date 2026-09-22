@@ -41,14 +41,21 @@ async fn fixture(context: &TestContext) -> LaunchFixture {
     // repository this file is testing.
     let persistence = PostgresPersistence::new(context.pool.clone());
     persistence
-        .register_instance(&instance_id, &tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("instance must register");
     // The dispatcher's preflight reads the durable input before it will hand a
     // generation to a runner, so a fixture that registers without one leaves the
     // launch stuck in the queue rather than failing loudly.
     persistence
-        .store_instance_input(&instance_id, br#"{}"#)
+        .store_instance_input(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+            br#"{}"#,
+        )
         .await
         .expect("durable input must persist");
     sqlx::query(
@@ -1267,27 +1274,40 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
             .unwrap()
             .unwrap();
         persistence
-            .insert_signal(&fixture.instance_id, SignalType::Cancel, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &fixture.instance_id,
+                SignalType::Cancel,
+                b"",
+            )
             .await
             .unwrap();
         // Also force the cancellation-first ordering; the other iterations race.
         if turn == 0 {
             assert_eq!(
                 persistence
-                    .cancel_suspended_instances(Some(&fixture.instance_id), 1)
+                    .cancel_suspended_instances(
+                        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                        Some(&fixture.instance_id),
+                        1
+                    )
                     .await
                     .unwrap()
                     .len(),
                 1
             );
         }
+        let tenant_scope = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
         let (cancelled, started) = tokio::join!(
-            persistence.cancel_suspended_instances(Some(&fixture.instance_id), 1),
+            persistence.cancel_suspended_instances(&tenant_scope, Some(&fixture.instance_id), 1),
             repository.mark_running(&launch_id, "cancel-race", claim.attempt_count),
         );
         let cancelled = cancelled.unwrap();
         let instance = persistence
-            .get_instance(&fixture.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &fixture.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1299,7 +1319,10 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
             ));
             assert!(
                 persistence
-                    .get_pending_signal(&fixture.instance_id)
+                    .get_pending_signal(
+                        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                        &fixture.instance_id
+                    )
                     .await
                     .unwrap()
                     .is_none()
@@ -1309,7 +1332,10 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
             assert_eq!(instance.status, InstanceStatus::Running);
             assert_eq!(
                 persistence
-                    .get_pending_signal(&fixture.instance_id)
+                    .get_pending_signal(
+                        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                        &fixture.instance_id
+                    )
                     .await
                     .unwrap()
                     .unwrap()
@@ -1378,9 +1404,11 @@ async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
         std::env::temp_dir(),
     );
     let instance_id = fixture.instance_id.clone();
+    let stop_tenant = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
     let stop = tokio::spawn(async move {
         handle_stop_instance(
             &peer,
+            &stop_tenant,
             StopInstanceRequest {
                 instance_id,
                 reason: "peer Stop".into(),
@@ -1450,7 +1478,10 @@ async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
     );
     assert!(
         persistence
-            .get_pending_signal(&fixture.instance_id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+                &fixture.instance_id
+            )
             .await
             .unwrap()
             .is_some()
@@ -1528,6 +1559,7 @@ async fn peer_stop_does_not_claim_delivery_when_owner_never_confirms() {
     );
     let response = handle_stop_instance(
         &peer,
+        &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
         StopInstanceRequest {
             instance_id: fixture.instance_id.clone(),
             reason: "owner unavailable".into(),

@@ -78,4 +78,4 @@ async-trait = "0.1"
 serial_test = "3"
 
 # For embedded heartbeat tests
-runtara-core = { path = "../runtara-core", version = "8.9" }
+runtara-core = { path = "../runtara-core", version = "8.9", features = ["test-support"] }

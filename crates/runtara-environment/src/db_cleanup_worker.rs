@@ -119,6 +119,7 @@ fn debug_event_max_age_from_raw(raw: Option<&str>) -> Option<Duration> {
 
 /// Background worker that cleans up old database records.
 pub struct DbCleanupWorker {
+    tenant_id: runtara_core::TenantId,
     pool: PgPool,
     persistence: Arc<dyn Persistence>,
     config: DbCleanupWorkerConfig,
@@ -128,11 +129,13 @@ pub struct DbCleanupWorker {
 impl DbCleanupWorker {
     /// Create a new database cleanup worker.
     pub fn new(
+        tenant_id: runtara_core::TenantId,
         pool: PgPool,
         persistence: Arc<dyn Persistence>,
         config: DbCleanupWorkerConfig,
     ) -> Self {
         Self {
+            tenant_id,
             pool,
             persistence,
             config,
@@ -205,6 +208,7 @@ impl DbCleanupWorker {
             let deleted = self
                 .persistence
                 .delete_paired_events_older_than(
+                    &self.tenant_id,
                     crate::step_vocabulary::workflow_steps(),
                     cutoff,
                     self.config.batch_size,
@@ -246,7 +250,7 @@ impl DbCleanupWorker {
             // Get batch of instances to delete
             let instance_ids = self
                 .persistence
-                .get_terminal_instances_older_than(cutoff, self.config.batch_size)
+                .get_terminal_instances_older_than(&self.tenant_id, cutoff, self.config.batch_size)
                 .await?;
 
             if instance_ids.is_empty() {
@@ -268,7 +272,7 @@ impl DbCleanupWorker {
             // Delete from instances table (cascades to Core tables)
             let deleted = self
                 .persistence
-                .delete_instances_batch(&instance_ids)
+                .delete_instances_batch(&self.tenant_id, &instance_ids)
                 .await?;
 
             total_deleted += deleted;

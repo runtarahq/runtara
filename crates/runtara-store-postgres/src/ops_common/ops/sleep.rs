@@ -20,6 +20,7 @@ macro_rules! impl_sleep_ops {
             /// row matched.
             pub(crate) async fn op_set_instance_sleep(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 sleep_until: ::chrono::DateTime<::chrono::Utc>,
                 reason: ::runtara_core::domain::WakeReason,
@@ -30,12 +31,13 @@ macro_rules! impl_sleep_ops {
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);
                 let sql = format!(
-                    "UPDATE instances SET sleep_until = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p2} END, wake_reason = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p3} END WHERE instance_id = {p1}"
+                    "UPDATE instances SET sleep_until = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p2} END, wake_reason = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p3} END WHERE instance_id = {p1} AND tenant_id = $4"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(sleep_until)
                     .bind(crate::encoding::wake_reason_to_str(reason))
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -49,16 +51,18 @@ macro_rules! impl_sleep_ops {
             /// if no row matched.
             pub(crate) async fn op_clear_instance_sleep(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::ops_common::error::not_found_if_empty;
                 use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let sql = format!(
-                    "UPDATE instances SET sleep_until = NULL WHERE instance_id = {p1}"
+                    "UPDATE instances SET sleep_until = NULL WHERE instance_id = {p1} AND tenant_id = $2"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await.db()?;
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
@@ -83,6 +87,7 @@ macro_rules! impl_sleep_ops {
             /// guarantee holds across processes, not just tasks.
             pub(crate) async fn op_claim_sleeping_instance(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;
@@ -92,13 +97,14 @@ macro_rules! impl_sleep_ops {
                 let rhs = <$Dialect>::normalize_timestamp(now);
                 let sql = format!(
                     "UPDATE instances SET sleep_until = NULL \
-                     WHERE instance_id = {p1} \
+                     WHERE instance_id = {p1} AND tenant_id = $2 \
                        AND sleep_until IS NOT NULL \
                        AND {lhs} <= {rhs} \
                        AND status = 'suspended'"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
+                    .bind(tenant_id.as_str())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -113,6 +119,7 @@ macro_rules! impl_sleep_ops {
             /// BLOB, which the wake scan never reads.
             pub(crate) async fn op_get_sleeping_instances_due(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 limit: i64,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<::runtara_core::persistence::InstanceRecord>,
@@ -130,7 +137,7 @@ macro_rules! impl_sleep_ops {
                             {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
                             created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason \
                      FROM instances \
-                     WHERE sleep_until IS NOT NULL \
+                     WHERE tenant_id = $2 AND sleep_until IS NOT NULL \
                        AND {lhs} <= {rhs} \
                        AND status = 'suspended' \
                      ORDER BY sleep_until ASC \
@@ -138,6 +145,7 @@ macro_rules! impl_sleep_ops {
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)
+                    .bind(tenant_id.as_str())
                     .fetch_all(pool)
                     .await.db()?;
                 Ok(records.into_iter().map(|r| r.0).collect())
@@ -170,6 +178,7 @@ macro_rules! impl_sleep_ops {
             /// considers suspended rows.
             pub(crate) async fn op_claim_sleeping_instances_due(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 limit: i64,
                 retry_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<
@@ -186,9 +195,9 @@ macro_rules! impl_sleep_ops {
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
                     "UPDATE instances SET sleep_until = {p2} \
-                     WHERE instance_id IN ( \
+                     WHERE tenant_id = $3 AND instance_id IN ( \
                          SELECT instance_id FROM instances \
-                         WHERE sleep_until IS NOT NULL \
+                         WHERE tenant_id = $3 AND sleep_until IS NOT NULL \
                            AND {lhs} <= {rhs} \
                            AND status = 'suspended' \
                          ORDER BY sleep_until ASC \
@@ -202,6 +211,7 @@ macro_rules! impl_sleep_ops {
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)
                     .bind(retry_at)
+                    .bind(tenant_id.as_str())
                     .fetch_all(pool)
                     .await.db()?;
                 Ok(records.into_iter().map(|r| r.0).collect())

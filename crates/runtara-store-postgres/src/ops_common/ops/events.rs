@@ -25,6 +25,7 @@ macro_rules! impl_event_ops {
             /// dialect.
             pub(crate) async fn op_list_events(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 filter: &::runtara_core::persistence::ListEventsFilter,
                 limit: i64,
@@ -37,6 +38,8 @@ macro_rules! impl_event_ops {
                 use crate::ops_common::filters::sort_direction_sql;
                 let order_direction = sort_direction_sql(filter.sort_order);
                 let sql = <$Dialect>::sql_list_events(order_direction);
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let records = ::sqlx::query_as::<_, crate::rows::EventRow>(&sql)
                     .bind(instance_id)
                     .bind(filter.event_type.map(crate::encoding::event_type_to_str))
@@ -49,9 +52,10 @@ macro_rules! impl_event_ops {
                     .bind(filter.root_scopes_only)
                     .bind(limit)
                     .bind(offset)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *tx)
                     .await
                     .db()?;
+                tx.commit().await.db()?;
                 Ok(records.into_iter().map(|r| r.0).collect())
             }
 
@@ -59,11 +63,14 @@ macro_rules! impl_event_ops {
             /// semantics as `op_list_events`.
             pub(crate) async fn op_count_events(
                 pool: &$Pool,
+                tenant_id: &::runtara_core::TenantId,
                 instance_id: &str,
                 filter: &::runtara_core::persistence::ListEventsFilter,
             ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_count_events();
+                let mut tx =
+                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
                     .bind(filter.event_type.map(crate::encoding::event_type_to_str))
@@ -74,9 +81,10 @@ macro_rules! impl_event_ops {
                     .bind(&filter.scope_id)
                     .bind(&filter.parent_scope_id)
                     .bind(filter.root_scopes_only)
-                    .fetch_one(pool)
+                    .fetch_one(&mut *tx)
                     .await
                     .db()?;
+                tx.commit().await.db()?;
                 Ok(count.0)
             }
         }

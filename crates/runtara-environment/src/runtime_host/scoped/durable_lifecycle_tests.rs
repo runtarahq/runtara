@@ -26,7 +26,12 @@ impl DatabaseLifecycle {
         self.persistence
             .invocation_fences()
             .unwrap()
-            .begin_invocation_attempt(&self.lease, "parent/child", &self.start_id)
+            .begin_invocation_attempt(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &self.lease,
+                "parent/child",
+                &self.start_id,
+            )
             .await
             .map_err(|_| TaskError::WorkerLost)
     }
@@ -59,7 +64,10 @@ impl TaskLifecycle for DatabaseLifecycle {
             Ok(outcome) => outcome,
             Err(error) => {
                 fences
-                    .revoke_invocation_lease(&self.lease)
+                    .revoke_invocation_lease(
+                        &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        &self.lease,
+                    )
                     .await
                     .map_err(|_| TaskError::WorkerLost)?;
                 return Err(error);
@@ -73,7 +81,11 @@ impl TaskLifecycle for DatabaseLifecycle {
             return Ok(InvokeExit::Cancelled);
         }
         let settled = fences
-            .settle_invocation_attempt(&attempt.fence, None)
+            .settle_invocation_attempt(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &attempt.fence,
+                None,
+            )
             .await
             .map_err(|_| TaskError::WorkerLost)?;
         Ok(if settled.state == AttemptState::Cancelled {
@@ -105,12 +117,25 @@ async fn hooks(
     hold_admission: bool,
     hold_settlement: bool,
 ) -> Arc<DatabaseLifecycle> {
-    let instance = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    let instance = fx
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     let lease = fx
         .persistence
         .invocation_fences()
         .unwrap()
-        .claim_invocation_lease(&instance.tenant_id, &fx.id, "test-launch", None)
+        .claim_invocation_lease(
+            &runtara_core::TenantId::new(&instance.tenant_id).unwrap(),
+            &fx.id,
+            "test-launch",
+            None,
+        )
         .await
         .unwrap();
     Arc::new(DatabaseLifecycle {
@@ -154,6 +179,7 @@ async fn start(
 async fn heartbeat_count(fx: &Fixture) -> i64 {
     fx.persistence
         .count_events(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
             &fx.id,
             &ListEventsFilter {
                 event_type: Some(runtara_core::domain::EventType::Heartbeat),
@@ -168,13 +194,19 @@ async fn finish(fx: &Fixture, hooks: &DatabaseLifecycle) {
     fx.persistence
         .invocation_fences()
         .unwrap()
-        .revoke_invocation_lease(&hooks.lease)
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &hooks.lease,
+        )
         .await
         .unwrap();
     assert_eq!(fx.status().await, InstanceStatus::Running);
     assert!(
         fx.persistence
-            .get_instance(&fx.id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -208,7 +240,12 @@ async fn database_admission_and_settlement_wrap_real_prepared_child_execution() 
         .persistence
         .invocation_fences()
         .unwrap()
-        .begin_invocation_attempt(&hooks.lease, "parent/child", &hooks.start_id)
+        .begin_invocation_attempt(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &hooks.lease,
+            "parent/child",
+            &hooks.start_id,
+        )
         .await
         .unwrap();
     assert_eq!(stored.state, AttemptState::Settled);
@@ -251,7 +288,10 @@ async fn persisted_cancellation_wins_over_computed_child_result_and_replay_admis
     let attempt = hooks.resolve().await.unwrap();
     assert_eq!(
         fences
-            .cancel_invocation_attempt(&attempt.fence)
+            .cancel_invocation_attempt(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &attempt.fence
+            )
             .await
             .unwrap(),
         AttemptState::Cancelled
@@ -266,10 +306,16 @@ async fn persisted_cancellation_wins_over_computed_child_result_and_replay_admis
         InvokeExit::Cancelled
     ));
     assert_eq!(heartbeat_count(&fx).await, 1);
-    fences.revoke_invocation_lease(&hooks.lease).await.unwrap();
+    fences
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &hooks.lease,
+        )
+        .await
+        .unwrap();
     let lease = fences
         .claim_invocation_lease(
-            &hooks.lease.tenant_id,
+            &runtara_core::TenantId::new(&hooks.lease.tenant_id).unwrap(),
             &fx.id,
             "replay",
             Some(hooks.lease.epoch),

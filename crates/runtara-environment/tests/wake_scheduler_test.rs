@@ -86,7 +86,10 @@ async fn cleanup_image(pool: &PgPool, image_id: &str) {
 async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
-        .register_instance(instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            instance_id,
+        )
         .await
         .expect("Failed to register instance");
     // The production path writes this row inside `LaunchRepository::claim_initial`;
@@ -108,6 +111,7 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
 /// Helper to update instance status using the Persistence trait.
 /// This replaces the old `db::update_instance_status` function that was removed.
 async fn update_test_instance_status(
+    tenant_id: &str,
     pool: &PgPool,
     instance_id: &str,
     status: &str,
@@ -123,7 +127,7 @@ async fn update_test_instance_status(
             params = params.with_checkpoint(cp_id);
         }
         persistence
-            .complete_instance(params)
+            .complete_instance(&runtara_core::TenantId::new(tenant_id).unwrap(), params)
             .await
             .expect("Failed to complete instance");
         return;
@@ -132,6 +136,7 @@ async fn update_test_instance_status(
     let started_at = (status == "running").then(Utc::now);
     persistence
         .update_instance_status(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
             instance_id,
             runtara_store_postgres::encoding::status_from_str(status).unwrap(),
             started_at,
@@ -140,7 +145,11 @@ async fn update_test_instance_status(
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
         persistence
-            .update_instance_checkpoint(instance_id, cp_id)
+            .update_instance_checkpoint(
+                &runtara_core::TenantId::new(tenant_id).unwrap(),
+                instance_id,
+                cp_id,
+            )
             .await
             .expect("Failed to update instance checkpoint");
     }
@@ -175,7 +184,7 @@ async fn update_test_instance_result(
         params = params.with_checkpoint(cp);
     }
     persistence
-        .complete_instance(params)
+        .complete_instance(&runtara_core::TenantId::new("test-tenant").unwrap(), params)
         .await
         .expect("Failed to update instance result");
 }
@@ -283,7 +292,7 @@ async fn test_update_instance_status() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Update to running
-    update_test_instance_status(&pool, &instance_id, "running", None).await;
+    update_test_instance_status(tenant_id, &pool, &instance_id, "running", None).await;
 
     let instance = InstanceRepository::new(pool.clone())
         .detail(&instance_id)
@@ -294,7 +303,14 @@ async fn test_update_instance_status() {
     assert!(instance.started_at.is_some()); // Should be set when status = running
 
     // Update to completed
-    update_test_instance_status(&pool, &instance_id, "completed", Some("cp-final")).await;
+    update_test_instance_status(
+        tenant_id,
+        &pool,
+        &instance_id,
+        "completed",
+        Some("cp-final"),
+    )
+    .await;
 
     let instance = InstanceRepository::new(pool.clone())
         .detail(&instance_id)
@@ -410,8 +426,8 @@ async fn test_list_instances() {
     create_test_instance(&pool, &instance3, "list-test-tenant-b", &image_id).await;
 
     // Update statuses
-    update_test_instance_status(&pool, &instance1, "running", None).await;
-    update_test_instance_status(&pool, &instance2, "completed", None).await;
+    update_test_instance_status("list-test-tenant-a", &pool, &instance1, "running", None).await;
+    update_test_instance_status("list-test-tenant-a", &pool, &instance2, "completed", None).await;
 
     // List all for tenant-a
     let options = ListInstancesOptions {
@@ -497,9 +513,13 @@ async fn test_list_instances() {
 async fn park_due_instance(pool: &PgPool, tenant_id: &str, image_id: &str) -> String {
     let instance_id = Uuid::new_v4().to_string();
     create_test_instance(pool, &instance_id, tenant_id, image_id).await;
-    update_test_instance_status(pool, &instance_id, "suspended", Some("delay-1")).await;
+    update_test_instance_status(tenant_id, pool, &instance_id, "suspended", Some("delay-1")).await;
     PostgresPersistence::new(pool.clone())
-        .set_instance_sleep(&instance_id, Utc::now() - chrono::Duration::seconds(1))
+        .set_instance_sleep(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
         .await
         .expect("Failed to stamp sleep_until");
     instance_id
@@ -526,7 +546,12 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
 
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     persistence
-        .insert_signal(&cancelled_id, runtara_core::domain::SignalType::Cancel, b"")
+        .insert_signal(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &cancelled_id,
+            runtara_core::domain::SignalType::Cancel,
+            b"",
+        )
         .await
         .expect("Failed to insert cancel signal");
 
@@ -534,6 +559,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
     // that constructor compatibility while assertions inspect queue state.
     let runner = Arc::new(MockRunner::never_completing());
     let scheduler = WakeScheduler::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         WakeSchedulerConfig {
@@ -554,7 +580,10 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
         status = persistence
-            .get_instance(&cancelled_id)
+            .get_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &cancelled_id,
+            )
             .await
             .expect("Failed to read instance")
             .expect("Instance should exist")
@@ -618,6 +647,7 @@ async fn a_wake_without_an_image_fails_without_a_runner_handoff() {
 
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let scheduler = WakeScheduler::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         WakeSchedulerConfig {
@@ -636,7 +666,10 @@ async fn a_wake_without_an_image_fails_without_a_runner_handoff() {
     let mut failed = false;
     while std::time::Instant::now() < deadline {
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+            )
             .await
             .unwrap()
             .expect("instance must exist");
@@ -737,6 +770,7 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
     let drain = DrainController::new();
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let scheduler = WakeScheduler::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         WakeSchedulerConfig {
@@ -799,6 +833,7 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
 
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let scheduler = WakeScheduler::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence,
         WakeSchedulerConfig {
@@ -843,21 +878,34 @@ async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline()
     let future = park_due_instance(&pool, "parked-recovery", &image).await;
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     persistence
-        .clear_instance_sleep(&no_deadline)
+        .clear_instance_sleep(
+            &runtara_core::TenantId::new("parked-recovery").unwrap(),
+            &no_deadline,
+        )
         .await
         .unwrap();
     persistence
-        .set_instance_sleep(&future, Utc::now() + chrono::Duration::hours(24))
+        .set_instance_sleep(
+            &runtara_core::TenantId::new("parked-recovery").unwrap(),
+            &future,
+            Utc::now() + chrono::Duration::hours(24),
+        )
         .await
         .unwrap();
     for id in [&no_deadline, &future] {
         // Only persist the request: model a crash before immediate application.
         persistence
-            .insert_signal(id, runtara_core::domain::SignalType::Cancel, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("parked-recovery").unwrap(),
+                id,
+                runtara_core::domain::SignalType::Cancel,
+                b"",
+            )
             .await
             .unwrap();
     }
     let scheduler = WakeScheduler::new(
+        runtara_core::TenantId::new("parked-recovery").unwrap(),
         pool.clone(),
         persistence.clone(),
         WakeSchedulerConfig {
@@ -873,7 +921,12 @@ async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline()
     while std::time::Instant::now() < deadline {
         done = true;
         for id in [&no_deadline, &future] {
-            done &= persistence.get_instance(id).await.unwrap().unwrap().status
+            done &= persistence
+                .get_instance(&runtara_core::TenantId::new("parked-recovery").unwrap(), id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
                 == CoreInstanceStatus::Cancelled;
         }
         if done {
@@ -888,10 +941,16 @@ async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline()
         "cancellation must not depend on a guest or a due timer"
     );
     for id in [&no_deadline, &future] {
-        assert!(persistence.get_pending_signal(id).await.unwrap().is_none());
         assert!(
             persistence
-                .get_instance(id)
+                .get_pending_signal(&runtara_core::TenantId::new("parked-recovery").unwrap(), id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            persistence
+                .get_instance(&runtara_core::TenantId::new("parked-recovery").unwrap(), id)
                 .await
                 .unwrap()
                 .unwrap()

@@ -14,6 +14,7 @@
 
 mod invocations;
 
+use crate::TenantId;
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 use crate::lifecycle::{
     self, Change, Decision, Receipt, SuspensionReason, Transition, WakeDeadline,
@@ -50,6 +51,20 @@ struct Store {
 }
 
 impl Store {
+    fn require_tenant(&self, tenant_id: &TenantId, instance_id: &str) -> Result<(), CoreError> {
+        if self
+            .instances
+            .get(instance_id)
+            .is_some_and(|i| i.tenant_id == tenant_id.as_str())
+        {
+            Ok(())
+        } else {
+            Err(CoreError::InstanceNotFound {
+                instance_id: instance_id.to_owned(),
+            })
+        }
+    }
+
     fn next_id(&mut self) -> i64 {
         self.next_id += 1;
         self.next_id
@@ -134,6 +149,33 @@ pub struct InMemoryPersistence {
 }
 
 impl InMemoryPersistence {
+    pub(crate) fn seed_instance(&self, instance: InstanceRecord) {
+        self.store
+            .lock()
+            .unwrap()
+            .instances
+            .insert(instance.instance_id.clone(), instance);
+    }
+    pub(crate) fn seed_checkpoint(&self, checkpoint: CheckpointRecord) {
+        self.store.lock().unwrap().checkpoints.push(checkpoint);
+    }
+    pub(crate) fn seed_signal(&self, signal: SignalRecord) {
+        self.store
+            .lock()
+            .unwrap()
+            .signals
+            .insert(signal.instance_id.clone(), signal);
+    }
+    pub(crate) fn seed_custom_signal(&self, signal: CustomSignalRecord) {
+        self.store.lock().unwrap().custom_signals.insert(
+            (signal.instance_id.clone(), signal.checkpoint_id.clone()),
+            signal,
+        );
+    }
+    pub(crate) fn recorded_events(&self) -> Vec<EventRecord> {
+        self.store.lock().unwrap().events.clone()
+    }
+
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
@@ -157,9 +199,34 @@ impl Persistence for InMemoryPersistence {
         Some(self)
     }
 
-    async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
+    async fn register_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError> {
+        if self
+            .try_register_instance(tenant_id, instance_id, None)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(CoreError::InstanceAlreadyExists {
+                instance_id: instance_id.to_owned(),
+            })
+        }
+    }
+
+    async fn try_register_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        input: Option<&[u8]>,
+    ) -> Result<bool, CoreError> {
         let mut store = self.store.lock().unwrap();
-        if store.instances.contains_key(instance_id) {
+        if let Some(existing) = store.instances.get(instance_id) {
+            if existing.tenant_id == tenant_id.as_str() {
+                return Ok(false);
+            }
             return Err(CoreError::InstanceAlreadyExists {
                 instance_id: instance_id.to_string(),
             });
@@ -178,7 +245,7 @@ impl Persistence for InMemoryPersistence {
                 created_at: Utc::now(),
                 started_at: None,
                 finished_at: None,
-                input: None,
+                input: input.map(<[u8]>::to_vec),
                 output: None,
                 error: None,
                 sleep_until: None,
@@ -189,26 +256,33 @@ impl Persistence for InMemoryPersistence {
                 recovery_marker: None,
             },
         );
-        Ok(())
+        Ok(true)
     }
 
-    async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
+    async fn get_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
         Ok(self
             .store
             .lock()
             .unwrap()
             .instances
             .get(instance_id)
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .cloned())
     }
 
     async fn update_instance_status(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let inst = store.instance_mut(instance_id)?;
         inst.status = status;
         if let Some(at) = started_at {
@@ -225,21 +299,28 @@ impl Persistence for InMemoryPersistence {
 
     async fn update_instance_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
         Ok(())
     }
 
     async fn complete_instance(
         &self,
+        tenant_id: &TenantId,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
         let run_label = params.normalized_run_label()?;
         let mut store = self.store.lock().unwrap();
-        let Some(inst) = store.instances.get_mut(params.instance_id) else {
+        let Some(inst) = store
+            .instances
+            .get_mut(params.instance_id)
+            .filter(|i| i.tenant_id == tenant_id.as_str())
+        else {
             return match params.guard {
                 CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
                     instance_id: params.instance_id.to_string(),
@@ -276,8 +357,14 @@ impl Persistence for InMemoryPersistence {
         Ok(true)
     }
 
-    async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
+    async fn store_instance_input(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        input: &[u8],
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         if let Some(inst) = store.instances.get_mut(instance_id) {
             inst.input = Some(input.to_vec());
         }
@@ -286,11 +373,13 @@ impl Persistence for InMemoryPersistence {
 
     async fn save_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         if let Some(existing) = store
             .checkpoints
             .iter_mut()
@@ -313,21 +402,23 @@ impl Persistence for InMemoryPersistence {
 
     async fn load_checkpoint(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
+        let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
+        Ok(store
             .checkpoints
             .iter()
             .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
             .cloned())
     }
 
+    #[allow(clippy::too_many_arguments)] // Existing filters plus explicit tenant scope.
     async fn list_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: Option<&str>,
         limit: i64,
@@ -336,6 +427,7 @@ impl Persistence for InMemoryPersistence {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
         let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let mut found: Vec<&CheckpointRecord> = store
             .checkpoints
             .iter()
@@ -364,12 +456,14 @@ impl Persistence for InMemoryPersistence {
 
     async fn count_checkpoints(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: Option<&str>,
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError> {
         let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         Ok(store
             .checkpoints
             .iter()
@@ -380,8 +474,13 @@ impl Persistence for InMemoryPersistence {
             .count() as i64)
     }
 
-    async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
+    async fn insert_event(
+        &self,
+        tenant_id: &TenantId,
+        event: &EventRecord,
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, &event.instance_id)?;
         let id = store.next_id();
         let mut stored = event.clone();
         // The docs are explicit: store the emitter's `created_at` verbatim.
@@ -392,11 +491,13 @@ impl Persistence for InMemoryPersistence {
 
     async fn insert_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         signal_type: crate::domain::SignalType,
         payload: &[u8],
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         store.instance_mut(instance_id)?;
         if !lifecycle::may_replace_command(
             store.signals.get(instance_id).map(SignalRecord::command),
@@ -419,12 +520,12 @@ impl Persistence for InMemoryPersistence {
 
     async fn get_pending_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
+        let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
+        Ok(store
             .signals
             .get(instance_id)
             .filter(|s| s.acknowledged_at.is_none())
@@ -433,11 +534,13 @@ impl Persistence for InMemoryPersistence {
 
     async fn apply_lifecycle_command(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         command_id: &str,
         signal_type: crate::domain::SignalType,
     ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let status = store.instance_mut(instance_id)?.status;
         let decision = lifecycle::acknowledge(
             status,
@@ -455,10 +558,12 @@ impl Persistence for InMemoryPersistence {
 
     async fn park_instance(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         request: crate::lifecycle::ParkRequest,
     ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
         if let Decision::Applied(effects) = decision {
             store.apply_transition(instance_id, effects, Utc::now())?;
@@ -468,6 +573,7 @@ impl Persistence for InMemoryPersistence {
 
     async fn cancel_suspended_instances(
         &self,
+        tenant_id: &TenantId,
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::persistence::CancelledInstance>, CoreError> {
@@ -475,6 +581,7 @@ impl Persistence for InMemoryPersistence {
         let mut candidates: Vec<_> = store
             .instances
             .values()
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .filter(|instance| instance_id.is_none_or(|id| id == instance.instance_id))
             .filter_map(|instance| {
                 let Decision::Applied(effects) = lifecycle::cancel_parked(
@@ -509,11 +616,13 @@ impl Persistence for InMemoryPersistence {
 
     async fn put_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
     ) -> Result<String, CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         store.instance_mut(instance_id)?;
         let signal_id = uuid::Uuid::new_v4().to_string();
         store.custom_signals.insert(
@@ -531,14 +640,14 @@ impl Persistence for InMemoryPersistence {
 
     async fn get_custom_signal(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
         // Non-destructive: a replayed WaitForSignal must re-read the same row.
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
+        let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
+        Ok(store
             .custom_signals
             .get(&(instance_id.to_string(), checkpoint_id.to_string()))
             .cloned())
@@ -546,6 +655,7 @@ impl Persistence for InMemoryPersistence {
 
     async fn save_retry_attempt(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         checkpoint_id: &str,
         attempt: i32,
@@ -553,6 +663,7 @@ impl Persistence for InMemoryPersistence {
     ) -> Result<(), CoreError> {
         // Stored as a synthetic checkpoint, matching the documented shape.
         self.save_checkpoint(
+            tenant_id,
             instance_id,
             &format!("{checkpoint_id}::retry::{attempt}"),
             b"",
@@ -562,7 +673,7 @@ impl Persistence for InMemoryPersistence {
 
     async fn list_instances(
         &self,
-        tenant_id: Option<&str>,
+        tenant_id: &TenantId,
         status: Option<CoreInstanceStatus>,
         limit: i64,
         offset: i64,
@@ -571,9 +682,13 @@ impl Persistence for InMemoryPersistence {
         let mut found: Vec<_> = store
             .instances
             .values()
-            .filter(|i| tenant_id.is_none_or(|t| i.tenant_id == t))
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .filter(|i| status.is_none_or(|s| i.status == s))
-            .cloned()
+            .map(|i| {
+                let mut record = i.clone();
+                record.input = None;
+                record
+            })
             .collect();
         // Newest first, ordered by `(created_at, instance_id)`: the id breaks
         // ties so instances registered inside one clock tick still page
@@ -599,41 +714,84 @@ impl Persistence for InMemoryPersistence {
         Ok(true)
     }
 
-    async fn count_active_instances(&self) -> Result<i64, CoreError> {
+    async fn count_active_instances(&self, tenant_id: &TenantId) -> Result<i64, CoreError> {
         Ok(self
             .store
             .lock()
             .unwrap()
             .instances
             .values()
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .filter(|i| i.status == CoreInstanceStatus::Running)
             .count() as i64)
     }
 
+    async fn mark_instance_started(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<bool, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let Some(instance) = store
+            .instances
+            .get_mut(instance_id)
+            .filter(|i| i.tenant_id == tenant_id.as_str())
+        else {
+            return Ok(false);
+        };
+        if !matches!(
+            instance.status,
+            CoreInstanceStatus::Pending | CoreInstanceStatus::Running
+        ) {
+            return Ok(false);
+        }
+        instance.status = CoreInstanceStatus::Running;
+        instance.started_at = Some(instance.started_at.unwrap_or(started_at));
+        instance.finished_at = None;
+        instance.termination_reason = None;
+        Ok(true)
+    }
+
     async fn schedule_wake(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
         reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let instance = store.instance_mut(instance_id)?;
         instance.sleep_until = (!instance.status.is_terminal()).then_some(sleep_until);
         instance.wake_reason = (!instance.status.is_terminal()).then_some(reason);
         Ok(())
     }
 
-    async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
+    async fn clear_instance_sleep(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         store.instance_mut(instance_id)?.sleep_until = None;
         Ok(())
     }
 
     /// Claimed under the store lock, so two concurrent callers cannot both
     /// win -- the default's read-then-clear can.
-    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
+    async fn claim_sleeping_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: &str,
+    ) -> Result<bool, CoreError> {
         let mut store = self.store.lock().unwrap();
-        let Some(instance) = store.instances.get_mut(instance_id) else {
+        let Some(instance) = store
+            .instances
+            .get_mut(instance_id)
+            .filter(|i| i.tenant_id == tenant_id.as_str())
+        else {
             return Ok(false);
         };
         // Due-ness, not just presence: an instance leased by a batch claim has
@@ -649,12 +807,14 @@ impl Persistence for InMemoryPersistence {
 
     async fn list_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         filter: &ListEventsFilter,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EventRecord>, CoreError> {
         let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let mut found = filtered_events(&store, instance_id, filter);
         // Ordered by `(created_at, id)`: the id breaks ties so events written
         // inside one clock tick still read back in insertion order.
@@ -672,15 +832,18 @@ impl Persistence for InMemoryPersistence {
 
     async fn count_events(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
         let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         Ok(filtered_events(&store, instance_id, filter).len() as i64)
     }
 
     async fn list_paired_records(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
@@ -688,6 +851,7 @@ impl Persistence for InMemoryPersistence {
         offset: i64,
     ) -> Result<Vec<PairedRecordSummary>, CoreError> {
         let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         let mut paired = pair_records(&store, instance_id, vocabulary);
         paired.retain(|record| matches_filter(record, filter));
         paired.sort_by_key(|r| r.started_at);
@@ -703,11 +867,13 @@ impl Persistence for InMemoryPersistence {
 
     async fn count_paired_records(
         &self,
+        tenant_id: &TenantId,
         instance_id: &str,
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
         let store = self.store.lock().unwrap();
+        store.require_tenant(tenant_id, instance_id)?;
         Ok(pair_records(&store, instance_id, vocabulary)
             .into_iter()
             .filter(|record| matches_filter(record, filter))
@@ -721,6 +887,7 @@ impl Persistence for InMemoryPersistence {
     /// retention silently, so this implements it.
     async fn get_terminal_instances_older_than(
         &self,
+        tenant_id: &TenantId,
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
@@ -728,6 +895,7 @@ impl Persistence for InMemoryPersistence {
         let mut terminal: Vec<_> = store
             .instances
             .values()
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .filter(|i| i.status.is_terminal())
             .filter(|i| i.finished_at.is_some_and(|t| t < older_than))
             .collect();
@@ -742,10 +910,17 @@ impl Persistence for InMemoryPersistence {
     /// Delete instances and everything hanging off them.
     ///
     /// Prune every dependent collection under the same store lock.
-    async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
+    async fn delete_instances_batch(
+        &self,
+        tenant_id: &TenantId,
+        instance_ids: &[String],
+    ) -> Result<u64, CoreError> {
         let mut store = self.store.lock().unwrap();
         let mut deleted = 0;
         for id in instance_ids {
+            if store.require_tenant(tenant_id, id).is_err() {
+                continue;
+            }
             if store.instances.remove(id).is_some() {
                 deleted += 1;
             }
@@ -768,6 +943,7 @@ impl Persistence for InMemoryPersistence {
     /// is older than the cutoff.
     async fn delete_paired_events_older_than(
         &self,
+        tenant_id: &TenantId,
         vocabulary: &EventVocabulary,
         older_than: DateTime<Utc>,
         limit: i64,
@@ -777,6 +953,7 @@ impl Persistence for InMemoryPersistence {
         let mut doomed: Vec<i64> = store
             .events
             .iter()
+            .filter(|e| store.require_tenant(tenant_id, &e.instance_id).is_ok())
             .filter(|e| e.created_at < older_than)
             .filter(|e| e.subtype.as_deref().is_some_and(|s| paired.contains(&s)))
             .filter_map(|e| e.id)
@@ -792,6 +969,7 @@ impl Persistence for InMemoryPersistence {
 
     async fn get_sleeping_instances_due(
         &self,
+        tenant_id: &TenantId,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
         let now = Utc::now();
@@ -799,6 +977,7 @@ impl Persistence for InMemoryPersistence {
         let mut due: Vec<_> = store
             .instances
             .values()
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .filter(|i| i.status == CoreInstanceStatus::Suspended)
             .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
             .cloned()
@@ -816,6 +995,7 @@ impl Persistence for InMemoryPersistence {
     /// briefly deadline-less.
     async fn claim_sleeping_instances_due(
         &self,
+        tenant_id: &TenantId,
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -827,6 +1007,7 @@ impl Persistence for InMemoryPersistence {
         let mut candidates: Vec<_> = store
             .instances
             .values()
+            .filter(|i| i.tenant_id == tenant_id.as_str())
             .filter(|i| i.status == CoreInstanceStatus::Suspended)
             .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
             .map(|i| (i.instance_id.clone(), i.sleep_until))
@@ -1032,7 +1213,10 @@ mod tests {
         let backend = InMemoryPersistence::new();
         let tenant = "instance-tie";
         for suffix in ["Step-A", "step-a", "stepA", "step_a"] {
-            backend.register_instance(suffix, tenant).await.unwrap();
+            backend
+                .register_instance(&crate::TenantId::new(tenant).unwrap(), suffix)
+                .await
+                .unwrap();
         }
         // One timestamp for every row: the tie-break alone decides the order.
         let shared_at = Utc::now();
@@ -1044,7 +1228,7 @@ mod tests {
         }
 
         let listed = backend
-            .list_instances(Some(tenant), None, 50, 0)
+            .list_instances(&crate::TenantId::new(tenant).unwrap(), None, 50, 0)
             .await
             .unwrap();
         let order: Vec<&str> = listed.iter().map(|i| i.instance_id.as_str()).collect();
@@ -1059,7 +1243,7 @@ mod tests {
         let mut paged = Vec::new();
         for offset in 0..4 {
             let page = backend
-                .list_instances(Some(tenant), None, 1, offset)
+                .list_instances(&crate::TenantId::new(tenant).unwrap(), None, 1, offset)
                 .await
                 .unwrap();
             paged.push(page[0].instance_id.clone());
@@ -1117,25 +1301,37 @@ mod tests {
         .expect("a vocabulary of identifiers is valid")
     }
 
-    async fn append(backend: &InMemoryPersistence, subtype: &str, payload: serde_json::Value) {
+    async fn append(
+        backend: &InMemoryPersistence,
+        tenant_scope: &TenantId,
+        subtype: &str,
+        payload: serde_json::Value,
+    ) {
         backend
-            .insert_event(&EventRecord {
-                id: None,
-                instance_id: "inst".to_string(),
-                event_type: crate::domain::EventType::Custom,
-                checkpoint_id: None,
-                payload: Some(payload.to_string().into_bytes()),
-                created_at: Utc::now(),
-                subtype: Some(subtype.to_string()),
-            })
+            .insert_event(
+                tenant_scope,
+                &EventRecord {
+                    id: None,
+                    instance_id: "inst".to_string(),
+                    event_type: crate::domain::EventType::Custom,
+                    checkpoint_id: None,
+                    payload: Some(payload.to_string().into_bytes()),
+                    created_at: Utc::now(),
+                    subtype: Some(subtype.to_string()),
+                },
+            )
             .await
             .expect("append");
     }
 
     #[tokio::test]
     async fn pairs_and_retires_events_with_non_identifier_names() {
+        let tenant_scope = crate::TenantId::new("tenant").unwrap();
         let backend = InMemoryPersistence::new();
-        backend.register_instance("inst", "tenant").await.unwrap();
+        backend
+            .register_instance(&tenant_scope, "inst")
+            .await
+            .unwrap();
         let vocabulary = EventVocabulary::new(crate::persistence::EventVocabularySpec {
             start_subtype: "unit-open",
             end_subtype: "unit-close",
@@ -1152,6 +1348,7 @@ mod tests {
         .unwrap();
         append(
             &backend,
+            &tenant_scope,
             "unit-open",
             serde_json::json!({
                 "unit.id": "u1", "kind name": "work", "étiquette": "label", "in'put": {"x": 1},
@@ -1160,6 +1357,7 @@ mod tests {
         .await;
         append(
             &backend,
+            &tenant_scope,
             "unit-close",
             serde_json::json!({
                 "unit.id": "u1", "out.put": {"x": 2},
@@ -1168,7 +1366,7 @@ mod tests {
         .await;
         let filter = ListPairedRecordsFilter::default();
         let records = backend
-            .list_paired_records("inst", &vocabulary, &filter, 10, 0)
+            .list_paired_records(&tenant_scope, "inst", &vocabulary, &filter, 10, 0)
             .await
             .unwrap();
         assert_eq!(records.len(), 1);
@@ -1177,14 +1375,19 @@ mod tests {
         assert_eq!(records[0].outputs, Some(serde_json::json!({"x": 2})));
         assert_eq!(
             backend
-                .count_paired_records("inst", &vocabulary, &filter)
+                .count_paired_records(&tenant_scope, "inst", &vocabulary, &filter)
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
             backend
-                .delete_paired_events_older_than(&vocabulary, Utc::now() + Duration::seconds(1), 10)
+                .delete_paired_events_older_than(
+                    &tenant_scope,
+                    &vocabulary,
+                    Utc::now() + Duration::seconds(1),
+                    10
+                )
                 .await
                 .unwrap(),
             2
@@ -1194,12 +1397,17 @@ mod tests {
     /// Pairing must be driven entirely by the supplied names.
     #[tokio::test]
     async fn pairs_records_under_a_vocabulary_that_shares_nothing_with_the_dsl() {
+        let tenant_scope = crate::TenantId::new("t").unwrap();
         let backend = InMemoryPersistence::new();
-        backend.register_instance("inst", "t").await.unwrap();
+        backend
+            .register_instance(&tenant_scope, "inst")
+            .await
+            .unwrap();
         let vocabulary = foreign_vocabulary();
 
         append(
             &backend,
+            &tenant_scope,
             "unit_open",
             serde_json::json!({"unit_id": "u1", "flavour": "Agent", "caption": "first",
                                "given": {"a": 1}, "scope_id": "s1"}),
@@ -1207,6 +1415,7 @@ mod tests {
         .await;
         append(
             &backend,
+            &tenant_scope,
             "unit_close",
             serde_json::json!({"unit_id": "u1", "produced": {"ok": true},
                                "scope_id": "s1", "began_ms": 10, "ended_ms": 20}),
@@ -1214,6 +1423,7 @@ mod tests {
         .await;
         append(
             &backend,
+            &tenant_scope,
             "unit_open",
             serde_json::json!({"unit_id": "u2", "flavour": "Split"}),
         )
@@ -1221,7 +1431,7 @@ mod tests {
 
         let filter = ListPairedRecordsFilter::default();
         let records = backend
-            .list_paired_records("inst", &vocabulary, &filter, 50, 0)
+            .list_paired_records(&tenant_scope, "inst", &vocabulary, &filter, 50, 0)
             .await
             .expect("list");
         assert_eq!(records.len(), 2);
@@ -1247,7 +1457,7 @@ mod tests {
 
         assert_eq!(
             backend
-                .count_paired_records("inst", &vocabulary, &filter)
+                .count_paired_records(&tenant_scope, "inst", &vocabulary, &filter)
                 .await
                 .unwrap(),
             2
@@ -1258,13 +1468,24 @@ mod tests {
     /// populating the error key, still reads as failed.
     #[tokio::test]
     async fn output_flag_marks_a_record_failed() {
+        let tenant_scope = crate::TenantId::new("t").unwrap();
         let backend = InMemoryPersistence::new();
-        backend.register_instance("inst", "t").await.unwrap();
+        backend
+            .register_instance(&tenant_scope, "inst")
+            .await
+            .unwrap();
         let vocabulary = foreign_vocabulary();
 
-        append(&backend, "unit_open", serde_json::json!({"unit_id": "u1"})).await;
         append(
             &backend,
+            &tenant_scope,
+            "unit_open",
+            serde_json::json!({"unit_id": "u1"}),
+        )
+        .await;
+        append(
+            &backend,
+            &tenant_scope,
             "unit_close",
             serde_json::json!({"unit_id": "u1", "produced": {"_broke": true}}),
         )
@@ -1272,6 +1493,7 @@ mod tests {
 
         let records = backend
             .list_paired_records(
+                &tenant_scope,
                 "inst",
                 &vocabulary,
                 &ListPairedRecordsFilter::default(),
@@ -1286,13 +1508,18 @@ mod tests {
     /// The same correlation id in two scopes is two records, not one.
     #[tokio::test]
     async fn scope_separates_records_sharing_a_correlation_id() {
+        let tenant_scope = crate::TenantId::new("t").unwrap();
         let backend = InMemoryPersistence::new();
-        backend.register_instance("inst", "t").await.unwrap();
+        backend
+            .register_instance(&tenant_scope, "inst")
+            .await
+            .unwrap();
         let vocabulary = foreign_vocabulary();
 
         for scope in ["iter-1", "iter-2"] {
             append(
                 &backend,
+                &tenant_scope,
                 "unit_open",
                 serde_json::json!({"unit_id": "same", "scope_id": scope}),
             )
@@ -1300,6 +1527,7 @@ mod tests {
         }
         append(
             &backend,
+            &tenant_scope,
             "unit_close",
             serde_json::json!({"unit_id": "same", "scope_id": "iter-1"}),
         )
@@ -1307,6 +1535,7 @@ mod tests {
 
         let records = backend
             .list_paired_records(
+                &tenant_scope,
                 "inst",
                 &vocabulary,
                 &ListPairedRecordsFilter::default(),
@@ -1334,23 +1563,56 @@ mod tests {
     /// Retention removes only what the vocabulary names.
     #[tokio::test]
     async fn the_sweep_spares_subtypes_the_vocabulary_does_not_name() {
+        let tenant_scope = crate::TenantId::new("t").unwrap();
         let backend = InMemoryPersistence::new();
-        backend.register_instance("inst", "t").await.unwrap();
+        backend
+            .register_instance(&tenant_scope, "inst")
+            .await
+            .unwrap();
         let vocabulary = foreign_vocabulary();
 
-        append(&backend, "unit_open", serde_json::json!({"unit_id": "u1"})).await;
-        append(&backend, "unit_close", serde_json::json!({"unit_id": "u1"})).await;
-        append(&backend, "workflow_log", serde_json::json!({})).await;
-        append(&backend, "step_debug_start", serde_json::json!({})).await;
+        append(
+            &backend,
+            &tenant_scope,
+            "unit_open",
+            serde_json::json!({"unit_id": "u1"}),
+        )
+        .await;
+        append(
+            &backend,
+            &tenant_scope,
+            "unit_close",
+            serde_json::json!({"unit_id": "u1"}),
+        )
+        .await;
+        append(
+            &backend,
+            &tenant_scope,
+            "workflow_log",
+            serde_json::json!({}),
+        )
+        .await;
+        append(
+            &backend,
+            &tenant_scope,
+            "step_debug_start",
+            serde_json::json!({}),
+        )
+        .await;
 
         let deleted = backend
-            .delete_paired_events_older_than(&vocabulary, Utc::now() + Duration::seconds(60), 100)
+            .delete_paired_events_older_than(
+                &tenant_scope,
+                &vocabulary,
+                Utc::now() + Duration::seconds(60),
+                100,
+            )
             .await
             .unwrap();
         assert_eq!(deleted, 2, "only the two subtypes this vocabulary names");
 
         let left = backend
-            .list_events("inst", &ListEventsFilter::default(), 50, 0)
+            .list_events(&tenant_scope, "inst", &ListEventsFilter::default(), 50, 0)
             .await
             .unwrap();
         let subtypes: Vec<_> = left.iter().filter_map(|e| e.subtype.as_deref()).collect();

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Instance registration handler.
 
+use crate::TenantId;
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 
 use anyhow::Result;
@@ -43,6 +44,7 @@ use crate::persistence::EventRecord;
 ))]
 pub async fn handle_register_instance(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     request: RegisterInstanceRequest,
 ) -> Result<RegisterInstanceResponse> {
     info!(
@@ -50,6 +52,14 @@ pub async fn handle_register_instance(
         resuming_from = ?request.checkpoint_id,
         "Instance registering"
     );
+
+    if request.tenant_id != tenant_id.as_str() {
+        return Err(CoreError::ValidationError {
+            field: "tenant_id".into(),
+            message: "request tenant does not match the host tenant".into(),
+        }
+        .into());
+    }
 
     // 1. Validate instance_id is not empty
     if request.instance_id.is_empty() {
@@ -59,22 +69,13 @@ pub async fn handle_register_instance(
         });
     }
 
-    // 2. Validate tenant_id is not empty
-    if request.tenant_id.is_empty() {
-        return Ok(RegisterInstanceResponse {
-            success: false,
-            error: "tenant_id is required".to_string(),
-        });
-    }
-
-    // 3. Refuse new registrations when the core is draining. Existing instances
+    // 2. Refuse new registrations when the core is draining. Existing instances
     //    (which already have a row in persistence) can still resume.
     let instance_exists = state
         .persistence
-        .get_instance_meta(&request.instance_id)
-        .await
-        .map(|opt| opt.is_some())
-        .unwrap_or(false);
+        .get_instance_meta(tenant_id, &request.instance_id)
+        .await?
+        .is_some();
 
     if !instance_exists && state.is_draining() {
         info!("Refusing registration: server draining");
@@ -94,7 +95,7 @@ pub async fn handle_register_instance(
         // routes answer the same status for the same fact.
         match state
             .persistence
-            .load_checkpoint(&request.instance_id, cp_id)
+            .load_checkpoint(tenant_id, &request.instance_id, cp_id)
             .await?
         {
             Some(_) => {
@@ -114,7 +115,7 @@ pub async fn handle_register_instance(
     //    Resumes are allowed past the cap, and the count behind it covers
     //    `running` only — a suspended instance holds no slot while parked.
     if !instance_exists && state.max_concurrent_instances > 0 {
-        match state.persistence.count_active_instances().await {
+        match state.persistence.count_active_instances(tenant_id).await {
             Ok(active) if active >= state.max_concurrent_instances as i64 => {
                 warn!(
                     active,
@@ -128,7 +129,7 @@ pub async fn handle_register_instance(
             }
             Ok(_) => {}
             Err(e) => {
-                warn!(error = %e, "Failed to count active instances; allowing registration");
+                return Err(e.into());
             }
         }
     }
@@ -143,7 +144,7 @@ pub async fn handle_register_instance(
         // `CoreError` carries.
         state
             .persistence
-            .register_instance(&request.instance_id, &request.tenant_id)
+            .register_instance(tenant_id, &request.instance_id)
             .await?;
     }
 
@@ -153,6 +154,7 @@ pub async fn handle_register_instance(
     state
         .persistence
         .update_instance_status(
+            tenant_id,
             &request.instance_id,
             CoreInstanceStatus::Running,
             Some(started_at),
@@ -169,9 +171,13 @@ pub async fn handle_register_instance(
         created_at: started_at,
         subtype: None,
     };
-    if let Err(e) = state.persistence.insert_event(&event).await {
+    if let Err(e) = state.persistence.insert_event(tenant_id, &event).await {
+        if matches!(e, CoreError::InstanceNotFound { .. }) {
+            return Err(e.into());
+        }
         warn!("Failed to insert started event: {}", e);
-        // Don't fail registration just because event logging failed
+        // Ordinary telemetry failures remain best-effort; loss of the scoped
+        // parent must not be reported as a successful registration.
     }
 
     info!("Instance registered successfully");
@@ -194,6 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_empty_instance_id() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
@@ -203,13 +210,16 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
+        let result = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.contains("instance_id is required"));
     }
 
     #[tokio::test]
     async fn test_register_empty_tenant_id() {
+        let tenant_scope = crate::TenantId::new("test-tenant").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
@@ -219,13 +229,17 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
-        assert!(!result.success);
-        assert!(result.error.contains("tenant_id is required"));
+        let Err(error) = handle_register_instance(&state, &tenant_scope, request).await else {
+            panic!("mismatched tenant must fail");
+        };
+        assert!(
+            matches!(error.downcast_ref::<CoreError>(), Some(CoreError::ValidationError { field, .. }) if field == "tenant_id")
+        );
     }
 
     #[tokio::test]
     async fn test_register_self_registration() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
@@ -235,13 +249,16 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
+        let result = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.success);
         assert!(result.error.is_empty());
     }
 
     #[tokio::test]
     async fn test_register_existing_instance() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -255,12 +272,15 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
+        let result = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_register_with_valid_checkpoint() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
@@ -278,12 +298,15 @@ mod tests {
             checkpoint_id: Some("cp-1".to_string()),
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
+        let result = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_register_with_invalid_checkpoint() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -297,7 +320,7 @@ mod tests {
             checkpoint_id: Some("nonexistent".to_string()),
         };
 
-        let err = match handle_register_instance(&state, request).await {
+        let err = match handle_register_instance(&state, &tenant_scope, request).await {
             Ok(_) => panic!("a missing checkpoint must not report success: false"),
             Err(e) => e,
         };
@@ -310,6 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_registration_write_is_an_error_not_a_refusal() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         // `success: false` means "the caller cannot register" — drain, cap, bad
         // input — and the HTTP layer answers those with a 4xx. A write that
         // failed is the server's problem, so it has to surface as an error the
@@ -324,7 +348,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let err = match handle_register_instance(&state, request).await {
+        let err = match handle_register_instance(&state, &tenant_scope, request).await {
             Ok(_) => panic!("a failed persistence write must not report success: false"),
             Err(e) => e,
         };
@@ -336,6 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_status_update_is_an_error_not_a_refusal() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = MockPersistence::new();
         persistence.set_fail_status_update();
         let state = InstanceHandlerState::new(Arc::new(persistence));
@@ -346,7 +371,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let err = match handle_register_instance(&state, request).await {
+        let err = match handle_register_instance(&state, &tenant_scope, request).await {
             Ok(_) => panic!("a failed status update must not report success: false"),
             Err(e) => e,
         };
@@ -358,6 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_creates_started_event() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let mock = MockPersistence::new();
         let persistence = Arc::new(mock);
         let state = InstanceHandlerState::new(persistence.clone());
@@ -368,7 +394,9 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
+        let result = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Check that started event was created
@@ -380,6 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_rejected_when_draining() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
         state.draining.store(true, Ordering::SeqCst);
@@ -390,13 +419,16 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, request).await.unwrap();
+        let resp = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(!resp.success);
         assert_eq!(resp.error, ERROR_SERVER_DRAINING);
     }
 
     #[tokio::test]
     async fn test_register_existing_instance_allowed_during_drain() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         // Existing (resuming) instances must still be able to register — we only
         // want to keep out fresh work.
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
@@ -413,12 +445,15 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, request).await.unwrap();
+        let resp = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(resp.success, "drain should not block resuming instances");
     }
 
     #[tokio::test]
     async fn test_register_rejected_when_max_concurrent_reached() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_active_count(32));
         let state = InstanceHandlerState::with_limits(persistence, 32);
 
@@ -428,13 +463,16 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, request).await.unwrap();
+        let resp = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(!resp.success);
         assert_eq!(resp.error, ERROR_MAX_CONCURRENT_INSTANCES);
     }
 
     #[tokio::test]
     async fn test_register_under_cap_allowed() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_active_count(5));
         let state = InstanceHandlerState::with_limits(persistence, 32);
 
@@ -444,7 +482,9 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, request).await.unwrap();
+        let resp = handle_register_instance(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert!(resp.success);
     }
 }

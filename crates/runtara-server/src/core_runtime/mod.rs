@@ -36,6 +36,7 @@
 //!     let persistence = Arc::new(PostgresPersistence::new(pool));
 //!
 //!     let runtime = CoreRuntime::builder()
+//!         .tenant_id(runtara_core::TenantId::new("host-selected-tenant")?)
 //!         .persistence(persistence)
 //!         .bind_addr("0.0.0.0:8001".parse()?)
 //!         .build()?
@@ -81,6 +82,7 @@ pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Builder for creating a [`CoreRuntime`].
 pub struct CoreRuntimeBuilder {
+    tenant_id: Option<runtara_core::TenantId>,
     persistence: Option<Arc<dyn Persistence>>,
     event_observer: Option<Arc<dyn InstanceEventObserver>>,
     bind_addr: SocketAddr,
@@ -106,6 +108,7 @@ impl std::fmt::Debug for CoreRuntimeBuilder {
 impl Default for CoreRuntimeBuilder {
     fn default() -> Self {
         Self {
+            tenant_id: None,
             persistence: None,
             event_observer: None,
             bind_addr: "0.0.0.0:8001".parse().unwrap(),
@@ -119,6 +122,12 @@ impl CoreRuntimeBuilder {
     /// Create a new builder with default settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the host-selected tenant for this dedicated protocol listener (required).
+    pub fn tenant_id(mut self, tenant_id: runtara_core::TenantId) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
     }
 
     /// Set the persistence layer (required).
@@ -194,7 +203,11 @@ impl CoreRuntimeBuilder {
             .persistence
             .ok_or_else(|| anyhow::anyhow!("persistence is required"))?;
 
+        let tenant_id = self
+            .tenant_id
+            .ok_or_else(|| anyhow::anyhow!("tenant_id is required"))?;
         Ok(CoreRuntimeConfig {
+            tenant_id,
             persistence,
             event_observer: self.event_observer,
             bind_addr: self.bind_addr,
@@ -206,6 +219,7 @@ impl CoreRuntimeBuilder {
 
 /// Configuration for a [`CoreRuntime`].
 pub struct CoreRuntimeConfig {
+    tenant_id: runtara_core::TenantId,
     persistence: Arc<dyn Persistence>,
     event_observer: Option<Arc<dyn InstanceEventObserver>>,
     bind_addr: SocketAddr,
@@ -232,6 +246,7 @@ impl CoreRuntimeConfig {
     /// Start the runtime, spawning the HTTP server task.
     pub async fn start(self) -> Result<CoreRuntime> {
         let CoreRuntimeConfig {
+            tenant_id,
             persistence,
             event_observer,
             bind_addr,
@@ -250,9 +265,12 @@ impl CoreRuntimeConfig {
         let shutdown_signal = Arc::new(Notify::new());
         let server_shutdown = Arc::clone(&shutdown_signal);
         let server_handle = tokio::spawn(async move {
-            http_server::run_http_server_with_shutdown(bind_addr, server_state, async move {
-                server_shutdown.notified().await
-            })
+            http_server::run_http_server_with_shutdown(
+                bind_addr,
+                server_state,
+                tenant_id,
+                async move { server_shutdown.notified().await },
+            )
             .await
         });
 
@@ -441,14 +459,15 @@ mod tests {
     impl Persistence for MockPersistence {
         async fn register_instance(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
-            _tenant_id: &str,
         ) -> Result<(), CoreError> {
             Ok(())
         }
 
         async fn get_instance(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
         ) -> Result<Option<InstanceRecord>, CoreError> {
             Ok(None)
@@ -456,6 +475,7 @@ mod tests {
 
         async fn update_instance_status(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _status: runtara_core::domain::InstanceStatus,
             _started_at: Option<DateTime<Utc>>,
@@ -465,6 +485,7 @@ mod tests {
 
         async fn update_instance_checkpoint(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: &str,
         ) -> Result<(), CoreError> {
@@ -473,6 +494,7 @@ mod tests {
 
         async fn complete_instance(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _params: CompleteInstanceParams<'_>,
         ) -> Result<bool, CoreError> {
             Ok(true)
@@ -480,6 +502,7 @@ mod tests {
 
         async fn save_checkpoint(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: &str,
             _state: &[u8],
@@ -489,6 +512,7 @@ mod tests {
 
         async fn load_checkpoint(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: &str,
         ) -> Result<Option<CheckpointRecord>, CoreError> {
@@ -497,6 +521,7 @@ mod tests {
 
         async fn list_checkpoints(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: Option<&str>,
             _limit: i64,
@@ -509,6 +534,7 @@ mod tests {
 
         async fn count_checkpoints(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: Option<&str>,
             _created_after: Option<DateTime<Utc>>,
@@ -517,12 +543,17 @@ mod tests {
             Ok(0)
         }
 
-        async fn insert_event(&self, _event: &EventRecord) -> Result<(), CoreError> {
+        async fn insert_event(
+            &self,
+            _tenant_id: &runtara_core::TenantId,
+            _event: &EventRecord,
+        ) -> Result<(), CoreError> {
             Ok(())
         }
 
         async fn insert_signal(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _signal_type: runtara_core::domain::SignalType,
             _payload: &[u8],
@@ -532,6 +563,7 @@ mod tests {
 
         async fn get_pending_signal(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
         ) -> Result<Option<SignalRecord>, CoreError> {
             Ok(None)
@@ -539,6 +571,7 @@ mod tests {
 
         async fn apply_lifecycle_command(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _command_id: &str,
             _signal_type: runtara_core::domain::SignalType,
@@ -548,6 +581,7 @@ mod tests {
 
         async fn park_instance(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _request: runtara_core::lifecycle::ParkRequest,
         ) -> std::result::Result<runtara_core::lifecycle::Decision, runtara_core::error::CoreError>
@@ -557,6 +591,7 @@ mod tests {
 
         async fn cancel_suspended_instances(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: Option<&str>,
             _limit: i64,
         ) -> std::result::Result<
@@ -568,6 +603,7 @@ mod tests {
 
         async fn put_custom_signal(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: &str,
             _payload: &[u8],
@@ -577,6 +613,7 @@ mod tests {
 
         async fn get_custom_signal(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: &str,
         ) -> Result<Option<CustomSignalRecord>, CoreError> {
@@ -585,6 +622,7 @@ mod tests {
 
         async fn save_retry_attempt(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _checkpoint_id: &str,
             _attempt: i32,
@@ -595,7 +633,8 @@ mod tests {
 
         async fn list_instances(
             &self,
-            _tenant_id: Option<&str>,
+            _tenant_id: &runtara_core::TenantId,
+
             _status: Option<runtara_core::domain::InstanceStatus>,
             _limit: i64,
             _offset: i64,
@@ -611,12 +650,16 @@ mod tests {
             Ok(true)
         }
 
-        async fn count_active_instances(&self) -> Result<i64, CoreError> {
+        async fn count_active_instances(
+            &self,
+            _tenant_id: &runtara_core::TenantId,
+        ) -> Result<i64, CoreError> {
             Ok(0)
         }
 
         async fn schedule_wake(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _sleep_until: DateTime<Utc>,
             _reason: runtara_core::domain::WakeReason,
@@ -624,18 +667,27 @@ mod tests {
             Ok(())
         }
 
-        async fn clear_instance_sleep(&self, _instance_id: &str) -> Result<(), CoreError> {
+        async fn clear_instance_sleep(
+            &self,
+            _tenant_id: &runtara_core::TenantId,
+            _instance_id: &str,
+        ) -> Result<(), CoreError> {
             Ok(())
         }
 
         /// This mock holds no instances, so there is never one to claim. These
         /// tests drive the health endpoint, not the wake path.
-        async fn claim_sleeping_instance(&self, _instance_id: &str) -> Result<bool, CoreError> {
+        async fn claim_sleeping_instance(
+            &self,
+            _tenant_id: &runtara_core::TenantId,
+            _instance_id: &str,
+        ) -> Result<bool, CoreError> {
             Ok(false)
         }
 
         async fn get_sleeping_instances_due(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _limit: i64,
         ) -> Result<Vec<InstanceRecord>, CoreError> {
             Ok(Vec::new())
@@ -645,6 +697,7 @@ mod tests {
         /// These tests drive the health endpoint, not the wake path.
         async fn claim_sleeping_instances_due(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _limit: i64,
             _retry_at: DateTime<Utc>,
         ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -653,6 +706,7 @@ mod tests {
 
         async fn list_events(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _filter: &ListEventsFilter,
             _limit: i64,
@@ -663,6 +717,7 @@ mod tests {
 
         async fn count_events(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _filter: &ListEventsFilter,
         ) -> Result<i64, CoreError> {
@@ -671,6 +726,7 @@ mod tests {
 
         async fn list_paired_records(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _vocabulary: &EventVocabulary,
             _filter: &ListPairedRecordsFilter,
@@ -682,11 +738,29 @@ mod tests {
 
         async fn count_paired_records(
             &self,
+            _tenant_id: &runtara_core::TenantId,
             _instance_id: &str,
             _vocabulary: &EventVocabulary,
             _filter: &ListPairedRecordsFilter,
         ) -> Result<i64, CoreError> {
             Ok(0)
+        }
+
+        async fn try_register_instance(
+            &self,
+            _tenant_id: &runtara_core::TenantId,
+            _instance_id: &str,
+            _input: Option<&[u8]>,
+        ) -> Result<bool, CoreError> {
+            Ok(true)
+        }
+        async fn store_instance_input(
+            &self,
+            _tenant_id: &runtara_core::TenantId,
+            _instance_id: &str,
+            _input: &[u8],
+        ) -> Result<(), CoreError> {
+            Ok(())
         }
     }
 
@@ -730,6 +804,7 @@ mod tests {
         let entered = Arc::new(Notify::new());
         let addr = free_port().await;
         let runtime = CoreRuntime::builder()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(Arc::new(MockPersistence::slow_health(
                 Duration::from_millis(800),
                 Arc::clone(&entered),
@@ -766,6 +841,7 @@ mod tests {
         let entered = Arc::new(Notify::new());
         let addr = free_port().await;
         let runtime = CoreRuntime::builder()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(Arc::new(MockPersistence::slow_health(
                 Duration::from_secs(3),
                 Arc::clone(&entered),
@@ -815,7 +891,8 @@ mod tests {
 
     #[test]
     fn test_builder_new() {
-        let builder = CoreRuntimeBuilder::new();
+        let builder =
+            CoreRuntimeBuilder::new().tenant_id(runtara_core::TenantId::new("t1").unwrap());
         assert!(builder.persistence.is_none());
         assert_eq!(builder.bind_addr.port(), 8001);
     }
@@ -823,14 +900,18 @@ mod tests {
     #[test]
     fn test_builder_persistence() {
         let persistence = Arc::new(MockPersistence::new());
-        let builder = CoreRuntimeBuilder::new().persistence(persistence);
+        let builder = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .persistence(persistence);
         assert!(builder.persistence.is_some());
     }
 
     #[test]
     fn test_builder_bind_addr() {
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
-        let builder = CoreRuntimeBuilder::new().bind_addr(addr);
+        let builder = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .bind_addr(addr);
         assert_eq!(builder.bind_addr.port(), 9000);
     }
 
@@ -839,6 +920,7 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new());
         let addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
         let builder = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(persistence)
             .bind_addr(addr);
         assert!(builder.persistence.is_some());
@@ -847,7 +929,8 @@ mod tests {
 
     #[test]
     fn test_builder_debug() {
-        let builder = CoreRuntimeBuilder::new();
+        let builder =
+            CoreRuntimeBuilder::new().tenant_id(runtara_core::TenantId::new("t1").unwrap());
         let debug_str = format!("{:?}", builder);
         assert!(debug_str.contains("CoreRuntimeBuilder"));
         assert!(debug_str.contains("bind_addr"));
@@ -856,7 +939,9 @@ mod tests {
     #[test]
     fn test_builder_debug_with_persistence() {
         let persistence = Arc::new(MockPersistence::new());
-        let builder = CoreRuntimeBuilder::new().persistence(persistence);
+        let builder = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .persistence(persistence);
         let debug_str = format!("{:?}", builder);
         assert!(debug_str.contains("CoreRuntimeBuilder"));
         // persistence is shown as "..." to avoid leaking details
@@ -865,16 +950,29 @@ mod tests {
 
     #[test]
     fn test_builder_build_missing_persistence() {
-        let result = CoreRuntimeBuilder::new().build();
+        let result = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .build();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("persistence is required"));
     }
 
     #[test]
+    fn builder_requires_host_selected_tenant() {
+        let result = CoreRuntimeBuilder::new()
+            .persistence(Arc::new(MockPersistence::new()))
+            .build();
+        assert_eq!(result.unwrap_err().to_string(), "tenant_id is required");
+    }
+
+    #[test]
     fn test_builder_build_success() {
         let persistence = Arc::new(MockPersistence::new());
-        let result = CoreRuntimeBuilder::new().persistence(persistence).build();
+        let result = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .persistence(persistence)
+            .build();
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bind_addr.port(), 8001);
@@ -885,6 +983,7 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new());
         let addr: SocketAddr = "0.0.0.0:9002".parse().unwrap();
         let result = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(persistence)
             .bind_addr(addr)
             .build();
@@ -895,10 +994,12 @@ mod tests {
 
     #[test]
     fn test_builder_apply_overrides_sets_both_knobs() {
-        let builder = CoreRuntimeBuilder::new().apply_overrides(RuntimeOverrides {
-            max_concurrent_instances: Some(4),
-            shutdown_grace: Some(Duration::from_millis(250)),
-        });
+        let builder = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .apply_overrides(RuntimeOverrides {
+                max_concurrent_instances: Some(4),
+                shutdown_grace: Some(Duration::from_millis(250)),
+            });
 
         assert_eq!(builder.max_concurrent_instances, 4);
         assert_eq!(builder.shutdown_grace, Duration::from_millis(250));
@@ -909,6 +1010,7 @@ mod tests {
         // A deployment that configures only the grace must not acquire a
         // concurrency cap as a side effect, and vice versa.
         let grace_only = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .max_concurrent_instances(9)
             .apply_overrides(RuntimeOverrides {
                 max_concurrent_instances: None,
@@ -917,7 +1019,9 @@ mod tests {
         assert_eq!(grace_only.max_concurrent_instances, 9);
         assert_eq!(grace_only.shutdown_grace, Duration::from_millis(750));
 
-        let empty = CoreRuntimeBuilder::new().apply_overrides(RuntimeOverrides::default());
+        let empty = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
+            .apply_overrides(RuntimeOverrides::default());
         assert_eq!(empty.max_concurrent_instances, 0);
         assert_eq!(empty.shutdown_grace, DEFAULT_SHUTDOWN_GRACE);
     }
@@ -926,6 +1030,7 @@ mod tests {
     fn test_build_carries_overrides_into_config() {
         let persistence = Arc::new(MockPersistence::new());
         let config = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(persistence)
             .apply_overrides(RuntimeOverrides {
                 max_concurrent_instances: Some(3),
@@ -940,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_core_runtime_builder_static_method() {
-        let builder = CoreRuntime::builder();
+        let builder = CoreRuntime::builder().tenant_id(runtara_core::TenantId::new("t1").unwrap());
         assert!(builder.persistence.is_none());
     }
 
@@ -954,7 +1059,11 @@ mod tests {
         struct CountingObserver(AtomicUsize);
 
         impl InstanceEventObserver for CountingObserver {
-            fn on_event_persisted(&self, _subtype: Option<&str>) {
+            fn on_event_persisted(
+                &self,
+                _tenant_id: &runtara_core::TenantId,
+                _subtype: Option<&str>,
+            ) {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -962,6 +1071,7 @@ mod tests {
         let observer = Arc::new(CountingObserver(AtomicUsize::new(0)));
         let addr = free_port().await;
         let runtime = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(Arc::new(MockPersistence::new()))
             .event_observer(observer.clone())
             .bind_addr(addr)
@@ -1001,6 +1111,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let config = CoreRuntimeBuilder::new()
+            .tenant_id(runtara_core::TenantId::new("t1").unwrap())
             .persistence(persistence)
             .bind_addr(addr)
             .build()

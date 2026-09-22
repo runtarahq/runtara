@@ -84,6 +84,7 @@ pub async fn recover_registered(
     container: &crate::container_registry::ContainerInfo,
     auto_recover: bool,
 ) -> Result<Option<RecoveryOutcome>> {
+    let tenant_id = runtara_core::TenantId::new(container.tenant_id.clone())?;
     let mut guard = pool.begin().await?;
     let launch_state: Option<String> =
         sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1 FOR UPDATE")
@@ -119,12 +120,18 @@ pub async fn recover_registered(
         return Ok(None);
     }
     let outcome = match persistence
-        .get_instance_meta(&container.instance_id)
+        .get_instance_meta(&tenant_id, &container.instance_id)
         .await?
     {
         Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
-            let outcome =
-                recover_or_fail(pool, persistence, &container.instance_id, auto_recover).await?;
+            let outcome = recover_or_fail(
+                pool,
+                persistence,
+                &tenant_id,
+                &container.instance_id,
+                auto_recover,
+            )
+            .await?;
             if outcome == RecoveryOutcome::Unchanged {
                 return Ok(Some(outcome));
             }
@@ -209,6 +216,7 @@ fn decide(
 pub async fn recover_or_fail(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     auto_recover: bool,
 ) -> Result<RecoveryOutcome> {
@@ -216,17 +224,18 @@ pub async fn recover_or_fail(
     // Monotonic, so a higher count than the last recovery means the instance
     // made forward progress across the restart.
     let progress = persistence
-        .count_checkpoints(instance_id, None, None, None)
-        .await
-        .unwrap_or(0);
+        .count_checkpoints(tenant_id, instance_id, None, None, None)
+        .await?;
     let marker = progress.to_string();
 
-    // Prior crash-loop counters (best-effort; treat read failure as a fresh
-    // instance so we err toward recovering rather than failing).
-    let (prev_attempts, prev_marker) = match persistence.get_instance_meta(instance_id).await {
-        Ok(Some(inst)) => (inst.recovery_attempts, inst.recovery_marker),
-        _ => (0, None),
-    };
+    // A failed or out-of-scope read cannot authorize a recovery write.
+    let instance = persistence
+        .get_instance_meta(tenant_id, instance_id)
+        .await?
+        .ok_or_else(|| runtara_core::error::CoreError::InstanceNotFound {
+            instance_id: instance_id.to_string(),
+        })?;
+    let (prev_attempts, prev_marker) = (instance.recovery_attempts, instance.recovery_marker);
 
     let cap = max_auto_restarts();
 
@@ -240,6 +249,7 @@ pub async fn recover_or_fail(
         Decision::Fail { error: err } => {
             let applied = persistence
                 .complete_instance(
+                    tenant_id,
                     CompleteInstanceParams::new(
                         instance_id,
                         runtara_core::domain::InstanceStatus::Failed,
@@ -262,7 +272,7 @@ pub async fn recover_or_fail(
         }
         Decision::Recover { attempt } => {
             let applied = crate::instance_repository::InstanceRepository::new(pool.clone())
-                .mark_for_recovery(instance_id, attempt, Some(&marker))
+                .mark_for_recovery(tenant_id, instance_id, attempt, Some(&marker))
                 .await?;
             if !applied {
                 return Ok(RecoveryOutcome::Unchanged);
@@ -426,7 +436,12 @@ mod persistence_tests {
             let before = snapshot(&pool, &id).await;
             assert!(
                 !repository
-                    .mark_for_recovery(&id, 4, Some("8"))
+                    .mark_for_recovery(
+                        &runtara_core::TenantId::new("recovery-test").unwrap(),
+                        &id,
+                        4,
+                        Some("8")
+                    )
                     .await
                     .expect("attempt stale recovery")
             );
@@ -434,9 +449,15 @@ mod persistence_tests {
             let persistence = PostgresPersistence::new(pool.clone());
             for auto_recover in [true, false] {
                 assert_eq!(
-                    recover_or_fail(&pool, &persistence, &id, auto_recover)
-                        .await
-                        .expect("resolve stale recovery"),
+                    recover_or_fail(
+                        &pool,
+                        &persistence,
+                        &runtara_core::TenantId::new("recovery-test").unwrap(),
+                        &id,
+                        auto_recover
+                    )
+                    .await
+                    .expect("resolve stale recovery"),
                     RecoveryOutcome::Unchanged
                 );
                 assert_eq!(snapshot(&pool, &id).await, before, "state {status}");
@@ -459,9 +480,15 @@ mod persistence_tests {
             .await
             .expect("create running instance");
             assert_eq!(
-                recover_or_fail(&pool, &persistence, &id, auto_recover)
-                    .await
-                    .expect("apply recovery decision"),
+                recover_or_fail(
+                    &pool,
+                    &persistence,
+                    &runtara_core::TenantId::new("recovery-test").unwrap(),
+                    &id,
+                    auto_recover
+                )
+                .await
+                .expect("apply recovery decision"),
                 if auto_recover {
                     RecoveryOutcome::Recovered
                 } else {
@@ -479,9 +506,15 @@ mod persistence_tests {
                 assert_eq!(after["recovery_attempts"], 1);
             }
             assert_eq!(
-                recover_or_fail(&pool, &persistence, &id, auto_recover)
-                    .await
-                    .expect("repeat recovery decision"),
+                recover_or_fail(
+                    &pool,
+                    &persistence,
+                    &runtara_core::TenantId::new("recovery-test").unwrap(),
+                    &id,
+                    auto_recover
+                )
+                .await
+                .expect("repeat recovery decision"),
                 RecoveryOutcome::Unchanged
             );
             assert_eq!(snapshot(&pool, &id).await, after);
@@ -495,9 +528,15 @@ mod persistence_tests {
         pool.close().await;
         for auto_recover in [true, false] {
             assert!(
-                recover_or_fail(&pool, &persistence, "unavailable", auto_recover)
-                    .await
-                    .is_err()
+                recover_or_fail(
+                    &pool,
+                    &persistence,
+                    &runtara_core::TenantId::new("recovery-test").unwrap(),
+                    "unavailable",
+                    auto_recover
+                )
+                .await
+                .is_err()
             );
         }
     }

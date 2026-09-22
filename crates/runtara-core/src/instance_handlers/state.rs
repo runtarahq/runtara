@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared state for instance handlers.
 
+use crate::TenantId;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,7 +23,7 @@ use crate::persistence::Persistence;
 /// or any I/O here is a bug.
 pub trait InstanceEventObserver: Send + Sync {
     /// An event was persisted, carrying the producer's subtype if it set one.
-    fn on_event_persisted(&self, subtype: Option<&str>);
+    fn on_event_persisted(&self, tenant_id: &TenantId, subtype: Option<&str>);
 }
 
 /// Shared state for instance handlers.

@@ -85,6 +85,7 @@ impl ScopedInvocationFactory {
         control_timeout: Duration,
     ) -> Result<Self, ExecutionError> {
         if lease.instance_id != self.owner.root.instance_id
+            || lease.tenant_id != self.owner.root.tenant_id.as_str()
             || lease.epoch <= 0
             || [&lease.tenant_id, &lease.instance_id, &lease.owner]
                 .iter()
@@ -144,6 +145,7 @@ impl ScopedInvocationFactory {
             self.durable.as_ref().map(|(lease, timeout)| {
                 Arc::new(InvocationAdmission::new(
                     self.owner.root.state.persistence.clone(),
+                    self.owner.root.tenant_id.clone(),
                     lease.clone(),
                     request.context.path.clone(),
                     *timeout,

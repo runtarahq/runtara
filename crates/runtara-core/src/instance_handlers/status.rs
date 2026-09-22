@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Read-only instance status query handler.
 
+use crate::TenantId;
 use anyhow::Result;
 use tracing::{debug, instrument};
 
@@ -18,6 +19,7 @@ use super::types::{GetInstanceStatusRequest, GetInstanceStatusResponse, Instance
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
 pub async fn handle_get_instance_status(
     state: &InstanceHandlerState,
+    tenant_id: &TenantId,
     request: GetInstanceStatusRequest,
 ) -> Result<GetInstanceStatusResponse> {
     debug!("Getting instance status");
@@ -26,7 +28,7 @@ pub async fn handle_get_instance_status(
     // the guest and the API both make often.
     let instance = state
         .persistence
-        .get_instance_meta(&request.instance_id)
+        .get_instance_meta(tenant_id, &request.instance_id)
         .await?;
 
     match instance {
@@ -64,6 +66,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_not_found() {
+        let tenant_scope = crate::TenantId::new("test-tenant").unwrap();
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
@@ -71,13 +74,16 @@ mod tests {
             instance_id: "nonexistent".to_string(),
         };
 
-        let result = handle_get_instance_status(&state, request).await.unwrap();
+        let result = handle_get_instance_status(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         // Instance not found returns StatusUnknown
         assert_eq!(result.status, InstanceStatus::StatusUnknown as i32);
     }
 
     #[tokio::test]
     async fn test_get_status_found() {
+        let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
@@ -89,7 +95,9 @@ mod tests {
             instance_id: "inst-1".to_string(),
         };
 
-        let result = handle_get_instance_status(&state, request).await.unwrap();
+        let result = handle_get_instance_status(&state, &tenant_scope, request)
+            .await
+            .unwrap();
         assert_eq!(result.status, InstanceStatus::StatusRunning as i32);
     }
 }

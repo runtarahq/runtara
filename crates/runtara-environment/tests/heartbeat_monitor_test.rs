@@ -279,18 +279,29 @@ impl MockPersistence {
 impl Persistence for MockPersistence {
     async fn register_instance(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
-        _tenant_id: &str,
     ) -> Result<(), CoreError> {
         Ok(())
     }
 
-    async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
-        Ok(self.instances.lock().unwrap().get(instance_id).cloned())
+    async fn get_instance(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        Ok(self
+            .instances
+            .lock()
+            .unwrap()
+            .get(instance_id)
+            .filter(|instance| instance.tenant_id == _tenant_id.as_str())
+            .cloned())
     }
 
     async fn update_instance_status(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _status: CoreInstanceStatus,
         _started_at: Option<DateTime<Utc>>,
@@ -300,6 +311,7 @@ impl Persistence for MockPersistence {
 
     async fn update_instance_checkpoint(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: &str,
     ) -> Result<(), CoreError> {
@@ -308,8 +320,18 @@ impl Persistence for MockPersistence {
 
     async fn complete_instance(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
+        if !self
+            .instances
+            .lock()
+            .unwrap()
+            .get(params.instance_id)
+            .is_some_and(|instance| instance.tenant_id == _tenant_id.as_str())
+        {
+            return Ok(false);
+        }
         self.completed_instances.lock().unwrap().push((
             params.instance_id.to_string(),
             params.output.map(|o| o.to_vec()),
@@ -322,6 +344,7 @@ impl Persistence for MockPersistence {
 
     async fn save_checkpoint(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: &str,
         _state: &[u8],
@@ -331,6 +354,7 @@ impl Persistence for MockPersistence {
 
     async fn load_checkpoint(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
@@ -339,6 +363,7 @@ impl Persistence for MockPersistence {
 
     async fn list_checkpoints(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: Option<&str>,
         _limit: i64,
@@ -351,6 +376,7 @@ impl Persistence for MockPersistence {
 
     async fn count_checkpoints(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: Option<&str>,
         _created_after: Option<DateTime<Utc>>,
@@ -359,12 +385,17 @@ impl Persistence for MockPersistence {
         Ok(0)
     }
 
-    async fn insert_event(&self, _event: &EventRecord) -> Result<(), CoreError> {
+    async fn insert_event(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+        _event: &EventRecord,
+    ) -> Result<(), CoreError> {
         Ok(())
     }
 
     async fn insert_signal(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _signal_type: runtara_core::domain::SignalType,
         _payload: &[u8],
@@ -374,6 +405,7 @@ impl Persistence for MockPersistence {
 
     async fn get_pending_signal(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
         Ok(None)
@@ -381,6 +413,7 @@ impl Persistence for MockPersistence {
 
     async fn apply_lifecycle_command(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _command_id: &str,
         _signal_type: runtara_core::domain::SignalType,
@@ -390,6 +423,7 @@ impl Persistence for MockPersistence {
 
     async fn park_instance(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _request: runtara_core::lifecycle::ParkRequest,
     ) -> std::result::Result<runtara_core::lifecycle::Decision, runtara_core::error::CoreError>
@@ -399,6 +433,7 @@ impl Persistence for MockPersistence {
 
     async fn cancel_suspended_instances(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: Option<&str>,
         _limit: i64,
     ) -> std::result::Result<
@@ -410,6 +445,7 @@ impl Persistence for MockPersistence {
 
     async fn put_custom_signal(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: &str,
         _payload: &[u8],
@@ -419,6 +455,7 @@ impl Persistence for MockPersistence {
 
     async fn get_custom_signal(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
@@ -427,6 +464,7 @@ impl Persistence for MockPersistence {
 
     async fn save_retry_attempt(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _checkpoint_id: &str,
         _attempt: i32,
@@ -437,7 +475,8 @@ impl Persistence for MockPersistence {
 
     async fn list_instances(
         &self,
-        _tenant_id: Option<&str>,
+        _tenant_id: &runtara_core::TenantId,
+
         status: Option<CoreInstanceStatus>,
         _limit: i64,
         _offset: i64,
@@ -445,6 +484,7 @@ impl Persistence for MockPersistence {
         let instances = self.instances.lock().unwrap();
         let filtered: Vec<InstanceRecord> = instances
             .values()
+            .filter(|inst| inst.tenant_id == _tenant_id.as_str())
             .filter(|inst| status.is_none_or(|s| inst.status == s))
             .cloned()
             .collect();
@@ -455,12 +495,22 @@ impl Persistence for MockPersistence {
         Ok(true)
     }
 
-    async fn count_active_instances(&self) -> Result<i64, CoreError> {
-        Ok(self.instances.lock().unwrap().len() as i64)
+    async fn count_active_instances(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+    ) -> Result<i64, CoreError> {
+        Ok(self
+            .instances
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|inst| inst.tenant_id == _tenant_id.as_str())
+            .count() as i64)
     }
 
     async fn schedule_wake(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _sleep_until: DateTime<Utc>,
         _reason: runtara_core::domain::WakeReason,
@@ -468,7 +518,11 @@ impl Persistence for MockPersistence {
         Ok(())
     }
 
-    async fn clear_instance_sleep(&self, _instance_id: &str) -> Result<(), CoreError> {
+    async fn clear_instance_sleep(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+        _instance_id: &str,
+    ) -> Result<(), CoreError> {
         Ok(())
     }
 
@@ -476,12 +530,17 @@ impl Persistence for MockPersistence {
     /// seeded instance carries `sleep_until: None` — so the due-ness guard
     /// always fails and this only ever loses. Kept faithful anyway, so it
     /// starts working if a test later seeds a sleeping instance.
-    async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
+    async fn claim_sleeping_instance(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+        instance_id: &str,
+    ) -> Result<bool, CoreError> {
         let mut instances = self.instances.lock().unwrap();
         let Some(instance) = instances.get_mut(instance_id) else {
             return Ok(false);
         };
-        if instance.status != CoreInstanceStatus::Suspended
+        if instance.tenant_id != _tenant_id.as_str()
+            || instance.status != CoreInstanceStatus::Suspended
             || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
         {
             return Ok(false);
@@ -492,6 +551,7 @@ impl Persistence for MockPersistence {
 
     async fn get_sleeping_instances_due(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
         Ok(vec![])
@@ -503,6 +563,7 @@ impl Persistence for MockPersistence {
     /// the heartbeat monitor, not the wake path.
     async fn claim_sleeping_instances_due(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _limit: i64,
         _retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -511,6 +572,7 @@ impl Persistence for MockPersistence {
 
     async fn list_events(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _filter: &ListEventsFilter,
         _limit: i64,
@@ -521,6 +583,7 @@ impl Persistence for MockPersistence {
 
     async fn count_events(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
@@ -529,6 +592,7 @@ impl Persistence for MockPersistence {
 
     async fn list_paired_records(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _vocabulary: &EventVocabulary,
         _filter: &ListPairedRecordsFilter,
@@ -540,11 +604,29 @@ impl Persistence for MockPersistence {
 
     async fn count_paired_records(
         &self,
+        _tenant_id: &runtara_core::TenantId,
         _instance_id: &str,
         _vocabulary: &EventVocabulary,
         _filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
         Ok(0)
+    }
+
+    async fn try_register_instance(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+        _instance_id: &str,
+        _input: Option<&[u8]>,
+    ) -> Result<bool, CoreError> {
+        Ok(true)
+    }
+    async fn store_instance_input(
+        &self,
+        _tenant_id: &runtara_core::TenantId,
+        _instance_id: &str,
+        _input: &[u8],
+    ) -> Result<(), CoreError> {
+        Ok(())
     }
 }
 
@@ -605,7 +687,13 @@ async fn test_heartbeat_monitor_shutdown() {
         heartbeat_timeout: Duration::from_secs(120),
     };
 
-    let monitor = HeartbeatMonitor::new(pool, persistence, Arc::new(MockRunner), config);
+    let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new("test-tenant").unwrap(),
+        pool,
+        persistence,
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start the monitor in a task
@@ -665,6 +753,7 @@ async fn a_draining_monitor_does_not_fail_a_stale_instance() {
     drain.set();
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -707,13 +796,18 @@ async fn test_stale_container_no_heartbeat() {
     create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
 
-    let persistence = Arc::new(MockPersistence::new());
+    let persistence = Arc::new(MockPersistence::new().with_running_instance(
+        &instance_id,
+        &tenant_id,
+        Utc::now(),
+    ));
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
         heartbeat_timeout: Duration::from_secs(60), // 1 minute timeout
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -761,13 +855,18 @@ async fn test_stale_container_old_heartbeat() {
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 10).await; // 10 minutes ago
 
-    let persistence = Arc::new(MockPersistence::new());
+    let persistence = Arc::new(MockPersistence::new().with_running_instance(
+        &instance_id,
+        &tenant_id,
+        Utc::now(),
+    ));
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -822,6 +921,7 @@ async fn test_container_with_recent_heartbeat_not_stale() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -881,6 +981,7 @@ async fn test_orphaned_instance_detected() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -939,6 +1040,7 @@ async fn test_tracked_instance_not_orphaned() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -992,6 +1094,7 @@ async fn test_recent_instance_not_immediately_orphaned() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1051,6 +1154,7 @@ async fn test_multiple_orphaned_instances() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1107,6 +1211,7 @@ async fn test_no_instances_to_check() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new("test-tenant").unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1181,6 +1286,7 @@ async fn test_completed_instance_in_core_not_flagged() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1247,6 +1353,7 @@ async fn test_checkpoint_event_counts_as_activity() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1306,6 +1413,7 @@ async fn test_any_event_type_counts_as_activity() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1358,6 +1466,7 @@ async fn test_multiple_events_uses_most_recent() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1432,6 +1541,7 @@ async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),
@@ -1557,13 +1667,18 @@ async fn test_long_running_instance_with_old_events_is_still_stale() {
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 20).await;
 
-    let persistence = Arc::new(MockPersistence::new());
+    let persistence = Arc::new(MockPersistence::new().with_running_instance(
+        &instance_id,
+        &tenant_id,
+        Utc::now(),
+    ));
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
         heartbeat_timeout: Duration::from_secs(120),
     };
 
     let monitor = HeartbeatMonitor::new(
+        runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         pool.clone(),
         persistence.clone(),
         Arc::new(MockRunner),

@@ -72,7 +72,10 @@ async fn seed_instance_image(
 async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
-        .register_instance(instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            instance_id,
+        )
         .await
         .expect("Failed to register instance");
     seed_instance_image(pool, instance_id, image_id, tenant_id, None, None).await;
@@ -88,7 +91,10 @@ async fn create_test_instance_with_env(
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
-        .register_instance(instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            instance_id,
+        )
         .await
         .expect("Failed to register instance");
     seed_instance_image(pool, instance_id, image_id, tenant_id, env, None).await;
@@ -97,6 +103,7 @@ async fn create_test_instance_with_env(
 /// Helper to update instance status using the Persistence trait.
 /// This replaces the old `db::update_instance_status` function that was removed.
 async fn update_test_instance_status(
+    tenant_id: &str,
     pool: &PgPool,
     instance_id: &str,
     status: &str,
@@ -112,7 +119,7 @@ async fn update_test_instance_status(
             params = params.with_checkpoint(checkpoint_id);
         }
         persistence
-            .complete_instance(params)
+            .complete_instance(&runtara_core::TenantId::new(tenant_id).unwrap(), params)
             .await
             .expect("Failed to complete instance");
         return;
@@ -120,6 +127,7 @@ async fn update_test_instance_status(
     let started_at = (status == "running").then(chrono::Utc::now);
     persistence
         .update_instance_status(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
             instance_id,
             runtara_store_postgres::encoding::status_from_str(status).unwrap(),
             started_at,
@@ -128,7 +136,11 @@ async fn update_test_instance_status(
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
         persistence
-            .update_instance_checkpoint(instance_id, cp_id)
+            .update_instance_checkpoint(
+                &runtara_core::TenantId::new(tenant_id).unwrap(),
+                instance_id,
+                cp_id,
+            )
             .await
             .expect("Failed to update instance checkpoint");
     }
@@ -163,7 +175,7 @@ async fn update_test_instance_result(
         params = params.with_checkpoint(cp);
     }
     persistence
-        .complete_instance(params)
+        .complete_instance(&runtara_core::TenantId::new("test-tenant").unwrap(), params)
         .await
         .expect("Failed to update instance result");
 }
@@ -250,7 +262,7 @@ async fn test_update_instance_status() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Update to running
-    update_test_instance_status(&pool, &instance_id, "running", None).await;
+    update_test_instance_status(tenant_id, &pool, &instance_id, "running", None).await;
 
     let instance = InstanceRepository::new(pool.clone())
         .detail(&instance_id)
@@ -262,7 +274,14 @@ async fn test_update_instance_status() {
     assert!(instance.started_at.is_some());
 
     // Update to completed with checkpoint
-    update_test_instance_status(&pool, &instance_id, "completed", Some("checkpoint-1")).await;
+    update_test_instance_status(
+        tenant_id,
+        &pool,
+        &instance_id,
+        "completed",
+        Some("checkpoint-1"),
+    )
+    .await;
 
     let instance = InstanceRepository::new(pool.clone())
         .detail(&instance_id)
@@ -418,7 +437,7 @@ async fn test_list_instances() {
     }
 
     // Mark one as completed
-    update_test_instance_status(&pool, &ids[0], "completed", None).await;
+    update_test_instance_status(tenant_id, &pool, &ids[0], "completed", None).await;
 
     // List all
     let options = ListInstancesOptions {
@@ -486,9 +505,9 @@ async fn test_list_instances_by_multiple_statuses() {
     for id in &ids {
         create_test_instance(&pool, id, tenant_id, &image_id).await;
     }
-    update_test_instance_status(&pool, &ids[0], "failed", None).await;
-    update_test_instance_status(&pool, &ids[1], "cancelled", None).await;
-    update_test_instance_status(&pool, &ids[2], "completed", None).await;
+    update_test_instance_status(tenant_id, &pool, &ids[0], "failed", None).await;
+    update_test_instance_status(tenant_id, &pool, &ids[1], "cancelled", None).await;
+    update_test_instance_status(tenant_id, &pool, &ids[2], "completed", None).await;
 
     let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
@@ -677,7 +696,10 @@ async fn test_instance_timeout_seconds_round_trips() {
 
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
-        .register_instance(&instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to register instance");
 

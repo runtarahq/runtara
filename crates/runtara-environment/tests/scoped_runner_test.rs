@@ -203,7 +203,11 @@ impl Harness {
         let input = serde_json::to_vec(&json!({"data":{},"variables":{}})).unwrap();
         assert!(
             self.persistence
-                .try_register_instance(&id, "scoped-runner-test", Some(&input))
+                .try_register_instance(
+                    &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                    &id,
+                    Some(&input)
+                )
                 .await
                 .unwrap()
         );
@@ -249,7 +253,10 @@ async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
         assert_eq!(runner.occupancy().unwrap().held, 0);
         let instance = h
             .persistence
-            .get_instance(&options.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -307,7 +314,10 @@ async fn scoped_runner_retains_exact_historical_reviews_for_pinned_artifacts() {
     assert_eq!(runner.occupancy().unwrap().held, 0);
     let instance = h
         .persistence
-        .get_instance(&options.instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -363,7 +373,10 @@ async fn scoped_runner_rejects_unapproved_and_old_packages_before_run_capacity()
         assert_eq!(runner.preparation_occupancy().unwrap().held, 0);
         let instance = h
             .persistence
-            .get_instance(&options.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -449,7 +462,10 @@ async fn scoped_runner_stops_a_hung_http_child_on_cancel_or_root_deadline() {
         assert_eq!(runner.occupancy().unwrap().held, 0);
         let instance = h
             .persistence
-            .get_instance(&options.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -463,7 +479,10 @@ async fn scoped_runner_stops_a_hung_http_child_on_cancel_or_root_deadline() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             h.persistence
-                .get_instance(&options.instance_id)
+                .get_instance(
+                    &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                    &options.instance_id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -502,7 +521,10 @@ async fn scoped_runner_rechecks_prepared_policy_and_rejects_foreign_engines() {
         assert_eq!(runner.preparation_occupancy().unwrap().held, 0);
         assert!(
             h.persistence
-                .get_instance(&options.instance_id)
+                .get_instance(
+                    &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                    &options.instance_id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -531,7 +553,10 @@ async fn scoped_runner_parks_and_replays_existing_checkpoints() {
     .unwrap();
     let parked = h
         .persistence
-        .get_instance(&options.instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -540,7 +565,15 @@ async fn scoped_runner_parks_and_replays_existing_checkpoints() {
     assert_eq!(runner.occupancy().unwrap().held, 0);
     let checkpoints = h
         .persistence
-        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .list_checkpoints(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+            None,
+            100,
+            0,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let agent = checkpoints
@@ -563,7 +596,10 @@ async fn scoped_runner_parks_and_replays_existing_checkpoints() {
     .unwrap();
     let completed = h
         .persistence
-        .get_instance(&options.instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -572,7 +608,11 @@ async fn scoped_runner_parks_and_replays_existing_checkpoints() {
     assert_eq!(output["value"].as_f64().unwrap(), expected);
     let replayed = h
         .persistence
-        .load_checkpoint(&options.instance_id, &agent.checkpoint_id)
+        .load_checkpoint(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+            &agent.checkpoint_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -604,14 +644,25 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
     assert!(runner.is_running(&handle).await);
     assert!(
         h.persistence
-            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .list_checkpoints(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id,
+                None,
+                100,
+                0,
+                None,
+                None
+            )
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
         h.persistence
-            .get_instance(&options.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -620,7 +671,11 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
     );
     // The dispatcher owns durable promotion for a gated launch.
     h.persistence
-        .mark_instance_running(&options.instance_id, chrono::Utc::now())
+        .mark_instance_running(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert!(gate.open());
@@ -632,7 +687,10 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
     .unwrap();
     assert_eq!(
         h.persistence
-            .get_instance(&options.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -760,7 +818,10 @@ async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it
 
     let parked = h
         .persistence
-        .get_instance_meta(&options.instance_id)
+        .get_instance_meta(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -784,6 +845,7 @@ async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it
     // instance; the address is the child's own nested route, but the waker is
     // keyed on the instance, so scheduling a wake is what has to happen here.
     runtara_environment::handlers::wake_suspended_on_signal(
+        &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
         h.persistence.as_ref(),
         &options.instance_id,
     )
@@ -791,7 +853,10 @@ async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it
 
     let woken = h
         .persistence
-        .get_instance_meta(&options.instance_id)
+        .get_instance_meta(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -835,7 +900,10 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
 
     let parked = h
         .persistence
-        .get_instance_meta(&options.instance_id)
+        .get_instance_meta(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -857,7 +925,14 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
     // binary have parked, and race them for this one. The scheduler's due-ness
     // predicate is what this test is about, and `get_sleeping_instances_due`
     // asks exactly that without mutating anyone.
-    let early = h.persistence.get_sleeping_instances_due(256).await.unwrap();
+    let early = h
+        .persistence
+        .get_sleeping_instances_due(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            256,
+        )
+        .await
+        .unwrap();
     assert!(
         !early
             .iter()
@@ -869,7 +944,14 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
     tokio::time::sleep(remaining + Duration::from_millis(50)).await;
 
     // The scheduler's own selection now returns it...
-    let due = h.persistence.get_sleeping_instances_due(256).await.unwrap();
+    let due = h
+        .persistence
+        .get_sleeping_instances_due(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            256,
+        )
+        .await
+        .unwrap();
     assert!(
         due.iter()
             .any(|record| record.instance_id == options.instance_id),
@@ -878,7 +960,10 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
     // ...and its claim takes ownership of this exact instance.
     assert!(
         h.persistence
-            .claim_sleeping_instance(&options.instance_id)
+            .claim_sleeping_instance(
+                &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+                &options.instance_id
+            )
             .await
             .unwrap(),
         "the scheduler must be able to claim the instance it selected"
@@ -897,7 +982,10 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
 
     let settled = h
         .persistence
-        .get_instance_meta(&options.instance_id)
+        .get_instance_meta(
+            &runtara_core::TenantId::new("scoped-runner-test").unwrap(),
+            &options.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();

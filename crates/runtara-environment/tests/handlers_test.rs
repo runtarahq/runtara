@@ -107,7 +107,10 @@ async fn cleanup(pool: &PgPool, instance_id: Option<&str>, image_id: Option<&str
 async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
-        .register_instance(instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            instance_id,
+        )
         .await
         .expect("Failed to register instance");
     // The production path writes this row inside `LaunchRepository::claim_initial`;
@@ -137,6 +140,7 @@ async fn update_test_instance_status(
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
         .update_instance_status(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
             instance_id,
             runtara_store_postgres::encoding::status_from_str(status).unwrap(),
             None,
@@ -145,7 +149,11 @@ async fn update_test_instance_status(
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
         persistence
-            .update_instance_checkpoint(instance_id, cp_id)
+            .update_instance_checkpoint(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                instance_id,
+                cp_id,
+            )
             .await
             .expect("Failed to update instance checkpoint");
     }
@@ -417,7 +425,10 @@ async fn test_start_instance_hands_runner_the_stored_input() {
     );
 
     let stored = persistence
-        .get_instance(&instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap()
         .expect("instance row")
@@ -485,6 +496,7 @@ async fn test_resume_instance_does_not_prepersist_placeholder_input() {
 
     let resumed = handle_resume_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         ResumeInstanceRequest {
             instance_id: instance_id.clone(),
         },
@@ -951,7 +963,13 @@ async fn test_stop_instance_not_found() {
         grace_period_seconds: 10,
     };
 
-    let response = handle_stop_instance(&state, request).await.unwrap();
+    let response = handle_stop_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(!response.success);
     assert!(response.error.as_ref().unwrap().contains("not found"));
@@ -967,11 +985,19 @@ async fn running_stop_fixture(
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let instance_id = Uuid::new_v4().to_string();
     persistence
-        .register_instance(&instance_id, "test-tenant")
+        .register_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+        )
         .await
         .unwrap();
     persistence
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .update_instance_status(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
         .await
         .unwrap();
     let handle = runner
@@ -1052,6 +1078,7 @@ impl Runner for RetiresDuringAbort {
     ) -> runtara_environment::runner::Result<bool> {
         self.persistence
             .complete_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
                 CompleteInstanceParams::new(&handle.instance_id, self.status).if_running(),
             )
             .await
@@ -1086,9 +1113,13 @@ async fn test_stop_instance_resolves_completion_and_parking_during_grace_arming(
             persistence: state.persistence.clone(),
             status,
         });
-        let response = handle_stop_instance(&state, stop_request(&handle, 60))
-            .await
-            .unwrap();
+        let response = handle_stop_instance(
+            &state,
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            stop_request(&handle, 60),
+        )
+        .await
+        .unwrap();
         assert!(response.success, "{:?}", response.error);
         let expected = if status == CoreInstanceStatus::Suspended {
             CoreInstanceStatus::Cancelled
@@ -1098,7 +1129,10 @@ async fn test_stop_instance_resolves_completion_and_parking_during_grace_arming(
         assert_eq!(
             state
                 .persistence
-                .get_instance_meta(&handle.instance_id)
+                .get_instance_meta(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &handle.instance_id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -1140,6 +1174,7 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
     );
     let response = handle_stop_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StopInstanceRequest {
             instance_id: started.instance_id.clone(),
             reason: "cancel before launch".into(),
@@ -1153,7 +1188,10 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
     assert_eq!(
         state
             .persistence
-            .get_instance_meta(&started.instance_id)
+            .get_instance_meta(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &started.instance_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -1177,7 +1215,11 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
     let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
     let response = tokio::time::timeout(
         Duration::from_secs(3),
-        handle_stop_instance(&state, stop_request(&handle, 60)),
+        handle_stop_instance(
+            &state,
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            stop_request(&handle, 60),
+        ),
     )
     .await
     .unwrap()
@@ -1186,7 +1228,10 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
     assert!(runner.is_running(&handle).await);
     let meta = state
         .persistence
-        .get_instance(&handle.instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &handle.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -1194,7 +1239,10 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
     assert!(meta.finished_at.is_none());
     let command = state
         .persistence
-        .get_pending_signal(&handle.instance_id)
+        .get_pending_signal(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &handle.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -1217,6 +1265,7 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
         state
             .persistence
             .acknowledge_signal(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
                 &handle.instance_id,
                 &command.command_id,
                 command.signal_type
@@ -1227,7 +1276,10 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
     assert_eq!(
         state
             .persistence
-            .get_instance_meta(&handle.instance_id)
+            .get_instance_meta(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -1246,9 +1298,13 @@ async fn test_stop_instance_zero_grace_aborts_without_faking_guest_acknowledgeme
     let pool = get_test_pool().await;
     let dir = tempfile::tempdir().unwrap();
     let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
-    let response = handle_stop_instance(&state, stop_request(&handle, 0))
-        .await
-        .unwrap();
+    let response = handle_stop_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        stop_request(&handle, 0),
+    )
+    .await
+    .unwrap();
     assert!(response.success, "{:?}", response.error);
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -1259,7 +1315,10 @@ async fn test_stop_instance_zero_grace_aborts_without_faking_guest_acknowledgeme
     assert!(!runner.is_running(&handle).await);
     let command = state
         .persistence
-        .get_pending_signal(&handle.instance_id)
+        .get_pending_signal(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &handle.instance_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -1269,7 +1328,10 @@ async fn test_stop_instance_zero_grace_aborts_without_faking_guest_acknowledgeme
     assert_eq!(
         state
             .persistence
-            .get_instance_meta(&handle.instance_id)
+            .get_instance_meta(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -1299,9 +1361,13 @@ async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforce
                 .await
                 .unwrap();
         }
-        let response = handle_stop_instance(&state, stop_request(&handle, 60))
-            .await
-            .unwrap();
+        let response = handle_stop_instance(
+            &state,
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            stop_request(&handle, 60),
+        )
+        .await
+        .unwrap();
         assert!(!response.success);
         assert!(
             response
@@ -1312,7 +1378,10 @@ async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforce
         assert_eq!(
             state
                 .persistence
-                .get_instance_meta(&handle.instance_id)
+                .get_instance_meta(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &handle.instance_id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -1322,7 +1391,10 @@ async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforce
         assert!(
             state
                 .persistence
-                .get_pending_signal(&handle.instance_id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &handle.instance_id
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -1352,6 +1424,7 @@ async fn test_stop_instance_preserves_terminal_outcomes() {
         state
             .persistence
             .complete_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
                 CompleteInstanceParams::new(&handle.instance_id, status)
                     .with_output(br#"{"preserved":true}"#)
                     .with_error("original"),
@@ -1360,17 +1433,27 @@ async fn test_stop_instance_preserves_terminal_outcomes() {
             .unwrap();
         let before = state
             .persistence
-            .get_instance(&handle.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
-        let response = handle_stop_instance(&state, stop_request(&handle, 0))
-            .await
-            .unwrap();
+        let response = handle_stop_instance(
+            &state,
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            stop_request(&handle, 0),
+        )
+        .await
+        .unwrap();
         assert!(response.success);
         let after = state
             .persistence
-            .get_instance(&handle.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1381,7 +1464,10 @@ async fn test_stop_instance_preserves_terminal_outcomes() {
         assert!(
             state
                 .persistence
-                .get_pending_signal(&handle.instance_id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &handle.instance_id
+                )
                 .await
                 .unwrap()
                 .is_none()
@@ -1397,15 +1483,22 @@ async fn test_stop_instance_overflow_is_rejected_before_signalling() {
     let pool = get_test_pool().await;
     let dir = tempfile::tempdir().unwrap();
     let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
-    let response = handle_stop_instance(&state, stop_request(&handle, u64::MAX))
-        .await
-        .unwrap();
+    let response = handle_stop_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        stop_request(&handle, u64::MAX),
+    )
+    .await
+    .unwrap();
     assert!(!response.success);
     assert!(response.error.unwrap().contains("monotonic clock range"));
     assert!(
         state
             .persistence
-            .get_pending_signal(&handle.instance_id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &handle.instance_id
+            )
             .await
             .unwrap()
             .is_none()
@@ -1423,16 +1516,22 @@ async fn test_stop_instance_cancels_parked_execution_without_runner_handle() {
     let id = Uuid::new_v4().to_string();
     state
         .persistence
-        .register_instance(&id, "test-tenant")
+        .register_instance(&runtara_core::TenantId::new("test-tenant").unwrap(), &id)
         .await
         .unwrap();
     state
         .persistence
-        .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+        .update_instance_status(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &id,
+            CoreInstanceStatus::Suspended,
+            None,
+        )
         .await
         .unwrap();
     let response = handle_stop_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StopInstanceRequest {
             instance_id: id.clone(),
             reason: "user".into(),
@@ -1445,7 +1544,7 @@ async fn test_stop_instance_cancels_parked_execution_without_runner_handle() {
     assert_eq!(
         state
             .persistence
-            .get_instance_meta(&id)
+            .get_instance_meta(&runtara_core::TenantId::new("test-tenant").unwrap(), &id)
             .await
             .unwrap()
             .unwrap()
@@ -1471,7 +1570,13 @@ async fn test_resume_instance_not_found() {
         instance_id: "nonexistent-instance".to_string(),
     };
 
-    let response = handle_resume_instance(&state, request).await.unwrap();
+    let response = handle_resume_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(!response.success);
     assert!(response.error.as_ref().unwrap().contains("not found"));
@@ -1510,7 +1615,13 @@ async fn test_resume_instance_wrong_status() {
         instance_id: instance_id.clone(),
     };
 
-    let response = handle_resume_instance(&state, request).await.unwrap();
+    let response = handle_resume_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(!response.success);
     assert!(
@@ -1557,7 +1668,13 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
         instance_id: instance_id.clone(),
     };
 
-    let response = handle_resume_instance(&state, request).await.unwrap();
+    let response = handle_resume_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(response.success, "resume should replay from start");
     assert!(response.error.is_none());
@@ -1606,7 +1723,13 @@ async fn test_resume_instance_success() {
         instance_id: instance_id.clone(),
     };
 
-    let response = handle_resume_instance(&state, request).await.unwrap();
+    let response = handle_resume_instance(
+        &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
 
     assert!(response.success, "Error: {:?}", response.error);
 
@@ -1911,13 +2034,21 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
 
     // Register the instance first
     persistence
-        .register_instance(&instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to register instance");
 
     // Update status to running (required for complete_instance_if_running to work)
     persistence
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .update_instance_status(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
         .await
         .expect("Failed to update instance status");
 
@@ -1973,7 +2104,10 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
     let mut timed_out_instance = None;
     while std::time::Instant::now() < deadline {
         let current = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+            )
             .await
             .expect("Failed to get instance")
             .expect("Instance not found");
@@ -2023,13 +2157,21 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
 
     // Register the instance first
     persistence
-        .register_instance(&instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to register instance");
 
     // Update status to running
     persistence
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .update_instance_status(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
         .await
         .expect("Failed to update instance status");
 
@@ -2080,7 +2222,10 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
     // Note: The monitor doesn't set status to "completed" - that's done by the SDK via Core.
     // It only processes output. So we check that status is NOT "failed" with timeout error.
     let instance = persistence
-        .get_instance(&instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -2120,13 +2265,21 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
 
     // Register the instance
     persistence
-        .register_instance(&instance_id, tenant_id)
+        .register_instance(
+            &runtara_core::TenantId::new(tenant_id).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to register instance");
 
     // Start with running status
     persistence
-        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .update_instance_status(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(Utc::now()),
+        )
         .await
         .expect("Failed to update instance status");
 
@@ -2167,6 +2320,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     persistence
         .complete_instance(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
             CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                 .with_output(b"success"),
         )
@@ -2178,7 +2332,10 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
 
     // Verify the instance status is still "completed" (not overwritten by timeout)
     let instance = persistence
-        .get_instance(&instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+            &instance_id,
+        )
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -2417,6 +2574,7 @@ impl Runner for ParksBeforeReturningRunner {
         // The guest ran and parked on a signal wait before we returned.
         self.persistence
             .complete_instance(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
                 CompleteInstanceParams::new(&options.instance_id, CoreInstanceStatus::Suspended)
                     .with_termination("waiting_signal", None),
             )
@@ -2505,7 +2663,10 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
     assert!(response.is_accepted(), "error: {:?}", response.rejection);
 
     let instance = persistence
-        .get_instance(&response.instance_id)
+        .get_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &response.instance_id,
+        )
         .await
         .unwrap()
         .expect("instance must exist");
@@ -2610,32 +2771,40 @@ async fn scope_ancestry_uses_custom_event_subtypes() {
     let id = Uuid::new_v4().to_string();
     state
         .persistence
-        .register_instance(&id, "scope-types")
+        .register_instance(&runtara_core::TenantId::new("scope-types").unwrap(), &id)
         .await
         .unwrap();
     for (scope, parent) in [("root", None), ("child", Some("root"))] {
         state
             .persistence
-            .insert_event(&runtara_core::persistence::EventRecord {
-                id: None,
-                instance_id: id.clone(),
-                event_type: runtara_core::domain::EventType::Custom,
-                checkpoint_id: None,
-                subtype: Some("scope_enter".into()),
-                created_at: Utc::now(),
-                payload: Some(
-                    serde_json::to_vec(&serde_json::json!({
-                        "scope_id": scope, "parent_scope_id": parent, "step_id": "step",
-                    }))
-                    .unwrap(),
-                ),
-            })
+            .insert_event(
+                &runtara_core::TenantId::new("scope-types").unwrap(),
+                &runtara_core::persistence::EventRecord {
+                    id: None,
+                    instance_id: id.clone(),
+                    event_type: runtara_core::domain::EventType::Custom,
+                    checkpoint_id: None,
+                    subtype: Some("scope_enter".into()),
+                    created_at: Utc::now(),
+                    payload: Some(
+                        serde_json::to_vec(&serde_json::json!({
+                            "scope_id": scope, "parent_scope_id": parent, "step_id": "step",
+                        }))
+                        .unwrap(),
+                    ),
+                },
+            )
             .await
             .unwrap();
     }
-    let ancestors = runtara_environment::handlers::handle_get_scope_ancestors(&state, &id, "child")
-        .await
-        .unwrap();
+    let ancestors = runtara_environment::handlers::handle_get_scope_ancestors(
+        &state,
+        &runtara_core::TenantId::new("scope-types").unwrap(),
+        &id,
+        "child",
+    )
+    .await
+    .unwrap();
     assert_eq!(
         ancestors
             .iter()
@@ -2645,7 +2814,7 @@ async fn scope_ancestry_uses_custom_event_subtypes() {
     );
     state
         .persistence
-        .delete_instances_batch(&[id])
+        .delete_instances_batch(&runtara_core::TenantId::new("scope-types").unwrap(), &[id])
         .await
         .unwrap();
 }
@@ -2660,24 +2829,35 @@ async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
     let id = Uuid::new_v4().to_string();
     state
         .persistence
-        .register_instance(&id, "parked-handler")
+        .register_instance(&runtara_core::TenantId::new("parked-handler").unwrap(), &id)
         .await
         .unwrap();
     state
         .persistence
-        .update_instance_status(&id, InstanceStatus::Suspended, None)
+        .update_instance_status(
+            &runtara_core::TenantId::new("parked-handler").unwrap(),
+            &id,
+            InstanceStatus::Suspended,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
-        handle_send_signal(&state, &id, "cancel", None)
-            .await
-            .unwrap(),
+        handle_send_signal(
+            &state,
+            &runtara_core::TenantId::new("parked-handler").unwrap(),
+            &id,
+            "cancel",
+            None
+        )
+        .await
+        .unwrap(),
         SendSignalOutcome::Delivered
     );
     assert_eq!(
         state
             .persistence
-            .get_instance(&id)
+            .get_instance(&runtara_core::TenantId::new("parked-handler").unwrap(), &id)
             .await
             .unwrap()
             .unwrap()
@@ -2687,7 +2867,7 @@ async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
     assert!(
         state
             .persistence
-            .get_pending_signal(&id)
+            .get_pending_signal(&runtara_core::TenantId::new("parked-handler").unwrap(), &id)
             .await
             .unwrap()
             .is_none()
@@ -2724,12 +2904,20 @@ async fn every_stored_status_reads_back_as_itself() {
     for status in statuses {
         let instance_id = format!("status-{status:?}-{}", Uuid::new_v4());
         persistence
-            .register_instance(&instance_id, &tenant_id)
+            .register_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+            )
             .await
             .expect("register instance");
         if status != CoreInstanceStatus::Pending {
             persistence
-                .update_instance_status(&instance_id, status, None)
+                .update_instance_status(
+                    &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                    &instance_id,
+                    status,
+                    None,
+                )
                 .await
                 .expect("move to status");
         }
@@ -2798,11 +2986,19 @@ async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
     for _ in 0..5 {
         let instance_id = format!("count-{}", Uuid::new_v4());
         persistence
-            .register_instance(&instance_id, &tenant_id)
+            .register_instance(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+            )
             .await
             .expect("register instance");
         persistence
-            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .update_instance_status(
+                &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
+                &instance_id,
+                CoreInstanceStatus::Suspended,
+                None,
+            )
             .await
             .expect("park it");
         created.push(instance_id);

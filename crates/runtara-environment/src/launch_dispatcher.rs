@@ -1170,7 +1170,11 @@ impl LaunchDispatcher {
     ) -> std::result::Result<LaunchOptions, String> {
         let instance = self
             .persistence
-            .get_instance(&launch.instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new(launch.tenant_id.clone())
+                    .map_err(|error| error.to_string())?,
+                &launch.instance_id,
+            )
             .await
             .map_err(|error| format!("failed to read durable instance: {error}"))?
             .ok_or_else(|| "durable instance no longer exists".to_string())?;

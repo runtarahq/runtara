@@ -93,6 +93,7 @@ impl ScopedRuntimeOwner {
         io: Arc<InvocationIo>,
     ) -> Result<Arc<ScopedRuntimeHost>, String> {
         if io.fence().lease.instance_id != self.root.instance_id
+            || io.fence().lease.tenant_id != self.root.tenant_id.as_str()
             || !Arc::ptr_eq(&io.persistence, &self.root.state.persistence)
         {
             return Err("invocation IO belongs to another runtime owner".into());
@@ -167,6 +168,7 @@ impl ScopedRuntimeOwner {
                 self.ensure_open()?;
                 let response = handle_poll_signals(
                     &self.root.state,
+                    &self.root.tenant_id,
                     PollSignalsRequest {
                         instance_id: self.root.instance_id.clone(),
                         checkpoint_id: None,
@@ -462,6 +464,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         }
         let result = handle_poll_signals(
             &self.owner.root.state,
+            &self.owner.root.tenant_id,
             PollSignalsRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id: Some(checkpoint_id),
@@ -483,6 +486,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         }
         let result = handle_get_checkpoint(
             &self.owner.root.state,
+            &self.owner.root.tenant_id,
             GetCheckpointRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
@@ -503,6 +507,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         }
         let result = handle_checkpoint(
             &self.owner.root.state,
+            &self.owner.root.tenant_id,
             CheckpointRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
@@ -549,6 +554,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         }
         handle_retry_attempt(
             &self.owner.root.state,
+            &self.owner.root.tenant_id,
             RetryAttemptEvent {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
@@ -573,6 +579,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         }
         let response = handle_sleep(
             &self.owner.root.state,
+            &self.owner.root.tenant_id,
             SleepRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,

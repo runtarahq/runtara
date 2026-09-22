@@ -38,7 +38,10 @@ async fn test_pool() -> PgPool {
 async fn registered_instance(pool: &PgPool, kind: &str) -> String {
     let id = format!("env-metrics-{kind}-{}", Uuid::new_v4());
     PostgresPersistence::new(pool.clone())
-        .register_instance(&id, &format!("env-metrics-tenant-{kind}"))
+        .register_instance(
+            &runtara_core::TenantId::new(format!("env-metrics-tenant-{kind}")).unwrap(),
+            &id,
+        )
         .await
         .unwrap();
     id

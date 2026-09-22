@@ -163,7 +163,11 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
     let id = uuid::Uuid::new_v4().to_string();
     anyhow::ensure!(
         persistence
-            .try_register_instance(&id, "stop-test", Some(br#"{"data":{},"variables":{}}"#))
+            .try_register_instance(
+                &runtara_core::TenantId::new("stop-test").unwrap(),
+                &id,
+                Some(br#"{"data":{},"variables":{}}"#)
+            )
             .await?
     );
     let (ready, requested) = tokio::sync::oneshot::channel();
@@ -250,6 +254,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
     let grace = if cleanup == Cleanup::Stalled { 5 } else { 10 };
     let response = handle_stop_instance(
         &state,
+        &runtara_core::TenantId::new("stop-test").unwrap(),
         StopInstanceRequest {
             instance_id: id.clone(),
             reason: "user clicked Cancel".into(),
@@ -264,10 +269,18 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             runner.is_running(&handle).await,
             "must observe stalled cancellation before abort"
         );
-        let instance = persistence.get_instance(&id).await?.unwrap();
+        let instance = persistence
+            .get_instance(&runtara_core::TenantId::new("stop-test").unwrap(), &id)
+            .await?
+            .unwrap();
         anyhow::ensure!(instance.status == InstanceStatus::Running);
         anyhow::ensure!(instance.finished_at.is_none());
-        anyhow::ensure!(persistence.get_pending_signal(&id).await?.is_some());
+        anyhow::ensure!(
+            persistence
+                .get_pending_signal(&runtara_core::TenantId::new("stop-test").unwrap(), &id)
+                .await?
+                .is_some()
+        );
         anyhow::ensure!(registry.get(&id).await?.is_some());
         anyhow::ensure!(runner.occupancy().unwrap().held == 1);
     }
@@ -288,7 +301,10 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
         );
     }
     tokio::time::timeout(Duration::from_secs(2), server).await???;
-    let instance = persistence.get_instance(&id).await?.unwrap();
+    let instance = persistence
+        .get_instance(&runtara_core::TenantId::new("stop-test").unwrap(), &id)
+        .await?
+        .unwrap();
     anyhow::ensure!(
         instance.status == InstanceStatus::Cancelled,
         "{:?}",

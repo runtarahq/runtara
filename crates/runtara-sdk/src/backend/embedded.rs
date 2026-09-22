@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::tracing_compat::{debug, info};
 use chrono::{DateTime, Utc};
+use runtara_core::TenantId;
 use runtara_core::persistence::{CompleteInstanceParams, EventRecord, Persistence};
 
 use super::SdkBackend;
@@ -32,7 +33,7 @@ pub struct EmbeddedBackend {
     /// Instance ID
     instance_id: String,
     /// Tenant ID
-    tenant_id: String,
+    tenant_id: TenantId,
     /// Tokio runtime for bridging async Persistence trait to sync SDK
     rt: tokio::runtime::Runtime,
 }
@@ -48,7 +49,7 @@ impl EmbeddedBackend {
     pub fn new(
         persistence: Arc<dyn Persistence>,
         instance_id: impl Into<String>,
-        tenant_id: impl Into<String>,
+        tenant_id: TenantId,
     ) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -58,7 +59,7 @@ impl EmbeddedBackend {
         Self {
             persistence,
             instance_id: instance_id.into(),
-            tenant_id: tenant_id.into(),
+            tenant_id,
             rt,
         }
     }
@@ -67,7 +68,10 @@ impl EmbeddedBackend {
     fn take_pending_lifecycle_signal(&self) -> Result<Option<Signal>> {
         let Some(record) = self
             .rt
-            .block_on(self.persistence.get_pending_signal(&self.instance_id))
+            .block_on(
+                self.persistence
+                    .get_pending_signal(&self.tenant_id, &self.instance_id),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?
         else {
             return Ok(None);
@@ -108,13 +112,14 @@ impl SdkBackend for EmbeddedBackend {
         self.rt
             .block_on(
                 self.persistence
-                    .register_instance(&self.instance_id, &self.tenant_id),
+                    .register_instance(&self.tenant_id, &self.instance_id),
             )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Update status to running
         self.rt
             .block_on(self.persistence.update_instance_status(
+                &self.tenant_id,
                 &self.instance_id,
                 CoreInstanceStatus::Running,
                 Some(Utc::now()),
@@ -130,10 +135,11 @@ impl SdkBackend for EmbeddedBackend {
         // Check if checkpoint exists
         let existing = self
             .rt
-            .block_on(
-                self.persistence
-                    .load_checkpoint(&self.instance_id, checkpoint_id),
-            )
+            .block_on(self.persistence.load_checkpoint(
+                &self.tenant_id,
+                &self.instance_id,
+                checkpoint_id,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         if let Some(checkpoint) = existing {
@@ -151,18 +157,21 @@ impl SdkBackend for EmbeddedBackend {
 
         // Save new checkpoint
         self.rt
-            .block_on(
-                self.persistence
-                    .save_checkpoint(&self.instance_id, checkpoint_id, state),
-            )
+            .block_on(self.persistence.save_checkpoint(
+                &self.tenant_id,
+                &self.instance_id,
+                checkpoint_id,
+                state,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Update instance's current checkpoint
         self.rt
-            .block_on(
-                self.persistence
-                    .update_instance_checkpoint(&self.instance_id, checkpoint_id),
-            )
+            .block_on(self.persistence.update_instance_checkpoint(
+                &self.tenant_id,
+                &self.instance_id,
+                checkpoint_id,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(checkpoint_id = %checkpoint_id, "New checkpoint saved");
@@ -179,10 +188,11 @@ impl SdkBackend for EmbeddedBackend {
     fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
         let result = self
             .rt
-            .block_on(
-                self.persistence
-                    .load_checkpoint(&self.instance_id, checkpoint_id),
-            )
+            .block_on(self.persistence.load_checkpoint(
+                &self.tenant_id,
+                &self.instance_id,
+                checkpoint_id,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         Ok(result.map(|c| c.state))
@@ -201,7 +211,7 @@ impl SdkBackend for EmbeddedBackend {
         };
 
         self.rt
-            .block_on(self.persistence.insert_event(&event))
+            .block_on(self.persistence.insert_event(&self.tenant_id, &event))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!("Heartbeat recorded");
@@ -222,7 +232,7 @@ impl SdkBackend for EmbeddedBackend {
             params = params.with_run_label(label);
         }
         self.rt
-            .block_on(self.persistence.complete_instance(params))
+            .block_on(self.persistence.complete_instance(&self.tenant_id, params))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
@@ -236,7 +246,7 @@ impl SdkBackend for EmbeddedBackend {
         };
 
         self.rt
-            .block_on(self.persistence.insert_event(&event))
+            .block_on(self.persistence.insert_event(&self.tenant_id, &event))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!("Instance completed");
@@ -248,6 +258,7 @@ impl SdkBackend for EmbeddedBackend {
         self.rt
             .block_on(
                 self.persistence.complete_instance(
+                    &self.tenant_id,
                     CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Failed)
                         .with_error(error),
                 ),
@@ -265,7 +276,7 @@ impl SdkBackend for EmbeddedBackend {
         };
 
         self.rt
-            .block_on(self.persistence.insert_event(&event))
+            .block_on(self.persistence.insert_event(&self.tenant_id, &event))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!(error = %error, "Instance failed");
@@ -276,6 +287,7 @@ impl SdkBackend for EmbeddedBackend {
     fn suspended(&self) -> Result<()> {
         self.rt
             .block_on(self.persistence.update_instance_status(
+                &self.tenant_id,
                 &self.instance_id,
                 CoreInstanceStatus::Suspended,
                 None,
@@ -293,7 +305,7 @@ impl SdkBackend for EmbeddedBackend {
         };
 
         self.rt
-            .block_on(self.persistence.insert_event(&event))
+            .block_on(self.persistence.insert_event(&self.tenant_id, &event))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!("Instance suspended");
@@ -304,31 +316,36 @@ impl SdkBackend for EmbeddedBackend {
     fn sleep_until(&self, checkpoint_id: &str, wake_at: DateTime<Utc>, state: &[u8]) -> Result<()> {
         // Save checkpoint first
         self.rt
-            .block_on(
-                self.persistence
-                    .save_checkpoint(&self.instance_id, checkpoint_id, state),
-            )
+            .block_on(self.persistence.save_checkpoint(
+                &self.tenant_id,
+                &self.instance_id,
+                checkpoint_id,
+                state,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Update checkpoint reference
         self.rt
-            .block_on(
-                self.persistence
-                    .update_instance_checkpoint(&self.instance_id, checkpoint_id),
-            )
+            .block_on(self.persistence.update_instance_checkpoint(
+                &self.tenant_id,
+                &self.instance_id,
+                checkpoint_id,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Set sleep_until for wake scheduler
         self.rt
-            .block_on(
-                self.persistence
-                    .set_instance_sleep(&self.instance_id, wake_at),
-            )
+            .block_on(self.persistence.set_instance_sleep(
+                &self.tenant_id,
+                &self.instance_id,
+                wake_at,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Mark as suspended
         self.rt
             .block_on(self.persistence.update_instance_status(
+                &self.tenant_id,
                 &self.instance_id,
                 CoreInstanceStatus::Suspended,
                 None,
@@ -347,7 +364,7 @@ impl SdkBackend for EmbeddedBackend {
         };
 
         self.rt
-            .block_on(self.persistence.insert_event(&event))
+            .block_on(self.persistence.insert_event(&self.tenant_id, &event))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!(wake_at = %wake_at, "Instance sleeping until wake time");
@@ -367,7 +384,7 @@ impl SdkBackend for EmbeddedBackend {
         };
 
         self.rt
-            .block_on(self.persistence.insert_event(&event))
+            .block_on(self.persistence.insert_event(&self.tenant_id, &event))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(subtype = %subtype, "Custom event recorded");
@@ -383,6 +400,7 @@ impl SdkBackend for EmbeddedBackend {
     ) -> Result<()> {
         self.rt
             .block_on(self.persistence.save_retry_attempt(
+                &self.tenant_id,
                 &self.instance_id,
                 checkpoint_id,
                 attempt_number as i32,
@@ -398,7 +416,10 @@ impl SdkBackend for EmbeddedBackend {
     fn get_status(&self) -> Result<StatusResponse> {
         let instance = self
             .rt
-            .block_on(self.persistence.get_instance(&self.instance_id))
+            .block_on(
+                self.persistence
+                    .get_instance(&self.tenant_id, &self.instance_id),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         match instance {
@@ -431,7 +452,11 @@ impl SdkBackend for EmbeddedBackend {
         let custom = match checkpoint_id {
             Some(id) => self
                 .rt
-                .block_on(self.persistence.get_custom_signal(&self.instance_id, id))
+                .block_on(self.persistence.get_custom_signal(
+                    &self.tenant_id,
+                    &self.instance_id,
+                    id,
+                ))
                 .map_err(|e| SdkError::Internal(e.to_string()))?
                 .map(|signal| CustomSignal {
                     signal_id: signal.signal_id,
@@ -451,6 +476,7 @@ impl SdkBackend for EmbeddedBackend {
         };
         self.rt
             .block_on(self.persistence.acknowledge_signal(
+                &self.tenant_id,
                 &self.instance_id,
                 command_id,
                 signal_type,
@@ -461,7 +487,7 @@ impl SdkBackend for EmbeddedBackend {
     fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
         let instance = self
             .rt
-            .block_on(self.persistence.get_instance(instance_id))
+            .block_on(self.persistence.get_instance(&self.tenant_id, instance_id))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         match instance {
@@ -489,7 +515,10 @@ impl SdkBackend for EmbeddedBackend {
     fn load_input(&self) -> Result<Option<Vec<u8>>> {
         let instance = self
             .rt
-            .block_on(self.persistence.get_instance(&self.instance_id))
+            .block_on(
+                self.persistence
+                    .get_instance(&self.tenant_id, &self.instance_id),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         Ok(instance.and_then(|r| r.input))
@@ -500,16 +529,17 @@ impl SdkBackend for EmbeddedBackend {
     }
 
     fn tenant_id(&self) -> &str {
-        &self.tenant_id
+        self.tenant_id.as_str()
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()> {
         self.rt
-            .block_on(
-                self.persistence
-                    .set_instance_sleep(&self.instance_id, sleep_until),
-            )
+            .block_on(self.persistence.set_instance_sleep(
+                &self.tenant_id,
+                &self.instance_id,
+                sleep_until,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(sleep_until = %sleep_until, "Sleep until set");
@@ -519,7 +549,10 @@ impl SdkBackend for EmbeddedBackend {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn clear_sleep(&self) -> Result<()> {
         self.rt
-            .block_on(self.persistence.clear_instance_sleep(&self.instance_id))
+            .block_on(
+                self.persistence
+                    .clear_instance_sleep(&self.tenant_id, &self.instance_id),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!("Sleep cleared");
@@ -530,7 +563,10 @@ impl SdkBackend for EmbeddedBackend {
     fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
         let instance = self
             .rt
-            .block_on(self.persistence.get_instance(&self.instance_id))
+            .block_on(
+                self.persistence
+                    .get_instance(&self.tenant_id, &self.instance_id),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         Ok(instance.and_then(|i| i.sleep_until))
@@ -604,378 +640,7 @@ fn sdk_status(value: CoreInstanceStatus) -> InstanceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use runtara_core::error::CoreError;
-
-    // Use std::result::Result to avoid conflict with SDK's Result type alias
-    type CoreResult<T> = std::result::Result<T, CoreError>;
-
-    // Mock persistence for testing (in-memory)
-    struct MockPersistence {
-        instances: tokio::sync::RwLock<std::collections::HashMap<String, MockInstance>>,
-        checkpoints: tokio::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>,
-        fail_signal_read: bool,
-    }
-
-    struct MockInstance {
-        #[allow(dead_code)]
-        instance_id: String,
-        #[allow(dead_code)]
-        tenant_id: String,
-        status: CoreInstanceStatus,
-        checkpoint_id: Option<String>,
-        input: Option<Vec<u8>>,
-        output: Option<Vec<u8>>,
-        error: Option<String>,
-        sleep_until: Option<DateTime<Utc>>,
-    }
-
-    impl MockPersistence {
-        fn new() -> Self {
-            Self {
-                instances: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-                checkpoints: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-                fail_signal_read: false,
-            }
-        }
-
-        fn checkpoint_key(instance_id: &str, checkpoint_id: &str) -> String {
-            format!("{}:{}", instance_id, checkpoint_id)
-        }
-    }
-
-    #[async_trait]
-    impl Persistence for MockPersistence {
-        async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> CoreResult<()> {
-            let mut instances = self.instances.write().await;
-            instances.insert(
-                instance_id.to_string(),
-                MockInstance {
-                    instance_id: instance_id.to_string(),
-                    tenant_id: tenant_id.to_string(),
-                    status: CoreInstanceStatus::Pending,
-                    checkpoint_id: None,
-                    input: None,
-                    output: None,
-                    error: None,
-                    sleep_until: None,
-                },
-            );
-            Ok(())
-        }
-
-        async fn get_instance(
-            &self,
-            instance_id: &str,
-        ) -> CoreResult<Option<runtara_core::persistence::InstanceRecord>> {
-            let instances = self.instances.read().await;
-            Ok(instances
-                .get(instance_id)
-                .map(|inst| runtara_core::persistence::InstanceRecord {
-                    run_label: None,
-                    instance_id: instance_id.to_string(),
-                    tenant_id: inst.tenant_id.clone(),
-                    definition_version: 1,
-                    status: inst.status,
-                    checkpoint_id: inst.checkpoint_id.clone(),
-                    attempt: 1,
-                    max_attempts: 3,
-                    created_at: chrono::Utc::now(),
-                    started_at: Some(chrono::Utc::now()),
-                    finished_at: None,
-                    input: inst.input.clone(),
-                    output: inst.output.clone(),
-                    error: inst.error.clone(),
-                    sleep_until: inst.sleep_until,
-                    wake_reason: None,
-                    termination_reason: None,
-                    exit_code: None,
-                    recovery_attempts: 0,
-                    recovery_marker: None,
-                }))
-        }
-
-        async fn update_instance_status(
-            &self,
-            instance_id: &str,
-            status: CoreInstanceStatus,
-            _started_at: Option<chrono::DateTime<chrono::Utc>>,
-        ) -> CoreResult<()> {
-            let mut instances = self.instances.write().await;
-            if let Some(inst) = instances.get_mut(instance_id) {
-                inst.status = status;
-            }
-            Ok(())
-        }
-
-        async fn update_instance_checkpoint(
-            &self,
-            instance_id: &str,
-            checkpoint_id: &str,
-        ) -> CoreResult<()> {
-            let mut instances = self.instances.write().await;
-            if let Some(inst) = instances.get_mut(instance_id) {
-                inst.checkpoint_id = Some(checkpoint_id.to_string());
-            }
-            Ok(())
-        }
-
-        async fn complete_instance(&self, params: CompleteInstanceParams<'_>) -> CoreResult<bool> {
-            let mut instances = self.instances.write().await;
-            if let Some(inst) = instances.get_mut(params.instance_id) {
-                inst.status = params.status;
-                inst.output = params.output.map(|o| o.to_vec());
-                inst.error = params.error.map(|e| e.to_string());
-            }
-            Ok(true)
-        }
-
-        async fn save_checkpoint(
-            &self,
-            instance_id: &str,
-            checkpoint_id: &str,
-            state: &[u8],
-        ) -> CoreResult<()> {
-            let mut checkpoints = self.checkpoints.write().await;
-            let key = Self::checkpoint_key(instance_id, checkpoint_id);
-            checkpoints.insert(key, state.to_vec());
-            Ok(())
-        }
-
-        async fn load_checkpoint(
-            &self,
-            instance_id: &str,
-            checkpoint_id: &str,
-        ) -> CoreResult<Option<runtara_core::persistence::CheckpointRecord>> {
-            let checkpoints = self.checkpoints.read().await;
-            let key = Self::checkpoint_key(instance_id, checkpoint_id);
-            Ok(checkpoints
-                .get(&key)
-                .map(|state| runtara_core::persistence::CheckpointRecord {
-                    instance_id: instance_id.to_string(),
-                    checkpoint_id: checkpoint_id.to_string(),
-                    state: state.clone(),
-                    created_at: chrono::Utc::now(),
-                }))
-        }
-
-        async fn list_checkpoints(
-            &self,
-            _instance_id: &str,
-            _checkpoint_id: Option<&str>,
-            _limit: i64,
-            _offset: i64,
-            _created_after: Option<chrono::DateTime<chrono::Utc>>,
-            _created_before: Option<chrono::DateTime<chrono::Utc>>,
-        ) -> CoreResult<Vec<runtara_core::persistence::CheckpointRecord>> {
-            Ok(vec![])
-        }
-
-        async fn count_checkpoints(
-            &self,
-            _instance_id: &str,
-            _checkpoint_id: Option<&str>,
-            _created_after: Option<chrono::DateTime<chrono::Utc>>,
-            _created_before: Option<chrono::DateTime<chrono::Utc>>,
-        ) -> CoreResult<i64> {
-            Ok(0)
-        }
-
-        async fn insert_event(
-            &self,
-            _event: &runtara_core::persistence::EventRecord,
-        ) -> CoreResult<()> {
-            Ok(())
-        }
-
-        async fn insert_signal(
-            &self,
-            _instance_id: &str,
-            _signal_type: CoreSignalType,
-            _payload: &[u8],
-        ) -> CoreResult<()> {
-            Ok(())
-        }
-
-        async fn get_pending_signal(
-            &self,
-            _instance_id: &str,
-        ) -> CoreResult<Option<runtara_core::persistence::SignalRecord>> {
-            if self.fail_signal_read {
-                return Err(runtara_core::error::CoreError::PersistenceError {
-                    operation: "get_pending_signal".into(),
-                    details: "cannot decode stored signal".into(),
-                });
-            }
-            Ok(None)
-        }
-
-        async fn apply_lifecycle_command(
-            &self,
-            _instance_id: &str,
-            _command_id: &str,
-            _signal_type: runtara_core::domain::SignalType,
-        ) -> CoreResult<runtara_core::lifecycle::Decision> {
-            Ok(runtara_core::lifecycle::Decision::Rejected)
-        }
-
-        async fn park_instance(
-            &self,
-            _instance_id: &str,
-            _request: runtara_core::lifecycle::ParkRequest,
-        ) -> std::result::Result<runtara_core::lifecycle::Decision, runtara_core::error::CoreError>
-        {
-            Ok(runtara_core::lifecycle::Decision::Rejected)
-        }
-
-        async fn cancel_suspended_instances(
-            &self,
-            _instance_id: Option<&str>,
-            _limit: i64,
-        ) -> std::result::Result<
-            Vec<runtara_core::persistence::CancelledInstance>,
-            runtara_core::error::CoreError,
-        > {
-            Ok(Vec::new())
-        }
-
-        async fn put_custom_signal(
-            &self,
-            _instance_id: &str,
-            _checkpoint_id: &str,
-            _payload: &[u8],
-        ) -> CoreResult<String> {
-            Ok("mock-custom-signal".into())
-        }
-
-        async fn get_custom_signal(
-            &self,
-            _instance_id: &str,
-            _checkpoint_id: &str,
-        ) -> CoreResult<Option<runtara_core::persistence::CustomSignalRecord>> {
-            Ok(None)
-        }
-
-        async fn save_retry_attempt(
-            &self,
-            _instance_id: &str,
-            _checkpoint_id: &str,
-            _attempt: i32,
-            _error_message: Option<&str>,
-        ) -> CoreResult<()> {
-            Ok(())
-        }
-
-        async fn list_instances(
-            &self,
-            _tenant_id: Option<&str>,
-            _status: Option<CoreInstanceStatus>,
-            _limit: i64,
-            _offset: i64,
-        ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
-            Ok(vec![])
-        }
-
-        async fn health_check(&self) -> CoreResult<bool> {
-            Ok(true)
-        }
-
-        async fn count_active_instances(&self) -> CoreResult<i64> {
-            Ok(0)
-        }
-
-        async fn schedule_wake(
-            &self,
-            instance_id: &str,
-            sleep_until: DateTime<Utc>,
-            _reason: runtara_core::domain::WakeReason,
-        ) -> CoreResult<()> {
-            let mut instances = self.instances.write().await;
-            if let Some(inst) = instances.get_mut(instance_id) {
-                inst.sleep_until = Some(sleep_until);
-            }
-            Ok(())
-        }
-
-        async fn clear_instance_sleep(&self, instance_id: &str) -> CoreResult<()> {
-            let mut instances = self.instances.write().await;
-            if let Some(inst) = instances.get_mut(instance_id) {
-                inst.sleep_until = None;
-            }
-            Ok(())
-        }
-
-        /// Claimed under the write guard, so two concurrent callers cannot both
-        /// win.
-        async fn claim_sleeping_instance(&self, instance_id: &str) -> CoreResult<bool> {
-            let mut instances = self.instances.write().await;
-            let Some(inst) = instances.get_mut(instance_id) else {
-                return Ok(false);
-            };
-            if inst.status != runtara_core::domain::InstanceStatus::Suspended
-                || !inst.sleep_until.is_some_and(|t| t <= Utc::now())
-            {
-                return Ok(false);
-            }
-            inst.sleep_until = None;
-            Ok(true)
-        }
-
-        async fn get_sleeping_instances_due(
-            &self,
-            _limit: i64,
-        ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
-            Ok(vec![])
-        }
-
-        /// Empty, because the due scan above is. Nothing here exercises the
-        /// wake path.
-        async fn claim_sleeping_instances_due(
-            &self,
-            _limit: i64,
-            _retry_at: DateTime<Utc>,
-        ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
-            Ok(vec![])
-        }
-
-        async fn list_events(
-            &self,
-            _instance_id: &str,
-            _filter: &runtara_core::persistence::ListEventsFilter,
-            _limit: i64,
-            _offset: i64,
-        ) -> CoreResult<Vec<runtara_core::persistence::EventRecord>> {
-            Ok(vec![])
-        }
-
-        async fn count_events(
-            &self,
-            _instance_id: &str,
-            _filter: &runtara_core::persistence::ListEventsFilter,
-        ) -> CoreResult<i64> {
-            Ok(0)
-        }
-
-        async fn list_paired_records(
-            &self,
-            _instance_id: &str,
-            _vocabulary: &runtara_core::persistence::EventVocabulary,
-            _filter: &runtara_core::persistence::ListPairedRecordsFilter,
-            _limit: i64,
-            _offset: i64,
-        ) -> CoreResult<Vec<runtara_core::persistence::PairedRecordSummary>> {
-            Ok(vec![])
-        }
-
-        async fn count_paired_records(
-            &self,
-            _instance_id: &str,
-            _vocabulary: &runtara_core::persistence::EventVocabulary,
-            _filter: &runtara_core::persistence::ListPairedRecordsFilter,
-        ) -> CoreResult<i64> {
-            Ok(0)
-        }
-    }
+    use runtara_core::instance_handlers::mock_persistence::MockPersistence;
 
     #[test]
     fn cancelled_status_is_preserved() {
@@ -988,7 +653,11 @@ mod tests {
     #[test]
     fn test_embedded_backend_register() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         // Connect should be no-op
         backend.connect().unwrap();
@@ -1000,7 +669,9 @@ mod tests {
         // Verify instance was registered
         let instance = backend
             .rt
-            .block_on(persistence.get_instance("test-instance"))
+            .block_on(
+                persistence.get_instance(&TenantId::new("test-tenant").unwrap(), "test-instance"),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(instance.instance_id, "test-instance");
@@ -1011,7 +682,11 @@ mod tests {
     #[test]
     fn test_embedded_backend_checkpoint_save() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         // Register first
         backend.register(None).unwrap();
@@ -1028,22 +703,28 @@ mod tests {
 
     #[test]
     fn checkpoint_propagates_signal_read_errors_on_save_and_replay() {
-        let persistence = Arc::new(MockPersistence {
-            fail_signal_read: true,
-            ..MockPersistence::new()
-        });
-        let backend = EmbeddedBackend::new(persistence, "test-instance", "test-tenant");
+        let persistence = Arc::new(MockPersistence::new());
+        persistence.set_fail_signal_read();
+        let backend = EmbeddedBackend::new(
+            persistence,
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
         backend.register(None).unwrap();
         for _ in 0..2 {
             let error = backend.checkpoint("step-1", b"state").unwrap_err();
-            assert!(error.to_string().contains("cannot decode stored signal"));
+            assert!(error.to_string().contains("injected storage failure"));
         }
     }
 
     #[test]
     fn test_embedded_backend_checkpoint_resume() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         backend.register(None).unwrap();
 
@@ -1061,7 +742,11 @@ mod tests {
     #[test]
     fn test_embedded_backend_get_checkpoint() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         backend.register(None).unwrap();
 
@@ -1081,14 +766,20 @@ mod tests {
     #[test]
     fn test_embedded_backend_completed() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         backend.register(None).unwrap();
         backend.completed(b"result data").unwrap();
 
         let instance = backend
             .rt
-            .block_on(persistence.get_instance("test-instance"))
+            .block_on(
+                persistence.get_instance(&TenantId::new("test-tenant").unwrap(), "test-instance"),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Completed);
@@ -1098,14 +789,20 @@ mod tests {
     #[test]
     fn test_embedded_backend_failed() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         backend.register(None).unwrap();
         backend.failed("something went wrong").unwrap();
 
         let instance = backend
             .rt
-            .block_on(persistence.get_instance("test-instance"))
+            .block_on(
+                persistence.get_instance(&TenantId::new("test-tenant").unwrap(), "test-instance"),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Failed);
@@ -1115,14 +812,20 @@ mod tests {
     #[test]
     fn test_embedded_backend_suspended() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         backend.register(None).unwrap();
         backend.suspended().unwrap();
 
         let instance = backend
             .rt
-            .block_on(persistence.get_instance("test-instance"))
+            .block_on(
+                persistence.get_instance(&TenantId::new("test-tenant").unwrap(), "test-instance"),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Suspended);
@@ -1131,7 +834,11 @@ mod tests {
     #[test]
     fn test_embedded_backend_get_status() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence.clone(),
+            "test-instance",
+            TenantId::new("test-tenant").unwrap(),
+        );
 
         // Get status before registration
         let status = backend.get_status().unwrap();
@@ -1147,7 +854,11 @@ mod tests {
     #[test]
     fn test_embedded_backend_ids() {
         let persistence = Arc::new(MockPersistence::new());
-        let backend = EmbeddedBackend::new(persistence, "my-instance", "my-tenant");
+        let backend = EmbeddedBackend::new(
+            persistence,
+            "my-instance",
+            TenantId::new("my-tenant").unwrap(),
+        );
 
         assert_eq!(backend.instance_id(), "my-instance");
         assert_eq!(backend.tenant_id(), "my-tenant");

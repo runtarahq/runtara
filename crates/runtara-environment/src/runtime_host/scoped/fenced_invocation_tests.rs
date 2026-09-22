@@ -29,10 +29,23 @@ impl InvocationAuthority for DurabilityAuthority {
 async fn prepared_wasm_factory_admits_only_durable_calls_without_memoizing_results() {
     for durable in [None, Some(false), Some(true)] {
         let fx = Fixture::new().await;
-        let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let root = fx
+            .persistence
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let fences = fx.persistence.invocation_fences().unwrap();
         let lease = fences
-            .claim_invocation_lease(&root.tenant_id, &fx.id, "auto-admission", None)
+            .claim_invocation_lease(
+                &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+                &fx.id,
+                "auto-admission",
+                None,
+            )
             .await
             .unwrap();
         let scopes = Arc::new(
@@ -70,7 +83,11 @@ async fn prepared_wasm_factory_admits_only_durable_calls_without_memoizing_resul
             );
             assert_eq!(
                 fx.persistence
-                    .count_events(&fx.id, &ListEventsFilter::default())
+                    .count_events(
+                        &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        &fx.id,
+                        &ListEventsFilter::default()
+                    )
                     .await
                     .unwrap(),
                 i
@@ -94,7 +111,10 @@ async fn prepared_wasm_factory_admits_only_durable_calls_without_memoizing_resul
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert!(
             fx.persistence
-                .get_instance(&fx.id)
+                .get_instance(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -102,30 +122,68 @@ async fn prepared_wasm_factory_admits_only_durable_calls_without_memoizing_resul
                 .is_none()
         );
         fx.close().await;
-        fences.revoke_invocation_lease(&lease).await.unwrap();
+        fences
+            .revoke_invocation_lease(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &lease,
+            )
+            .await
+            .unwrap();
     }
 }
 
 #[tokio::test]
 async fn prepared_wasm_initial_admission_skips_initializer_for_cancelled_replay() {
     let fx = Fixture::new().await;
-    let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    let root = fx
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     let fences = fx.persistence.invocation_fences().unwrap();
     let old = fences
-        .claim_invocation_lease(&root.tenant_id, &fx.id, "old", None)
+        .claim_invocation_lease(
+            &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+            &fx.id,
+            "old",
+            None,
+        )
         .await
         .unwrap();
     let attempt = fences
-        .begin_invocation_attempt(&old, "parent/child", "cancelled")
+        .begin_invocation_attempt(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &old,
+            "parent/child",
+            "cancelled",
+        )
         .await
         .unwrap();
     fences
-        .cancel_invocation_attempt(&attempt.fence)
+        .cancel_invocation_attempt(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &attempt.fence,
+        )
         .await
         .unwrap();
-    fences.revoke_invocation_lease(&old).await.unwrap();
+    fences
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &old,
+        )
+        .await
+        .unwrap();
     let lease = fences
-        .claim_invocation_lease(&root.tenant_id, &fx.id, "new", Some(old.epoch))
+        .claim_invocation_lease(
+            &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+            &fx.id,
+            "new",
+            Some(old.epoch),
+        )
         .await
         .unwrap();
     let scopes = Arc::new(
@@ -158,33 +216,62 @@ async fn prepared_wasm_initial_admission_skips_initializer_for_cancelled_replay(
     ));
     assert_eq!(
         fx.persistence
-            .count_events(&fx.id, &ListEventsFilter::default())
+            .count_events(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                &ListEventsFilter::default()
+            )
             .await
             .unwrap(),
         0
     );
     assert_eq!(fx.status().await, InstanceStatus::Running);
     fx.close().await;
-    fences.revoke_invocation_lease(&lease).await.unwrap();
+    fences
+        .revoke_invocation_lease(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &lease,
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlement() {
     for mode in ["complete", "cancel", "revoked"] {
         let fx = Fixture::new().await;
-        let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let root = fx
+            .persistence
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let fences = fx.persistence.invocation_fences().unwrap();
         let lease = fences
-            .claim_invocation_lease(&root.tenant_id, &fx.id, "fenced-wasm", None)
+            .claim_invocation_lease(
+                &runtara_core::TenantId::new(&root.tenant_id).unwrap(),
+                &fx.id,
+                "fenced-wasm",
+                None,
+            )
             .await
             .unwrap();
         let attempt = fences
-            .begin_invocation_attempt(&lease, "parent/child", "one")
+            .begin_invocation_attempt(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &lease,
+                "parent/child",
+                "one",
+            )
             .await
             .unwrap();
         let io = Arc::new(
             InvocationIo::new(
                 fx.persistence.clone(),
+                runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
                 attempt.fence,
                 Duration::from_secs(5),
             )
@@ -206,8 +293,13 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
                     wrong.lease.instance_id = "other-root".into();
                 }
                 let wrong = Arc::new(
-                    InvocationIo::new(fx.persistence.clone(), wrong, Duration::from_secs(5))
-                        .unwrap(),
+                    InvocationIo::new(
+                        fx.persistence.clone(),
+                        runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        wrong,
+                        Duration::from_secs(5),
+                    )
+                    .unwrap(),
                 );
                 assert!(matches!(
                     scopes.prepare_fenced_child(&request("copy"), wrong),
@@ -232,10 +324,22 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
         .unwrap();
         let prepared = launcher.prepare(request("copy")).unwrap();
         if mode == "cancel" {
-            fences.cancel_invocation_attempt(io.fence()).await.unwrap();
+            fences
+                .cancel_invocation_attempt(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    io.fence(),
+                )
+                .await
+                .unwrap();
         }
         if mode == "revoked" {
-            fences.revoke_invocation_lease(&lease).await.unwrap();
+            fences
+                .revoke_invocation_lease(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &lease,
+                )
+                .await
+                .unwrap();
         }
         let id = fx
             .tasks
@@ -251,7 +355,12 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
                 );
                 assert_eq!(
                     fences
-                        .begin_invocation_attempt(&lease, "parent/child", "one")
+                        .begin_invocation_attempt(
+                            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                            &lease,
+                            "parent/child",
+                            "one"
+                        )
                         .await
                         .unwrap()
                         .state,
@@ -264,7 +373,11 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
         }
         assert_eq!(
             fx.persistence
-                .count_events(&fx.id, &ListEventsFilter::default())
+                .count_events(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    &ListEventsFilter::default()
+                )
                 .await
                 .unwrap(),
             i64::from(mode == "complete")
@@ -272,7 +385,10 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert!(
             fx.persistence
-                .get_instance(&fx.id)
+                .get_instance(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -289,7 +405,13 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
         } else {
             assert!(!io.failed());
             fx.close().await;
-            fences.revoke_invocation_lease(&lease).await.unwrap();
+            fences
+                .revoke_invocation_lease(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &lease,
+                )
+                .await
+                .unwrap();
         }
     }
 }

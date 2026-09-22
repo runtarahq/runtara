@@ -27,14 +27,17 @@ impl LockedCommand {
 
 pub(crate) async fn lock_instance(
     tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &runtara_core::TenantId,
     id: &str,
 ) -> Result<InstanceStatus, CoreError> {
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status::text FROM instances WHERE instance_id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await
-            .db()?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status::text FROM instances WHERE instance_id = $1 AND tenant_id = $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(tenant_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .db()?;
     let status = status.ok_or_else(|| CoreError::InstanceNotFound {
         instance_id: id.into(),
     })?;

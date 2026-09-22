@@ -49,7 +49,8 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 /// // Create persistence layer (PostgreSQL)
 /// let persistence: Arc<dyn Persistence> = create_persistence()?;
 ///
-/// let mut sdk = RuntaraSdk::embedded(persistence, "my-instance", "my-tenant");
+/// let tenant_id = runtara_core::TenantId::new("my-tenant")?;
+/// let mut sdk = RuntaraSdk::embedded(persistence, "my-instance", tenant_id);
 /// sdk.connect()?;  // No-op for embedded
 /// sdk.register(None)?;
 ///
@@ -125,7 +126,7 @@ impl RuntaraSdk {
     pub fn embedded(
         persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
         instance_id: impl Into<String>,
-        tenant_id: impl Into<String>,
+        tenant_id: runtara_core::TenantId,
     ) -> Self {
         use crate::backend::embedded::EmbeddedBackend;
 
@@ -151,7 +152,7 @@ impl RuntaraSdk {
     pub fn with_embedded_backend(
         persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
         instance_id: impl Into<String>,
-        tenant_id: impl Into<String>,
+        tenant_id: runtara_core::TenantId,
         signal_poll_interval_ms: u64,
         heartbeat_interval_ms: u64,
     ) -> Self {

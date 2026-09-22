@@ -20,19 +20,20 @@ fn event() -> InvocationEvent {
 
 /// Sleep replaces state, retries upsert without moving progress, and events append.
 pub async fn child_write_semantics(p: &dyn Persistence) {
+    let tenant_scope = crate::TenantId::new("fence-tenant").unwrap();
     let (id, lease) = root(p).await;
     let f = p.invocation_fences().unwrap();
     let target = f
-        .begin_invocation_attempt(&lease, "nested/child", "one")
+        .begin_invocation_attempt(&tenant_scope, &lease, "nested/child", "one")
         .await
         .unwrap();
     let fence = &target.fence;
     for bytes in [b"first".as_slice(), b"second", b""] {
-        f.invocation_sleep_checkpoint(fence, &write("sleep", bytes))
+        f.invocation_sleep_checkpoint(&tenant_scope, fence, &write("sleep", bytes))
             .await
             .unwrap();
         assert_eq!(
-            p.load_checkpoint(&id, "sleep")
+            p.load_checkpoint(&tenant_scope, &id, "sleep")
                 .await
                 .unwrap()
                 .unwrap()
@@ -42,16 +43,18 @@ pub async fn child_write_semantics(p: &dyn Persistence) {
     }
     // Empty sleep state is still a checkpoint. Empty result state is a probe.
     assert!(
-        f.invocation_checkpoint(fence, &write("sleep", b""))
+        f.invocation_checkpoint(&tenant_scope, fence, &write("sleep", b""))
             .await
             .unwrap()
             .found
     );
     for number in [1, 1, i32::MAX as u32] {
         let audit = retry("step", number);
-        f.invocation_retry(fence, &audit).await.unwrap();
+        f.invocation_retry(&tenant_scope, fence, &audit)
+            .await
+            .unwrap();
         assert!(
-            p.load_checkpoint(&id, &audit.storage_key().unwrap())
+            p.load_checkpoint(&tenant_scope, &id, &audit.storage_key().unwrap())
                 .await
                 .unwrap()
                 .unwrap()
@@ -59,18 +62,29 @@ pub async fn child_write_semantics(p: &dyn Persistence) {
                 .is_empty()
         );
     }
-    assert_eq!(p.count_checkpoints(&id, None, None, None).await.unwrap(), 3);
+    assert_eq!(
+        p.count_checkpoints(&tenant_scope, &id, None, None, None)
+            .await
+            .unwrap(),
+        3
+    );
     let sample = event();
-    f.invocation_event(fence, &sample).await.unwrap();
-    f.invocation_event(fence, &sample).await.unwrap();
+    f.invocation_event(&tenant_scope, fence, &sample)
+        .await
+        .unwrap();
+    f.invocation_event(&tenant_scope, fence, &sample)
+        .await
+        .unwrap();
     let heartbeat = InvocationEvent {
         kind: InvocationEventKind::Heartbeat,
         payload: vec![],
         created_at: sample.created_at,
     };
-    f.invocation_event(fence, &heartbeat).await.unwrap();
+    f.invocation_event(&tenant_scope, fence, &heartbeat)
+        .await
+        .unwrap();
     let events = p
-        .list_events(&id, &ListEventsFilter::default(), 10, 0)
+        .list_events(&tenant_scope, &id, &ListEventsFilter::default(), 10, 0)
         .await
         .unwrap();
     assert_eq!(events.len(), 3);
@@ -95,7 +109,7 @@ pub async fn child_write_semantics(p: &dyn Persistence) {
             assert_eq!(stored.subtype.as_deref(), Some("step-debug"));
         }
     }
-    let root = p.get_instance(&id).await.unwrap().unwrap();
+    let root = p.get_instance(&tenant_scope, &id).await.unwrap().unwrap();
     assert_eq!(root.checkpoint_id.as_deref(), Some("sleep"));
     assert_eq!(root.status, InstanceStatus::Running);
     assert!(root.output.is_none() && root.error.is_none() && root.sleep_until.is_none());
@@ -103,6 +117,7 @@ pub async fn child_write_semantics(p: &dyn Persistence) {
 
 /// Losing any authority denies all write families and preserves existing bytes.
 pub async fn child_write_rejections(p: &dyn Persistence) {
+    let tenant_scope = crate::TenantId::new("fence-tenant").unwrap();
     for mode in [
         "cancel",
         "settle",
@@ -118,40 +133,54 @@ pub async fn child_write_rejections(p: &dyn Persistence) {
         let (id, lease) = root(p).await;
         let f = p.invocation_fences().unwrap();
         let mut token = f
-            .begin_invocation_attempt(&lease, "child", "one")
+            .begin_invocation_attempt(&tenant_scope, &lease, "child", "one")
             .await
             .unwrap()
             .fence;
-        f.invocation_sleep_checkpoint(&token, &write("sleep", b"retained"))
+        f.invocation_sleep_checkpoint(&tenant_scope, &token, &write("sleep", b"retained"))
             .await
             .unwrap();
         let expected = match mode {
             "cancel" => {
-                f.cancel_invocation_attempt(&token).await.unwrap();
+                f.cancel_invocation_attempt(&tenant_scope, &token)
+                    .await
+                    .unwrap();
                 FenceRejection::Cancelled
             }
             "settle" => {
-                f.settle_invocation_attempt(&token, None).await.unwrap();
+                f.settle_invocation_attempt(&tenant_scope, &token, None)
+                    .await
+                    .unwrap();
                 FenceRejection::Settled
             }
             "revoke" | "takeover" => {
-                f.revoke_invocation_lease(&lease).await.unwrap();
+                f.revoke_invocation_lease(&tenant_scope, &lease)
+                    .await
+                    .unwrap();
                 if mode == "takeover" {
-                    f.claim_invocation_lease(&lease.tenant_id, &id, "next", Some(lease.epoch))
-                        .await
-                        .unwrap();
+                    f.claim_invocation_lease(
+                        &crate::TenantId::new(&lease.tenant_id).unwrap(),
+                        &id,
+                        "next",
+                        Some(lease.epoch),
+                    )
+                    .await
+                    .unwrap();
                 }
                 FenceRejection::LeaseMismatch
             }
             "supersede" => {
-                f.settle_invocation_attempt(&token, None).await.unwrap();
-                f.begin_invocation_attempt(&lease, "child", "two")
+                f.settle_invocation_attempt(&tenant_scope, &token, None)
+                    .await
+                    .unwrap();
+                f.begin_invocation_attempt(&tenant_scope, &lease, "child", "two")
                     .await
                     .unwrap();
                 FenceRejection::AttemptMismatch
             }
             "park" | "terminal" => {
                 p.update_instance_status(
+                    &tenant_scope,
                     &id,
                     if mode == "park" {
                         InstanceStatus::Suspended
@@ -179,22 +208,26 @@ pub async fn child_write_rejections(p: &dyn Persistence) {
             _ => unreachable!(),
         };
         rejected(
-            f.invocation_checkpoint(&token, &write("late", b"bad"))
+            f.invocation_checkpoint(&tenant_scope, &token, &write("late", b"bad"))
                 .await,
             expected,
         );
         rejected(
-            f.invocation_sleep_checkpoint(&token, &write("sleep", b"bad"))
+            f.invocation_sleep_checkpoint(&tenant_scope, &token, &write("sleep", b"bad"))
                 .await,
             expected,
         );
         rejected(
-            f.invocation_retry(&token, &retry("late", 1)).await,
+            f.invocation_retry(&tenant_scope, &token, &retry("late", 1))
+                .await,
             expected,
         );
-        rejected(f.invocation_event(&token, &event()).await, expected);
+        rejected(
+            f.invocation_event(&tenant_scope, &token, &event()).await,
+            expected,
+        );
         assert_eq!(
-            p.load_checkpoint(&id, "sleep")
+            p.load_checkpoint(&tenant_scope, &id, "sleep")
                 .await
                 .unwrap()
                 .unwrap()
@@ -203,19 +236,21 @@ pub async fn child_write_rejections(p: &dyn Persistence) {
             "{mode}"
         );
         assert_eq!(
-            p.count_checkpoints(&id, None, None, None).await.unwrap(),
+            p.count_checkpoints(&tenant_scope, &id, None, None, None)
+                .await
+                .unwrap(),
             1,
             "{mode}"
         );
         assert_eq!(
-            p.count_events(&id, &ListEventsFilter::default())
+            p.count_events(&tenant_scope, &id, &ListEventsFilter::default())
                 .await
                 .unwrap(),
             0,
             "{mode}"
         );
         assert_eq!(
-            p.get_instance(&id)
+            p.get_instance(&tenant_scope, &id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -229,27 +264,30 @@ pub async fn child_write_rejections(p: &dyn Persistence) {
 
 /// Invalid counters and keys fail before inserting or moving the root pointer.
 pub async fn child_write_boundaries(p: &dyn Persistence) {
+    let tenant_scope = crate::TenantId::new("fence-tenant").unwrap();
     let (id, lease) = root(p).await;
     let f = p.invocation_fences().unwrap();
     let token = f
-        .begin_invocation_attempt(&lease, "child", "one")
+        .begin_invocation_attempt(&tenant_scope, &lease, "child", "one")
         .await
         .unwrap()
         .fence;
     for number in [0, i32::MAX as u32 + 1, u32::MAX] {
         rejected(
-            f.invocation_retry(&token, &retry("key", number)).await,
+            f.invocation_retry(&tenant_scope, &token, &retry("key", number))
+                .await,
             FenceRejection::InvalidIdentity,
         );
     }
     for key in ["".to_string(), "bad\0key".into(), "a".repeat(4097)] {
         rejected(
-            f.invocation_sleep_checkpoint(&token, &write(&key, b"bad"))
+            f.invocation_sleep_checkpoint(&tenant_scope, &token, &write(&key, b"bad"))
                 .await,
             FenceRejection::InvalidIdentity,
         );
         rejected(
-            f.invocation_retry(&token, &retry(&key, 1)).await,
+            f.invocation_retry(&tenant_scope, &token, &retry(&key, 1))
+                .await,
             FenceRejection::InvalidIdentity,
         );
     }
@@ -257,15 +295,22 @@ pub async fn child_write_boundaries(p: &dyn Persistence) {
     let allowed = "é".repeat((4096 - "::retry::1".len()) / 2);
     let audit = retry(&allowed, 1);
     assert_eq!(audit.storage_key().unwrap().len(), 4096);
-    f.invocation_retry(&token, &audit).await.unwrap();
+    f.invocation_retry(&tenant_scope, &token, &audit)
+        .await
+        .unwrap();
     rejected(
-        f.invocation_retry(&token, &retry(&(allowed + "a"), 1))
+        f.invocation_retry(&tenant_scope, &token, &retry(&(allowed + "a"), 1))
             .await,
         FenceRejection::InvalidIdentity,
     );
-    assert_eq!(p.count_checkpoints(&id, None, None, None).await.unwrap(), 1);
+    assert_eq!(
+        p.count_checkpoints(&tenant_scope, &id, None, None, None)
+            .await
+            .unwrap(),
+        1
+    );
     assert!(
-        p.get_instance(&id)
+        p.get_instance(&tenant_scope, &id)
             .await
             .unwrap()
             .unwrap()

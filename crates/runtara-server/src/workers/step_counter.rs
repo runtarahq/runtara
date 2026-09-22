@@ -34,7 +34,7 @@ impl StepCounter {
 }
 
 impl runtara_core::instance_handlers::InstanceEventObserver for StepCounter {
-    fn on_event_persisted(&self, subtype: Option<&str>) {
+    fn on_event_persisted(&self, _tenant_id: &runtara_core::TenantId, subtype: Option<&str>) {
         // Only a step's *start* counts. Counting its end too would double the
         // reported rate, and counting log events would inflate it.
         if subtype == Some(runtara_environment::step_vocabulary::workflow_steps().start_subtype()) {
@@ -57,12 +57,21 @@ mod tests {
         let gauges = PipelineGauges::new();
         let counter = StepCounter::new(Arc::clone(&gauges));
 
-        counter.on_event_persisted(Some(vocabulary.start_subtype()));
+        counter.on_event_persisted(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            Some(vocabulary.start_subtype()),
+        );
         assert_eq!(gauges.totals().steps, 1, "a step start must be counted");
 
-        counter.on_event_persisted(Some(vocabulary.end_subtype()));
-        counter.on_event_persisted(Some("workflow_log"));
-        counter.on_event_persisted(None);
+        counter.on_event_persisted(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            Some(vocabulary.end_subtype()),
+        );
+        counter.on_event_persisted(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            Some("workflow_log"),
+        );
+        counter.on_event_persisted(&runtara_core::TenantId::new("test-tenant").unwrap(), None);
         assert_eq!(
             gauges.totals().steps,
             1,

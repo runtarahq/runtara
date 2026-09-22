@@ -51,9 +51,14 @@ async fn free_port() -> SocketAddr {
 }
 
 /// Start a runtime with the given concurrency cap.
-async fn start(persistence: Arc<dyn Persistence>, cap: u32) -> (CoreRuntime, SocketAddr) {
+async fn start(
+    persistence: Arc<dyn Persistence>,
+    cap: u32,
+    tenant: &str,
+) -> (CoreRuntime, SocketAddr) {
     let addr = free_port().await;
     let runtime = CoreRuntime::builder()
+        .tenant_id(runtara_core::TenantId::new(tenant).unwrap())
         .persistence(persistence)
         .bind_addr(addr)
         .max_concurrent_instances(cap)
@@ -94,8 +99,8 @@ async fn run_label_completion_http_validates_and_preserves_output() {
     use base64::Engine;
     use runtara_core::domain::InstanceStatus;
     let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(test_pool().await));
-    let (runtime, addr) = start(persistence.clone(), 100).await;
     let tenant = format!("run-label-{}", Uuid::new_v4());
+    let (runtime, addr) = start(persistence.clone(), 100, &tenant).await;
     let id = format!("{tenant}-1");
     assert_eq!(register(addr, &id, &tenant).await, 200);
     let client = reqwest::Client::new();
@@ -127,7 +132,11 @@ async fn run_label_completion_http_validates_and_preserves_output() {
                 .status()
                 .is_success()
         );
-        let record = persistence.get_instance(&case_id).await.unwrap().unwrap();
+        let record = persistence
+            .get_instance(&runtara_core::TenantId::new(&tenant).unwrap(), &case_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(record.status, InstanceStatus::Completed);
         assert_eq!(
             record.run_label,
@@ -154,7 +163,11 @@ async fn run_label_completion_http_validates_and_preserves_output() {
                 .is_success()
         );
     }
-    let record = persistence.get_instance(&id).await.unwrap().unwrap();
+    let record = persistence
+        .get_instance(&runtara_core::TenantId::new(&tenant).unwrap(), &id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(record.status, InstanceStatus::Completed);
     assert_eq!(record.run_label.as_deref(), Some("Order/12 [done]"));
     assert_eq!(
@@ -175,17 +188,15 @@ async fn the_concurrency_cap_bounds_running_work_only() {
     let pool = test_pool().await;
     let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
 
-    // The cap counts every `running` instance in the table, so this test needs
-    // a tenant of its own and a cap it can reach on its own terms. Count the
-    // rows already running and aim just past them.
+    // Admission counts only this tenant. Its fresh namespace starts empty.
     let tenant = format!("cap-{}", Uuid::new_v4());
     let already_running: i64 = persistence
-        .count_active_instances()
+        .count_active_instances(&runtara_core::TenantId::new(&tenant).unwrap())
         .await
         .expect("count active instances");
     let cap = u32::try_from(already_running).expect("active count fits a cap") + 2;
 
-    let (runtime, addr) = start(Arc::clone(&persistence), cap).await;
+    let (runtime, addr) = start(Arc::clone(&persistence), cap, &tenant).await;
 
     let first = format!("{tenant}-1");
     let second = format!("{tenant}-2");
@@ -235,7 +246,7 @@ async fn draining_refuses_new_instances_but_keeps_serving() {
     let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
     let tenant = format!("drain-{}", Uuid::new_v4());
 
-    let (runtime, addr) = start(persistence, 0).await;
+    let (runtime, addr) = start(persistence, 0, &tenant).await;
 
     let early = format!("{tenant}-1");
     assert_eq!(
@@ -289,7 +300,7 @@ async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
     let instance = format!("{tenant}-1");
     let checkpoint = "sleep-cp-1";
 
-    let (runtime, addr) = start(persistence.clone(), 8).await;
+    let (runtime, addr) = start(persistence.clone(), 8, &tenant).await;
     assert_eq!(register(addr, &instance, &tenant).await, 200, "register");
 
     let sleep_shape = json!({
@@ -313,7 +324,7 @@ async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
     assert_eq!(status, 200, "a payload-bearing suspend is still accepted");
 
     let record = persistence
-        .get_instance(&instance)
+        .get_instance(&runtara_core::TenantId::new(&tenant).unwrap(), &instance)
         .await
         .expect("get_instance")
         .expect("instance must exist");
@@ -333,7 +344,11 @@ async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
     );
     assert!(
         persistence
-            .load_checkpoint(&instance, checkpoint)
+            .load_checkpoint(
+                &runtara_core::TenantId::new(&tenant).unwrap(),
+                &instance,
+                checkpoint
+            )
             .await
             .expect("load_checkpoint")
             .is_none(),
@@ -348,7 +363,7 @@ async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
 async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
     use runtara_core::domain::{InstanceStatus, SignalType};
     let backend = Arc::new(PostgresPersistence::new(test_pool().await));
-    let (runtime, addr) = start(backend.clone(), 0).await;
+    let (runtime, addr) = start(backend.clone(), 0, "typed-wire").await;
     let client = reqwest::Client::new();
     for (signal_type, label, status) in [
         (SignalType::Cancel, "cancel", InstanceStatus::Cancelled),
@@ -358,7 +373,12 @@ async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
         let id = Uuid::new_v4().to_string();
         assert_eq!(register(addr, &id, "typed-wire").await, 200);
         backend
-            .insert_signal(&id, signal_type, b"payload")
+            .insert_signal(
+                &runtara_core::TenantId::new("typed-wire").unwrap(),
+                &id,
+                signal_type,
+                b"payload",
+            )
             .await
             .unwrap();
         let url = format!("http://{addr}/api/v1/instances/{id}");
@@ -395,11 +415,25 @@ async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
             .error_for_status()
             .unwrap();
         assert_eq!(
-            backend.get_instance(&id).await.unwrap().unwrap().status,
+            backend
+                .get_instance(&runtara_core::TenantId::new("typed-wire").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             status
         );
-        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
-        backend.delete_instances_batch(&[id]).await.unwrap();
+        assert!(
+            backend
+                .get_pending_signal(&runtara_core::TenantId::new("typed-wire").unwrap(), &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        backend
+            .delete_instances_batch(&runtara_core::TenantId::new("typed-wire").unwrap(), &[id])
+            .await
+            .unwrap();
     }
     runtime.shutdown().await.expect("shutdown");
 }
@@ -409,11 +443,16 @@ async fn custom_values_keep_identity_across_poll_and_checkpoint_without_guest_re
     use runtara_core::domain::InstanceStatus;
     let pool = test_pool().await;
     let backend = Arc::new(PostgresPersistence::new(pool));
-    let (runtime, addr) = start(backend.clone(), 0).await;
+    let (runtime, addr) = start(backend.clone(), 0, "custom-contract").await;
     let id = Uuid::new_v4().to_string();
     assert_eq!(register(addr, &id, "custom-contract").await, 200);
     let signal_id = backend
-        .put_custom_signal(&id, "payment", b"{}")
+        .put_custom_signal(
+            &runtara_core::TenantId::new("custom-contract").unwrap(),
+            &id,
+            "payment",
+            b"{}",
+        )
         .await
         .unwrap();
     let client = reqwest::Client::new();
@@ -455,9 +494,23 @@ async fn custom_values_keep_identity_across_poll_and_checkpoint_without_guest_re
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
     assert_eq!(
-        backend.get_instance(&id).await.unwrap().unwrap().status,
+        backend
+            .get_instance(
+                &runtara_core::TenantId::new("custom-contract").unwrap(),
+                &id
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         InstanceStatus::Running
     );
-    backend.delete_instances_batch(&[id]).await.unwrap();
+    backend
+        .delete_instances_batch(
+            &runtara_core::TenantId::new("custom-contract").unwrap(),
+            &[id],
+        )
+        .await
+        .unwrap();
     runtime.shutdown().await.unwrap();
 }

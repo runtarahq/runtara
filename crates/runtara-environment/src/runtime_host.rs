@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use runtara_component_host::runtime_host::{
     RuntimeCheckpointResult, RuntimeCustomSignalInfo, RuntimeHost, RuntimeSignalInfo,
 };
+use runtara_core::TenantId;
 use runtara_core::instance_handlers::{
     CheckpointRequest, GetCheckpointRequest, InstanceEvent, InstanceEventType,
     InstanceHandlerState, PollSignalsRequest, RetryAttemptEvent, Signal, SignalAck, SignalType,
@@ -62,6 +63,7 @@ const DEFAULT_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// Persistence-backed runtime host for one workflow instance run.
 pub struct PersistenceRuntimeHost {
     state: Arc<InstanceHandlerState>,
+    tenant_id: TenantId,
     instance_id: String,
     debug_mode: bool,
     /// The instance's enriched input envelope, supplied by a launch that had
@@ -90,9 +92,15 @@ pub struct PersistenceRuntimeHost {
 
 impl PersistenceRuntimeHost {
     /// Host for `instance_id` over the environment's shared handler state.
-    pub fn new(state: Arc<InstanceHandlerState>, instance_id: String, debug_mode: bool) -> Self {
+    pub fn new(
+        state: Arc<InstanceHandlerState>,
+        tenant_id: TenantId,
+        instance_id: String,
+        debug_mode: bool,
+    ) -> Self {
         Self {
             state,
+            tenant_id,
             instance_id,
             debug_mode,
             prepersisted_input: None,
@@ -135,11 +143,13 @@ impl PersistenceRuntimeHost {
     /// Host over a bare persistence handle (constructs its own handler state).
     pub fn from_persistence(
         persistence: Arc<dyn Persistence>,
+        tenant_id: TenantId,
         instance_id: String,
         debug_mode: bool,
     ) -> Self {
         Self::new(
             Arc::new(InstanceHandlerState::new(persistence)),
+            tenant_id,
             instance_id,
             debug_mode,
         )
@@ -174,6 +184,7 @@ impl PersistenceRuntimeHost {
 
         let response = handle_poll_signals(
             &self.state,
+            &self.tenant_id,
             PollSignalsRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id: None,
@@ -231,7 +242,7 @@ impl PersistenceRuntimeHost {
         let pending = self
             .state
             .persistence
-            .get_pending_signal(&self.instance_id)
+            .get_pending_signal(&self.tenant_id, &self.instance_id)
             .await;
         match pending {
             Ok(Some(signal))
@@ -276,6 +287,7 @@ impl PersistenceRuntimeHost {
     async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
         handle_signal_ack_decision(
             &self.state,
+            &self.tenant_id,
             SignalAck {
                 command_id: command_id.to_owned(),
                 instance_id: self.instance_id.clone(),
@@ -320,6 +332,7 @@ impl PersistenceRuntimeHost {
         }
         handle_instance_event(
             &self.state,
+            &self.tenant_id,
             InstanceEvent {
                 instance_id: self.instance_id.clone(),
                 event_type: event_type as i32,
@@ -380,7 +393,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         let instance = self
             .state
             .persistence
-            .get_instance(&self.instance_id)
+            .get_instance(&self.tenant_id, &self.instance_id)
             .await
             .map_err(Self::err)?
             .ok_or_else(|| format!("instance {} not found", self.instance_id))?;
@@ -404,6 +417,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
             .flatten();
         runtara_core::instance_handlers::handle_instance_event_with_run_label(
             &self.state,
+            &self.tenant_id,
             InstanceEvent {
                 instance_id: self.instance_id.clone(),
                 event_type: InstanceEventType::EventCompleted as i32,
@@ -492,6 +506,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         self.escalate_if_cancel_ignored().await;
         let response = handle_poll_signals(
             &self.state,
+            &self.tenant_id,
             PollSignalsRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id: Some(checkpoint_id),
@@ -506,6 +521,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         self.escalate_if_cancel_ignored().await;
         let response = handle_get_checkpoint(
             &self.state,
+            &self.tenant_id,
             GetCheckpointRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
@@ -524,6 +540,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         self.escalate_if_cancel_ignored().await;
         let response = handle_checkpoint(
             &self.state,
+            &self.tenant_id,
             CheckpointRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
@@ -578,6 +595,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         self.escalate_if_cancel_ignored().await;
         handle_retry_attempt(
             &self.state,
+            &self.tenant_id,
             RetryAttemptEvent {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
@@ -607,6 +625,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         }
         let response = handle_sleep(
             &self.state,
+            &self.tenant_id,
             SleepRequest {
                 instance_id: self.instance_id.clone(),
                 duration_ms: ms,
@@ -647,11 +666,16 @@ mod tests {
     async fn setup() -> (Arc<dyn Persistence>, PersistenceRuntimeHost, String) {
         let (persistence, instance_id) = test_support::running_instance("rt-host").await;
         persistence
-            .store_instance_input(&instance_id, INPUT)
+            .store_instance_input(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                &instance_id,
+                INPUT,
+            )
             .await
             .expect("store input");
         let host = PersistenceRuntimeHost::from_persistence(
             Arc::clone(&persistence),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
             instance_id.clone(),
             false,
         )
@@ -715,9 +739,14 @@ mod tests {
     async fn custom_signal_poll_is_idempotent_rereads() {
         let (p, host, inst_id) = setup().await;
         assert_eq!(host.poll_custom_signal("sig-1".into()).await.unwrap(), None);
-        p.put_custom_signal(inst_id.as_str(), "sig-1", b"payload-1")
-            .await
-            .unwrap();
+        p.put_custom_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            "sig-1",
+            b"payload-1",
+        )
+        .await
+        .unwrap();
         // Non-destructive read (wait-replay fix): both polls see the payload.
         assert_eq!(
             host.poll_custom_signal("sig-1".into()).await.unwrap(),
@@ -734,7 +763,14 @@ mod tests {
     async fn complete_persists_output_and_terminal_status() {
         let (p, host, inst_id) = setup().await;
         host.complete(b"{\"result\":1}".to_vec()).await.unwrap();
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Completed);
         assert_eq!(inst.output.as_deref(), Some(b"{\"result\":1}".as_slice()));
     }
@@ -754,7 +790,11 @@ mod tests {
             host.complete_with_label(b"{}".to_vec(), serde_json::to_vec(&invalid).unwrap())
                 .await
                 .unwrap();
-            let instance = p.get_instance(&id).await.unwrap().unwrap();
+            let instance = p
+                .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(instance.status, CoreInstanceStatus::Completed);
             assert!(instance.run_label.is_none());
             assert_eq!(instance.output.as_deref(), Some(b"{}".as_slice()));
@@ -767,7 +807,11 @@ mod tests {
             )
             .await
             .unwrap();
-            let instance = p.get_instance(&id).await.unwrap().unwrap();
+            let instance = p
+                .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(instance.run_label, Some("x".repeat(250)));
             assert_eq!(instance.status, CoreInstanceStatus::Completed);
         }
@@ -780,7 +824,11 @@ mod tests {
         host.complete_with_label(b"{\"result\":2}".to_vec(), br#""replacement""#.to_vec())
             .await
             .unwrap();
-        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        let instance = p
+            .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Completed);
         assert_eq!(instance.run_label.as_deref(), Some("Order/12 [done]"));
         assert_eq!(
@@ -789,16 +837,23 @@ mod tests {
         );
 
         let (p, host, id) = setup().await;
-        p.complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-            &id,
-            CoreInstanceStatus::Cancelled,
-        ))
+        p.complete_instance(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            runtara_core::persistence::CompleteInstanceParams::new(
+                &id,
+                CoreInstanceStatus::Cancelled,
+            ),
+        )
         .await
         .unwrap();
         host.complete_with_label(b"{}".to_vec(), br#""too late""#.to_vec())
             .await
             .unwrap();
-        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        let instance = p
+            .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Cancelled);
         assert!(instance.run_label.is_none());
         assert!(instance.output.is_none());
@@ -808,7 +863,14 @@ mod tests {
     async fn fail_persists_error_and_terminal_status() {
         let (p, host, inst_id) = setup().await;
         host.fail(b"boom".to_vec()).await.unwrap();
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Failed);
     }
 
@@ -821,6 +883,7 @@ mod tests {
             .unwrap();
         let events = p
             .list_events(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
                 inst_id.as_str(),
                 &runtara_core::persistence::ListEventsFilter::default(),
                 100,
@@ -850,23 +913,41 @@ mod tests {
         ] {
             let (p, host, id) = setup().await;
             assert_eq!(host.poll_signal().await.unwrap(), None);
-            p.put_custom_signal(&id, "business", b"application payload")
-                .await
-                .unwrap();
-            p.insert_signal(&id, kind, b"lifecycle payload")
-                .await
-                .unwrap();
+            p.put_custom_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                &id,
+                "business",
+                b"application payload",
+            )
+            .await
+            .unwrap();
+            p.insert_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                &id,
+                kind,
+                b"lifecycle payload",
+            )
+            .await
+            .unwrap();
             let signal = host.poll_signal().await.unwrap().unwrap();
             assert_eq!(host.poll_signal().await.unwrap(), Some(signal.clone()));
             assert_eq!(signal.payload, b"lifecycle payload");
             assert_eq!(signal.checkpoint_id, None);
             assert_eq!(
-                p.get_instance(&id).await.unwrap().unwrap().status,
+                p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 CoreInstanceStatus::Running
             );
             assert!(!host.cancelled.load(Ordering::SeqCst));
             assert_eq!(
-                p.get_pending_signal(&id).await.unwrap().unwrap().command_id,
+                p.get_pending_signal(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .command_id,
                 signal.command_id
             );
             assert_eq!(
@@ -887,7 +968,14 @@ mod tests {
             } else {
                 CoreInstanceStatus::Suspended
             };
-            assert_eq!(p.get_instance(&id).await.unwrap().unwrap().status, expected);
+            assert_eq!(
+                p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                expected
+            );
             assert_eq!(host.poll_signal().await.unwrap(), None);
             // A duplicate receipt preserves the same terminal/suspended result.
             assert!(
@@ -895,20 +983,37 @@ mod tests {
                     .await
                     .unwrap()
             );
-            assert_eq!(p.get_instance(&id).await.unwrap().unwrap().status, expected);
+            assert_eq!(
+                p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                expected
+            );
         }
     }
 
     #[tokio::test]
     async fn poll_signal_observation_does_not_consume_a_superseding_cancel() {
         let (p, host, id) = setup().await;
-        p.insert_signal(&id, CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
         let pause = host.poll_signal().await.unwrap().unwrap();
-        p.insert_signal(&id, CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
         assert!(
             !host
                 .handle_checkpoint_signal(pause.signal_type, pause.command_id)
@@ -918,7 +1023,11 @@ mod tests {
         let cancel = host.poll_signal().await.unwrap().unwrap();
         assert_eq!(cancel.signal_type, "cancel");
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Running
         );
         assert!(
@@ -927,7 +1036,11 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Cancelled
         );
     }
@@ -935,12 +1048,22 @@ mod tests {
     #[tokio::test]
     async fn poll_signal_after_interrupted_sleep_observes_without_publishing_cancellation() {
         let (p, _, id) = setup().await;
-        let host = PersistenceRuntimeHost::from_persistence(p.clone(), id.clone(), false)
-            .with_signal_poll_interval(Duration::from_secs(60));
+        let host = PersistenceRuntimeHost::from_persistence(
+            p.clone(),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            id.clone(),
+            false,
+        )
+        .with_signal_poll_interval(Duration::from_secs(60));
         assert_eq!(host.poll_signal().await.unwrap(), None);
-        p.insert_signal(&id, CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
         host.durable_sleep_checkpoint("sleep".into(), vec![], 60_000)
             .await
             .unwrap();
@@ -950,17 +1073,30 @@ mod tests {
         // acknowledging the command before the guest has cleaned up.
         host.heartbeat().await.unwrap();
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Running
         );
-        assert!(p.get_pending_signal(&id).await.unwrap().is_some());
+        assert!(
+            p.get_pending_signal(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(
             host.handle_checkpoint_signal(signal.signal_type, signal.command_id)
                 .await
                 .unwrap()
         );
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Cancelled
         );
     }
@@ -969,9 +1105,14 @@ mod tests {
     async fn cancel_signal_is_consumed_acked_and_latched() {
         let (p, host, inst_id) = setup().await;
         assert!(!host.is_cancelled().await.unwrap());
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
         assert!(
             host.is_cancelled().await.unwrap(),
             "pending cancel detected"
@@ -982,18 +1123,24 @@ mod tests {
         // NULL — a cancel that is acked but still surfaces as pending would
         // re-cancel the run on every later poll.
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Cancelled
         );
         assert!(
-            p.get_pending_signal(inst_id.as_str())
-                .await
-                .unwrap()
-                .is_none(),
+            p.get_pending_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "the acknowledged cancel must no longer be pending"
         );
         // Local latch short-circuits without any new signal.
@@ -1004,17 +1151,32 @@ mod tests {
     async fn pause_signal_suspends_via_check_signals() {
         let (p, host, inst_id) = setup().await;
         assert!(!host.check_signals().await.unwrap());
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
         assert!(host.check_signals().await.unwrap(), "pause handled");
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(
-            p.get_pending_signal(inst_id.as_str())
-                .await
-                .unwrap()
-                .is_none(),
+            p.get_pending_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "the acknowledged pause must no longer be pending"
         );
         // A pause is not a cancel.
@@ -1024,11 +1186,23 @@ mod tests {
     #[tokio::test]
     async fn shutdown_signal_suspends_with_reason_and_wake() {
         let (p, host, inst_id) = setup().await;
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Shutdown, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Shutdown,
+            b"",
+        )
+        .await
+        .unwrap();
         assert!(host.check_signals().await.unwrap(), "shutdown handled");
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         // The ack's complete_instance records why it parked and when to wake.
         // Both assertions pin that the ack reached the database at all: its
@@ -1050,9 +1224,14 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reports_pending_signal_and_handle_reacts() {
         let (p, host, inst_id) = setup().await;
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
         let result = host
             .checkpoint("cp-sig".into(), b"s".to_vec())
             .await
@@ -1065,7 +1244,14 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
 
         // Unknown types are ignored (guest parity).
@@ -1086,25 +1272,43 @@ mod tests {
     #[tokio::test]
     async fn retried_checkpoint_ack_after_resume_does_not_suspend_again() {
         let (p, host, id) = setup().await;
-        p.insert_signal(&id, CoreSignalType::Pause, b"")
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
+        let signal = p
+            .get_pending_signal(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
             .await
+            .unwrap()
             .unwrap();
-        let signal = p.get_pending_signal(&id).await.unwrap().unwrap();
         assert!(
             host.handle_checkpoint_signal("pause".into(), signal.command_id.clone())
                 .await
                 .unwrap()
         );
-        p.update_instance_status(&id, CoreInstanceStatus::Running, None)
-            .await
-            .unwrap();
+        p.update_instance_status(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreInstanceStatus::Running,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             host.handle_checkpoint_signal("pause".into(), signal.command_id)
                 .await
                 .unwrap()
         );
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Running
         );
     }
@@ -1112,18 +1316,28 @@ mod tests {
     #[tokio::test]
     async fn stale_checkpoint_receipt_does_not_suspend_or_consume_cancel() {
         let (p, host, id) = setup().await;
-        p.insert_signal(&id, CoreSignalType::Pause, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreSignalType::Pause,
+            b"",
+        )
+        .await
+        .unwrap();
         let old = host
             .checkpoint("receipt".into(), b"state".to_vec())
             .await
             .unwrap()
             .pending_signal
             .unwrap();
-        p.insert_signal(&id, CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            &id,
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
         assert!(
             !host
                 .handle_checkpoint_signal(old.signal_type, old.command_id)
@@ -1131,11 +1345,15 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Running
         );
         assert_eq!(
-            p.get_pending_signal(&id)
+            p.get_pending_signal(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1144,7 +1362,11 @@ mod tests {
         );
         assert!(host.check_signals().await.unwrap());
         assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
+            p.get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             CoreInstanceStatus::Cancelled
         );
     }
@@ -1164,7 +1386,14 @@ mod tests {
             host.get_checkpoint("cp-sleep".into()).await.unwrap(),
             Some(b"wake-state".to_vec())
         );
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(inst.checkpoint_id.as_deref(), Some("cp-sleep"));
     }
 
@@ -1185,11 +1414,21 @@ mod tests {
     #[tokio::test]
     async fn sleep_interrupted_by_cancel_is_visible_to_the_next_check_signals() {
         let (p, _host, inst_id) = setup().await;
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-            .with_signal_poll_interval(Duration::from_secs(60));
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.clone(),
+            false,
+        )
+        .with_signal_poll_interval(Duration::from_secs(60));
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
 
         // A long sleep that the pending cancel must cut short.
         let started = std::time::Instant::now();
@@ -1206,7 +1445,14 @@ mod tests {
             host.check_signals().await.unwrap(),
             "the cancel must be observable right after the interrupted sleep"
         );
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             inst.status,
             CoreInstanceStatus::Cancelled,
@@ -1222,22 +1468,35 @@ mod tests {
     async fn stale_artifact_that_ignores_an_interrupted_sleep_is_cancelled_host_side() {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-            .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.clone(),
+            false,
+        )
+        .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
 
         // First Delay: the sleep is cut short by the pending cancel.
         host.durable_sleep_checkpoint("delay-1".into(), b"s".to_vec(), 30_000)
             .await
             .unwrap();
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Running,
             "the interrupted sleep alone must not decide the run's fate"
         );
@@ -1249,20 +1508,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Running
         );
         assert!(
-            p.get_pending_signal(&inst_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .acknowledged_at
-                .is_none(),
+            p.get_pending_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                &inst_id
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .acknowledged_at
+            .is_none(),
             "host escalation cannot acknowledge guest cleanup"
         );
         assert!(
@@ -1288,15 +1553,25 @@ mod tests {
         let host = {
             let cancel = Arc::clone(&cancel);
             let seen = Arc::clone(&flag_at_interrupt);
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-                .with_cancel_token(Arc::clone(&cancel))
-                .with_guest_interrupt(Arc::new(move || {
-                    seen.lock().unwrap().push(cancel.load(Ordering::SeqCst));
-                }))
+            PersistenceRuntimeHost::from_persistence(
+                Arc::clone(&p),
+                runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.clone(),
+                false,
+            )
+            .with_cancel_token(Arc::clone(&cancel))
+            .with_guest_interrupt(Arc::new(move || {
+                seen.lock().unwrap().push(cancel.load(Ordering::SeqCst));
+            }))
         };
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
             .await
@@ -1321,11 +1596,14 @@ mod tests {
              forward, or the epoch callback sees no cancel and yields"
         );
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Running,
             "terminal publication must wait until the guest has stopped"
         );
@@ -1338,13 +1616,23 @@ mod tests {
         let interrupts: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = {
             let fired = Arc::clone(&interrupts);
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-                .with_cancel_token(Arc::new(AtomicBool::new(false)))
-                .with_guest_interrupt(Arc::new(move || fired.store(true, Ordering::SeqCst)))
+            PersistenceRuntimeHost::from_persistence(
+                Arc::clone(&p),
+                runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.clone(),
+                false,
+            )
+            .with_cancel_token(Arc::new(AtomicBool::new(false)))
+            .with_guest_interrupt(Arc::new(move || fired.store(true, Ordering::SeqCst)))
         };
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
             .await
@@ -1365,11 +1653,21 @@ mod tests {
     async fn single_delay_into_finish_cannot_publish_completion_after_abort_selection() {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-            .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.clone(),
+            false,
+        )
+        .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 1_800_000)
             .await
@@ -1377,7 +1675,14 @@ mod tests {
         // Stale guest proceeds to Finish and reports completion.
         host.complete(br#"{"done":true}"#.to_vec()).await.unwrap();
 
-        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
+        let inst = p
+            .get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             inst.status,
             CoreInstanceStatus::Running,
@@ -1387,12 +1692,15 @@ mod tests {
         assert!(cancel.load(Ordering::SeqCst));
         assert!(inst.output.is_none());
         assert!(
-            p.get_pending_signal(&inst_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .acknowledged_at
-                .is_none()
+            p.get_pending_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                &inst_id
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .acknowledged_at
+            .is_none()
         );
     }
 
@@ -1400,18 +1708,28 @@ mod tests {
     async fn full_abort_selection_suppresses_terminal_and_park_events_until_exit() {
         let (p, _, id) = setup().await;
         let cancel = Arc::new(AtomicBool::new(true));
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), id.clone(), false)
-            .with_cancel_token(cancel);
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            id.clone(),
+            false,
+        )
+        .with_cancel_token(cancel);
         host.complete(b"late output".to_vec()).await.unwrap();
         host.fail(b"late error".to_vec()).await.unwrap();
         host.breakpoint_pause().await.unwrap();
-        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        let instance = p
+            .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Running);
         assert!(instance.output.is_none());
         assert!(instance.error.is_none());
         assert!(instance.finished_at.is_none());
         let events = p
             .list_events(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
                 &id,
                 &runtara_core::persistence::ListEventsFilter::default(),
                 100,
@@ -1429,13 +1747,26 @@ mod tests {
     async fn completion_accepted_before_abort_selection_is_preserved() {
         let (p, _, id) = setup().await;
         let cancel = Arc::new(AtomicBool::new(false));
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), id.clone(), false)
-            .with_cancel_token(Arc::clone(&cancel));
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            id.clone(),
+            false,
+        )
+        .with_cancel_token(Arc::clone(&cancel));
         host.complete(b"accepted output".to_vec()).await.unwrap();
-        let before = p.get_instance(&id).await.unwrap().unwrap();
+        let before = p
+            .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
         cancel.store(true, Ordering::SeqCst);
         host.fail(b"late error".to_vec()).await.unwrap();
-        let after = p.get_instance(&id).await.unwrap().unwrap();
+        let after = p
+            .get_instance(&runtara_core::TenantId::new("rt-host-tenant").unwrap(), &id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(after.status, CoreInstanceStatus::Completed);
         assert_eq!(after.output, before.output);
         assert_eq!(after.error, before.error);
@@ -1449,11 +1780,21 @@ mod tests {
     async fn fresh_artifact_polls_and_the_host_does_not_also_escalate() {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-            .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.clone(),
+            false,
+        )
+        .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
             .await
@@ -1461,11 +1802,14 @@ mod tests {
         // The emitted poll site: the guest asks, acts, and suspends itself.
         assert!(host.check_signals().await.unwrap());
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Cancelled
         );
         assert!(
@@ -1479,19 +1823,25 @@ mod tests {
         // poll ran: absence alone could not tell an ack from a signal that was
         // never inserted.
         assert!(
-            p.get_pending_signal(inst_id.as_str())
-                .await
-                .unwrap()
-                .is_none(),
+            p.get_pending_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "the guest's poll must have acknowledged the cancel"
         );
         host.heartbeat().await.unwrap();
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Cancelled
         );
     }
@@ -1502,8 +1852,13 @@ mod tests {
     async fn uncancelled_run_is_never_escalated() {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-            .with_cancel_token(Arc::clone(&cancel));
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.clone(),
+            false,
+        )
+        .with_cancel_token(Arc::clone(&cancel));
 
         host.durable_sleep_checkpoint("delay-1".into(), b"s".to_vec(), 10)
             .await
@@ -1515,11 +1870,14 @@ mod tests {
 
         assert!(!cancel.load(Ordering::SeqCst));
         assert_eq!(
-            p.get_instance(inst_id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
+            p.get_instance(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
             CoreInstanceStatus::Completed
         );
     }
@@ -1527,21 +1885,34 @@ mod tests {
     #[tokio::test]
     async fn signal_poll_rate_limiter_suppresses_back_to_back_polls() {
         let (p, _host, inst_id) = setup().await;
-        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
-            .with_signal_poll_interval(Duration::from_secs(60));
+        let host = PersistenceRuntimeHost::from_persistence(
+            Arc::clone(&p),
+            runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.clone(),
+            false,
+        )
+        .with_signal_poll_interval(Duration::from_secs(60));
         // First poll consumes the rate budget (no signal pending).
         assert!(!host.is_cancelled().await.unwrap());
-        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
-            .await
-            .unwrap();
+        p.insert_signal(
+            &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            inst_id.as_str(),
+            CoreSignalType::Cancel,
+            b"",
+        )
+        .await
+        .unwrap();
         // Within the interval the poll is suppressed — parity with the SDK's
         // limiter; the signal stays pending and undetected for now.
         assert!(!host.is_cancelled().await.unwrap());
         assert!(
-            p.get_pending_signal(inst_id.as_str())
-                .await
-                .unwrap()
-                .is_some()
+            p.get_pending_signal(
+                &runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                inst_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_some()
         );
     }
 }

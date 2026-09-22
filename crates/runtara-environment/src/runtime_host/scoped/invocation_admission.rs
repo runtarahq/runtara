@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 pub(super) struct InvocationAdmission {
     persistence: Arc<dyn Persistence>,
+    tenant_id: TenantId,
     lease: InvocationLease,
     path: String,
     start_id: String,
@@ -21,12 +22,14 @@ pub(super) struct InvocationAdmission {
 impl InvocationAdmission {
     pub(super) fn new(
         persistence: Arc<dyn Persistence>,
+        tenant_id: TenantId,
         lease: InvocationLease,
         path: String,
         timeout: Duration,
     ) -> Self {
         Self {
             persistence,
+            tenant_id,
             lease,
             path,
             start_id: uuid::Uuid::new_v4().to_string(),
@@ -54,7 +57,7 @@ impl InvocationAdmission {
         self.persistence
             .invocation_fences()
             .unwrap()
-            .begin_invocation_attempt(&self.lease, &self.path, &self.start_id)
+            .begin_invocation_attempt(&self.tenant_id, &self.lease, &self.path, &self.start_id)
             .await
     }
 
@@ -80,6 +83,7 @@ impl InvocationAdmission {
             {
                 let io = InvocationIo::new(
                     self.persistence.clone(),
+                    self.tenant_id.clone(),
                     attempt.fence.clone(),
                     self.timeout,
                 )
@@ -125,7 +129,7 @@ impl InvocationAdmission {
             self.persistence
                 .invocation_fences()
                 .unwrap()
-                .revoke_invocation_lease(&self.lease),
+                .revoke_invocation_lease(&self.tenant_id, &self.lease),
         )
         .await;
         Err(TaskError::WorkerLost)

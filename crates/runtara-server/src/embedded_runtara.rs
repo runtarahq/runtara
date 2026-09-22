@@ -28,6 +28,8 @@ use crate::core_runtime::CoreRuntime;
 
 /// Configuration for embedded Runtara servers.
 pub struct EmbeddedRuntaraConfig {
+    /// Tenant selected by the embedding host for the dedicated runtime.
+    pub tenant_id: runtara_core::TenantId,
     /// PostgreSQL connection pool for Runtara's dedicated database.
     pub pool: PgPool,
     /// Data directory for images and instance I/O.
@@ -87,6 +89,7 @@ impl EmbeddedRuntara {
         let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);
         info!(addr = %core_http_addr, "Starting runtara-core...");
         let mut core_builder = CoreRuntime::builder()
+            .tenant_id(config.tenant_id.clone())
             .persistence(persistence.clone())
             .bind_addr(core_http_addr)
             .apply_overrides(config.core_overrides);
@@ -129,6 +132,7 @@ impl EmbeddedRuntara {
         // runner's host imports, so it needs no core address of its own.
         info!("Starting runtara-environment...");
         let environment = EnvironmentRuntime::builder()
+            .tenant_id(config.tenant_id)
             .pool(config.pool)
             .runner(runner)
             .core_persistence(persistence.clone())
@@ -357,6 +361,7 @@ pub async fn maybe_start_embedded(
     // Core HTTP port is used for both binding and client connections (QUIC is gone)
     let core_http_addr = core_http_port;
     let config = EmbeddedRuntaraConfig {
+        tenant_id: runtara_core::TenantId::new(crate::config::tenant_id())?,
         pool,
         data_dir,
         core_bind_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),

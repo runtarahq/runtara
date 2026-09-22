@@ -190,7 +190,10 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     assert!(h.runner.is_running(&handle).await);
     assert_eq!(
         h.persistence
-            .get_instance_meta(&inst_id)
+            .get_instance_meta(
+                &runtara_core::TenantId::new("test-tenant").unwrap(),
+                &inst_id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -200,6 +203,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     let before = tokio::time::Instant::now();
     let response = handle_stop_instance(
         &state,
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         StopInstanceRequest {
             instance_id: inst_id.clone(),
             reason: "clicked Cancel".into(),
@@ -216,7 +220,10 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
         );
         assert_eq!(
             h.persistence
-                .get_instance_meta(&inst_id)
+                .get_instance_meta(
+                    &runtara_core::TenantId::new("test-tenant").unwrap(),
+                    &inst_id
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -228,6 +235,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
         // extending an already accepted cancellation grace period.
         let response = handle_stop_instance(
             &state,
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
             StopInstanceRequest {
                 instance_id: inst_id.clone(),
                 reason: "Cancel again".into(),
@@ -257,12 +265,23 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
             .unwrap();
     }
     assert!(!h.runner.is_running(&handle).await);
-    let instance = h.persistence.get_instance(&inst_id).await.unwrap().unwrap();
+    let instance = h
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &inst_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(instance.status, InstanceStatus::Cancelled);
     assert_eq!(instance.termination_reason.as_deref(), Some("aborted"));
     let command = h
         .persistence
-        .get_pending_signal(&inst_id)
+        .get_pending_signal(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &inst_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -414,7 +433,7 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
     assert_eq!(h.runner.occupancy().unwrap().held, 0);
     assert!(
         h.persistence
-            .get_pending_signal(&id)
+            .get_pending_signal(&runtara_core::TenantId::new("test-tenant").unwrap(), &id)
             .await
             .unwrap()
             .is_none()
@@ -538,7 +557,11 @@ async fn seed_detached_instance(harness: &Harness, instance_id: &str) {
     assert!(
         harness
             .persistence
-            .try_register_instance(instance_id, "embedded-test", Some(INPUT))
+            .try_register_instance(
+                &runtara_core::TenantId::new("embedded-test").unwrap(),
+                instance_id,
+                Some(INPUT)
+            )
             .await
             .expect("register detached instance"),
         "the freshly generated test instance id must be claimed"
@@ -610,6 +633,7 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     // aborted via the runner's existing whole-execution stop mechanism.
     h.persistence
         .insert_signal(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
             &inst_id,
             runtara_core::domain::SignalType::Cancel,
             b"request",
@@ -618,7 +642,10 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
         .unwrap();
     let command = h
         .persistence
-        .get_pending_signal(&inst_id)
+        .get_pending_signal(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &inst_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -630,7 +657,15 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     .await
     .expect("cancel did not end the spinning guest");
     assert!(!h.runner.is_running(&handle).await);
-    let instance = h.persistence.get_instance(&inst_id).await.unwrap().unwrap();
+    let instance = h
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &inst_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         instance.status,
         runtara_core::domain::InstanceStatus::Cancelled
@@ -638,7 +673,10 @@ async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     assert_eq!(instance.termination_reason.as_deref(), Some("aborted"));
     let pending = h
         .persistence
-        .get_pending_signal(&inst_id)
+        .get_pending_signal(
+            &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &inst_id,
+        )
         .await
         .unwrap()
         .unwrap();

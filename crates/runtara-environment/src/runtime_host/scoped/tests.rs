@@ -38,12 +38,21 @@ impl Fixture {
     async fn with_poll_interval(interval: Duration) -> Self {
         let (persistence, id) = crate::test_support::running_instance("scoped-runtime").await;
         persistence
-            .store_instance_input(&id, b"root input")
+            .store_instance_input(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &id,
+                b"root input",
+            )
             .await
             .unwrap();
         let owner = Arc::new(ScopedRuntimeOwner::new(Arc::new(
-            PersistenceRuntimeHost::from_persistence(persistence.clone(), id.clone(), true)
-                .with_signal_poll_interval(interval),
+            PersistenceRuntimeHost::from_persistence(
+                persistence.clone(),
+                runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                id.clone(),
+                true,
+            )
+            .with_signal_poll_interval(interval),
         )));
         let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
             cache_dir: None,
@@ -91,7 +100,10 @@ impl Fixture {
     }
     async fn status(&self) -> InstanceStatus {
         self.persistence
-            .get_instance(&self.id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &self.id,
+            )
             .await
             .unwrap()
             .unwrap()
@@ -132,7 +144,15 @@ async fn scoped_runtime_terminal_callbacks_never_terminalize_root() {
         Some(ChildTerminal::Fail(b"child error".to_vec()))
     );
     assert_eq!(fx.status().await, InstanceStatus::Running);
-    let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    let root = fx
+        .persistence
+        .get_instance(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(root.output.is_none());
     assert!(child.fail(b"conflict".to_vec()).await.is_err());
     assert!(child.terminal().is_err());
@@ -163,7 +183,11 @@ async fn scoped_runtime_data_keys_are_authorized_and_not_rewritten() {
     );
     assert_eq!(
         fx.persistence
-            .load_checkpoint(&fx.id, "child/checkpoint")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "child/checkpoint"
+            )
             .await
             .unwrap()
             .map(|checkpoint| checkpoint.state),
@@ -193,7 +217,12 @@ async fn scoped_runtime_data_keys_are_authorized_and_not_rewritten() {
     assert!(hit.found);
     assert_eq!(hit.state, b"saved");
     fx.persistence
-        .put_custom_signal(&fx.id, "child/signal", b"signal")
+        .put_custom_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            "child/signal",
+            b"signal",
+        )
         .await
         .unwrap();
     for _ in 0..2 {
@@ -244,14 +273,22 @@ async fn scoped_runtime_data_keys_are_authorized_and_not_rewritten() {
     );
     assert!(
         fx.persistence
-            .load_checkpoint(&fx.id, "sibling/write")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "sibling/write"
+            )
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         fx.persistence
-            .load_checkpoint(&fx.id, "sibling/sleep")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "sibling/sleep"
+            )
             .await
             .unwrap()
             .is_none()
@@ -263,7 +300,13 @@ async fn scoped_runtime_data_keys_are_authorized_and_not_rewritten() {
     child.heartbeat().await.unwrap();
     let events = fx
         .persistence
-        .list_events(&fx.id, &ListEventsFilter::default(), 100, 0)
+        .list_events(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            &ListEventsFilter::default(),
+            100,
+            0,
+        )
         .await
         .unwrap();
     let event = events
@@ -290,7 +333,12 @@ async fn scoped_runtime_siblings_observe_one_command_without_acknowledging_it() 
         let (first, _) = fx.child().await;
         let (second, _) = fx.child().await;
         fx.persistence
-            .insert_signal(&fx.id, kind, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                kind,
+                b"",
+            )
             .await
             .unwrap();
         let pending = first
@@ -313,7 +361,10 @@ async fn scoped_runtime_siblings_observe_one_command_without_acknowledging_it() 
         assert_eq!(fx.status().await, InstanceStatus::Running);
         assert!(
             fx.persistence
-                .get_pending_signal(&fx.id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -325,7 +376,10 @@ async fn scoped_runtime_siblings_observe_one_command_without_acknowledging_it() 
         assert_eq!(fx.status().await, terminal);
         assert!(
             fx.persistence
-                .get_pending_signal(&fx.id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id
+                )
                 .await
                 .unwrap()
                 .is_none()
@@ -342,7 +396,12 @@ async fn scoped_runtime_stale_receipts_cannot_consume_replacement_commands() {
     let fx = Fixture::new().await;
     let (child, _) = fx.child().await;
     fx.persistence
-        .insert_signal(&fx.id, CoreSignal::Pause, b"")
+        .insert_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            CoreSignal::Pause,
+            b"",
+        )
         .await
         .unwrap();
     let pending = child
@@ -353,7 +412,12 @@ async fn scoped_runtime_stale_receipts_cannot_consume_replacement_commands() {
         .unwrap();
     assert!(child.check_signals().await.unwrap());
     fx.persistence
-        .insert_signal(&fx.id, CoreSignal::Cancel, b"")
+        .insert_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            CoreSignal::Cancel,
+            b"",
+        )
         .await
         .unwrap();
     assert!(
@@ -370,7 +434,10 @@ async fn scoped_runtime_stale_receipts_cannot_consume_replacement_commands() {
     assert_eq!(fx.status().await, InstanceStatus::Running);
     assert_eq!(
         fx.persistence
-            .get_pending_signal(&fx.id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -398,14 +465,21 @@ async fn scoped_runtime_breakpoints_and_target_cancellation_stay_child_scoped() 
     );
     assert!(
         fx.persistence
-            .load_checkpoint(&fx.id, "child/cancelled")
+            .load_checkpoint(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                "child/cancelled"
+            )
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         fx.persistence
-            .get_pending_signal(&fx.id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .is_none()
@@ -448,7 +522,12 @@ async fn scoped_runtime_root_commands_supersede_child_breakpoints() {
         let (child, _) = fx.child().await;
         child.breakpoint_pause().await.unwrap();
         fx.persistence
-            .insert_signal(&fx.id, kind, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                kind,
+                b"",
+            )
             .await
             .unwrap();
         assert!(child.check_signals().await.unwrap());
@@ -459,7 +538,13 @@ async fn scoped_runtime_root_commands_supersede_child_breakpoints() {
         assert_eq!(fx.status().await, terminal);
         let before = fx
             .persistence
-            .list_events(&fx.id, &ListEventsFilter::default(), 100, 0)
+            .list_events(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                &ListEventsFilter::default(),
+                100,
+                0,
+            )
             .await
             .unwrap()
             .len();
@@ -469,7 +554,13 @@ async fn scoped_runtime_root_commands_supersede_child_breakpoints() {
         );
         let after = fx
             .persistence
-            .list_events(&fx.id, &ListEventsFilter::default(), 100, 0)
+            .list_events(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                &ListEventsFilter::default(),
+                100,
+                0,
+            )
             .await
             .unwrap()
             .len();
@@ -486,7 +577,12 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
     let fx = Fixture::new().await;
     let (child, _) = fx.child().await;
     fx.persistence
-        .insert_signal(&fx.id, CoreSignal::Pause, b"")
+        .insert_signal(
+            &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            &fx.id,
+            CoreSignal::Pause,
+            b"",
+        )
         .await
         .unwrap();
     let wasm = wat::parse_str(r#"(component
@@ -568,7 +664,10 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
     assert_eq!(fx.status().await, InstanceStatus::Running);
     assert!(
         fx.persistence
-            .get_instance(&fx.id)
+            .get_instance(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .unwrap()
@@ -577,7 +676,10 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
     );
     assert!(
         fx.persistence
-            .get_pending_signal(&fx.id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id
+            )
             .await
             .unwrap()
             .is_some()

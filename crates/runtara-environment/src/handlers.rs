@@ -364,7 +364,12 @@ async fn existing_start_response(
     tenant_id: &str,
     image_id: &str,
 ) -> Result<Option<StartInstanceResponse>> {
-    let Some(existing) = state.persistence.get_instance_meta(instance_id).await? else {
+    let tenant_scope = runtara_core::TenantId::new(tenant_id)?;
+    let Some(existing) = state
+        .persistence
+        .get_instance_meta(&tenant_scope, instance_id)
+        .await?
+    else {
         return Ok(None);
     };
 
@@ -729,6 +734,7 @@ pub struct StopInstanceResponse {
 ))]
 pub async fn handle_stop_instance(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     request: StopInstanceRequest,
 ) -> Result<StopInstanceResponse> {
     let Some(abort_at) = tokio::time::Instant::now()
@@ -741,7 +747,7 @@ pub async fn handle_stop_instance(
     };
     let Some(instance) = state
         .persistence
-        .get_instance_meta(&request.instance_id)
+        .get_instance_meta(tenant_id, &request.instance_id)
         .await?
     else {
         return Ok(StopInstanceResponse {
@@ -802,6 +808,7 @@ pub async fn handle_stop_instance(
 
     let signal = handle_send_signal(
         state,
+        tenant_id,
         &request.instance_id,
         "cancel",
         Some(request.reason.as_bytes()),
@@ -824,7 +831,7 @@ pub async fn handle_stop_instance(
     }
     if state
         .persistence
-        .get_instance_meta(&request.instance_id)
+        .get_instance_meta(tenant_id, &request.instance_id)
         .await?
         .is_some_and(|instance| instance.status.is_terminal())
     {
@@ -839,7 +846,7 @@ pub async fn handle_stop_instance(
     let container = match container_registry.get(&request.instance_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
-            return stop_after_handle_retired(state, &request).await;
+            return stop_after_handle_retired(state, tenant_id, &request).await;
         }
         Err(e) => {
             error!(error = %e, "Failed to look up container");
@@ -870,13 +877,13 @@ pub async fn handle_stop_instance(
             let delivery = async {
                 let Some(deadline) = container_registry.request_abort(&handle, abort_at).await?
                 else {
-                    return stop_after_handle_retired(state, &request).await;
+                    return stop_after_handle_retired(state, tenant_id, &request).await;
                 };
                 loop {
                     if container_registry.abort_is_armed(&handle, deadline).await?
                         || state
                             .persistence
-                            .get_instance_meta(&request.instance_id)
+                            .get_instance_meta(tenant_id, &request.instance_id)
                             .await?
                             .is_some_and(|instance| instance.status.is_terminal())
                     {
@@ -918,6 +925,7 @@ pub async fn handle_stop_instance(
 
 async fn stop_after_handle_retired(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     request: &StopInstanceRequest,
 ) -> Result<StopInstanceResponse> {
     // Completion/parking can retire the handle after the initial signal. The
@@ -925,6 +933,7 @@ async fn stop_after_handle_retired(
     // still-running foreign/missing handle cannot promise grace enforcement.
     handle_send_signal(
         state,
+        tenant_id,
         &request.instance_id,
         "cancel",
         Some(request.reason.as_bytes()),
@@ -932,7 +941,7 @@ async fn stop_after_handle_retired(
     .await?;
     let terminal = state
         .persistence
-        .get_instance_meta(&request.instance_id)
+        .get_instance_meta(tenant_id, &request.instance_id)
         .await?
         .is_some_and(|instance| instance.status.is_terminal());
     Ok(StopInstanceResponse {
@@ -964,14 +973,21 @@ pub struct ResumeInstanceResponse {
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
 pub async fn handle_resume_instance(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     request: ResumeInstanceRequest,
 ) -> Result<ResumeInstanceResponse> {
     info!(instance_id = %request.instance_id, "Resume instance request received");
 
     // Get instance from DB
-    let (status, tenant_id) = match db::instance_identity(&state.pool, &request.instance_id).await?
+    let (status, tenant_id) = match state
+        .persistence
+        .get_instance_meta(tenant_id, &request.instance_id)
+        .await?
     {
-        Some(identity) => identity,
+        Some(instance) => (
+            crate::core_types::status_name(instance.status),
+            instance.tenant_id,
+        ),
         None => {
             return Ok(ResumeInstanceResponse {
                 success: false,
@@ -1099,13 +1115,14 @@ pub async fn handle_resume_instance(
 /// — the previous implementation did not collect them on timeout either, and
 /// doing so now would race with `runner.stop`.
 async fn release_launch_after_monitor(
+    tenant_id: &runtara_core::TenantId,
     pool: &PgPool,
     persistence: &dyn Persistence,
     launch_id: &str,
     instance_id: &str,
     lifecycle_observers: &LaunchLifecycleObservers,
 ) {
-    let instance = match persistence.get_instance_meta(instance_id).await {
+    let instance = match persistence.get_instance_meta(tenant_id, instance_id).await {
         Ok(Some(instance)) => instance,
         Ok(None) => {
             warn!(
@@ -1204,6 +1221,13 @@ async fn settle_execution_timeout(
     instance_id: &str,
     timeout: Duration,
 ) {
+    let tenant_id = match runtara_core::TenantId::new(handle.tenant_id.clone()) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => {
+            tracing::error!(%error, "Invalid tenant on runner handle");
+            return;
+        }
+    };
     let container_registry = ContainerRegistry::new(pool.clone());
     warn!(
         instance_id = %instance_id,
@@ -1215,6 +1239,7 @@ async fn settle_execution_timeout(
     // Update instance status to failed with termination_reason = "timeout"
     if let Err(e) = persistence
         .complete_instance(
+            &tenant_id,
             CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Failed)
                 .if_running()
                 .with_termination("timeout", None)
@@ -1236,6 +1261,7 @@ async fn settle_execution_timeout(
         .await;
 
     release_launch_after_monitor(
+        &tenant_id,
         pool,
         persistence.as_ref(),
         &handle.launch_id,
@@ -1264,6 +1290,10 @@ async fn record_exit_diagnostics(
     >,
     Option<String>,
 ) {
+    let tenant_id = match runtara_core::TenantId::new(handle.tenant_id.clone()) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return (Err(error), None),
+    };
     let (_output, stderr, metrics) = runner.collect_result(handle).await;
 
     // Store metrics and pick up the status the guest reported in the same
@@ -1298,7 +1328,7 @@ async fn record_exit_diagnostics(
             // below, so a failed metrics write must not be read as a
             // crash. Fall back to a plain status read, as before.
             persistence
-                .get_instance_meta(instance_id)
+                .get_instance_meta(&tenant_id, instance_id)
                 .await
                 .map(|found| found.map(|i| (i.status, i.termination_reason)))
         }
@@ -1333,6 +1363,7 @@ async fn record_exit_diagnostics(
 /// is parked for the wake scheduler to relaunch; otherwise the process died on
 /// its own and the run is a crash.
 async fn settle_unreported_exit(
+    tenant_id: &runtara_core::TenantId,
     persistence: &Arc<dyn Persistence>,
     drain: &DrainController,
     instance_id: &str,
@@ -1379,7 +1410,7 @@ async fn settle_unreported_exit(
     if let Some(s) = stderr {
         params = params.with_stderr(s);
     }
-    match persistence.complete_instance(params).await {
+    match persistence.complete_instance(tenant_id, params).await {
         Ok(applied) => {
             if applied {
                 if drain.is_draining() {
@@ -1390,6 +1421,7 @@ async fn settle_unreported_exit(
                     // suspended forever.
                     if let Err(e) = persistence
                         .schedule_wake(
+                            tenant_id,
                             instance_id,
                             chrono::Utc::now(),
                             runtara_core::domain::WakeReason::Recovery,
@@ -1592,6 +1624,13 @@ pub fn spawn_container_monitor(
     start_gate: Option<(StartGate, i32)>,
     execution_lease: Option<crate::execution_lease::ExecutionLease>,
 ) {
+    let tenant_id = match runtara_core::TenantId::new(handle.tenant_id.clone()) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => {
+            tracing::error!(%error, "Invalid tenant on runner handle");
+            return;
+        }
+    };
     let instance_id = handle.instance_id.clone();
 
     let lease_runner = runner.clone();
@@ -1702,12 +1741,7 @@ pub fn spawn_container_monitor(
                             );
                         }
                         _ => {
-                            settle_unreported_exit(
-                                &persistence,
-                                &drain,
-                                &instance_id,
-                                stderr.as_deref(),
-                            )
+                            settle_unreported_exit(&tenant_id, &persistence, &drain, &instance_id, stderr.as_deref())
                             .await;
                         }
                     }
@@ -1717,13 +1751,7 @@ pub fn spawn_container_monitor(
                     // this reconciliation runs. Release admission only after
                     // the matching queue generation is durably terminal or
                     // parked; observer failure is intentionally out-of-band.
-                    release_launch_after_monitor(
-                        &pool,
-                        persistence.as_ref(),
-                        &handle.launch_id,
-                        &instance_id,
-                        &lifecycle_observers,
-                    )
+                    release_launch_after_monitor(&tenant_id, &pool, persistence.as_ref(), &handle.launch_id, &instance_id, &lifecycle_observers)
                     .await;
                 }
 
@@ -1816,11 +1844,16 @@ pub enum SendSignalOutcome {
 /// came to disagree with the rest of the crate about what a signal type is.
 pub async fn handle_send_signal(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     signal_type: &str,
     payload: Option<&[u8]>,
 ) -> Result<SendSignalOutcome> {
-    let Some(instance) = state.persistence.get_instance_meta(instance_id).await? else {
+    let Some(instance) = state
+        .persistence
+        .get_instance_meta(tenant_id, instance_id)
+        .await?
+    else {
         return Ok(SendSignalOutcome::InstanceNotFound);
     };
 
@@ -1848,13 +1881,18 @@ pub async fn handle_send_signal(
 
     state
         .persistence
-        .insert_signal(instance_id, signal_type, payload.unwrap_or_default())
+        .insert_signal(
+            tenant_id,
+            instance_id,
+            signal_type,
+            payload.unwrap_or_default(),
+        )
         .await?;
 
     if signal_type == runtara_core::domain::SignalType::Cancel {
         for cancelled in state
             .persistence
-            .cancel_suspended_instances(Some(instance_id), 1)
+            .cancel_suspended_instances(tenant_id, Some(instance_id), 1)
             .await?
         {
             state.lifecycle_observers.notify_instance_released(
@@ -1882,13 +1920,14 @@ pub enum SendCustomSignalOutcome {
 /// Send a custom (workflow-defined) signal addressed to one checkpoint.
 pub async fn handle_send_custom_signal(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     checkpoint_id: &str,
     payload: Option<&[u8]>,
 ) -> Result<SendCustomSignalOutcome> {
     if state
         .persistence
-        .get_instance_meta(instance_id)
+        .get_instance_meta(tenant_id, instance_id)
         .await?
         .is_none()
     {
@@ -1903,10 +1942,15 @@ pub async fn handle_send_custom_signal(
 
     let signal_id = state
         .persistence
-        .put_custom_signal(instance_id, checkpoint_id, payload.unwrap_or_default())
+        .put_custom_signal(
+            tenant_id,
+            instance_id,
+            checkpoint_id,
+            payload.unwrap_or_default(),
+        )
         .await?;
 
-    wake_suspended_on_signal(state.persistence.as_ref(), instance_id).await;
+    wake_suspended_on_signal(tenant_id, state.persistence.as_ref(), instance_id).await;
     Ok(SendCustomSignalOutcome::Delivered { signal_id })
 }
 
@@ -1925,8 +1969,12 @@ pub async fn handle_send_custom_signal(
 /// pause/breakpoint/shutdown ack whose pause signal was already consumed —
 /// stamping `sleep_until` on those would relaunch a replay that runs PAST the
 /// pause, silently auto-resuming a paused instance on any custom signal.
-pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id: &str) {
-    match persistence.get_instance_meta(instance_id).await {
+pub async fn wake_suspended_on_signal(
+    tenant_id: &runtara_core::TenantId,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+) {
+    match persistence.get_instance_meta(tenant_id, instance_id).await {
         Ok(Some(inst))
             if inst.status == CoreInstanceStatus::Suspended
                 && inst.termination_reason.as_deref()
@@ -1934,6 +1982,7 @@ pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id
         {
             if let Err(e) = persistence
                 .schedule_wake(
+                    tenant_id,
                     instance_id,
                     chrono::Utc::now(),
                     runtara_core::domain::WakeReason::CustomSignal,
@@ -1990,12 +2039,14 @@ pub struct ListCheckpointsResult {
 /// List an instance's checkpoints.
 pub async fn handle_list_checkpoints(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     params: &ListCheckpointsParams,
 ) -> Result<ListCheckpointsResult> {
     let checkpoints = state
         .persistence
         .list_checkpoints(
+            tenant_id,
             instance_id,
             params.checkpoint_id.as_deref(),
             params.limit,
@@ -2008,6 +2059,7 @@ pub async fn handle_list_checkpoints(
     let total_count = state
         .persistence
         .count_checkpoints(
+            tenant_id,
             instance_id,
             params.checkpoint_id.as_deref(),
             params.created_after,
@@ -2061,6 +2113,7 @@ pub struct ListEventsResult {
 /// List an instance's events.
 pub async fn handle_list_events(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     filter: &runtara_core::persistence::ListEventsFilter,
     limit: i64,
@@ -2068,12 +2121,12 @@ pub async fn handle_list_events(
 ) -> Result<ListEventsResult> {
     let events = state
         .persistence
-        .list_events(instance_id, filter, limit, offset)
+        .list_events(tenant_id, instance_id, filter, limit, offset)
         .await?;
 
     let total_count = state
         .persistence
-        .count_events(instance_id, filter)
+        .count_events(tenant_id, instance_id, filter)
         .await
         .unwrap_or(0);
 
@@ -2141,6 +2194,7 @@ pub struct ListStepSummariesResult {
 /// List an instance's per-step summaries.
 pub async fn handle_list_step_summaries(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     filter: &runtara_core::persistence::ListPairedRecordsFilter,
     limit: i64,
@@ -2158,12 +2212,12 @@ pub async fn handle_list_step_summaries(
 
     let steps = state
         .persistence
-        .list_paired_records(instance_id, vocabulary, filter, limit, offset)
+        .list_paired_records(tenant_id, instance_id, vocabulary, filter, limit, offset)
         .await?;
 
     let total_count = state
         .persistence
-        .count_paired_records(instance_id, vocabulary, filter)
+        .count_paired_records(tenant_id, instance_id, vocabulary, filter)
         .await
         .unwrap_or(0);
 
@@ -2218,6 +2272,7 @@ pub struct ScopeInfo {
 /// would have to handle anyway for an instance still running.
 pub async fn handle_get_scope_ancestors(
     state: &EnvironmentHandlerState,
+    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     scope_id: &str,
 ) -> Result<Vec<ScopeInfo>> {
@@ -2243,7 +2298,7 @@ pub async fn handle_get_scope_ancestors(
 
     let events = state
         .persistence
-        .list_events(instance_id, &filter, 10000, 0)
+        .list_events(tenant_id, instance_id, &filter, 10000, 0)
         .await?;
 
     let mut scope_map: std::collections::HashMap<String, ScopeInfo> =
@@ -2588,7 +2643,10 @@ mod tests {
             params = params.with_termination(marker, None);
         }
         persistence
-            .complete_instance(params)
+            .complete_instance(
+                &runtara_core::TenantId::new("waker-tenant").unwrap(),
+                params,
+            )
             .await
             .expect("suspend");
         (persistence, instance_id)
@@ -2601,10 +2659,18 @@ mod tests {
         // pause signal already consumed — a custom signal must NOT relaunch it
         // (the replay would run straight past the pause).
         let (persistence, instance_id) = suspended_instance(None).await;
-        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+        wake_suspended_on_signal(
+            &runtara_core::TenantId::new("waker-tenant").unwrap(),
+            persistence.as_ref(),
+            &instance_id,
+        )
+        .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("waker-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2620,10 +2686,18 @@ mod tests {
     async fn waker_stamps_sleep_for_an_on_signal_park() {
         let (persistence, instance_id) =
             suspended_instance(Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION)).await;
-        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+        wake_suspended_on_signal(
+            &runtara_core::TenantId::new("waker-tenant").unwrap(),
+            persistence.as_ref(),
+            &instance_id,
+        )
+        .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("waker-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2640,10 +2714,18 @@ mod tests {
         // A store-freeing durable Delay parks with the `sleeping` marker and a
         // deadline; a custom signal must not fast-forward it.
         let (persistence, instance_id) = suspended_instance(Some("sleeping")).await;
-        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+        wake_suspended_on_signal(
+            &runtara_core::TenantId::new("waker-tenant").unwrap(),
+            persistence.as_ref(),
+            &instance_id,
+        )
+        .await;
 
         let inst = persistence
-            .get_instance(&instance_id)
+            .get_instance(
+                &runtara_core::TenantId::new("waker-tenant").unwrap(),
+                &instance_id,
+            )
             .await
             .expect("get")
             .expect("instance exists");
@@ -2695,17 +2777,31 @@ mod tests {
             let (state, persistence) = in_memory_state();
             let instance_id = format!("signal-{name}");
             persistence
-                .register_instance(&instance_id, "tenant-1")
+                .register_instance(
+                    &runtara_core::TenantId::new("tenant-1").unwrap(),
+                    &instance_id,
+                )
                 .await
                 .expect("register");
             persistence
-                .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
+                .update_instance_status(
+                    &runtara_core::TenantId::new("tenant-1").unwrap(),
+                    &instance_id,
+                    CoreInstanceStatus::Running,
+                    None,
+                )
                 .await
                 .expect("mark running");
 
-            let outcome = handle_send_signal(&state, &instance_id, name, None)
-                .await
-                .expect("signal send must not error");
+            let outcome = handle_send_signal(
+                &state,
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                &instance_id,
+                name,
+                None,
+            )
+            .await
+            .expect("signal send must not error");
 
             assert_eq!(
                 outcome,
@@ -2714,7 +2810,10 @@ mod tests {
             );
 
             let stored = persistence
-                .get_pending_signal(&instance_id)
+                .get_pending_signal(
+                    &runtara_core::TenantId::new("tenant-1").unwrap(),
+                    &instance_id,
+                )
                 .await
                 .expect("read back the signal")
                 .expect("a delivered signal is pending");
@@ -2728,17 +2827,31 @@ mod tests {
     async fn an_unstorable_signal_type_is_still_refused() {
         let (state, persistence) = in_memory_state();
         persistence
-            .register_instance("signal-bogus", "tenant-1")
+            .register_instance(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "signal-bogus",
+            )
             .await
             .expect("register");
         persistence
-            .update_instance_status("signal-bogus", CoreInstanceStatus::Running, None)
+            .update_instance_status(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "signal-bogus",
+                CoreInstanceStatus::Running,
+                None,
+            )
             .await
             .expect("mark running");
 
-        let outcome = handle_send_signal(&state, "signal-bogus", "detonate", None)
-            .await
-            .expect("an unknown name is an outcome, not an error");
+        let outcome = handle_send_signal(
+            &state,
+            &runtara_core::TenantId::new("tenant-1").unwrap(),
+            "signal-bogus",
+            "detonate",
+            None,
+        )
+        .await
+        .expect("an unknown name is an outcome, not an error");
 
         assert_eq!(
             outcome,
@@ -2763,6 +2876,13 @@ mod tests {
         use runtara_core::persistence::{EventRecord, ListEventsFilter};
 
         let (state, persistence) = in_memory_state();
+        persistence
+            .register_instance(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "precision-1",
+            )
+            .await
+            .unwrap();
         // 123_456_000 ns = 123.456 ms. Anything below the millisecond is what
         // the old `timestamp_millis()` hop discarded.
         let precise = Utc
@@ -2776,21 +2896,31 @@ mod tests {
         );
 
         persistence
-            .insert_event(&EventRecord {
-                id: None,
-                instance_id: "precision-1".to_string(),
-                event_type: EventType::Custom,
-                checkpoint_id: None,
-                payload: None,
-                created_at: precise,
-                subtype: None,
-            })
+            .insert_event(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                &EventRecord {
+                    id: None,
+                    instance_id: "precision-1".to_string(),
+                    event_type: EventType::Custom,
+                    checkpoint_id: None,
+                    payload: None,
+                    created_at: precise,
+                    subtype: None,
+                },
+            )
             .await
             .expect("insert event");
 
-        let page = handle_list_events(&state, "precision-1", &ListEventsFilter::default(), 10, 0)
-            .await
-            .expect("list events");
+        let page = handle_list_events(
+            &state,
+            &runtara_core::TenantId::new("tenant-1").unwrap(),
+            "precision-1",
+            &ListEventsFilter::default(),
+            10,
+            0,
+        )
+        .await
+        .expect("list events");
 
         assert_eq!(page.events.len(), 1);
         assert_eq!(
@@ -2812,6 +2942,13 @@ mod tests {
         use runtara_core::persistence::{EventRecord, ListEventsFilter};
 
         let (state, persistence) = in_memory_state();
+        persistence
+            .register_instance(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                "opaque-1",
+            )
+            .await
+            .unwrap();
         let raw: Vec<u8> = vec![0x00, 0xff, b'n', b'o', b't', 0x80, b'{'];
         assert!(
             serde_json::from_slice::<serde_json::Value>(&raw).is_err(),
@@ -2819,21 +2956,31 @@ mod tests {
         );
 
         persistence
-            .insert_event(&EventRecord {
-                id: None,
-                instance_id: "opaque-1".to_string(),
-                event_type: EventType::Custom,
-                checkpoint_id: None,
-                payload: Some(raw.clone()),
-                created_at: Utc::now(),
-                subtype: None,
-            })
+            .insert_event(
+                &runtara_core::TenantId::new("tenant-1").unwrap(),
+                &EventRecord {
+                    id: None,
+                    instance_id: "opaque-1".to_string(),
+                    event_type: EventType::Custom,
+                    checkpoint_id: None,
+                    payload: Some(raw.clone()),
+                    created_at: Utc::now(),
+                    subtype: None,
+                },
+            )
             .await
             .expect("insert event");
 
-        let page = handle_list_events(&state, "opaque-1", &ListEventsFilter::default(), 10, 0)
-            .await
-            .expect("list events");
+        let page = handle_list_events(
+            &state,
+            &runtara_core::TenantId::new("tenant-1").unwrap(),
+            "opaque-1",
+            &ListEventsFilter::default(),
+            10,
+            0,
+        )
+        .await
+        .expect("list events");
 
         assert_eq!(page.events.len(), 1);
         assert_eq!(

@@ -20,6 +20,7 @@
 //!     let runner = build_runner(persistence.clone(), None)?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
+//!         .tenant_id(runtara_core::TenantId::new("host-selected-tenant")?)
 //!         .pool(pool)
 //!         .runner(runner)
 //!         .build()?
@@ -98,6 +99,7 @@ fn wake_concurrency(vars: &dyn Vars) -> usize {
 
 /// Builder for creating an [`EnvironmentRuntime`].
 pub struct EnvironmentRuntimeBuilder {
+    tenant_id: Option<runtara_core::TenantId>,
     pool: Option<PgPool>,
     core_persistence: Option<Arc<dyn Persistence>>,
     runner: Option<Arc<dyn Runner>>,
@@ -119,6 +121,7 @@ pub struct EnvironmentRuntimeBuilder {
 impl Default for EnvironmentRuntimeBuilder {
     fn default() -> Self {
         Self {
+            tenant_id: None,
             pool: None,
             core_persistence: None,
             runner: None,
@@ -143,6 +146,12 @@ impl EnvironmentRuntimeBuilder {
     /// Create a new builder with default settings.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the tenant whose durable execution workers this runtime runs (required).
+    pub fn tenant_id(mut self, tenant_id: runtara_core::TenantId) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
     }
 
     /// Set the PostgreSQL connection pool (required).
@@ -280,7 +289,11 @@ impl EnvironmentRuntimeBuilder {
         let persistence = self
             .core_persistence
             .ok_or_else(|| anyhow::anyhow!("core_persistence is required"))?;
+        let tenant_id = self
+            .tenant_id
+            .ok_or_else(|| anyhow::anyhow!("tenant_id is required"))?;
         Ok(EnvironmentRuntimeConfig {
+            tenant_id,
             pool,
             persistence,
             runner,
@@ -303,6 +316,7 @@ impl EnvironmentRuntimeBuilder {
 
 /// Configuration for an [`EnvironmentRuntime`].
 pub struct EnvironmentRuntimeConfig {
+    tenant_id: runtara_core::TenantId,
     pool: PgPool,
     persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
@@ -367,10 +381,14 @@ impl EnvironmentRuntimeConfig {
             failed_wake_retry_delay: Duration::from_secs(5),
         };
 
-        let wake_scheduler =
-            WakeScheduler::new(self.pool.clone(), self.persistence.clone(), wake_config)
-                .with_drain(drain.clone())
-                .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
+        let wake_scheduler = WakeScheduler::new(
+            self.tenant_id.clone(),
+            self.pool.clone(),
+            self.persistence.clone(),
+            wake_config,
+        )
+        .with_drain(drain.clone())
+        .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
 
         let wake = Worker::spawn(
             "wake scheduler",
@@ -424,6 +442,7 @@ impl EnvironmentRuntimeConfig {
             heartbeat_timeout: self.heartbeat_timeout,
         };
         let heartbeat_monitor = HeartbeatMonitor::new(
+            self.tenant_id.clone(),
             self.pool.clone(),
             self.persistence.clone(),
             self.runner.clone(),
@@ -441,6 +460,7 @@ impl EnvironmentRuntimeConfig {
         // Create database cleanup worker
         let db_cleanup_enabled = self.db_cleanup_config.enabled;
         let db_cleanup_worker = DbCleanupWorker::new(
+            self.tenant_id.clone(),
             self.pool.clone(),
             self.persistence.clone(),
             self.db_cleanup_config,
@@ -671,6 +691,7 @@ impl EnvironmentRuntime {
                 .state
                 .persistence
                 .insert_signal(
+                    &runtara_core::TenantId::new(info.tenant_id.clone())?,
                     &info.instance_id,
                     runtara_core::domain::SignalType::Shutdown,
                     &[],
@@ -734,6 +755,7 @@ impl EnvironmentRuntime {
                 .state
                 .persistence
                 .complete_instance(
+                    &runtara_core::TenantId::new(info.tenant_id.clone())?,
                     CompleteInstanceParams::new(&info.instance_id, CoreInstanceStatus::Suspended)
                         .if_running()
                         .with_termination("shutdown_requested", None)
@@ -752,6 +774,7 @@ impl EnvironmentRuntime {
                             .state
                             .persistence
                             .schedule_wake(
+                                &runtara_core::TenantId::new(info.tenant_id.clone())?,
                                 &info.instance_id,
                                 chrono::Utc::now(),
                                 runtara_core::domain::WakeReason::Recovery,
@@ -788,7 +811,18 @@ impl EnvironmentRuntime {
     ) -> Vec<crate::container_registry::ContainerInfo> {
         let mut still_active = Vec::with_capacity(candidates.len());
         for info in candidates {
-            match persistence.get_instance_meta(&info.instance_id).await {
+            let tenant_id = match runtara_core::TenantId::new(info.tenant_id.clone()) {
+                Ok(tenant_id) => tenant_id,
+                Err(error) => {
+                    warn!(%error, "Invalid tenant in drain registration");
+                    still_active.push(info);
+                    continue;
+                }
+            };
+            match persistence
+                .get_instance_meta(&tenant_id, &info.instance_id)
+                .await
+            {
                 Ok(Some(inst))
                     if matches!(
                         inst.status,
@@ -1070,6 +1104,7 @@ mod tests {
             .expect("a lazy pool never connects up front");
 
         let runtime = EnvironmentRuntime::builder()
+            .tenant_id(runtara_core::TenantId::new("test-tenant").unwrap())
             .pool(unreachable.clone())
             .core_persistence(Arc::new(runtara_store_postgres::PostgresPersistence::new(
                 unreachable,
@@ -1250,6 +1285,21 @@ mod tests {
             builder_default.wake_poll_interval
         );
         assert_eq!(builder_new.wake_batch_size, builder_default.wake_batch_size);
+    }
+
+    #[tokio::test]
+    async fn builder_requires_host_selected_tenant() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://127.0.0.1:1/unused")
+            .unwrap();
+        let result = EnvironmentRuntimeBuilder::new()
+            .pool(pool.clone())
+            .runner(Arc::new(crate::runner::MockRunner::new()))
+            .core_persistence(Arc::new(runtara_store_postgres::PostgresPersistence::new(
+                pool,
+            )))
+            .build();
+        assert_eq!(result.err().unwrap().to_string(), "tenant_id is required");
     }
 
     #[test]

@@ -11,7 +11,12 @@ async fn root_and_children_share_pending_commands_and_revalidate_replacements() 
         let (second, _) = fx.child_in("sibling/").await;
         assert!(!root.check_signals().await.unwrap());
         fx.persistence
-            .insert_signal(&fx.id, CoreSignal::Pause, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                CoreSignal::Pause,
+                b"",
+            )
             .await
             .unwrap();
         assert!(!first.check_signals().await.unwrap());
@@ -45,7 +50,12 @@ async fn root_and_children_share_pending_commands_and_revalidate_replacements() 
         assert_eq!(fx.owner.observed.lock().unwrap().commands.len(), 1);
 
         fx.persistence
-            .insert_signal(&fx.id, CoreSignal::Cancel, b"")
+            .insert_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+                CoreSignal::Cancel,
+                b"",
+            )
             .await
             .unwrap();
         assert!(
@@ -59,7 +69,10 @@ async fn root_and_children_share_pending_commands_and_revalidate_replacements() 
         assert!(second.check_signals().await.unwrap());
         let cancel = fx
             .persistence
-            .get_pending_signal(&fx.id)
+            .get_pending_signal(
+                &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                &fx.id,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -84,7 +97,12 @@ async fn root_and_child_sleep_interrupts_invalidate_cached_absence_without_ackno
             let (child, _) = fx.child().await;
             assert!(!child.check_signals().await.unwrap());
             fx.persistence
-                .insert_signal(&fx.id, command, b"")
+                .insert_signal(
+                    &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                    &fx.id,
+                    command,
+                    b"",
+                )
                 .await
                 .unwrap();
             let sleeping: &dyn RuntimeHost = if sleep_in_child {
@@ -114,7 +132,10 @@ async fn root_and_child_sleep_interrupts_invalidate_cached_absence_without_ackno
             assert_eq!(fx.status().await, InstanceStatus::Running);
             assert!(
                 fx.persistence
-                    .get_pending_signal(&fx.id)
+                    .get_pending_signal(
+                        &runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        &fx.id
+                    )
                     .await
                     .unwrap()
                     .is_some()
