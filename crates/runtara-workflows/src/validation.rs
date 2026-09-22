@@ -3007,7 +3007,8 @@ fn validate_template_static_reference(
     }
 
     if let Some((root, field_name)) = parse_reference(reference) {
-        match root {
+        let field_name = field_name.as_str();
+        match root.as_str() {
             "data" => match context.data_scope {
                 DataScope::RequireSchema => {
                     if context.graph.input_schema.is_empty() {
@@ -4649,18 +4650,19 @@ fn format_duration(ms: u64) -> String {
 
 /// Parse a reference string and return (root, field_name) if it's a data or variables reference.
 /// Returns None for steps.* or other reference types.
-fn parse_reference(reference: &str) -> Option<(&str, &str)> {
-    let parts: Vec<&str> = reference.splitn(3, '.').collect();
-    if parts.len() < 2 {
-        return None;
-    }
+///
+/// Tokenizing with the shared path tokenizer rather than splitting on `.` is what lets
+/// bracket forms reach validation: `data["a.b"]` yields the opaque key `a.b`, and
+/// `variables.rows[0].sku` yields the variable name `rows` rather than `rows[0]`.
+fn parse_reference(reference: &str) -> Option<(String, String)> {
+    let mut segments = reference_segments(reference).into_iter();
 
-    let root = parts[0];
+    let root = segments.next()?;
     if root != "data" && root != "variables" {
         return None;
     }
 
-    Some((root, parts[1]))
+    Some((root, segments.next()?))
 }
 
 /// The reference roots the runtime resolves — `build_source` in
@@ -5230,6 +5232,7 @@ fn validate_reference_root(
             let Some((_, field_name)) = parse_reference(reference) else {
                 return;
             };
+            let field_name = field_name.as_str();
             if !all_variables.contains(field_name) {
                 result
                     .errors
@@ -5403,7 +5406,11 @@ fn validate_workflow_reference(
     }
 
     if let Some(rest) = reference.strip_prefix("workflow.inputs.variables.") {
-        let field_name = rest.split('.').next().unwrap_or(rest);
+        let field_segment = reference_segments(rest)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| rest.to_string());
+        let field_name = field_segment.as_str();
         if !all_variables.contains(field_name) {
             result
                 .errors
@@ -10284,11 +10291,8 @@ mod tests {
     /// what resolves at run time — previously the runtime split this path and
     /// silently produced null for a reference the validator had accepted.
     ///
-    /// Anchored one level down deliberately: a *root*-level bracket reference
-    /// like `data["a.b"]` never reaches schema validation at all, because
-    /// `parse_reference` splits on `.` and sees the root as `data["a`. That
-    /// bypass is a separate gap — testing this here against `data[..]` would
-    /// pass no matter what the schema says.
+    /// Anchored one level down; the root-level spelling `data["a.b"]` is
+    /// covered by `test_root_level_bracket_reference_reaches_schema_validation`.
     #[test]
     fn test_data_reference_bracket_quoted_dotted_key_resolves_flat() {
         // Both halves run against the same schema, so the assertions can only
@@ -10341,6 +10345,152 @@ mod tests {
         validate_workflow(&graph, &test_catalog())
     }
 
+    /// A *root*-level bracket reference must reach the schema walk like any
+    /// other. It previously did not: the root was taken by splitting on `.`,
+    /// which sees `data["a` and matches no known root, so the reference was
+    /// accepted against any schema at all — no error, no warning.
+    #[test]
+    fn test_root_level_bracket_reference_reaches_schema_validation() {
+        let declared = validate_root_bracket_reference(r#"data["a.b"]"#);
+        assert!(
+            !declared
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::UndefinedDataReference { .. })),
+            "declared root key `a.b` must validate: {:?}",
+            declared.errors
+        );
+
+        // The discriminating half: an undeclared key must be rejected rather
+        // than silently accepted.
+        let undeclared = validate_root_bracket_reference(r#"data["c.d"]"#);
+        assert!(
+            undeclared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "c.d"
+            )),
+            "undeclared root key `c.d` must be rejected: {:?}",
+            undeclared.errors
+        );
+
+        // Single quotes tokenize identically.
+        let single = validate_root_bracket_reference(r#"data['c.d']"#);
+        assert!(
+            single.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "c.d"
+            )),
+            "single-quoted body must behave like the double-quoted one: {:?}",
+            single.errors
+        );
+    }
+
+    /// Validate a single-mapping workflow whose only reference is `reference`,
+    /// against an input schema declaring exactly one literal dotted key `a.b`.
+    fn validate_root_bracket_reference(reference: &str) -> ValidationResult {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value(reference));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a.b".to_string(), schema_field(SchemaFieldType::String));
+
+        validate_workflow(&graph, &test_catalog())
+    }
+
+    /// An indexed variable reference names the variable `rows`, not `rows[0]`.
+    /// The field was previously taken by splitting on `.`, so the bracket form
+    /// was reported as an undefined variable and never reached the value walk —
+    /// a false positive on a reference the runtime resolves fine.
+    #[test]
+    fn test_indexed_variable_reference_names_the_variable() {
+        let result = validate_indexed_variable_reference("variables.rows[0].sku");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::UndefinedVariableReference { .. })),
+            "`rows[0]` must resolve to the variable `rows`: {:?}",
+            result.errors
+        );
+
+        // The discriminating half: a genuinely missing variable is still
+        // reported, under its own name rather than with the index attached.
+        let missing = validate_indexed_variable_reference("variables.absent[0].sku");
+        assert!(
+            missing.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "absent"
+            )),
+            "missing variable must be reported as `absent`: {:?}",
+            missing.errors
+        );
+    }
+
+    /// The same extraction on the `workflow.inputs.variables.*` spelling, which
+    /// carried its own copy of the naive split.
+    #[test]
+    fn test_indexed_workflow_inputs_variable_reference_names_the_variable() {
+        let result = validate_indexed_variable_reference("workflow.inputs.variables.rows[0].sku");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::UndefinedVariableReference { .. })),
+            "`rows[0]` must resolve to the variable `rows`: {:?}",
+            result.errors
+        );
+
+        let missing =
+            validate_indexed_variable_reference("workflow.inputs.variables.absent[0].sku");
+        assert!(
+            missing.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "absent"
+            )),
+            "missing variable must be reported as `absent`: {:?}",
+            missing.errors
+        );
+    }
+
+    /// Validate a single-mapping workflow whose only reference is `reference`,
+    /// against a workflow declaring one array variable `rows`.
+    fn validate_indexed_variable_reference(reference: &str) -> ValidationResult {
+        use runtara_dsl::{Variable, VariableType};
+
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value(reference));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.variables.insert(
+            "rows".to_string(),
+            Variable {
+                var_type: VariableType::Array,
+                value: serde_json::json!([{ "sku": "a" }, { "sku": "b" }]),
+                description: None,
+            },
+        );
+
+        validate_workflow(&graph, &test_catalog())
+    }
+
     /// Negative array indices resolve Python-style at run time, so authoring
     /// must accept them too. The schema walk previously gated on
     /// `parse::<usize>()`, which rejects `-1`, so a declared array raised a
@@ -10380,16 +10530,15 @@ mod tests {
     /// The same rule on the concrete-value walk used for `variables.*`, where
     /// the index is resolved against the literal array rather than a schema.
     ///
-    /// Spelled with dots rather than `rows[-1]` because `parse_reference` still
-    /// splits the variable name on the first `.`, so the bracket form is
-    /// reported as the unknown variable `rows[-1]` and never reaches this walk.
+    /// Spelled in bracket form, which the shared tokenizer reads as an index
+    /// segment on the variable `rows` — the spelling an author reaches for.
     #[test]
     fn test_variable_reference_negative_array_index_resolves_from_the_end() {
         use runtara_dsl::{Variable, VariableType};
 
         let mut mapping = HashMap::new();
-        mapping.insert("last".to_string(), ref_value("variables.rows.-1.sku"));
-        mapping.insert("past".to_string(), ref_value("variables.rows.-4.sku"));
+        mapping.insert("last".to_string(), ref_value("variables.rows[-1].sku"));
+        mapping.insert("past".to_string(), ref_value("variables.rows[-4].sku"));
 
         let mut steps = HashMap::new();
         steps.insert(
@@ -12835,6 +12984,29 @@ mod reference_extraction_tests {
         // steps reference (not data or variables)
         let result = parse_reference("steps.fetch.outputs");
         assert!(result.is_none());
+
+        // root-level bracket: the body is one opaque key, not a split path
+        let (root, field) = parse_reference(r#"data["a.b"]"#).unwrap();
+        assert_eq!(root, "data");
+        assert_eq!(field, "a.b");
+
+        // single quotes tokenize identically
+        let (root, field) = parse_reference(r#"data['a.b']"#).unwrap();
+        assert_eq!(root, "data");
+        assert_eq!(field, "a.b");
+
+        // an indexed tail belongs to the path, not to the field name
+        let (root, field) = parse_reference("variables.rows[0].sku").unwrap();
+        assert_eq!(root, "variables");
+        assert_eq!(field, "rows");
+
+        // a root-level index still occupies the field position
+        let (root, field) = parse_reference("data[0]").unwrap();
+        assert_eq!(root, "data");
+        assert_eq!(field, "0");
+
+        // a bare root has no field to report
+        assert!(parse_reference("data").is_none());
     }
 
     #[test]
