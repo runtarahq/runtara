@@ -46,7 +46,7 @@ async fn get_test_pool() -> PgPool {
 }
 
 /// Create a test image in the database with a unique name
-async fn create_test_image(pool: &PgPool, tenant_id: &str) -> String {
+async fn create_test_image(tenant_id: &str, pool: &PgPool) -> String {
     let image_id = Uuid::new_v4().to_string();
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
@@ -83,7 +83,7 @@ async fn cleanup_image(pool: &PgPool, image_id: &str) {
 
 /// Helper to create a test instance using the Persistence trait.
 /// This replaces the old `db::create_instance` function that was removed.
-async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+async fn create_test_instance(tenant_id: &str, pool: &PgPool, instance_id: &str, image_id: &str) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
         .register_instance(
@@ -259,9 +259,9 @@ async fn test_create_and_get_instance() {
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
 
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     let instance = InstanceRepository::new(pool.clone())
         .detail(
@@ -290,9 +290,9 @@ async fn test_update_instance_status() {
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
 
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     // Update to running
     update_test_instance_status(tenant_id, &pool, &instance_id, "running", None).await;
@@ -341,9 +341,9 @@ async fn test_update_instance_result() {
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
 
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     let output = serde_json::json!({"result": "success"});
     let output_bytes = serde_json::to_vec(&output).unwrap();
@@ -384,9 +384,9 @@ async fn test_update_instance_result_with_error() {
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
 
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     update_test_instance_result(
         &pool,
@@ -430,15 +430,15 @@ async fn test_list_instances() {
         .await
         .ok();
 
-    let image_id = create_test_image(&pool, "list-test-tenant-a").await;
+    let image_id = create_test_image("list-test-tenant-a", &pool).await;
 
     let instance1 = Uuid::new_v4().to_string();
     let instance2 = Uuid::new_v4().to_string();
     let instance3 = Uuid::new_v4().to_string();
 
-    create_test_instance(&pool, &instance1, "list-test-tenant-a", &image_id).await;
-    create_test_instance(&pool, &instance2, "list-test-tenant-a", &image_id).await;
-    create_test_instance(&pool, &instance3, "list-test-tenant-b", &image_id).await;
+    create_test_instance("list-test-tenant-a", &pool, &instance1, &image_id).await;
+    create_test_instance("list-test-tenant-a", &pool, &instance2, &image_id).await;
+    create_test_instance("list-test-tenant-b", &pool, &instance3, &image_id).await;
 
     // Update statuses
     update_test_instance_status("list-test-tenant-a", &pool, &instance1, "running", None).await;
@@ -536,9 +536,9 @@ async fn test_list_instances() {
 
 /// Park an instance as a durable sleep leaves it: suspended, with a wake time
 /// already past. Returns its id.
-async fn park_due_instance(pool: &PgPool, tenant_id: &str, image_id: &str) -> String {
+async fn park_due_instance(tenant_id: &str, pool: &PgPool, image_id: &str) -> String {
     let instance_id = Uuid::new_v4().to_string();
-    create_test_instance(pool, &instance_id, tenant_id, image_id).await;
+    create_test_instance(tenant_id, pool, &instance_id, image_id).await;
     update_test_instance_status(tenant_id, pool, &instance_id, "suspended", Some("delay-1")).await;
     PostgresPersistence::new(pool.clone())
         .set_instance_sleep(
@@ -566,9 +566,9 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
     let pool = get_test_pool().await;
 
     let tenant_id = "test-tenant-syn606";
-    let image_id = create_test_image(&pool, tenant_id).await;
-    let cancelled_id = park_due_instance(&pool, tenant_id, &image_id).await;
-    let healthy_id = park_due_instance(&pool, tenant_id, &image_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
+    let cancelled_id = park_due_instance(tenant_id, &pool, &image_id).await;
+    let healthy_id = park_due_instance(tenant_id, &pool, &image_id).await;
 
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     persistence
@@ -662,8 +662,8 @@ async fn a_wake_without_an_image_fails_without_a_runner_handoff() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
     let tenant_id = "wake-failure-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
-    let instance_id = park_due_instance(&pool, tenant_id, &image_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
+    let instance_id = park_due_instance(tenant_id, &pool, &image_id).await;
 
     // A sleeper without its immutable image cannot ever be dispatched. It must
     // become visible as failed rather than repeatedly returning to the wake
@@ -792,9 +792,9 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
     let tenant_id = "wake-drain-race-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
-    let first_id = park_due_instance(&pool, tenant_id, &image_id).await;
-    let second_id = park_due_instance(&pool, tenant_id, &image_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
+    let first_id = park_due_instance(tenant_id, &pool, &image_id).await;
+    let second_id = park_due_instance(tenant_id, &pool, &image_id).await;
 
     let drain = DrainController::new();
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
@@ -857,11 +857,11 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
     let tenant_id = "wake-concurrency-tenant";
-    let image_id = create_test_image(&pool, tenant_id).await;
+    let image_id = create_test_image(tenant_id, &pool).await;
 
     let mut ids = Vec::new();
     for _ in 0..24 {
-        ids.push(park_due_instance(&pool, tenant_id, &image_id).await);
+        ids.push(park_due_instance(tenant_id, &pool, &image_id).await);
     }
 
     const BOUND: usize = 6;
@@ -911,9 +911,9 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
 #[tokio::test]
 async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline() {
     let pool = get_test_pool().await;
-    let image = create_test_image(&pool, "parked-recovery").await;
-    let no_deadline = park_due_instance(&pool, "parked-recovery", &image).await;
-    let future = park_due_instance(&pool, "parked-recovery", &image).await;
+    let image = create_test_image("parked-recovery", &pool).await;
+    let no_deadline = park_due_instance("parked-recovery", &pool, &image).await;
+    let future = park_due_instance("parked-recovery", &pool, &image).await;
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     persistence
         .clear_instance_sleep(

@@ -270,8 +270,8 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
             .unwrap();
         let io = Arc::new(
             InvocationIo::new(
-                fx.persistence.clone(),
                 runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                fx.persistence.clone(),
                 attempt.fence,
                 Duration::from_secs(5),
             )
@@ -294,8 +294,8 @@ async fn prepared_wasm_child_uses_fenced_initializer_io_and_supervised_settlemen
                 }
                 let wrong = Arc::new(
                     InvocationIo::new(
-                        fx.persistence.clone(),
                         runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                        fx.persistence.clone(),
                         wrong,
                         Duration::from_secs(5),
                     )

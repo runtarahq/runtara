@@ -167,8 +167,8 @@ impl ScopedRuntimeOwner {
                 // the owner. Do not start new persistence IO after that fence.
                 self.ensure_open()?;
                 let response = handle_poll_signals(
-                    &self.root.state,
                     &self.root.tenant_id,
+                    &self.root.state,
                     PollSignalsRequest {
                         instance_id: self.root.instance_id.clone(),
                         checkpoint_id: None,
@@ -463,8 +463,8 @@ impl RuntimeHost for ScopedRuntimeHost {
             io.checkpoint(checkpoint_id.clone(), vec![]).await?;
         }
         let result = handle_poll_signals(
-            &self.owner.root.state,
             &self.owner.root.tenant_id,
+            &self.owner.root.state,
             PollSignalsRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id: Some(checkpoint_id),
@@ -485,8 +485,8 @@ impl RuntimeHost for ScopedRuntimeHost {
             return Ok(result.found.then_some(result.state));
         }
         let result = handle_get_checkpoint(
-            &self.owner.root.state,
             &self.owner.root.tenant_id,
+            &self.owner.root.state,
             GetCheckpointRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
@@ -506,8 +506,8 @@ impl RuntimeHost for ScopedRuntimeHost {
             return self.fenced_checkpoint(io, checkpoint_id, state).await;
         }
         let result = handle_checkpoint(
-            &self.owner.root.state,
             &self.owner.root.tenant_id,
+            &self.owner.root.state,
             CheckpointRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
@@ -553,8 +553,8 @@ impl RuntimeHost for ScopedRuntimeHost {
             return io.retry(checkpoint_id, attempt_number, error_message).await;
         }
         handle_retry_attempt(
-            &self.owner.root.state,
             &self.owner.root.tenant_id,
+            &self.owner.root.state,
             RetryAttemptEvent {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
@@ -578,8 +578,8 @@ impl RuntimeHost for ScopedRuntimeHost {
             return self.fenced_sleep(io, checkpoint_id, state, ms).await;
         }
         let response = handle_sleep(
-            &self.owner.root.state,
             &self.owner.root.tenant_id,
+            &self.owner.root.state,
             SleepRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,

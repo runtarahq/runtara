@@ -372,7 +372,7 @@ impl EnvironmentRuntimeConfig {
         }
 
         if let Err(e) =
-            fail_interrupted_pending_starts(&self.pool, &self.tenant_id, pending_start_cutoff).await
+            fail_interrupted_pending_starts(&self.tenant_id, &self.pool, pending_start_cutoff).await
         {
             warn!(error = %e, "Failed to recover legacy pending starts without a durable launch");
         }
@@ -997,8 +997,8 @@ async fn recover_orphaned_containers(
 /// The status predicate on the `UPDATE` is a final guard. It makes a row that
 /// advanced concurrently a no-op rather than overwriting a live transition.
 async fn fail_interrupted_pending_starts<'e, E>(
-    executor: E,
     tenant_id: &runtara_core::TenantId,
+    executor: E,
     started_before: chrono::DateTime<chrono::Utc>,
 ) -> Result<()>
 where
@@ -1531,8 +1531,8 @@ mod tests {
         .expect("register live pending start");
 
         fail_interrupted_pending_starts(
-            &mut *tx,
             &runtara_core::TenantId::new(&tenant_id).unwrap(),
+            &mut *tx,
             cutoff,
         )
         .await

@@ -28,8 +28,8 @@ macro_rules! impl_paired_record_ops {
             /// [`::runtara_core::persistence::PairedRecordSummary`] entries.
             #[allow(clippy::too_many_arguments)]
             pub(crate) async fn op_list_paired_records(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 vocabulary: &::runtara_core::persistence::EventVocabulary,
                 filter: &::runtara_core::persistence::ListPairedRecordsFilter,
@@ -59,7 +59,7 @@ macro_rules! impl_paired_record_ops {
                 let sql_vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
                 let sql = <$Dialect>::sql_list_paired_records(&sql_vocabulary, order_direction);
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
 
                 let rows = ::sqlx::query(&sql)
                     .bind(instance_id)
@@ -113,8 +113,8 @@ macro_rules! impl_paired_record_ops {
 
             /// COUNT paired records under the same filter.
             pub(crate) async fn op_count_paired_records(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 vocabulary: &::runtara_core::persistence::EventVocabulary,
                 filter: &::runtara_core::persistence::ListPairedRecordsFilter,
@@ -130,7 +130,7 @@ macro_rules! impl_paired_record_ops {
                 let sql_vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
                 let sql = <$Dialect>::sql_count_paired_records(&sql_vocabulary);
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let count: (i64,) = ::sqlx::query_as(&sql)
                     .bind(instance_id)
                     .bind(status_filter)

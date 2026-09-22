@@ -23,8 +23,8 @@ fn tenant() -> TenantId {
 }
 
 async fn launch(
-    context: &TestContext,
     tenant: &TenantId,
+    context: &TestContext,
 ) -> runtara_environment::launch_queue::Launch {
     let image = context
         .create_test_image(tenant.as_str(), "tenancy-fixture")
@@ -32,9 +32,9 @@ async fn launch(
         .to_string();
     let request = InitialLaunchRequest {
         launch: EnqueueRequest::immediate(
-            Uuid::new_v4().to_string(),
-            Uuid::new_v4().to_string(),
             tenant.as_str(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
             image,
             LaunchKind::Start,
             Duration::from_secs(60),
@@ -58,8 +58,8 @@ async fn instance_reads_counts_and_diagnostics_are_scoped() {
     let context = TestContext::new().await.unwrap();
     let a = tenant();
     let b = tenant();
-    let own = launch(&context, &a).await;
-    let foreign = launch(&context, &b).await;
+    let own = launch(&a, &context).await;
+    let foreign = launch(&b, &context).await;
     let instances = InstanceRepository::new(context.pool.clone());
     assert!(
         instances
@@ -212,7 +212,7 @@ async fn launch_replays_and_every_execution_transition_hide_foreign_generations(
     let context = TestContext::new().await.unwrap();
     let a = tenant();
     let b = tenant();
-    let foreign = launch(&context, &b).await;
+    let foreign = launch(&b, &context).await;
     let queue = LaunchRepository::new(context.pool.clone());
     assert!(queue.get(&a, &foreign.launch_id).await.unwrap().is_none());
     assert!(
@@ -223,9 +223,9 @@ async fn launch_replays_and_every_execution_transition_hide_foreign_generations(
             .is_none()
     );
     let replay = EnqueueRequest::immediate(
+        a.as_str(),
         &foreign.launch_id,
         &foreign.instance_id,
-        a.as_str(),
         &foreign.image_id,
         LaunchKind::Start,
         Duration::from_secs(60),
@@ -234,9 +234,9 @@ async fn launch_replays_and_every_execution_transition_hide_foreign_generations(
     let own_image = context.create_test_image(a.as_str(), "replay-image").await;
     let initial_replay = InitialLaunchRequest {
         launch: EnqueueRequest::immediate(
+            a.as_str(),
             &foreign.launch_id,
             &foreign.instance_id,
-            a.as_str(),
             own_image.to_string(),
             LaunchKind::Start,
             Duration::from_secs(60),
@@ -422,8 +422,8 @@ async fn queue_batch_limits_expiry_and_recovery_apply_after_tenant_filtering() {
     let context = TestContext::new().await.unwrap();
     let a = tenant();
     let b = tenant();
-    let foreign = launch(&context, &b).await;
-    let own = launch(&context, &a).await;
+    let foreign = launch(&b, &context).await;
+    let own = launch(&a, &context).await;
     let queue = LaunchRepository::new(context.pool.clone());
     let claimed = queue
         .claim_ready(&a, "owner", Duration::from_secs(60), 1)
@@ -478,7 +478,7 @@ async fn container_control_and_registration_cannot_cross_tenants() {
     let context = TestContext::new().await.unwrap();
     let a = tenant();
     let b = tenant();
-    let launch = launch(&context, &b).await;
+    let launch = launch(&b, &context).await;
     let registry = ContainerRegistry::new(context.pool.clone());
     let info = ContainerInfo {
         container_id: Uuid::new_v4().to_string(),
@@ -568,14 +568,14 @@ async fn uploaded_artifacts_use_tenant_namespaces_and_reject_payload_authority()
         metadata: None,
     };
     assert!(
-        handle_store_image(&state, &a, params(&b), b"forbidden")
+        handle_store_image(&a, &state, params(&b), b"forbidden")
             .await
             .is_err()
     );
-    let a_id = handle_store_image(&state, &a, params(&a), b"a binary")
+    let a_id = handle_store_image(&a, &state, params(&a), b"a binary")
         .await
         .unwrap();
-    let b_id = handle_store_image(&state, &b, params(&b), b"b binary")
+    let b_id = handle_store_image(&b, &state, params(&b), b"b binary")
         .await
         .unwrap();
     let registry = ImageRegistry::new(context.pool.clone());
@@ -584,7 +584,7 @@ async fn uploaded_artifacts_use_tenant_namespaces_and_reject_payload_authority()
     assert_ne!(a_path, b_path);
     assert!(std::path::Path::new(&a_path).starts_with(context.data_dir.join("tenants")));
     assert_eq!(
-        handle_store_image(&state, &a, params(&a), b"updated a")
+        handle_store_image(&a, &state, params(&a), b"updated a")
             .await
             .unwrap(),
         a_id

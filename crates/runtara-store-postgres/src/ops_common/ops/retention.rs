@@ -18,8 +18,8 @@ macro_rules! impl_retention_ops {
             /// failed / cancelled) and `finished_at < older_than`,
             /// ordered oldest-first for batch-cleanup workers.
             pub(crate) async fn op_get_terminal_instances_older_than(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
                 limit: i64,
             ) -> ::core::result::Result<
@@ -53,11 +53,11 @@ macro_rules! impl_retention_ops {
             /// `exec_delete_instances_batch`, which binds `&[String]` as
             /// `TEXT[]` for `= ANY($1)`.
             pub(crate) async fn op_delete_instances_batch(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_ids: &[::std::string::String],
             ) -> ::core::result::Result<u64, ::runtara_core::error::CoreError> {
-                <$Dialect>::exec_delete_instances_batch(pool, tenant_id, instance_ids).await
+                <$Dialect>::exec_delete_instances_batch( tenant_id,pool, instance_ids).await
             }
 
             /// DELETE the vocabulary's paired events older than
@@ -82,8 +82,8 @@ macro_rules! impl_retention_ops {
             /// Bounded by `limit` and driven in a loop by the caller so a
             /// large backlog never becomes one long-running DELETE.
             pub(crate) async fn op_delete_paired_events_older_than(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 vocabulary: &::runtara_core::persistence::EventVocabulary,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
                 limit: i64,

@@ -24,8 +24,8 @@ macro_rules! impl_event_ops {
             /// splice-formatted into a trusted SQL keyword by the
             /// dialect.
             pub(crate) async fn op_list_events(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 filter: &::runtara_core::persistence::ListEventsFilter,
                 limit: i64,
@@ -39,7 +39,7 @@ macro_rules! impl_event_ops {
                 let order_direction = sort_direction_sql(filter.sort_order);
                 let sql = <$Dialect>::sql_list_events(order_direction);
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let records = ::sqlx::query_as::<_, crate::rows::EventRow>(&sql)
                     .bind(instance_id)
                     .bind(filter.event_type.map(crate::encoding::event_type_to_str))
@@ -62,15 +62,15 @@ macro_rules! impl_event_ops {
             /// Count events for an instance with the same filter
             /// semantics as `op_list_events`.
             pub(crate) async fn op_count_events(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 filter: &::runtara_core::persistence::ListEventsFilter,
             ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_count_events();
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
                     .bind(filter.event_type.map(crate::encoding::event_type_to_str))

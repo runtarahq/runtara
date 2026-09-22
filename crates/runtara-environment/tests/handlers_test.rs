@@ -107,7 +107,7 @@ async fn cleanup(pool: &PgPool, instance_id: Option<&str>, image_id: Option<&str
 
 /// Helper to create a test instance using the Persistence trait.
 /// This replaces the old `db::create_instance` function that was removed.
-async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+async fn create_test_instance(tenant_id: &str, pool: &PgPool, instance_id: &str, image_id: &str) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
         .register_instance(
@@ -231,8 +231,8 @@ async fn test_start_instance_success() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -297,8 +297,8 @@ async fn test_start_instance_with_custom_id() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -351,8 +351,8 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     };
 
     let first = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request(),
     )
     .await
@@ -365,8 +365,8 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     assert!(!first.deduplicated);
 
     let replay = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request(),
     )
     .await
@@ -429,8 +429,8 @@ async fn test_start_instance_hands_runner_the_stored_input() {
 
     let instance_id = format!("input-passthrough-{}", Uuid::new_v4());
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         StartInstanceRequest {
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
@@ -520,12 +520,12 @@ async fn test_resume_instance_does_not_prepersist_placeholder_input() {
     .unwrap();
 
     let instance_id = format!("resume-placeholder-{}", Uuid::new_v4());
-    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    create_test_instance("test-tenant", &pool, &instance_id, &image_id).await;
     update_test_instance_status(&pool, &instance_id, "suspended", None).await;
 
     let resumed = handle_resume_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         ResumeInstanceRequest {
             instance_id: instance_id.clone(),
         },
@@ -617,8 +617,8 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
     };
 
     let first = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request(),
     )
     .await
@@ -633,8 +633,8 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
     std::fs::remove_file(&artifact).unwrap();
 
     let replay = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request(),
     )
     .await
@@ -680,8 +680,8 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
 
     let instance_id = format!("missing-artifact-{}", Uuid::new_v4());
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         StartInstanceRequest {
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
@@ -793,8 +793,8 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     };
 
     let failed = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request(),
     )
     .await
@@ -829,8 +829,8 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     // must be available to retry, rather than returning the historical
     // `Instance already exists` response for a poisoned pending row.
     let retried = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request(),
     )
     .await
@@ -893,8 +893,8 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
     };
 
     let first = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         start(first_image_id.clone()),
     )
     .await
@@ -902,8 +902,8 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
     assert!(first.is_accepted());
 
     let conflict = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         start(second_image_id.clone()),
     )
     .await
@@ -937,8 +937,8 @@ async fn test_start_instance_empty_image_id() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -969,8 +969,8 @@ async fn test_start_instance_image_not_found() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1015,8 +1015,8 @@ async fn a_database_failure_is_not_reported_as_a_missing_image() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1049,8 +1049,8 @@ async fn test_stop_instance_not_found() {
     };
 
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1105,9 +1105,9 @@ async fn running_stop_fixture(
         .await
         .unwrap();
     common::register_container_fixture(
+        &runtara_core::TenantId::new("test-tenant").unwrap(),
         pool,
         &ContainerRegistry::new(pool.clone()),
-        &runtara_core::TenantId::new("test-tenant").unwrap(),
         &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
@@ -1203,8 +1203,8 @@ async fn test_stop_instance_resolves_completion_and_parking_during_grace_arming(
             status,
         });
         let response = handle_stop_instance(
-            &state,
             &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &state,
             stop_request(&handle, 60),
         )
         .await
@@ -1244,8 +1244,8 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
     sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, 'test-tenant', $1, $2)")
         .bind(&image).bind(test_artifact_path()).execute(&pool).await.unwrap();
     let started = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         StartInstanceRequest {
             image_id: image.clone(),
             tenant_id: "test-tenant".into(),
@@ -1263,8 +1263,8 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
         LaunchState::Queued
     );
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         StopInstanceRequest {
             instance_id: started.instance_id.clone(),
             reason: "cancel before launch".into(),
@@ -1309,8 +1309,8 @@ async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_han
     let response = tokio::time::timeout(
         Duration::from_secs(3),
         handle_stop_instance(
-            &state,
             &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &state,
             stop_request(&handle, 60),
         ),
     )
@@ -1395,8 +1395,8 @@ async fn test_stop_instance_zero_grace_aborts_without_faking_guest_acknowledgeme
     let dir = tempfile::tempdir().unwrap();
     let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         stop_request(&handle, 0),
     )
     .await
@@ -1466,8 +1466,8 @@ async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforce
                 .unwrap();
         }
         let response = handle_stop_instance(
-            &state,
             &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &state,
             stop_request(&handle, 60),
         )
         .await
@@ -1548,8 +1548,8 @@ async fn test_stop_instance_preserves_terminal_outcomes() {
             .unwrap()
             .unwrap();
         let response = handle_stop_instance(
-            &state,
             &runtara_core::TenantId::new("test-tenant").unwrap(),
+            &state,
             stop_request(&handle, 0),
         )
         .await
@@ -1591,8 +1591,8 @@ async fn test_stop_instance_overflow_is_rejected_before_signalling() {
     let dir = tempfile::tempdir().unwrap();
     let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         stop_request(&handle, u64::MAX),
     )
     .await
@@ -1637,8 +1637,8 @@ async fn test_stop_instance_cancels_parked_execution_without_runner_handle() {
         .await
         .unwrap();
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         StopInstanceRequest {
             instance_id: id.clone(),
             reason: "user".into(),
@@ -1678,8 +1678,8 @@ async fn test_resume_instance_not_found() {
     };
 
     let response = handle_resume_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1715,7 +1715,7 @@ async fn test_resume_instance_wrong_status() {
     .await
     .unwrap();
 
-    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    create_test_instance("test-tenant", &pool, &instance_id, &image_id).await;
     update_test_instance_status(&pool, &instance_id, "running", None).await;
 
     let request = ResumeInstanceRequest {
@@ -1723,8 +1723,8 @@ async fn test_resume_instance_wrong_status() {
     };
 
     let response = handle_resume_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1768,7 +1768,7 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
     .await
     .unwrap();
 
-    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    create_test_instance("test-tenant", &pool, &instance_id, &image_id).await;
     update_test_instance_status(&pool, &instance_id, "suspended", None).await;
 
     let request = ResumeInstanceRequest {
@@ -1776,8 +1776,8 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
     };
 
     let response = handle_resume_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1815,7 +1815,7 @@ async fn test_resume_instance_success() {
     .await
     .unwrap();
 
-    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    create_test_instance("test-tenant", &pool, &instance_id, &image_id).await;
     update_test_instance_status(&pool, &instance_id, "suspended", Some("checkpoint-123")).await;
 
     // Core parked before the previous runner retired its launch row. Resume
@@ -1831,8 +1831,8 @@ async fn test_resume_instance_success() {
     };
 
     let response = handle_resume_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1936,8 +1936,8 @@ async fn test_start_instance_tenant_isolation() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("tenant-B").unwrap(),
+        &state,
         request,
     )
     .await
@@ -1996,8 +1996,8 @@ async fn test_start_instance_same_tenant_allowed() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("tenant-A").unwrap(),
+        &state,
         request,
     )
     .await
@@ -2058,8 +2058,8 @@ async fn test_start_instance_stores_env() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -2123,8 +2123,8 @@ async fn test_start_instance_empty_env() {
     };
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         request,
     )
     .await
@@ -2525,10 +2525,10 @@ async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
 
     // A row belonging to a newer run: not ours, and it must survive.
     common::register_container_fixture(
+        &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(tenant_id.to_string()).unwrap(),
-        &make_container_info(&instance_id, tenant_id, "newer-run"),
+        &make_container_info(tenant_id, &instance_id, "newer-run"),
     )
     .await
     .expect("register failed");
@@ -2659,7 +2659,7 @@ async fn registering_an_image_refreshes_subsequent_reads() {
 }
 
 /// Helper: build a `ContainerInfo` populated with the fields the registry stores.
-fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -> ContainerInfo {
+fn make_container_info(tenant_id: &str, instance_id: &str, container_id: &str) -> ContainerInfo {
     ContainerInfo {
         container_id: container_id.to_string(),
         launch_id: format!("launch-{container_id}"),
@@ -2832,8 +2832,8 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
     .unwrap();
 
     let response = handle_start_instance(
-        &state,
         &runtara_core::TenantId::new("test-tenant").unwrap(),
+        &state,
         StartInstanceRequest {
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
@@ -2896,8 +2896,8 @@ async fn test_tenant_metrics_rejects_a_zero_bucket_width() {
     let state = create_test_state(pool, temp_dir.path().to_path_buf());
 
     let error = handle_get_tenant_metrics(
-        &state,
         &runtara_core::TenantId::new("tenant-a").unwrap(),
+        &state,
         &metrics_options("tenant-a", 0, 3_600),
     )
     .await
@@ -2920,8 +2920,8 @@ async fn test_tenant_metrics_rejects_a_width_that_overruns_the_bucket_cap() {
     // One-minute buckets over ninety days: 129,601 spine rows.
     let ninety_days = 90 * 86_400;
     let error = handle_get_tenant_metrics(
-        &state,
         &runtara_core::TenantId::new("tenant-a").unwrap(),
+        &state,
         &metrics_options("tenant-a", 60, ninety_days),
     )
     .await
@@ -2944,8 +2944,8 @@ async fn test_tenant_metrics_allows_the_widest_console_request() {
     // The console's widest ask: seven days at 24-minute buckets, 421 rows.
     let seven_days = 7 * 86_400;
     let buckets = handle_get_tenant_metrics(
-        &state,
         &runtara_core::TenantId::new("tenant-a").unwrap(),
+        &state,
         &metrics_options("tenant-a", 1_440, seven_days),
     )
     .await
@@ -2994,8 +2994,8 @@ async fn scope_ancestry_uses_custom_event_subtypes() {
             .unwrap();
     }
     let ancestors = runtara_environment::handlers::handle_get_scope_ancestors(
-        &state,
         &runtara_core::TenantId::new("scope-types").unwrap(),
+        &state,
         &id,
         "child",
     )
@@ -3040,8 +3040,8 @@ async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
         .unwrap();
     assert_eq!(
         handle_send_signal(
-            &state,
             &runtara_core::TenantId::new("parked-handler").unwrap(),
+            &state,
             &id,
             "cancel",
             None

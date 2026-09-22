@@ -1302,8 +1302,8 @@ mod tests {
     }
 
     async fn append(
-        backend: &InMemoryPersistence,
         tenant_scope: &TenantId,
+        backend: &InMemoryPersistence,
         subtype: &str,
         payload: serde_json::Value,
     ) {
@@ -1347,8 +1347,8 @@ mod tests {
         })
         .unwrap();
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit-open",
             serde_json::json!({
                 "unit.id": "u1", "kind name": "work", "étiquette": "label", "in'put": {"x": 1},
@@ -1356,8 +1356,8 @@ mod tests {
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit-close",
             serde_json::json!({
                 "unit.id": "u1", "out.put": {"x": 2},
@@ -1406,24 +1406,24 @@ mod tests {
         let vocabulary = foreign_vocabulary();
 
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_open",
             serde_json::json!({"unit_id": "u1", "flavour": "Agent", "caption": "first",
                                "given": {"a": 1}, "scope_id": "s1"}),
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_close",
             serde_json::json!({"unit_id": "u1", "produced": {"ok": true},
                                "scope_id": "s1", "began_ms": 10, "ended_ms": 20}),
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_open",
             serde_json::json!({"unit_id": "u2", "flavour": "Split"}),
         )
@@ -1477,15 +1477,15 @@ mod tests {
         let vocabulary = foreign_vocabulary();
 
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_open",
             serde_json::json!({"unit_id": "u1"}),
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_close",
             serde_json::json!({"unit_id": "u1", "produced": {"_broke": true}}),
         )
@@ -1518,16 +1518,16 @@ mod tests {
 
         for scope in ["iter-1", "iter-2"] {
             append(
-                &backend,
                 &tenant_scope,
+                &backend,
                 "unit_open",
                 serde_json::json!({"unit_id": "same", "scope_id": scope}),
             )
             .await;
         }
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_close",
             serde_json::json!({"unit_id": "same", "scope_id": "iter-1"}),
         )
@@ -1572,29 +1572,29 @@ mod tests {
         let vocabulary = foreign_vocabulary();
 
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_open",
             serde_json::json!({"unit_id": "u1"}),
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "unit_close",
             serde_json::json!({"unit_id": "u1"}),
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "workflow_log",
             serde_json::json!({}),
         )
         .await;
         append(
-            &backend,
             &tenant_scope,
+            &backend,
             "step_debug_start",
             serde_json::json!({}),
         )

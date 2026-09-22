@@ -1262,8 +1262,8 @@ impl ExecutionEngine {
         // Start instance (non-blocking)
         let start = match runtime_client
             .start_instance(
-                &image_id,
                 &event.tenant_id,
+                &image_id,
                 &event.workflow_id,
                 Some(event.instance_id.clone()),
                 Some(workflow_input),

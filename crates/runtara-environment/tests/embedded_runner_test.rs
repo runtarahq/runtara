@@ -135,9 +135,9 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
         .unwrap();
     let registry = ContainerRegistry::new(h.pool.clone());
     common::register_container_fixture(
+        &runtara_core::TenantId::new("embedded-test").unwrap(),
         &h.pool,
         &registry,
-        &runtara_core::TenantId::new("embedded-test").unwrap(),
         &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
@@ -203,8 +203,8 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
     );
     let before = tokio::time::Instant::now();
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("embedded-test").unwrap(),
+        &state,
         StopInstanceRequest {
             instance_id: inst_id.clone(),
             reason: "clicked Cancel".into(),
@@ -244,8 +244,8 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
         // A repeated request cannot keep an uncooperative run alive by
         // extending an already accepted cancellation grace period.
         let response = handle_stop_instance(
-            &state,
             &runtara_core::TenantId::new("embedded-test").unwrap(),
+            &state,
             StopInstanceRequest {
                 instance_id: inst_id.clone(),
                 reason: "Cancel again".into(),
@@ -395,9 +395,9 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
         .unwrap();
     let registry = ContainerRegistry::new(h.pool.clone());
     common::register_container_fixture(
+        &runtara_core::TenantId::new("embedded-test").unwrap(),
         &h.pool,
         &registry,
-        &runtara_core::TenantId::new("embedded-test").unwrap(),
         &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),

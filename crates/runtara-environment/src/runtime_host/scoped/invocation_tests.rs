@@ -708,8 +708,8 @@ async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
             .unwrap();
         let io = Arc::new(
             InvocationIo::new(
-                fx.persistence.clone(),
                 runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                fx.persistence.clone(),
                 attempt.fence,
                 Duration::from_secs(5),
             )

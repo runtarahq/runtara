@@ -19,8 +19,8 @@ macro_rules! impl_sleep_ops {
             /// UPDATE `sleep_until`. Errors with `InstanceNotFound` if no
             /// row matched.
             pub(crate) async fn op_set_instance_sleep(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 sleep_until: ::chrono::DateTime<::chrono::Utc>,
                 reason: ::runtara_core::domain::WakeReason,
@@ -50,8 +50,8 @@ macro_rules! impl_sleep_ops {
             /// UPDATE `sleep_until = NULL`. Errors with `InstanceNotFound`
             /// if no row matched.
             pub(crate) async fn op_clear_instance_sleep(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::ops_common::error::not_found_if_empty;
@@ -86,8 +86,8 @@ macro_rules! impl_sleep_ops {
             /// Postgres row-level locking serializes concurrent claims, so the
             /// guarantee holds across processes, not just tasks.
             pub(crate) async fn op_claim_sleeping_instance(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;
@@ -118,8 +118,8 @@ macro_rules! impl_sleep_ops {
             /// ordered by `sleep_until` ascending. Excludes the `input`
             /// BLOB, which the wake scan never reads.
             pub(crate) async fn op_get_sleeping_instances_due(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 limit: i64,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<::runtara_core::persistence::InstanceRecord>,
@@ -177,8 +177,8 @@ macro_rules! impl_sleep_ops {
             /// never fires for a run that actually started; the scan only
             /// considers suspended rows.
             pub(crate) async fn op_claim_sleeping_instances_due(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 limit: i64,
                 retry_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<

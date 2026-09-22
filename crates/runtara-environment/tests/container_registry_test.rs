@@ -35,7 +35,7 @@ async fn get_test_pool() -> PgPool {
 }
 
 /// Create a test ContainerInfo
-fn create_test_container_info(instance_id: &str, tenant_id: &str) -> ContainerInfo {
+fn create_test_container_info(tenant_id: &str, instance_id: &str) -> ContainerInfo {
     ContainerInfo {
         container_id: format!("container-{}", Uuid::new_v4()),
         launch_id: format!("launch-{}", Uuid::new_v4()),
@@ -97,7 +97,7 @@ fn test_container_info_optional_fields() {
 
 #[test]
 fn test_container_info_serialization() {
-    let info = create_test_container_info("inst-1", "tenant-1");
+    let info = create_test_container_info("tenant-1", "inst-1");
     let json = serde_json::to_string(&info).unwrap();
     assert!(json.contains("container_id"));
     assert!(json.contains("instance_id"));
@@ -120,13 +120,13 @@ async fn test_register_and_get() {
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
-    let info = create_test_container_info(&instance_id, "test-tenant");
+    let info = create_test_container_info("test-tenant", &instance_id);
 
     // Register
     common::register_container_fixture(
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &info,
     )
     .await
@@ -156,13 +156,13 @@ async fn test_register_upsert() {
 
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
-    let mut info = create_test_container_info(&instance_id, "tenant-1");
+    let mut info = create_test_container_info("tenant-1", &instance_id);
 
     // Register first time
     common::register_container_fixture(
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &info,
     )
     .await
@@ -171,9 +171,9 @@ async fn test_register_upsert() {
     // Update and re-register (upsert)
     info.binary_path = "/new/path".to_string();
     common::register_container_fixture(
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &info,
     )
     .await
@@ -204,18 +204,18 @@ async fn test_list_all_registered() {
     let instance2 = Uuid::new_v4().to_string();
 
     common::register_container_fixture(
+        &runtara_core::TenantId::new("tenant-list-1").unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new("tenant-list-1").unwrap(),
-        &create_test_container_info(&instance1, "tenant-list-1"),
+        &create_test_container_info("tenant-list-1", &instance1),
     )
     .await
     .unwrap();
     common::register_container_fixture(
+        &runtara_core::TenantId::new("tenant-list-2").unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new("tenant-list-2").unwrap(),
-        &create_test_container_info(&instance2, "tenant-list-2"),
+        &create_test_container_info("tenant-list-2", &instance2),
     )
     .await
     .unwrap();
@@ -270,11 +270,11 @@ async fn test_cleanup_single_container() {
 
     // cleanup() drops the registry entry once an instance reaches a terminal
     // state.
-    let info = create_test_container_info(&instance_id, "tenant-1");
+    let info = create_test_container_info("tenant-1", &instance_id);
     common::register_container_fixture(
+        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(&info.tenant_id).unwrap(),
         &info,
     )
     .await
@@ -315,13 +315,13 @@ async fn cleanup_is_fenced_by_launch_id_not_container_handle() {
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
 
-    let mut first = create_test_container_info(&instance_id, "generation-tenant");
+    let mut first = create_test_container_info("generation-tenant", &instance_id);
     first.container_id = "opaque-shared-handle".to_string();
     first.launch_id = "launch-old".to_string();
     common::register_container_fixture(
+        &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
         &first,
     )
     .await
@@ -331,9 +331,9 @@ async fn cleanup_is_fenced_by_launch_id_not_container_handle() {
     replacement.launch_id = "launch-new".to_string();
     replacement.started_at = Utc::now();
     common::register_container_fixture(
+        &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new(&first.tenant_id).unwrap(),
         &replacement,
     )
     .await
@@ -374,11 +374,11 @@ async fn cleanup_handle_preserves_every_replacement_identity() {
     let registry = ContainerRegistry::new(pool.clone());
     for (new_launch, new_handle) in [(false, true), (true, false), (true, true)] {
         let id = Uuid::new_v4().to_string();
-        let observed = create_test_container_info(&id, "recovery-snapshot-tenant");
+        let observed = create_test_container_info("recovery-snapshot-tenant", &id);
         common::register_container_fixture(
+            &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
             &pool,
             &registry,
-            &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
             &observed,
         )
         .await
@@ -391,9 +391,9 @@ async fn cleanup_handle_preserves_every_replacement_identity() {
             replacement.container_id = Uuid::new_v4().to_string();
         }
         common::register_container_fixture(
+            &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
             &pool,
             &registry,
-            &runtara_core::TenantId::new(&observed.tenant_id).unwrap(),
             &replacement,
         )
         .await
@@ -509,9 +509,9 @@ async fn test_container_with_no_optional_fields() {
     };
 
     common::register_container_fixture(
+        &runtara_core::TenantId::new("tenant").unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new("tenant").unwrap(),
         &info,
     )
     .await

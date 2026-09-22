@@ -109,9 +109,9 @@ impl WorkflowRunnerConfig {
 /// that support them supply `core_http_url` explicitly. The normal runner API
 /// leaves it unset when no embedded core is available.
 pub(crate) fn build_env(
+    tenant_id: &str,
     config: &WorkflowRunnerConfig,
     instance_id: &str,
-    tenant_id: &str,
     checkpoint_id: Option<&str>,
     core_http_url: Option<&str>,
 ) -> HashMap<String, String> {
@@ -146,8 +146,8 @@ pub(crate) fn build_env(
 }
 
 /// The per-instance run directory (stderr capture lives here).
-pub(crate) fn run_dir(data_dir: &Path, tenant_id: &str, instance_id: &str) -> PathBuf {
-    crate::artifact_paths::tenant_root(data_dir, tenant_id)
+pub(crate) fn run_dir(tenant_id: &str, data_dir: &Path, instance_id: &str) -> PathBuf {
+    crate::artifact_paths::tenant_root(tenant_id, data_dir)
         .join("runs")
         .join(crate::artifact_paths::identity_component(instance_id))
 }
@@ -158,24 +158,24 @@ pub(crate) fn run_dir(data_dir: &Path, tenant_id: &str, instance_id: &str) -> Pa
 /// predecessor is still unwinding. Keeping stderr under the launch generation
 /// prevents the old task from overwriting diagnostics for the new one.
 pub(crate) fn launch_run_dir(
-    data_dir: &Path,
     tenant_id: &str,
+    data_dir: &Path,
     instance_id: &str,
     launch_id: &str,
 ) -> PathBuf {
-    run_dir(data_dir, tenant_id, instance_id)
+    run_dir(tenant_id, data_dir, instance_id)
         .join(crate::artifact_paths::identity_component(launch_id))
 }
 
 /// Load stderr from the per-run log file for diagnostics.
 pub(crate) async fn load_stderr(
-    data_dir: &Path,
     tenant_id: &str,
+    data_dir: &Path,
     instance_id: &str,
     launch_id: &str,
 ) -> Option<String> {
     let stderr_path =
-        launch_run_dir(data_dir, tenant_id, instance_id, launch_id).join("stderr.log");
+        launch_run_dir(tenant_id, data_dir, instance_id, launch_id).join("stderr.log");
     if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
         let stderr_trimmed = stderr_content.trim();
         if !stderr_trimmed.is_empty() {
@@ -262,9 +262,9 @@ mod tests {
     #[test]
     fn legacy_http_composed_guests_receive_the_configured_core_url() {
         let env = build_env(
+            "tenant-1",
             &config(),
             "instance-1",
-            "tenant-1",
             None,
             Some("http://127.0.0.1:49123"),
         );
@@ -274,7 +274,7 @@ mod tests {
             Some("http://127.0.0.1:49123")
         );
 
-        let env_without_core = build_env(&config(), "instance-1", "tenant-1", None, None);
+        let env_without_core = build_env("tenant-1", &config(), "instance-1", None, None);
         assert!(!env_without_core.contains_key("RUNTARA_HTTP_URL"));
     }
 

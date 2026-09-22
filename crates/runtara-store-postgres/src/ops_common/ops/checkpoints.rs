@@ -33,8 +33,8 @@ macro_rules! impl_checkpoint_ops {
             /// `CoreError::CheckpointSaveFailed` with the instance ID
             /// attached.
             pub(crate) async fn op_save_checkpoint(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: &str,
                 state: &[u8],
@@ -42,7 +42,7 @@ macro_rules! impl_checkpoint_ops {
                 use crate::dialect::Dialect;
                 use crate::ops_common::error::wrap_checkpoint_save;
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let sql = <$Dialect>::sql_save_checkpoint();
                 ::sqlx::query(sql)
                     .bind(instance_id)
@@ -57,8 +57,8 @@ macro_rules! impl_checkpoint_ops {
 
             /// SELECT a single checkpoint by `(instance_id, checkpoint_id)`.
             pub(crate) async fn op_load_checkpoint(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<
@@ -67,7 +67,7 @@ macro_rules! impl_checkpoint_ops {
             > {
                 use crate::dialect::Dialect;
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
@@ -92,8 +92,8 @@ macro_rules! impl_checkpoint_ops {
             /// `checkpoint_id` / `created_at` window filters and pagination.
             #[allow(clippy::too_many_arguments)]
             pub(crate) async fn op_list_checkpoints(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: ::core::option::Option<&str>,
                 limit: i64,
@@ -107,7 +107,7 @@ macro_rules! impl_checkpoint_ops {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_list_checkpoints();
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let rows = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(&sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
@@ -125,8 +125,8 @@ macro_rules! impl_checkpoint_ops {
             /// COUNT checkpoints for an instance using the same filter
             /// semantics as `op_list_checkpoints`.
             pub(crate) async fn op_count_checkpoints(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: ::core::option::Option<&str>,
                 created_after: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
@@ -135,7 +135,7 @@ macro_rules! impl_checkpoint_ops {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_count_checkpoints();
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)

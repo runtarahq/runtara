@@ -47,9 +47,9 @@ impl EmbeddedBackend {
     /// * `instance_id` - Unique instance identifier
     /// * `tenant_id` - Tenant identifier
     pub fn new(
+        tenant_id: TenantId,
         persistence: Arc<dyn Persistence>,
         instance_id: impl Into<String>,
-        tenant_id: TenantId,
     ) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -654,9 +654,9 @@ mod tests {
     fn test_embedded_backend_register() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         // Connect should be no-op
@@ -683,9 +683,9 @@ mod tests {
     fn test_embedded_backend_checkpoint_save() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         // Register first
@@ -706,9 +706,9 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new());
         persistence.set_fail_signal_read();
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence,
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
         backend.register(None).unwrap();
         for _ in 0..2 {
@@ -721,9 +721,9 @@ mod tests {
     fn test_embedded_backend_checkpoint_resume() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         backend.register(None).unwrap();
@@ -743,9 +743,9 @@ mod tests {
     fn test_embedded_backend_get_checkpoint() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         backend.register(None).unwrap();
@@ -767,9 +767,9 @@ mod tests {
     fn test_embedded_backend_completed() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         backend.register(None).unwrap();
@@ -790,9 +790,9 @@ mod tests {
     fn test_embedded_backend_failed() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         backend.register(None).unwrap();
@@ -813,9 +813,9 @@ mod tests {
     fn test_embedded_backend_suspended() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         backend.register(None).unwrap();
@@ -835,9 +835,9 @@ mod tests {
     fn test_embedded_backend_get_status() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("test-tenant").unwrap(),
             persistence.clone(),
             "test-instance",
-            TenantId::new("test-tenant").unwrap(),
         );
 
         // Get status before registration
@@ -855,9 +855,9 @@ mod tests {
     fn test_embedded_backend_ids() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(
+            TenantId::new("my-tenant").unwrap(),
             persistence,
             "my-instance",
-            TenantId::new("my-tenant").unwrap(),
         );
 
         assert_eq!(backend.instance_id(), "my-instance");

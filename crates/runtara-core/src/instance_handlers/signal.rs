@@ -28,8 +28,8 @@ use super::types::{
     checkpoint_id = ?request.checkpoint_id,
 ))]
 pub async fn handle_poll_signals(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     request: PollSignalsRequest,
 ) -> Result<PollSignalsResponse> {
     debug!("Instance polling for signals");
@@ -82,19 +82,19 @@ pub async fn handle_poll_signals(
 /// False means the receipt is stale or the requested transition is no longer valid.
 #[instrument(skip(state, ack), fields(instance_id = %ack.instance_id, command_id = %ack.command_id))]
 pub async fn handle_signal_ack(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     ack: SignalAck,
 ) -> Result<bool> {
-    Ok(handle_signal_ack_decision(state, tenant_id, ack)
+    Ok(handle_signal_ack_decision(tenant_id, state, ack)
         .await?
         .accepted())
 }
 
 /// Acknowledge a command while retaining its typed lifecycle disposition.
 pub async fn handle_signal_ack_decision(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     ack: SignalAck,
 ) -> Result<crate::lifecycle::Decision> {
     if !ack.acknowledged {
@@ -145,8 +145,8 @@ mod tests {
             .unwrap();
         let state = InstanceHandlerState::new(backend.clone());
         let result = handle_signal_ack(
-            &state,
             &tenant_scope,
+            &state,
             SignalAck {
                 instance_id: "retired".into(),
                 command_id: command.command_id.clone(),
@@ -179,13 +179,13 @@ mod tests {
         ] {
             let persistence = Arc::new(
                 MockPersistence::new()
-                    .with_instance(make_instance("instance", "tenant", InstanceStatus::Running))
+                    .with_instance(make_instance("tenant", "instance", InstanceStatus::Running))
                     .with_signal(make_signal("instance", signal_type)),
             );
             let state = InstanceHandlerState::new(persistence);
             let poll = handle_poll_signals(
-                &state,
                 &tenant_scope,
+                &state,
                 PollSignalsRequest {
                     instance_id: "instance".into(),
                     checkpoint_id: None,
@@ -196,8 +196,8 @@ mod tests {
             .signal
             .unwrap();
             let checkpoint = handle_checkpoint(
-                &state,
                 &tenant_scope,
+                &state,
                 CheckpointRequest {
                     instance_id: "instance".into(),
                     checkpoint_id: "cp".into(),
@@ -219,15 +219,15 @@ mod tests {
         use crate::domain::InstanceStatus;
         use crate::instance_handlers::{CheckpointRequest, handle_checkpoint};
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "instance",
             "tenant",
+            "instance",
             InstanceStatus::Running,
         )));
         persistence.set_fail_signal_read();
         let state = InstanceHandlerState::new(persistence);
         let poll = handle_poll_signals(
-            &state,
             &tenant_scope,
+            &state,
             PollSignalsRequest {
                 instance_id: "instance".into(),
                 checkpoint_id: None,
@@ -235,8 +235,8 @@ mod tests {
         )
         .await;
         let checkpoint = handle_checkpoint(
-            &state,
             &tenant_scope,
+            &state,
             CheckpointRequest {
                 instance_id: "instance".into(),
                 checkpoint_id: "cp".into(),
@@ -258,8 +258,8 @@ mod tests {
     async fn test_poll_signals_no_signal() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -269,7 +269,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_poll_signals(&state, &tenant_scope, request)
+        let result = handle_poll_signals(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.signal.is_none());
@@ -281,8 +281,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", crate::domain::SignalType::Pause)),
@@ -294,7 +294,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_poll_signals(&state, &tenant_scope, request)
+        let result = handle_poll_signals(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.signal.is_some());
@@ -308,8 +308,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
@@ -329,7 +329,7 @@ mod tests {
         };
 
         // handle_signal_ack returns Result<()>
-        handle_signal_ack(&state, &tenant_scope, request)
+        handle_signal_ack(&tenant_scope, &state, request)
             .await
             .unwrap();
 
@@ -354,8 +354,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "test-tenant",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
@@ -375,7 +375,7 @@ mod tests {
             acknowledged: true,
         };
 
-        handle_signal_ack(&state, &tenant_scope, ack)
+        handle_signal_ack(&tenant_scope, &state, ack)
             .await
             .expect_err("a failed status transition must surface as an error");
 
@@ -395,8 +395,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Shutdown)),
@@ -415,7 +415,7 @@ mod tests {
             acknowledged: true,
         };
 
-        handle_signal_ack(&state, &tenant_scope, ack).await.unwrap();
+        handle_signal_ack(&tenant_scope, &state, ack).await.unwrap();
 
         // Instance should be suspended with termination_reason=shutdown_requested,
         // NOT cancelled or failed.

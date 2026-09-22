@@ -270,8 +270,8 @@ fn core_error_response(route_code: &str, context: &str, err: impl Into<anyhow::E
 
 /// POST /api/v1/instances/{instance_id}/register
 async fn register_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<RegisterRequest>,
 ) -> impl IntoResponse {
@@ -281,7 +281,7 @@ async fn register_handler(
         checkpoint_id: body.checkpoint_id,
     };
 
-    match instance_handlers::handle_register_instance(&state, &tenant_id, request).await {
+    match instance_handlers::handle_register_instance(&tenant_id, &state, request).await {
         Ok(resp) => {
             if resp.success {
                 Json(RegisterResponse {
@@ -318,8 +318,8 @@ async fn register_handler(
 
 /// POST /api/v1/instances/{instance_id}/checkpoint
 async fn checkpoint_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<CheckpointRequest>,
 ) -> impl IntoResponse {
@@ -345,7 +345,7 @@ async fn checkpoint_handler(
         state: state_bytes,
     };
 
-    match instance_handlers::handle_checkpoint(&state, &tenant_id, request).await {
+    match instance_handlers::handle_checkpoint(&tenant_id, &state, request).await {
         Ok(resp) => {
             let signal = resp.pending_signal.map(|s| SignalInfo {
                 command_id: s.command_id,
@@ -385,8 +385,8 @@ async fn checkpoint_handler(
 
 /// GET /api/v1/instances/{instance_id}/signals
 async fn poll_signals_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
     let request = HandlerPollSignalsRequest {
@@ -394,7 +394,7 @@ async fn poll_signals_handler(
         checkpoint_id: None,
     };
 
-    match instance_handlers::handle_poll_signals(&state, &tenant_id, request).await {
+    match instance_handlers::handle_poll_signals(&tenant_id, &state, request).await {
         Ok(resp) => {
             let signal = resp.signal.map(|s| SignalInfo {
                 command_id: s.command_id,
@@ -428,8 +428,8 @@ async fn poll_signals_handler(
 
 /// GET /api/v1/instances/{instance_id}/signals/{signal_id}
 async fn poll_custom_signal_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path((instance_id, signal_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let request = HandlerPollSignalsRequest {
@@ -437,7 +437,7 @@ async fn poll_custom_signal_handler(
         checkpoint_id: Some(signal_id),
     };
 
-    match instance_handlers::handle_poll_signals(&state, &tenant_id, request).await {
+    match instance_handlers::handle_poll_signals(&tenant_id, &state, request).await {
         Ok(resp) => {
             let custom_signal = resp.custom_signal.map(|cs| CustomSignalInfo {
                 signal_id: cs.signal_id,
@@ -461,8 +461,8 @@ async fn poll_custom_signal_handler(
 
 /// POST /api/v1/instances/{instance_id}/events
 async fn instance_event_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<InstanceEventRequest>,
 ) -> impl IntoResponse {
@@ -495,7 +495,7 @@ async fn instance_event_handler(
         subtype: body.subtype,
     };
 
-    match instance_handlers::handle_instance_event(&state, &tenant_id, event).await {
+    match instance_handlers::handle_instance_event(&tenant_id, &state, event).await {
         Ok(resp) => {
             if resp.success {
                 Json(SuccessResponse { success: true }).into_response()
@@ -519,8 +519,8 @@ async fn instance_event_handler(
 
 /// POST /api/v1/instances/{instance_id}/completed
 async fn completed_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -555,7 +555,7 @@ async fn completed_handler(
     };
 
     match instance_handlers::handle_instance_event_with_run_label(
-        &state, &tenant_id, event, run_label,
+        &tenant_id, &state, event, run_label,
     )
     .await
     {
@@ -566,8 +566,8 @@ async fn completed_handler(
 
 /// POST /api/v1/instances/{instance_id}/failed
 async fn failed_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -585,7 +585,7 @@ async fn failed_handler(
         subtype: None,
     };
 
-    match instance_handlers::handle_instance_event(&state, &tenant_id, event).await {
+    match instance_handlers::handle_instance_event(&tenant_id, &state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => core_error_response("FAILED_ERROR", "Failed handler error", e),
     }
@@ -593,8 +593,8 @@ async fn failed_handler(
 
 /// POST /api/v1/instances/{instance_id}/suspended
 async fn suspended_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
     let event = HandlerInstanceEvent {
@@ -606,7 +606,7 @@ async fn suspended_handler(
         subtype: None,
     };
 
-    match instance_handlers::handle_instance_event(&state, &tenant_id, event).await {
+    match instance_handlers::handle_instance_event(&tenant_id, &state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => core_error_response("SUSPENDED_ERROR", "Suspended handler error", e),
     }
@@ -614,8 +614,8 @@ async fn suspended_handler(
 
 /// POST /api/v1/instances/{instance_id}/sleep
 async fn sleep_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<SleepRequest>,
 ) -> impl IntoResponse {
@@ -640,7 +640,7 @@ async fn sleep_handler(
         state: state_bytes,
     };
 
-    match instance_handlers::handle_sleep(&state, &tenant_id, request).await {
+    match instance_handlers::handle_sleep(&tenant_id, &state, request).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => core_error_response("SLEEP_ERROR", "Sleep handler error", e),
     }
@@ -648,8 +648,8 @@ async fn sleep_handler(
 
 /// POST /api/v1/instances/{instance_id}/signals/ack
 async fn signal_ack_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<SignalAckRequest>,
 ) -> impl IntoResponse {
@@ -676,7 +676,7 @@ async fn signal_ack_handler(
         acknowledged: true,
     };
 
-    match instance_handlers::handle_signal_ack(&state, &tenant_id, ack).await {
+    match instance_handlers::handle_signal_ack(&tenant_id, &state, ack).await {
         Ok(success) => Json(SuccessResponse { success }).into_response(),
         Err(e) => core_error_response("SIGNAL_ACK_ERROR", "Signal ack error", e),
     }
@@ -684,8 +684,8 @@ async fn signal_ack_handler(
 
 /// POST /api/v1/instances/{instance_id}/retry
 async fn retry_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
     Json(body): Json<RetryAttemptRequest>,
 ) -> impl IntoResponse {
@@ -698,7 +698,7 @@ async fn retry_handler(
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
     };
 
-    match instance_handlers::handle_retry_attempt(&state, &tenant_id, event).await {
+    match instance_handlers::handle_retry_attempt(&tenant_id, &state, event).await {
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => core_error_response("RETRY_ERROR", "Retry attempt error", e),
     }
@@ -721,15 +721,15 @@ pub struct InstanceStatusResponse {
 
 /// GET /api/v1/instances/{instance_id}/status
 async fn status_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
     let request = HandlerGetStatusRequest {
         instance_id: instance_id.clone(),
     };
 
-    match instance_handlers::handle_get_instance_status(&state, &tenant_id, request).await {
+    match instance_handlers::handle_get_instance_status(&tenant_id, &state, request).await {
         Ok(resp) => {
             let status_str = match InstanceStatus::try_from_i32(resp.status) {
                 Some(InstanceStatus::StatusPending) => "pending",
@@ -765,8 +765,8 @@ async fn status_handler(
 
 /// GET /api/v1/instances/{instance_id}/input
 async fn input_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
     axum::Extension(tenant_id): axum::Extension<runtara_core::TenantId>,
+    State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
     match state
@@ -830,8 +830,8 @@ async fn health_handler(State(state): State<Arc<InstanceHandlerState>>) -> impl 
 ///
 /// All routes are prefixed with `/api/v1`.
 pub fn instance_http_router(
-    state: Arc<InstanceHandlerState>,
     tenant_id: runtara_core::TenantId,
+    state: Arc<InstanceHandlerState>,
 ) -> Router {
     Router::new()
         // Instance lifecycle
@@ -903,12 +903,12 @@ pub fn instance_http_router(
 /// Nothing here bounds that wait: a caller that needs shutdown to be bounded
 /// applies its own deadline, as `CoreRuntime::shutdown` does.
 pub async fn run_http_server_with_shutdown(
+    tenant_id: runtara_core::TenantId,
     bind_addr: SocketAddr,
     state: Arc<InstanceHandlerState>,
-    tenant_id: runtara_core::TenantId,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let app = instance_http_router(state, tenant_id);
+    let app = instance_http_router(tenant_id, state);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
     info!(addr = %bind_addr, "Instance HTTP server starting");
@@ -932,8 +932,8 @@ mod tests {
 
     fn router_over(persistence: MockPersistence) -> Router {
         instance_http_router(
-            Arc::new(InstanceHandlerState::new(Arc::new(persistence))),
             runtara_core::TenantId::new("t1").unwrap(),
+            Arc::new(InstanceHandlerState::new(Arc::new(persistence))),
         )
     }
 
@@ -954,14 +954,14 @@ mod tests {
             .await
             .unwrap();
         let router = instance_http_router(
-            Arc::new(InstanceHandlerState::new(persistence.clone())),
             own.clone(),
+            Arc::new(InstanceHandlerState::new(persistence.clone())),
         );
         let empty = instance_http_router(
+            own.clone(),
             Arc::new(InstanceHandlerState::new(Arc::new(
                 InMemoryPersistence::new(),
             ))),
-            own.clone(),
         );
         let foreign_input = send(router.clone(), get("/api/v1/instances/hidden/input")).await;
         let missing_input = send(empty, get("/api/v1/instances/hidden/input")).await;
@@ -1203,8 +1203,8 @@ mod tests {
         // the client's last step and this checkpoint. The client is wrong, not
         // the server, and retrying will never help.
         let persistence = MockPersistence::new().with_instance(make_instance(
-            "done",
             "t1",
+            "done",
             runtara_core::domain::InstanceStatus::Completed,
         ));
 
@@ -1244,8 +1244,8 @@ mod tests {
         // The same fact as a missing checkpoint on the checkpoint route, so it
         // has to get the same status — registration used to answer 400 here.
         let persistence = MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "t1",
+            "inst-1",
             runtara_core::domain::InstanceStatus::Pending,
         ));
 
@@ -1280,8 +1280,8 @@ mod tests {
         // The rewrite touched every error arm; this proves it left the happy
         // path — and its response body — alone.
         let persistence = MockPersistence::new().with_instance(make_instance(
-            "live",
             "t1",
+            "live",
             runtara_core::domain::InstanceStatus::Running,
         ));
 

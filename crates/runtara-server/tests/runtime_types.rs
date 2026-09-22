@@ -55,7 +55,7 @@ fn test_signal_type_to_i32() {
 
 #[test]
 fn test_start_instance_options_builder() {
-    let opts = StartInstanceOptions::new("img-123", "tenant-abc")
+    let opts = StartInstanceOptions::new("tenant-abc", "img-123")
         .with_instance_id("inst-xyz")
         .with_input(serde_json::json!({"key": "value"}))
         .with_timeout(60);

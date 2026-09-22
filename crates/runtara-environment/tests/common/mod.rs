@@ -289,9 +289,9 @@ async fn integration_database(base_url: &str) -> Result<String, String> {
 /// Establish the durable parent rows required by a physical registration.
 /// Registry-only tests deliberately do not exercise the launch dispatcher.
 pub async fn register_container_fixture(
+    tenant: &runtara_core::TenantId,
     pool: &PgPool,
     registry: &runtara_environment::container_registry::ContainerRegistry,
-    tenant: &runtara_core::TenantId,
     info: &runtara_environment::container_registry::ContainerInfo,
 ) -> runtara_environment::error::Result<()> {
     let image_id = format!("registry-fixture-{}", info.instance_id);

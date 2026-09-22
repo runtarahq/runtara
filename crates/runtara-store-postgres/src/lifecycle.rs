@@ -26,8 +26,8 @@ impl LockedCommand {
 }
 
 pub(crate) async fn lock_instance(
-    tx: &mut Transaction<'_, Postgres>,
     tenant_id: &runtara_core::TenantId,
+    tx: &mut Transaction<'_, Postgres>,
     id: &str,
 ) -> Result<InstanceStatus, CoreError> {
     let status: Option<String> = sqlx::query_scalar(

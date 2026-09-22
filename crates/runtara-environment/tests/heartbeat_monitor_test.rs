@@ -86,7 +86,7 @@ async fn get_test_pool() -> PgPool {
 }
 
 /// Create a test image in the database with a unique name
-async fn create_test_image(pool: &PgPool, tenant_id: &str) -> String {
+async fn create_test_image(tenant_id: &str, pool: &PgPool) -> String {
     let image_id = Uuid::new_v4().to_string();
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
@@ -106,9 +106,9 @@ async fn create_test_image(pool: &PgPool, tenant_id: &str) -> String {
 
 /// Create a test instance in Environment's instances table
 async fn create_env_instance(
+    tenant_id: &str,
     pool: &PgPool,
     instance_id: &str,
-    tenant_id: &str,
     _image_id: &str,
     status: &str,
 ) {
@@ -151,7 +151,7 @@ async fn recovery_state(pool: &PgPool, instance_id: &str) -> (String, Option<Str
 }
 
 /// Register a container in container_registry
-async fn register_container(pool: &PgPool, instance_id: &str, tenant_id: &str, _image_id: &str) {
+async fn register_container(tenant_id: &str, pool: &PgPool, instance_id: &str, _image_id: &str) {
     let container_id = format!("runtara_{}", &instance_id[..8.min(instance_id.len())]);
     sqlx::query(
         r#"
@@ -237,8 +237,8 @@ impl MockPersistence {
 
     fn with_running_instance(
         self,
-        instance_id: &str,
         tenant_id: &str,
+        instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Self {
         let record = InstanceRecord {
@@ -735,13 +735,13 @@ async fn a_draining_monitor_does_not_fail_a_stale_instance() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-drain-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
     // Exactly the fixture test_stale_container_no_heartbeat uses: a registered
     // container that never heartbeats, which a scanning monitor WILL fail.
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
 
     let persistence = Arc::new(MockPersistence::new());
     let config = HeartbeatMonitorConfig {
@@ -789,16 +789,16 @@ async fn test_stale_container_no_heartbeat() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-stale-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
     // Create instance and register container but don't send heartbeat
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
 
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
-        &instance_id,
         &tenant_id,
+        &instance_id,
         Utc::now(),
     ));
     let config = HeartbeatMonitorConfig {
@@ -847,17 +847,17 @@ async fn test_stale_container_old_heartbeat() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-old-hb-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
     // Create instance, register container, and record old event in instance_events
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 10).await; // 10 minutes ago
 
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
-        &instance_id,
         &tenant_id,
+        &instance_id,
         Utc::now(),
     ));
     let config = HeartbeatMonitorConfig {
@@ -906,12 +906,12 @@ async fn test_container_with_recent_heartbeat_not_stale() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-fresh-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
     // Create instance, register container, and record recent event in instance_events
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 0).await; // Just now
 
     let persistence = Arc::new(MockPersistence::new());
@@ -968,12 +968,12 @@ async fn test_orphaned_instance_detected() {
     // Create instance as running in Core (mock persistence) but NOT in container_registry
     let started_at = Utc::now() - ChronoDuration::hours(1);
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
-        &instance_id,
         &tenant_id,
+        &instance_id,
         started_at,
     ));
     // The recovery mark is a real UPDATE, so the row has to exist.
-    create_env_instance(&pool, &instance_id, &tenant_id, "", "running").await;
+    create_env_instance(&tenant_id, &pool, &instance_id, "", "running").await;
 
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
@@ -1018,20 +1018,20 @@ async fn test_tracked_instance_not_orphaned() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-tracked-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
     // Create instance in both Core persistence AND container_registry with recent activity
     let started_at = Utc::now() - ChronoDuration::hours(1);
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
-        &instance_id,
         &tenant_id,
+        &instance_id,
         started_at,
     ));
 
     // Register in container_registry and record fresh activity in instance_events
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 0).await; // Fresh activity
 
     let config = HeartbeatMonitorConfig {
@@ -1083,8 +1083,8 @@ async fn test_recent_instance_not_immediately_orphaned() {
     // Create instance as running in Core but started very recently (within timeout)
     let started_at = Utc::now() - ChronoDuration::seconds(30); // 30 seconds ago
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
-        &instance_id,
         &tenant_id,
+        &instance_id,
         started_at,
     ));
 
@@ -1139,13 +1139,13 @@ async fn test_multiple_orphaned_instances() {
 
     let persistence = Arc::new(
         MockPersistence::new()
-            .with_running_instance(&instance1, &tenant_id, old_start)
-            .with_running_instance(&instance2, &tenant_id, old_start)
-            .with_running_instance(&instance3, &tenant_id, recent_start), // Should NOT be orphaned yet
+            .with_running_instance(&tenant_id, &instance1, old_start)
+            .with_running_instance(&tenant_id, &instance2, old_start)
+            .with_running_instance(&tenant_id, &instance3, recent_start), // Should NOT be orphaned yet
     );
     // The recovery mark is a real UPDATE, so the rows have to exist.
     for id in [&instance1, &instance2, &instance3] {
-        create_env_instance(&pool, id, &tenant_id, "", "running").await;
+        create_env_instance(&tenant_id, &pool, id, "", "running").await;
     }
 
     let config = HeartbeatMonitorConfig {
@@ -1325,12 +1325,12 @@ async fn test_checkpoint_event_counts_as_activity() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-checkpoint-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
     // Create instance, register container
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
 
     // Record a progress event (the current schema representation of durable
     // execution progress such as a checkpoint).
@@ -1387,11 +1387,11 @@ async fn test_any_event_type_counts_as_activity() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-anyevent-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
 
     // Record a custom event type (not heartbeat or progress).
     sqlx::query(
@@ -1447,11 +1447,11 @@ async fn test_multiple_events_uses_most_recent() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-multi-events-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
 
     // Record an old event (10 minutes ago)
     record_instance_event(&pool, &instance_id, &tenant_id, 10).await;
@@ -1511,10 +1511,10 @@ async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-woken-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
 
     // The shape of a wake: the container was registered moments ago, but the
     // newest event predates the sleep by hours.
@@ -1581,9 +1581,9 @@ async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
     let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
     let tenant_id = format!("test-tenant-generation-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
 
     let registry = ContainerRegistry::new(pool.clone());
     let insert = |container_id: String| {
@@ -1673,17 +1673,17 @@ async fn test_long_running_instance_with_old_events_is_still_stale() {
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-hung-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    create_env_instance(&tenant_id, &pool, &instance_id, &image_id, "running").await;
     // register_container backdates started_at by 30 minutes.
-    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    register_container(&tenant_id, &pool, &instance_id, &image_id).await;
     record_instance_event(&pool, &instance_id, &tenant_id, 20).await;
 
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
-        &instance_id,
         &tenant_id,
+        &instance_id,
         Utc::now(),
     ));
     let config = HeartbeatMonitorConfig {

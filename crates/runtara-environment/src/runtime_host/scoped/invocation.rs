@@ -144,8 +144,8 @@ impl ScopedInvocationFactory {
         let admission = if io.is_none() && authorized.durable == Some(true) {
             self.durable.as_ref().map(|(lease, timeout)| {
                 Arc::new(InvocationAdmission::new(
-                    self.owner.root.state.persistence.clone(),
                     self.owner.root.tenant_id.clone(),
+                    self.owner.root.state.persistence.clone(),
                     lease.clone(),
                     request.context.path.clone(),
                     *timeout,

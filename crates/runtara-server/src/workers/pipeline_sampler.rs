@@ -545,7 +545,7 @@ pub async fn run(
         if last_slow.elapsed() >= SLOW_TICK {
             last_slow = Instant::now();
             parked = match inputs.runtime.as_ref() {
-                Some(runtime) => count_parked(&runtime.instances, &inputs.tenant_id).await,
+                Some(runtime) => count_parked(&inputs.tenant_id, &runtime.instances).await,
                 None => None,
             };
         }
@@ -556,7 +556,7 @@ pub async fn run(
         // instead, including its queue deadline outcome and the workflows
         // responsible for the current backlog.
         let launches = match inputs.runtime.as_ref() {
-            Some(runtime) => count_launch_telemetry(&runtime.launches, &inputs.tenant_id).await,
+            Some(runtime) => count_launch_telemetry(&inputs.tenant_id, &runtime.launches).await,
             None => None,
         };
 
@@ -665,8 +665,8 @@ const TOP_LAUNCH_WORKFLOWS: i64 = 3;
 /// recovery. This query reads only the small actionable state set; `parked`
 /// remains deliberately separate in [`count_parked`].
 async fn count_launch_telemetry(
-    launches: &runtara_environment::launch_queue::LaunchRepository,
     tenant_id: &str,
+    launches: &runtara_environment::launch_queue::LaunchRepository,
 ) -> Option<LaunchTelemetryReading> {
     let tenant_id = runtara_core::TenantId::new(tenant_id).ok()?;
     let started = Instant::now();
@@ -758,8 +758,8 @@ fn launch_stage_reading_mut<'a>(
 /// the actual figure. That is why this runs on [`SLOW_TICK`] and never on the
 /// fast one.
 async fn count_parked(
-    instances: &runtara_environment::instance_repository::InstanceRepository,
     tenant_id: &str,
+    instances: &runtara_environment::instance_repository::InstanceRepository,
 ) -> Option<u64> {
     let tenant_id = runtara_core::TenantId::new(tenant_id).ok()?;
     let started = Instant::now();

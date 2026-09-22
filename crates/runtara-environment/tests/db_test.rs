@@ -42,10 +42,10 @@ async fn get_pool() -> Option<sqlx::PgPool> {
 /// Production writes this row inside `LaunchRepository::claim_initial`; keeping
 /// a `db` helper alive for test setup alone is what this replaces.
 async fn seed_instance_image(
+    tenant_id: &str,
     pool: &PgPool,
     instance_id: &str,
     image_id: &str,
-    tenant_id: &str,
     env: Option<&std::collections::HashMap<String, String>>,
     timeout_seconds: Option<i64>,
 ) {
@@ -69,7 +69,7 @@ async fn seed_instance_image(
 
 /// Helper to create a test instance using the Persistence trait.
 /// This replaces the old `db::create_instance` function that was removed.
-async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+async fn create_test_instance(tenant_id: &str, pool: &PgPool, instance_id: &str, image_id: &str) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
         .register_instance(
@@ -78,14 +78,14 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         )
         .await
         .expect("Failed to register instance");
-    seed_instance_image(pool, instance_id, image_id, tenant_id, None, None).await;
+    seed_instance_image(tenant_id, pool, instance_id, image_id, None, None).await;
 }
 
 /// Helper to create a test instance with env vars using the Persistence trait.
 async fn create_test_instance_with_env(
+    tenant_id: &str,
     pool: &PgPool,
     instance_id: &str,
-    tenant_id: &str,
     image_id: &str,
     env: Option<&std::collections::HashMap<String, String>>,
 ) {
@@ -97,7 +97,7 @@ async fn create_test_instance_with_env(
         )
         .await
         .expect("Failed to register instance");
-    seed_instance_image(pool, instance_id, image_id, tenant_id, env, None).await;
+    seed_instance_image(tenant_id, pool, instance_id, image_id, env, None).await;
 }
 
 /// Helper to update instance status using the Persistence trait.
@@ -182,9 +182,9 @@ async fn update_test_instance_result(
 
 /// Create a test image with a unique name
 async fn create_test_image(
+    tenant_id: &str,
     pool: &sqlx::PgPool,
     image_id: &str,
-    tenant_id: &str,
 ) -> Result<(), sqlx::Error> {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
@@ -212,12 +212,12 @@ async fn test_create_and_get_instance() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image first (foreign key constraint)
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Create instance
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     // Get instance (use get_instance_full to also get image_id)
     let instance = InstanceRepository::new(pool.clone())
@@ -257,12 +257,12 @@ async fn test_update_instance_status() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Create instance
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     // Update to running
     update_test_instance_status(tenant_id, &pool, &instance_id, "running", None).await;
@@ -325,12 +325,12 @@ async fn test_update_instance_result() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Create instance
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     // Update with success result
     let output = serde_json::json!({"result": "success"});
@@ -383,12 +383,12 @@ async fn test_update_instance_result_with_error() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Create instance
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     // Update with error result (include stderr for debugging)
     update_test_instance_result(
@@ -441,14 +441,14 @@ async fn test_list_instances() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Create multiple instances
     let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
     for id in &ids {
-        create_test_instance(&pool, id, tenant_id, &image_id).await;
+        create_test_instance(tenant_id, &pool, id, &image_id).await;
     }
 
     // Mark one as completed
@@ -514,7 +514,7 @@ async fn test_list_instances_by_multiple_statuses() {
     let tenant_id = tenant_id.as_str();
     let image_id = Uuid::new_v4().to_string();
 
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
@@ -522,7 +522,7 @@ async fn test_list_instances_by_multiple_statuses() {
     // comes back short.
     let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
     for id in &ids {
-        create_test_instance(&pool, id, tenant_id, &image_id).await;
+        create_test_instance(tenant_id, &pool, id, &image_id).await;
     }
     update_test_instance_status(tenant_id, &pool, &ids[0], "failed", None).await;
     update_test_instance_status(tenant_id, &pool, &ids[1], "cancelled", None).await;
@@ -607,7 +607,7 @@ async fn test_create_instance_with_env() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image first
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
@@ -616,7 +616,7 @@ async fn test_create_instance_with_env() {
     env.insert("API_URL".to_string(), "https://api.example.com".to_string());
     env.insert("DEBUG".to_string(), "true".to_string());
 
-    create_test_instance_with_env(&pool, &instance_id, tenant_id, &image_id, Some(&env)).await;
+    create_test_instance_with_env(tenant_id, &pool, &instance_id, &image_id, Some(&env)).await;
 
     // Retrieve and verify env vars
     let result = InstanceRepository::new(pool.clone())
@@ -661,12 +661,12 @@ async fn test_create_instance_without_env() {
     let image_id = Uuid::new_v4().to_string();
 
     // Create test image first
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Create instance without env vars
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     // Retrieve and verify empty env
     let result = InstanceRepository::new(pool.clone())
@@ -725,7 +725,7 @@ async fn test_instance_timeout_seconds_round_trips() {
     let tenant_id = "test-tenant-timeout";
     let image_id = Uuid::new_v4().to_string();
 
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
@@ -739,7 +739,7 @@ async fn test_instance_timeout_seconds_round_trips() {
         .expect("Failed to register instance");
 
     // Persist a per-instance timeout larger than the legacy hardcoded 300s.
-    seed_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800)).await;
+    seed_instance_image(tenant_id, &pool, &instance_id, &image_id, None, Some(1800)).await;
 
     let timeout = InstanceRepository::new(pool.clone())
         .image_binding(
@@ -773,12 +773,12 @@ async fn test_instance_timeout_seconds_absent_is_none() {
     let tenant_id = "test-tenant-timeout-none";
     let image_id = Uuid::new_v4().to_string();
 
-    create_test_image(&pool, &image_id, tenant_id)
+    create_test_image(tenant_id, &pool, &image_id)
         .await
         .expect("Failed to create test image");
 
     // Associate without a timeout (e.g. rows predating the column).
-    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
+    create_test_instance(tenant_id, &pool, &instance_id, &image_id).await;
 
     let timeout = InstanceRepository::new(pool.clone())
         .image_binding(

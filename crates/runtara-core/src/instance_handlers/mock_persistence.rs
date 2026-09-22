@@ -104,8 +104,8 @@ impl MockPersistence {
 /// Build an `InstanceRecord` with plausible defaults for everything the
 /// caller does not care about.
 pub fn make_instance(
-    instance_id: &str,
     tenant_id: &str,
+    instance_id: &str,
     status: CoreInstanceStatus,
 ) -> InstanceRecord {
     InstanceRecord {

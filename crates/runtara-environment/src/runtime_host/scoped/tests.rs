@@ -47,8 +47,8 @@ impl Fixture {
             .unwrap();
         let owner = Arc::new(ScopedRuntimeOwner::new(Arc::new(
             PersistenceRuntimeHost::from_persistence(
-                persistence.clone(),
                 runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+                persistence.clone(),
                 id.clone(),
                 true,
             )

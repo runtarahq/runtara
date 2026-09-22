@@ -32,8 +32,8 @@ use crate::persistence::{EventRecord, Persistence};
 /// Includes pending signal information so instance can react to cancel/pause.
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_checkpoint(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     request: CheckpointRequest,
 ) -> Result<CheckpointResponse> {
     debug!(
@@ -42,7 +42,7 @@ pub async fn handle_checkpoint(
     );
 
     // 1. Validate instance exists and is running
-    ensure_instance_running(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
+    ensure_instance_running(tenant_id, state.persistence.as_ref(), &request.instance_id).await?;
 
     // 2. Check if checkpoint already exists
     if let Some(existing) = state
@@ -58,7 +58,7 @@ pub async fn handle_checkpoint(
 
         // Check for pending signal even when returning existing checkpoint
         let pending_signal =
-            get_pending_signal(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
+            get_pending_signal(tenant_id, state.persistence.as_ref(), &request.instance_id).await?;
         let custom_signal = state
             .persistence
             .get_custom_signal(tenant_id, &request.instance_id, &request.checkpoint_id)
@@ -87,8 +87,8 @@ pub async fn handle_checkpoint(
             found: false,
             state: vec![],
             pending_signal: get_pending_signal(
-                state.persistence.as_ref(),
                 tenant_id,
+                state.persistence.as_ref(),
                 &request.instance_id,
             )
             .await?,
@@ -114,7 +114,7 @@ pub async fn handle_checkpoint(
 
     // 5. Check for pending signals to include in response
     let pending_signal =
-        get_pending_signal(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
+        get_pending_signal(tenant_id, state.persistence.as_ref(), &request.instance_id).await?;
     let custom_signal = state
         .persistence
         .get_custom_signal(tenant_id, &request.instance_id, &request.checkpoint_id)
@@ -148,8 +148,8 @@ pub async fn handle_checkpoint(
 /// Validate before writing so a missing or terminal instance is reported as a
 /// caller error rather than an implementation-specific storage failure.
 async fn ensure_instance_running(
-    persistence: &dyn Persistence,
     tenant_id: &TenantId,
+    persistence: &dyn Persistence,
     instance_id: &str,
 ) -> std::result::Result<(), CoreError> {
     match persistence
@@ -170,8 +170,8 @@ async fn ensure_instance_running(
 
 /// Helper to get the pending instance-wide signal for an instance.
 async fn get_pending_signal(
-    persistence: &dyn Persistence,
     tenant_id: &TenantId,
+    persistence: &dyn Persistence,
     instance_id: &str,
 ) -> std::result::Result<Option<Signal>, CoreError> {
     Ok(persistence
@@ -190,8 +190,8 @@ async fn get_pending_signal(
 /// Returns the checkpoint state if found, or empty if not found.
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_get_checkpoint(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     request: GetCheckpointRequest,
 ) -> Result<GetCheckpointResponse> {
     debug!("Looking up checkpoint (read-only)");
@@ -257,8 +257,8 @@ pub const SLEEP_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 ///   without it any sleep longer than the heartbeat window is reaped as failed.
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_sleep(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     request: SleepRequest,
 ) -> Result<SleepResponse> {
     debug!(
@@ -273,7 +273,7 @@ pub async fn handle_sleep(
     // failure — a retryable-looking error for a caller mistake. The check is
     // unconditional: sleeping out the clock on behalf of an instance that
     // isn't running is just as wrong when there is no checkpoint to save.
-    ensure_instance_running(state.persistence.as_ref(), tenant_id, &request.instance_id).await?;
+    ensure_instance_running(tenant_id, state.persistence.as_ref(), &request.instance_id).await?;
 
     // 2. Save checkpoint before sleeping (for durability)
     if !request.checkpoint_id.is_empty() {
@@ -318,10 +318,10 @@ pub async fn handle_sleep(
 
         // Proof of life for the staleness reaper, which judges liveness from
         // `instance_events` and counts any event.
-        record_sleep_heartbeat(state, tenant_id, &request.instance_id).await?;
+        record_sleep_heartbeat(tenant_id, state, &request.instance_id).await?;
 
         if let Some(signal) =
-            get_pending_signal(state.persistence.as_ref(), tenant_id, &request.instance_id)
+            get_pending_signal(tenant_id, state.persistence.as_ref(), &request.instance_id)
                 .await?
                 .filter(interrupts_sleep)
         {
@@ -350,8 +350,8 @@ fn interrupts_sleep(signal: &Signal) -> bool {
 /// the sleep itself is still perfectly valid. The worst case is the instance
 /// looking stale, which is exactly the pre-existing behaviour.
 async fn record_sleep_heartbeat(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     instance_id: &str,
 ) -> Result<()> {
     let event = EventRecord {
@@ -396,7 +396,7 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, &tenant_scope, request).await;
+        let result = handle_checkpoint(&tenant_scope, &state, request).await;
         assert!(result.is_err());
     }
 
@@ -404,8 +404,8 @@ mod tests {
     async fn test_checkpoint_instance_not_running() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Completed,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -416,7 +416,7 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, &tenant_scope, request).await;
+        let result = handle_checkpoint(&tenant_scope, &state, request).await;
         assert!(result.is_err());
     }
 
@@ -424,8 +424,8 @@ mod tests {
     async fn test_checkpoint_new_saves_state() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -436,7 +436,7 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, &tenant_scope, request)
+        let result = handle_checkpoint(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(!result.found); // New checkpoint, not found
@@ -448,8 +448,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_checkpoint(make_checkpoint("inst-1", "cp-1", b"existing state")),
@@ -462,7 +462,7 @@ mod tests {
             state: b"new state".to_vec(), // This should be ignored
         };
 
-        let result = handle_checkpoint(&state, &tenant_scope, request)
+        let result = handle_checkpoint(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.found);
@@ -475,8 +475,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
@@ -489,7 +489,7 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, &tenant_scope, request)
+        let result = handle_checkpoint(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.pending_signal.is_some());
@@ -510,8 +510,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_custom_signal(custom_signal),
@@ -524,7 +524,7 @@ mod tests {
             state: b"test state".to_vec(),
         };
 
-        let result = handle_checkpoint(&state, &tenant_scope, request)
+        let result = handle_checkpoint(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.custom_signal.is_some());
@@ -547,7 +547,7 @@ mod tests {
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
         };
-        let Err(error) = handle_sleep(&state, &tenant_scope, request).await else {
+        let Err(error) = handle_sleep(&tenant_scope, &state, request).await else {
             panic!("an unknown instance must be rejected, not slept on");
         };
 
@@ -576,7 +576,7 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new());
         let state = InstanceHandlerState::new(persistence);
 
-        let Err(error) = handle_sleep(&state, &tenant_scope, sleep_request(30_000)).await else {
+        let Err(error) = handle_sleep(&tenant_scope, &state, sleep_request(30_000)).await else {
             panic!("an unknown instance must be rejected even with no checkpoint to save");
         };
 
@@ -595,13 +595,13 @@ mod tests {
     async fn test_sleep_instance_not_running() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Cancelled,
         )));
         let state = InstanceHandlerState::new(persistence);
 
-        let Err(error) = handle_sleep(&state, &tenant_scope, sleep_request(30_000)).await else {
+        let Err(error) = handle_sleep(&tenant_scope, &state, sleep_request(30_000)).await else {
             panic!("a terminal instance must be rejected");
         };
 
@@ -642,8 +642,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
@@ -651,7 +651,7 @@ mod tests {
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
-        let response = handle_sleep(&state, &tenant_scope, sleep_request(30_000))
+        let response = handle_sleep(&tenant_scope, &state, sleep_request(30_000))
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -674,15 +674,15 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Shutdown)),
         );
         let state = InstanceHandlerState::new(persistence);
 
-        let response = handle_sleep(&state, &tenant_scope, sleep_request(30_000))
+        let response = handle_sleep(&tenant_scope, &state, sleep_request(30_000))
             .await
             .unwrap();
         let signal = response
@@ -699,8 +699,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Pause)),
@@ -708,7 +708,7 @@ mod tests {
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
-        let response = handle_sleep(&state, &tenant_scope, sleep_request(5_000))
+        let response = handle_sleep(&tenant_scope, &state, sleep_request(5_000))
             .await
             .unwrap();
 
@@ -726,14 +726,14 @@ mod tests {
     async fn test_sleep_without_signal_runs_full_duration() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
-        let response = handle_sleep(&state, &tenant_scope, sleep_request(5_000))
+        let response = handle_sleep(&tenant_scope, &state, sleep_request(5_000))
             .await
             .unwrap();
 
@@ -749,13 +749,13 @@ mod tests {
     async fn test_long_sleep_emits_heartbeats() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
 
-        handle_sleep(&state, &tenant_scope, sleep_request(5_000))
+        handle_sleep(&tenant_scope, &state, sleep_request(5_000))
             .await
             .unwrap();
 
@@ -773,8 +773,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
@@ -782,7 +782,7 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let started = Instant::now();
-        let response = handle_sleep(&state, &tenant_scope, sleep_request(25))
+        let response = handle_sleep(&tenant_scope, &state, sleep_request(25))
             .await
             .unwrap();
 
@@ -802,8 +802,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Running,
                 ))
                 .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
@@ -816,7 +816,7 @@ mod tests {
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
         };
-        let response = handle_sleep(&state, &tenant_scope, request).await.unwrap();
+        let response = handle_sleep(&tenant_scope, &state, request).await.unwrap();
 
         assert!(response.pending_signal.is_some());
         let saved = persistence

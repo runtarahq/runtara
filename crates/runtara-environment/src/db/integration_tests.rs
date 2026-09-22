@@ -64,8 +64,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
         options.offset = page * 4;
         assert_eq!(
             count_instances(
-                &pool,
                 &runtara_core::TenantId::new(&tenant).unwrap(),
+                &pool,
                 &options
             )
             .await
@@ -74,8 +74,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
         );
         ids.extend(
             list_instances(
-                &pool,
                 &runtara_core::TenantId::new(&tenant).unwrap(),
+                &pool,
                 &options,
             )
             .await
@@ -92,8 +92,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     options.offset = 100;
     assert!(
         list_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -102,8 +102,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     );
     assert_eq!(
         count_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -115,8 +115,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     options.run_label = Some("Order/12 [done] (v1.2)".into());
     assert_eq!(
         count_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -126,8 +126,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     options.statuses = Some(vec!["failed".into()]);
     assert_eq!(
         count_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -138,8 +138,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     options.created_after = Some(epoch(1_001));
     assert_eq!(
         count_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -152,8 +152,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
         options.search = Some(term.into());
         assert_eq!(
             count_instances(
-                &pool,
                 &runtara_core::TenantId::new(&tenant).unwrap(),
+                &pool,
                 &options
             )
             .await
@@ -178,8 +178,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     options.image_name_prefix = Some("invoice:".into());
     assert_eq!(
         count_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -188,8 +188,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     );
     assert_eq!(
         list_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -201,8 +201,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     options.search_workflow_ids = vec!["invoice".into()];
     assert_eq!(
         count_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -211,8 +211,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     );
     assert_eq!(
         list_instances(
-            &pool,
             &runtara_core::TenantId::new(&tenant).unwrap(),
+            &pool,
             &options
         )
         .await
@@ -259,8 +259,8 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
 /// production wants and exactly what a bucketing test cannot use. Writing the
 /// three columns directly is the honest way to get a controlled fixture.
 async fn seed_terminal_instance(
-    pool: &PgPool,
     tenant_id: &str,
+    pool: &PgPool,
     status: &str,
     started_at: chrono::DateTime<chrono::Utc>,
     finished_at: chrono::DateTime<chrono::Utc>,
@@ -295,7 +295,7 @@ async fn seed_terminal_instance(
     instance_id
 }
 
-async fn delete_tenant_instances(pool: &PgPool, tenant_id: &str) {
+async fn delete_tenant_instances(tenant_id: &str, pool: &PgPool) {
     sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
@@ -318,8 +318,8 @@ async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
     let start = epoch(0);
     let end = epoch(3_600);
     seed_terminal_instance(
-        &pool,
         &tenant_id,
+        &pool,
         "completed",
         epoch(0),
         epoch(10),
@@ -327,18 +327,18 @@ async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
     )
     .await;
     seed_terminal_instance(
-        &pool,
         &tenant_id,
+        &pool,
         "completed",
         epoch(100),
         epoch(130),
         Some(2_097_152),
     )
     .await;
-    seed_terminal_instance(&pool, &tenant_id, "failed", epoch(120), epoch(150), None).await;
+    seed_terminal_instance(&tenant_id, &pool, "failed", epoch(120), epoch(150), None).await;
     seed_terminal_instance(
-        &pool,
         &tenant_id,
+        &pool,
         "cancelled",
         epoch(3_500),
         epoch(3_580),
@@ -347,8 +347,8 @@ async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
     .await;
 
     let buckets = get_tenant_metrics(
-        &pool,
         &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        &pool,
         start,
         end,
         60,
@@ -380,7 +380,7 @@ async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
     assert_eq!(at_minute(30).invocation_count, 0);
     assert_eq!(at_minute(30).success_count, 0);
 
-    delete_tenant_instances(&pool, &tenant_id).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
 }
 
 #[tokio::test]
@@ -389,8 +389,8 @@ async fn test_tenant_metrics_empty_buckets_carry_null_aggregates_not_zero() {
     let tenant_id = format!("tenant-{}", Uuid::new_v4());
 
     seed_terminal_instance(
-        &pool,
         &tenant_id,
+        &pool,
         "completed",
         epoch(0),
         epoch(30),
@@ -399,8 +399,8 @@ async fn test_tenant_metrics_empty_buckets_carry_null_aggregates_not_zero() {
     .await;
 
     let buckets = get_tenant_metrics(
-        &pool,
         &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        &pool,
         epoch(0),
         epoch(600),
         60,
@@ -428,7 +428,7 @@ async fn test_tenant_metrics_empty_buckets_carry_null_aggregates_not_zero() {
     );
     assert!(empty.max_memory_bytes.is_none());
 
-    delete_tenant_instances(&pool, &tenant_id).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
 }
 
 #[tokio::test]
@@ -436,10 +436,10 @@ async fn test_tenant_metrics_hourly_width_aligns_to_hour_boundaries() {
     let pool = crate::test_support::pool().await;
     let tenant_id = format!("tenant-{}", Uuid::new_v4());
 
-    seed_terminal_instance(&pool, &tenant_id, "completed", epoch(100), epoch(200), None).await;
+    seed_terminal_instance(&tenant_id, &pool, "completed", epoch(100), epoch(200), None).await;
     seed_terminal_instance(
-        &pool,
         &tenant_id,
+        &pool,
         "completed",
         epoch(7_300),
         epoch(7_400),
@@ -448,8 +448,8 @@ async fn test_tenant_metrics_hourly_width_aligns_to_hour_boundaries() {
     .await;
 
     let buckets = get_tenant_metrics(
-        &pool,
         &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        &pool,
         epoch(0),
         epoch(10_800),
         3_600,
@@ -471,7 +471,7 @@ async fn test_tenant_metrics_hourly_width_aligns_to_hour_boundaries() {
     assert_eq!(buckets[1].invocation_count, 0);
     assert_eq!(buckets[2].invocation_count, 1);
 
-    delete_tenant_instances(&pool, &tenant_id).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
 }
 
 #[tokio::test]
@@ -526,8 +526,8 @@ async fn test_tenant_metrics_daily_buckets_stay_utc_under_a_shifted_session_time
 
     // And the aggregation itself keeps UTC-aligned days.
     seed_terminal_instance(
-        &pool,
         &tenant_id,
+        &pool,
         "completed",
         epoch(day),
         epoch(day + 60),
@@ -536,8 +536,8 @@ async fn test_tenant_metrics_daily_buckets_stay_utc_under_a_shifted_session_time
     .await;
 
     let buckets = get_tenant_metrics(
-        &pool,
         &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        &pool,
         epoch(0),
         epoch(3 * day),
         86_400,
@@ -558,7 +558,7 @@ async fn test_tenant_metrics_daily_buckets_stay_utc_under_a_shifted_session_time
         "the run should sit in the UTC day that contains it"
     );
 
-    delete_tenant_instances(&pool, &tenant_id).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
 }
 
 #[tokio::test]
@@ -568,11 +568,11 @@ async fn test_tenant_metrics_counts_a_boundary_crossing_run_once() {
 
     // Starts in the 0s bucket, finishes in the 120s one. Aggregation keys on
     // finished_at, so it belongs to the later bucket and to only that bucket.
-    seed_terminal_instance(&pool, &tenant_id, "completed", epoch(30), epoch(150), None).await;
+    seed_terminal_instance(&tenant_id, &pool, "completed", epoch(30), epoch(150), None).await;
 
     let buckets = get_tenant_metrics(
-        &pool,
         &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        &pool,
         epoch(0),
         epoch(600),
         60,
@@ -590,7 +590,7 @@ async fn test_tenant_metrics_counts_a_boundary_crossing_run_once() {
     // Duration still spans the whole run, not the part inside the bucket.
     assert_eq!(buckets[2].avg_duration_ms, Some(120_000.0));
 
-    delete_tenant_instances(&pool, &tenant_id).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
 }
 
 #[tokio::test]
@@ -602,8 +602,8 @@ async fn test_tenant_metrics_totals_do_not_change_with_bucket_width() {
     let mut expected_total = 0i64;
     for offset in [7i64, 61, 199, 3_607, 7_411, 43_205, 80_000, 86_399] {
         seed_terminal_instance(
-            &pool,
             &tenant_id,
+            &pool,
             if offset % 3 == 0 {
                 "failed"
             } else {
@@ -622,8 +622,8 @@ async fn test_tenant_metrics_totals_do_not_change_with_bucket_width() {
     // ever key differently, runs silently vanish into unmatched buckets.
     for width in [60u32, 360, 1_440, 3_600, 7_200, 21_600, 86_400] {
         let buckets = get_tenant_metrics(
-            &pool,
             &runtara_core::TenantId::new(&tenant_id).unwrap(),
+            &pool,
             epoch(0),
             epoch(86_400),
             width,
@@ -647,7 +647,7 @@ async fn test_tenant_metrics_totals_do_not_change_with_bucket_width() {
         );
     }
 
-    delete_tenant_instances(&pool, &tenant_id).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
 }
 
 #[tokio::test]
@@ -656,14 +656,14 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
     let tenant_id = format!("tenant-{}", Uuid::new_v4());
     let other_tenant = format!("tenant-{}", Uuid::new_v4());
 
-    seed_terminal_instance(&pool, &tenant_id, "completed", epoch(0), epoch(30), None).await;
-    seed_terminal_instance(&pool, &other_tenant, "completed", epoch(0), epoch(30), None).await;
+    seed_terminal_instance(&tenant_id, &pool, "completed", epoch(0), epoch(30), None).await;
+    seed_terminal_instance(&other_tenant, &pool, "completed", epoch(0), epoch(30), None).await;
     // Running: no finished_at, so it is invisible to the aggregation by design.
-    seed_terminal_instance(&pool, &tenant_id, "running", epoch(0), epoch(30), None).await;
+    seed_terminal_instance(&tenant_id, &pool, "running", epoch(0), epoch(30), None).await;
 
     let buckets = get_tenant_metrics(
-        &pool,
         &runtara_core::TenantId::new(&tenant_id).unwrap(),
+        &pool,
         epoch(0),
         epoch(600),
         60,
@@ -677,8 +677,8 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
         "aggregation crossed a tenant or counted a live run"
     );
 
-    delete_tenant_instances(&pool, &tenant_id).await;
-    delete_tenant_instances(&pool, &other_tenant).await;
+    delete_tenant_instances(&tenant_id, &pool).await;
+    delete_tenant_instances(&other_tenant, &pool).await;
 }
 
 // ============================================================================
@@ -699,7 +699,7 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
 /// exactly the property at issue, and it is not a given: a partial index
 /// applies only where the planner can prove the query's predicate implies the
 /// index's.
-async fn explain_parked_count(pool: &PgPool, sql: &str, tenant_id: &str) -> String {
+async fn explain_parked_count(tenant_id: &str, pool: &PgPool, sql: &str) -> String {
     let mut tx = pool.begin().await.expect("begin");
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *tx)
@@ -761,7 +761,7 @@ async fn the_parked_count_reaches_its_partial_index() {
     let tenant_id = seed_parked_across_tenants(&pool, &tag).await;
 
     let parked = crate::core_types::status_name(runtara_core::domain::InstanceStatus::Suspended);
-    let plan = explain_parked_count(&pool, &super::parked_count_sql(parked), &tenant_id).await;
+    let plan = explain_parked_count(&tenant_id, &pool, &super::parked_count_sql(parked)).await;
     assert!(
         plan.contains("idx_instances_suspended_tenant"),
         "the parked count must be served by migration 025's partial index, \

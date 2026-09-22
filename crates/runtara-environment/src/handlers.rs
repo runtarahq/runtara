@@ -359,9 +359,9 @@ impl std::fmt::Display for StartRejection {
 }
 
 async fn existing_start_response(
+    tenant_id: &str,
     state: &EnvironmentHandlerState,
     instance_id: &str,
-    tenant_id: &str,
     image_id: &str,
 ) -> Result<Option<StartInstanceResponse>> {
     let tenant_scope = runtara_core::TenantId::new(tenant_id)?;
@@ -477,8 +477,8 @@ pub fn enrich_input_for_storage(
     instance_id = ?request.instance_id,
 ))]
 pub async fn handle_start_instance(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     request: StartInstanceRequest,
 ) -> Result<StartInstanceResponse> {
     info!(
@@ -564,7 +564,7 @@ pub async fn handle_start_instance(
         // existing row: it was accepted when the artifact was present, and
         // losing the file afterwards must not turn a duplicate into an error.
         if let Some(response) =
-            existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
+            existing_start_response(&request.tenant_id, state, &instance_id, &request.image_id)
                 .await?
         {
             return Ok(response);
@@ -636,9 +636,9 @@ pub async fn handle_start_instance(
         .filter(|workflow_id| !workflow_id.is_empty())
         .cloned();
     let launch = EnqueueRequest::immediate(
+        request_tenant_id.clone(),
         uuid::Uuid::new_v4().to_string(),
         instance_id.clone(),
-        request_tenant_id.clone(),
         request_image_id.clone(),
         LaunchKind::Start,
         DEFAULT_LAUNCH_QUEUE_TIMEOUT,
@@ -679,7 +679,7 @@ pub async fn handle_start_instance(
             // The existing active generation is the idempotency winner. Keep
             // the older response contract while never enqueueing a second run.
             if let Some(response) =
-                existing_start_response(state, &instance_id, &request_tenant_id, &request_image_id)
+                existing_start_response(&request_tenant_id, state, &instance_id, &request_image_id)
                     .await?
             {
                 Ok(response)
@@ -740,8 +740,8 @@ pub struct StopInstanceResponse {
     reason = %request.reason,
 ))]
 pub async fn handle_stop_instance(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     request: StopInstanceRequest,
 ) -> Result<StopInstanceResponse> {
     let Some(abort_at) = tokio::time::Instant::now()
@@ -820,8 +820,8 @@ pub async fn handle_stop_instance(
     }
 
     let signal = handle_send_signal(
-        state,
         tenant_id,
+        state,
         &request.instance_id,
         "cancel",
         Some(request.reason.as_bytes()),
@@ -862,7 +862,7 @@ pub async fn handle_stop_instance(
     {
         Ok(Some(c)) => c,
         Ok(None) => {
-            return stop_after_handle_retired(state, tenant_id, &request).await;
+            return stop_after_handle_retired(tenant_id, state, &request).await;
         }
         Err(e) => {
             error!(error = %e, "Failed to look up container");
@@ -895,7 +895,7 @@ pub async fn handle_stop_instance(
                     .request_abort(tenant_id, &handle, abort_at)
                     .await?
                 else {
-                    return stop_after_handle_retired(state, tenant_id, &request).await;
+                    return stop_after_handle_retired(tenant_id, state, &request).await;
                 };
                 loop {
                     if container_registry
@@ -944,16 +944,16 @@ pub async fn handle_stop_instance(
 }
 
 async fn stop_after_handle_retired(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     request: &StopInstanceRequest,
 ) -> Result<StopInstanceResponse> {
     // Completion/parking can retire the handle after the initial signal. The
     // existing idempotent signal path also resolves parked cancellation. A
     // still-running foreign/missing handle cannot promise grace enforcement.
     handle_send_signal(
-        state,
         tenant_id,
+        state,
         &request.instance_id,
         "cancel",
         Some(request.reason.as_bytes()),
@@ -992,8 +992,8 @@ pub struct ResumeInstanceResponse {
 /// Handle resume instance request.
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
 pub async fn handle_resume_instance(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     request: ResumeInstanceRequest,
 ) -> Result<ResumeInstanceResponse> {
     info!(instance_id = %request.instance_id, "Resume instance request received");
@@ -1055,9 +1055,9 @@ pub async fn handle_resume_instance(
             .notify_released(&released, "reconciled");
     }
     let enqueue = EnqueueRequest::immediate(
+        tenant_id.as_str(),
         uuid::Uuid::new_v4().to_string(),
         request.instance_id.clone(),
-        tenant_id.as_str(),
         image_id,
         LaunchKind::Resume,
         DEFAULT_LAUNCH_QUEUE_TIMEOUT,
@@ -1329,8 +1329,8 @@ async fn record_exit_diagnostics(
     // always has a status to look at.
 
     let observed_status = match crate::metrics::record_resources_returning_status(
-        pool,
         &tenant_id,
+        pool,
         instance_id,
         metrics.memory_peak_bytes,
         metrics.cpu_usage_usec,
@@ -1365,7 +1365,7 @@ async fn record_exit_diagnostics(
     // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
     if let Some(ref stderr_content) = stderr {
         if let Err(e) =
-            crate::metrics::record_instance_stderr(pool, &tenant_id, instance_id, stderr_content)
+            crate::metrics::record_instance_stderr(&tenant_id, pool, instance_id, stderr_content)
                 .await
         {
             warn!(
@@ -1878,8 +1878,8 @@ pub enum SendSignalOutcome {
 /// through `Persistence` and never arrives here — which is how this handler
 /// came to disagree with the rest of the crate about what a signal type is.
 pub async fn handle_send_signal(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     instance_id: &str,
     signal_type: &str,
     payload: Option<&[u8]>,
@@ -1954,8 +1954,8 @@ pub enum SendCustomSignalOutcome {
 
 /// Send a custom (workflow-defined) signal addressed to one checkpoint.
 pub async fn handle_send_custom_signal(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     instance_id: &str,
     checkpoint_id: &str,
     payload: Option<&[u8]>,
@@ -2073,8 +2073,8 @@ pub struct ListCheckpointsResult {
 
 /// List an instance's checkpoints.
 pub async fn handle_list_checkpoints(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     instance_id: &str,
     params: &ListCheckpointsParams,
 ) -> Result<ListCheckpointsResult> {
@@ -2146,8 +2146,8 @@ pub struct ListEventsResult {
 
 /// List an instance's events.
 pub async fn handle_list_events(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     instance_id: &str,
     filter: &runtara_core::persistence::ListEventsFilter,
     limit: i64,
@@ -2226,8 +2226,8 @@ pub struct ListStepSummariesResult {
 
 /// List an instance's per-step summaries.
 pub async fn handle_list_step_summaries(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     instance_id: &str,
     filter: &runtara_core::persistence::ListPairedRecordsFilter,
     limit: i64,
@@ -2303,8 +2303,8 @@ pub struct ScopeInfo {
 /// chain is more useful than none, and a truncated ancestry is what the caller
 /// would have to handle anyway for an instance still running.
 pub async fn handle_get_scope_ancestors(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     instance_id: &str,
     scope_id: &str,
 ) -> Result<Vec<ScopeInfo>> {
@@ -2468,8 +2468,8 @@ pub struct MetricsBucket {
 /// in flight neither count against it nor inflate it; a bucket with nothing
 /// terminal yet reports `None` rather than 0%.
 pub async fn handle_get_tenant_metrics(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     options: &TenantMetricsOptions,
 ) -> Result<Vec<MetricsBucket>> {
     if options.tenant_id != tenant_id.as_str() {
@@ -2496,8 +2496,8 @@ pub async fn handle_get_tenant_metrics(
     }
 
     let bucket_rows = db::get_tenant_metrics(
-        &state.pool,
         tenant_id,
+        &state.pool,
         options.start_time,
         options.end_time,
         options.bucket_seconds,
@@ -2574,8 +2574,8 @@ impl std::error::Error for StoreImageError {}
 /// file and renamed only after it is complete, so a launch never observes a
 /// partially written artifact.
 pub async fn handle_store_image(
-    state: &EnvironmentHandlerState,
     tenant_id: &runtara_core::TenantId,
+    state: &EnvironmentHandlerState,
     params: StoreImageParams,
     binary: &[u8],
 ) -> std::result::Result<String, StoreImageError> {
@@ -2589,7 +2589,7 @@ pub async fn handle_store_image(
     let image_registry = ImageRegistry::new(state.pool.clone());
     let candidate_image_id = uuid::Uuid::new_v4().to_string();
     let candidate_binary_path =
-        crate::artifact_paths::image_dir(&state.data_dir, tenant_id.as_str(), &candidate_image_id)
+        crate::artifact_paths::image_dir(tenant_id.as_str(), &state.data_dir, &candidate_image_id)
             .join("binary");
     let name_claim = image_registry
         .claim_name(
@@ -2603,7 +2603,7 @@ pub async fn handle_store_image(
     let image_id = name_claim.image_id;
 
     let images_dir =
-        crate::artifact_paths::image_dir(&state.data_dir, tenant_id.as_str(), &image_id);
+        crate::artifact_paths::image_dir(tenant_id.as_str(), &state.data_dir, &image_id);
     let binary_path = images_dir.join("binary");
 
     if let Err(e) = std::fs::create_dir_all(&images_dir) {
@@ -2832,8 +2832,8 @@ mod tests {
                 .expect("mark running");
 
             let outcome = handle_send_signal(
-                &state,
                 &runtara_core::TenantId::new("tenant-1").unwrap(),
+                &state,
                 &instance_id,
                 name,
                 None,
@@ -2882,8 +2882,8 @@ mod tests {
             .expect("mark running");
 
         let outcome = handle_send_signal(
-            &state,
             &runtara_core::TenantId::new("tenant-1").unwrap(),
+            &state,
             "signal-bogus",
             "detonate",
             None,
@@ -2950,8 +2950,8 @@ mod tests {
             .expect("insert event");
 
         let page = handle_list_events(
-            &state,
             &runtara_core::TenantId::new("tenant-1").unwrap(),
+            &state,
             "precision-1",
             &ListEventsFilter::default(),
             10,
@@ -3010,8 +3010,8 @@ mod tests {
             .expect("insert event");
 
         let page = handle_list_events(
-            &state,
             &runtara_core::TenantId::new("tenant-1").unwrap(),
+            &state,
             "opaque-1",
             &ListEventsFilter::default(),
             10,

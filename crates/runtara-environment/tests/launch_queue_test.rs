@@ -84,9 +84,9 @@ fn request(
     queue_timeout: Duration,
 ) -> EnqueueRequest {
     EnqueueRequest::immediate(
+        &fixture.tenant_id,
         launch_id,
         &fixture.instance_id,
-        &fixture.tenant_id,
         &fixture.image_id,
         kind,
         queue_timeout,
@@ -1283,9 +1283,9 @@ async fn enqueue_requires_the_bound_image_and_matching_pre_launch_state() {
         .to_string();
 
     let wrong_image_request = EnqueueRequest::immediate(
+        &fixture.tenant_id,
         Uuid::new_v4().to_string(),
         &fixture.instance_id,
-        &fixture.tenant_id,
         wrong_image,
         LaunchKind::Start,
         Duration::from_secs(60),
@@ -1330,9 +1330,9 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let launch_id = Uuid::new_v4().to_string();
     let request = InitialLaunchRequest {
         launch: EnqueueRequest::immediate(
+            &tenant_id,
             &launch_id,
             &instance_id,
-            &tenant_id,
             &image_id,
             LaunchKind::Start,
             Duration::from_secs(60),
@@ -1390,9 +1390,9 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let invalid_instance = Uuid::new_v4().to_string();
     let invalid = InitialLaunchRequest {
         launch: EnqueueRequest::immediate(
+            &tenant_id,
             Uuid::new_v4().to_string(),
             &invalid_instance,
-            &tenant_id,
             "missing-image",
             LaunchKind::Start,
             Duration::from_secs(60),
@@ -1697,8 +1697,8 @@ async fn peer_stop_waits_for_physical_owner_to_arm_emergency_grace() {
     let stop_tenant = runtara_core::TenantId::new(&fixture.tenant_id).unwrap();
     let stop = tokio::spawn(async move {
         handle_stop_instance(
-            &peer,
             &stop_tenant,
+            &peer,
             StopInstanceRequest {
                 instance_id,
                 reason: "peer Stop".into(),
@@ -1932,8 +1932,8 @@ async fn peer_stop_does_not_claim_delivery_when_owner_never_confirms() {
         std::env::temp_dir(),
     );
     let response = handle_stop_instance(
-        &peer,
         &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &peer,
         StopInstanceRequest {
             instance_id: fixture.instance_id.clone(),
             reason: "owner unavailable".into(),

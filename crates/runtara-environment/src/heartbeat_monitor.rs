@@ -519,9 +519,9 @@ impl HeartbeatMonitor {
         );
 
         let outcome = crate::recovery::recover_or_fail(
+            &self.tenant_id,
             &self.pool,
             self.core_persistence.as_ref(),
-            &self.tenant_id,
             &instance.instance_id,
             crate::recovery::auto_recover_enabled(),
         )

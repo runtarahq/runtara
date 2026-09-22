@@ -66,8 +66,8 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
     for id in ["foreign", "absent"] {
         missing(
             handle_checkpoint(
-                &state,
                 &a,
+                &state,
                 CheckpointRequest {
                     instance_id: id.into(),
                     checkpoint_id: "cp".into(),
@@ -78,8 +78,8 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
         );
         missing(
             handle_get_checkpoint(
-                &state,
                 &a,
+                &state,
                 GetCheckpointRequest {
                     instance_id: id.into(),
                     checkpoint_id: "cp".into(),
@@ -89,8 +89,8 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
         );
         missing(
             handle_sleep(
-                &state,
                 &a,
+                &state,
                 SleepRequest {
                     instance_id: id.into(),
                     checkpoint_id: "cp".into(),
@@ -100,12 +100,12 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
             )
             .await,
         );
-        missing(handle_instance_event(&state, &a, event(id)).await);
-        missing(handle_instance_event_with_run_label(&state, &a, event(id), None).await);
+        missing(handle_instance_event(&a, &state, event(id)).await);
+        missing(handle_instance_event_with_run_label(&a, &state, event(id), None).await);
         missing(
             handle_retry_attempt(
-                &state,
                 &a,
+                &state,
                 RetryAttemptEvent {
                     instance_id: id.into(),
                     checkpoint_id: "cp".into(),
@@ -119,8 +119,8 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
         );
         missing(
             handle_poll_signals(
-                &state,
                 &a,
+                &state,
                 PollSignalsRequest {
                     instance_id: id.into(),
                     checkpoint_id: Some("cp".into()),
@@ -136,14 +136,14 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
                 acknowledged: true,
             };
             if boolean_api {
-                missing(handle_signal_ack(&state, &a, ack).await);
+                missing(handle_signal_ack(&a, &state, ack).await);
             } else {
-                missing(handle_signal_ack_decision(&state, &a, ack).await);
+                missing(handle_signal_ack_decision(&a, &state, ack).await);
             }
         }
         let status = handle_get_instance_status(
-            &state,
             &a,
+            &state,
             GetInstanceStatusRequest {
                 instance_id: id.into(),
             },
@@ -163,7 +163,7 @@ async fn handlers_cannot_read_or_mutate_another_tenant() {
             .state,
         b"private"
     );
-    handle_instance_event(&state, &b, event("foreign"))
+    handle_instance_event(&b, &state, event("foreign"))
         .await
         .unwrap();
     assert_eq!(*observer.0.lock().unwrap(), vec![b]);
@@ -181,25 +181,25 @@ async fn registration_requires_matching_host_identity_and_tenant_local_admission
         checkpoint_id: None,
     };
     assert!(
-        handle_register_instance(&state, &b, request("b1", &b))
+        handle_register_instance(&b, &state, request("b1", &b))
             .await
             .unwrap()
             .success
     );
     // B's occupied slot must not consume A's allowance on the same handler state.
     assert!(
-        handle_register_instance(&state, &a, request("a1", &a))
+        handle_register_instance(&a, &state, request("a1", &a))
             .await
             .unwrap()
             .success
     );
     assert!(
-        !handle_register_instance(&state, &a, request("a2", &a))
+        !handle_register_instance(&a, &state, request("a2", &a))
             .await
             .unwrap()
             .success
     );
-    let Err(error) = handle_register_instance(&state, &a, request("new", &b)).await else {
+    let Err(error) = handle_register_instance(&a, &state, request("new", &b)).await else {
         panic!("payload tenant must not select authority");
     };
     assert!(
@@ -207,7 +207,7 @@ async fn registration_requires_matching_host_identity_and_tenant_local_admission
     );
     // Disable admission to exercise the global ID collision, rather than hitting the cap.
     let state = InstanceHandlerState::new(persistence.clone());
-    let Err(error) = handle_register_instance(&state, &a, request("b1", &a)).await else {
+    let Err(error) = handle_register_instance(&a, &state, request("b1", &a)).await else {
         panic!("foreign ID must not be adopted");
     };
     assert!(matches!(
@@ -225,8 +225,8 @@ async fn registration_does_not_hide_loss_of_parent_during_telemetry() {
     persistence.set_remove_parent_before_event();
     let state = InstanceHandlerState::new(persistence.clone());
     let error = handle_register_instance(
-        &state,
         &tenant,
+        &state,
         RegisterInstanceRequest {
             instance_id: "lost-parent".into(),
             tenant_id: tenant.to_string(),
@@ -255,8 +255,8 @@ async fn registration_and_status_preserve_storage_errors() {
         }
         let state = InstanceHandlerState::with_limits(persistence.clone(), 1);
         let Err(error) = handle_register_instance(
-            &state,
             &tenant,
+            &state,
             RegisterInstanceRequest {
                 instance_id: "new".into(),
                 tenant_id: tenant.to_string(),
@@ -274,8 +274,8 @@ async fn registration_and_status_preserve_storage_errors() {
         assert!(persistence.get_events().is_empty());
         if metadata_failure {
             let Err(error) = handle_get_instance_status(
-                &state,
                 &tenant,
+                &state,
                 GetInstanceStatusRequest {
                     instance_id: "new".into(),
                 },

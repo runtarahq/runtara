@@ -9,8 +9,10 @@ multiple tenants through the current server.
 
 Tenant identity comes from the trusted embedding host. `TenantId` validates its
 representation; it does not authenticate or authorize a caller. Repositories and
-pools remain reusable. Tenant operations take a mandatory `&TenantId` first after
-`&self`, and handlers take it after their shared state.
+pools remain reusable. Tenant operations take a mandatory `&TenantId` as the first argument after the
+`self` receiver for methods, and as the first argument for free functions and
+handlers, before shared state or database dependencies. Tenant-bound constructors
+likewise take tenant identity first.
 
 | Boundary | Implemented behavior | Missing, foreign, and failure handling |
 | --- | --- | --- |

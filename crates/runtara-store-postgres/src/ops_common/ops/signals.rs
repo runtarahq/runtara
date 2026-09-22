@@ -27,8 +27,8 @@ macro_rules! impl_signal_ops {
             /// already acknowledged (`acknowledged_at IS NULL`), so a signal
             /// a guest already consumed is not handed back on the next read.
             pub(crate) async fn op_get_pending_signal(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<
                 ::core::option::Option<::runtara_core::persistence::SignalRecord>,
@@ -37,7 +37,7 @@ macro_rules! impl_signal_ops {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_get_pending_signal();
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let record = ::sqlx::query_as::<_, crate::rows::SignalRow>(sql)
                     .bind(instance_id)
                     .fetch_optional(&mut *tx)
@@ -61,8 +61,8 @@ macro_rules! impl_signal_ops {
             /// `ON DELETE CASCADE` at instance deletion. Name kept as
             /// `take_*` for call-site stability; the semantics are read-only.
             pub(crate) async fn op_get_custom_signal(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<
@@ -72,7 +72,7 @@ macro_rules! impl_signal_ops {
                 use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_get_custom_signal();
                 let mut tx =
-                    crate::backend::begin_tenant_operation(pool, tenant_id, instance_id).await?;
+                    crate::backend::begin_tenant_operation(tenant_id, pool, instance_id).await?;
                 let record = ::sqlx::query_as::<_, crate::rows::CustomSignalRow>(sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)

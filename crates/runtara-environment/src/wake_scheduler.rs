@@ -499,9 +499,9 @@ impl WakeScheduler {
         }
 
         let request = EnqueueRequest::immediate(
+            instance.tenant_id.clone(),
             uuid::Uuid::new_v4().to_string(),
             instance.instance_id.clone(),
-            instance.tenant_id.clone(),
             image_id,
             LaunchKind::Wake,
             DEFAULT_LAUNCH_QUEUE_TIMEOUT,

@@ -221,12 +221,12 @@ fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
 impl RuntimeClient {
     /// Create a client over the embedded environment's shared handler state.
     pub fn new(
-        state: Arc<EnvironmentHandlerState>,
         tenant_id: runtara_core::TenantId,
+        state: Arc<EnvironmentHandlerState>,
         config: RuntimeClientConfig,
     ) -> Self {
         Self {
-            client: EnvironmentClient::new(state, tenant_id),
+            client: EnvironmentClient::new(tenant_id, state),
             config,
         }
     }
@@ -247,8 +247,8 @@ impl RuntimeClient {
     /// Start a workflow instance
     ///
     /// # Arguments
-    /// * `image_id` - The compiled workflow image ID (UUID from runtara-environment)
     /// * `tenant_id` - The tenant identifier
+    /// * `image_id` - The compiled workflow image ID (UUID from runtara-environment)
     /// * `workflow_id` - The workflow identifier (for tracing context)
     /// * `instance_id` - Optional custom instance ID
     /// * `input` - Input data for the workflow
@@ -260,8 +260,8 @@ impl RuntimeClient {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_instance(
         &self,
-        image_id: &str,
         tenant_id: &str,
+        image_id: &str,
         workflow_id: &str,
         instance_id: Option<String>,
         input: Option<Value>,
@@ -271,7 +271,7 @@ impl RuntimeClient {
     ) -> Result<StartInstanceOutcome, RuntimeError> {
         let sdk = &self.client;
 
-        let mut options = StartInstanceOptions::new(image_id, tenant_id);
+        let mut options = StartInstanceOptions::new(tenant_id, image_id);
 
         // Store instance_id for later use in env vars
         let actual_instance_id = if let Some(ref id) = instance_id {
@@ -669,12 +669,12 @@ impl RuntimeClient {
     /// `workflow_id:version@fingerprint`).
     pub async fn get_image(
         &self,
-        image_id: &str,
         tenant_id: &str,
+        image_id: &str,
     ) -> Result<Option<crate::runtime_types::ImageSummary>, RuntimeError> {
         let sdk = &self.client;
 
-        sdk.get_image(image_id, tenant_id)
+        sdk.get_image(tenant_id, image_id)
             .await
             .map_err(RuntimeError::from)
     }

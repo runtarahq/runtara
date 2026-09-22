@@ -33,8 +33,8 @@ async fn io(fx: &Fixture) -> Arc<InvocationIo> {
         .unwrap();
     Arc::new(
         InvocationIo::new(
-            fx.persistence.clone(),
             runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            fx.persistence.clone(),
             attempt.fence,
             Duration::from_secs(5),
         )
@@ -406,8 +406,8 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
     state.event_observer = Some(observer.clone());
     let owner = Arc::new(ScopedRuntimeOwner::new(Arc::new(
         PersistenceRuntimeHost::new(
-            Arc::new(state),
             runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            Arc::new(state),
             fx.id.clone(),
             false,
         ),
@@ -626,8 +626,8 @@ async fn managed_fenced_io_bounds_blocked_control_and_retains_failure_for_root_c
     let admitted = io(&fx).await;
     let io = Arc::new(
         InvocationIo::new(
-            fx.persistence.clone(),
             runtara_core::TenantId::new("scoped-runtime-tenant").unwrap(),
+            fx.persistence.clone(),
             admitted.fence().clone(),
             Duration::from_millis(50),
         )

@@ -164,8 +164,8 @@ impl RuntimeHost for ScopedRootRuntime {
         // Keep persistence/sleep semantics while leaving signal observation to
         // the shared owner. Do not arm the legacy immediate-ack escalation.
         let response = handle_sleep(
-            &self.owner.root.state,
             &self.owner.root.tenant_id,
+            &self.owner.root.state,
             SleepRequest {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,

@@ -6,7 +6,7 @@ use crate::persistence::invocations::*;
 fn denied(reason: FenceRejection) -> InvocationFenceError {
     InvocationFenceError::Rejected(reason)
 }
-fn root(store: &Store, tenant: &str, instance: &str, running: bool) -> FenceResult<()> {
+fn root(tenant: &str, store: &Store, instance: &str, running: bool) -> FenceResult<()> {
     validate_identity(tenant)?;
     validate_identity(instance)?;
     let record = store
@@ -20,7 +20,7 @@ fn root(store: &Store, tenant: &str, instance: &str, running: bool) -> FenceResu
     Ok(())
 }
 fn lease(store: &Store, token: &InvocationLease, active: bool) -> FenceResult<()> {
-    root(store, &token.tenant_id, &token.instance_id, active)?;
+    root(&token.tenant_id, store, &token.instance_id, active)?;
     match store.invocation_leases.get(&token.instance_id) {
         Some((current, live)) if current == token && (!active || *live) => Ok(()),
         _ => Err(denied(FenceRejection::LeaseMismatch)),
@@ -105,7 +105,7 @@ impl InvocationFences for InMemoryPersistence {
         instance: &str,
     ) -> FenceResult<Option<InvocationLeaseState>> {
         let store = self.store.lock().unwrap();
-        root(&store, tenant_id.as_str(), instance, false)?;
+        root(tenant_id.as_str(), &store, instance, false)?;
         Ok(store
             .invocation_leases
             .get(instance)
@@ -127,7 +127,7 @@ impl InvocationFences for InMemoryPersistence {
             return Err(denied(FenceRejection::InvalidIdentity));
         }
         let mut store = self.store.lock().unwrap();
-        root(&store, tenant_id.as_str(), instance, true)?;
+        root(tenant_id.as_str(), &store, instance, true)?;
         let next = expected_epoch.unwrap_or(0) + 1;
         if let Some((current, active)) = store.invocation_leases.get(instance) {
             if current.owner == owner && current.epoch == next && *active {
@@ -228,8 +228,8 @@ impl InvocationFences for InMemoryPersistence {
         token.lease.require_tenant(tenant_id)?;
         let mut store = self.store.lock().unwrap();
         root(
-            &store,
             &token.lease.tenant_id,
+            &store,
             &token.lease.instance_id,
             false,
         )?;

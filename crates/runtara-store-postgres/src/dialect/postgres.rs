@@ -25,8 +25,8 @@ impl PostgresDialect {
     /// trying to express a variable-arity `IN` list through the dialect
     /// fragments.
     pub(crate) async fn exec_delete_instances_batch(
-        pool: &sqlx::PgPool,
         tenant_id: &runtara_core::TenantId,
+        pool: &sqlx::PgPool,
         instance_ids: &[String],
     ) -> Result<u64, CoreError> {
         if instance_ids.is_empty() {

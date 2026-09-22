@@ -33,8 +33,8 @@ macro_rules! impl_instance_ops {
             /// `created_at` stamped from the dialect's current-timestamp
             /// expression.
             pub(crate) async fn op_register_instance(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::dialect::{Dialect, EnumKind};
@@ -75,8 +75,8 @@ macro_rules! impl_instance_ops {
             /// follow-up UPDATE. On a lost claim nothing is written at all,
             /// which is right: the row that already exists owns its input.
             pub(crate) async fn op_try_register_instance(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 input: ::core::option::Option<&[u8]>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
@@ -107,7 +107,7 @@ macro_rules! impl_instance_ops {
                 }
                 // A duplicate is idempotent only within the requested tenant.
                 // Never return or adopt the existing row's owner or input.
-                if Self::op_get_instance_meta(pool, tenant_id, instance_id).await?.is_some() {
+                if Self::op_get_instance_meta( tenant_id,pool, instance_id).await?.is_some() {
                     Ok(false)
                 } else {
                     Err(::runtara_core::error::CoreError::InstanceAlreadyExists { instance_id: instance_id.into() })
@@ -126,8 +126,8 @@ macro_rules! impl_instance_ops {
             /// avoids dragging the whole launch payload, which for a big input
             /// means a TOAST read on every call.
             pub(crate) async fn op_get_instance_meta(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<
                 ::core::option::Option<::runtara_core::persistence::InstanceRecord>,
@@ -156,8 +156,8 @@ macro_rules! impl_instance_ops {
 
             /// SELECT a single instance by id, including the `input` BLOB.
             pub(crate) async fn op_get_instance(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<
                 ::core::option::Option<::runtara_core::persistence::InstanceRecord>,
@@ -198,8 +198,8 @@ macro_rules! impl_instance_ops {
             /// to read the row first purely to carry `started_at` forward, so a
             /// run that suspends and wakes still reports when it first began.
             pub(crate) async fn op_mark_instance_running(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 started_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
@@ -242,8 +242,8 @@ macro_rules! impl_instance_ops {
             /// the same reason `mark_running` re-uses it: a run that suspends
             /// and wakes should still report when it first began.
             pub(crate) async fn op_mark_instance_started(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 started_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
@@ -284,8 +284,8 @@ macro_rules! impl_instance_ops {
             /// invariant. Leaving them would make `finished_at < started_at`
             /// and render a negative duration for any resumed run.
             pub(crate) async fn op_update_instance_status(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 status: ::runtara_core::domain::InstanceStatus,
                 started_at: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
@@ -337,8 +337,8 @@ macro_rules! impl_instance_ops {
             /// UPDATE the instance's `checkpoint_id`. Errors with
             /// `InstanceNotFound` if no row matched.
             pub(crate) async fn op_update_instance_checkpoint(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
@@ -380,8 +380,8 @@ macro_rules! impl_instance_ops {
             /// - [`CompleteInstanceGuard::Any`] returns `Ok(true)` on
             ///   success or `Err(InstanceNotFound)` on miss.
             pub(crate) async fn op_complete_instance_unified(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 params: ::runtara_core::persistence::CompleteInstanceParams<'_>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 let run_label = params.normalized_run_label()?;
@@ -453,8 +453,8 @@ macro_rules! impl_instance_ops {
             /// exist — a write against a missing row is a silent no-op
             /// rather than an error.
             pub(crate) async fn op_store_instance_input(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 instance_id: &str,
                 input: &[u8],
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
@@ -483,8 +483,8 @@ macro_rules! impl_instance_ops {
             /// falls back to `None` on `InstanceRecord` via
             /// `#[sqlx(default)]`.
             pub(crate) async fn op_list_instances(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
                 status: ::core::option::Option<::runtara_core::domain::InstanceStatus>,
                 limit: i64,
                 offset: i64,
@@ -557,8 +557,8 @@ macro_rules! impl_instance_ops {
             /// this crate reaps one. The heartbeat monitor that does lives in
             /// the embedding host.
             pub(crate) async fn op_count_active_instances(
-                pool: &$Pool,
                 tenant_id: &::runtara_core::TenantId,
+                pool: &$Pool,
             ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
                 let row: (i64,) =
                     ::sqlx::query_as("SELECT COUNT(*) FROM instances WHERE status = 'running' AND tenant_id = $1")

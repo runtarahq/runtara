@@ -31,18 +31,18 @@ use crate::persistence::{CompleteInstanceParams, EventRecord};
     event_type = ?event.event_type(),
 ))]
 pub async fn handle_instance_event(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     event: InstanceEvent,
 ) -> Result<InstanceEventResponse> {
-    handle_instance_event_with_run_label(state, tenant_id, event, None).await
+    handle_instance_event_with_run_label(tenant_id, state, event, None).await
 }
 
 /// Complete an execution with optional label metadata in the guarded update.
 /// Other event types must not supply a label.
 pub async fn handle_instance_event_with_run_label(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     event: InstanceEvent,
     run_label: Option<&str>,
 ) -> Result<InstanceEventResponse> {
@@ -224,8 +224,8 @@ pub async fn handle_instance_event_with_run_label(
     error_message = ?event.error_message,
 ))]
 pub async fn handle_retry_attempt(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     event: RetryAttemptEvent,
 ) -> Result<()> {
     debug!(timestamp_ms = event.timestamp_ms, "Recording retry attempt");
@@ -270,8 +270,8 @@ mod tests {
     async fn test_handle_event_heartbeat() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
@@ -285,7 +285,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, &tenant_scope, event)
+        let result = handle_instance_event(&tenant_scope, &state, event)
             .await
             .unwrap();
         assert!(result.success);
@@ -300,8 +300,8 @@ mod tests {
     async fn test_handle_event_completed() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
@@ -315,7 +315,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, &tenant_scope, event)
+        let result = handle_instance_event(&tenant_scope, &state, event)
             .await
             .unwrap();
         assert!(result.success);
@@ -333,8 +333,8 @@ mod tests {
     async fn test_handle_event_failed() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
@@ -348,7 +348,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, &tenant_scope, event)
+        let result = handle_instance_event(&tenant_scope, &state, event)
             .await
             .unwrap();
         assert!(result.success);
@@ -366,8 +366,8 @@ mod tests {
     async fn test_handle_event_suspended() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
@@ -381,7 +381,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, &tenant_scope, event)
+        let result = handle_instance_event(&tenant_scope, &state, event)
             .await
             .unwrap();
         assert!(result.success);
@@ -417,8 +417,8 @@ mod tests {
 
         let observer = Arc::new(Recording(Mutex::new(Vec::new())));
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state =
@@ -434,7 +434,7 @@ mod tests {
         };
 
         for subtype in [Some("step_debug_start"), Some("workflow_log"), None] {
-            handle_instance_event(&state, &tenant_scope, custom_event(subtype))
+            handle_instance_event(&tenant_scope, &state, custom_event(subtype))
                 .await
                 .unwrap();
         }
@@ -460,15 +460,15 @@ mod tests {
     async fn events_are_handled_normally_without_an_observer() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let result = handle_instance_event(
-            &state,
             &tenant_scope,
+            &state,
             InstanceEvent {
                 instance_id: "inst-1".to_string(),
                 event_type: InstanceEventType::EventCustom as i32,
@@ -493,8 +493,8 @@ mod tests {
     async fn test_handle_event_custom() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
@@ -508,7 +508,7 @@ mod tests {
             subtype: Some("my_custom_type".to_string()),
         };
 
-        let result = handle_instance_event(&state, &tenant_scope, event)
+        let result = handle_instance_event(&tenant_scope, &state, event)
             .await
             .unwrap();
         assert!(result.success);
@@ -524,8 +524,8 @@ mod tests {
     async fn test_handle_event_suspended_with_payload_arms_no_sleep() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence.clone());
@@ -546,7 +546,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = handle_instance_event(&state, &tenant_scope, event)
+        let result = handle_instance_event(&tenant_scope, &state, event)
             .await
             .unwrap();
         assert!(result.success);

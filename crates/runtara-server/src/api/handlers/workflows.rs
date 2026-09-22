@@ -3348,13 +3348,13 @@ mod checkpoint_pagination_tests {
             tokio::time::sleep(SAVE_GAP).await;
         }
         let client = Arc::new(RuntimeClient::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
             Arc::new(EnvironmentHandlerState::new(
                 lazy_pool(),
                 Arc::clone(&persistence) as Arc<dyn Persistence>,
                 Arc::new(MockRunner::new()),
                 std::env::temp_dir(),
             )),
-            runtara_core::TenantId::new("test-tenant").unwrap(),
             RuntimeClientConfig::new(ExecutionTimeoutPolicy::default()),
         ));
         (client, persistence)

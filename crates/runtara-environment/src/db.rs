@@ -83,8 +83,8 @@ pub struct InstanceFull {
 
 /// Get full instance details including image name and heartbeat.
 pub async fn get_instance_full(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<InstanceFull>, sqlx::Error> {
     sqlx::query_as::<_, InstanceFull>(
@@ -132,8 +132,8 @@ pub fn escape_like_literal(value: &str) -> String {
 
 /// One predicate builder for both the page and its unpaged count.
 fn push_instance_filters(
-    query: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     tenant_id: &TenantId,
+    query: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     options: &ListInstancesOptions,
 ) {
     query
@@ -194,8 +194,8 @@ fn push_instance_filters(
 
 /// List instances with optional filters, with a deterministic tie-breaker.
 pub async fn list_instances(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     options: &ListInstancesOptions,
 ) -> Result<Vec<InstanceWithImage>, sqlx::Error> {
     let mut query = sqlx::QueryBuilder::new(
@@ -206,7 +206,7 @@ pub async fn list_instances(
          LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id AND i.tenant_id = ii.tenant_id
          LEFT JOIN images img ON ii.image_id = img.image_id AND ii.tenant_id = img.tenant_id",
     );
-    push_instance_filters(&mut query, tenant_id, options);
+    push_instance_filters(tenant_id, &mut query, options);
     query.push(match options.order_by.as_deref() {
         Some("created_at_asc") => " ORDER BY i.created_at ASC, i.instance_id ASC",
         Some("finished_at_desc") => " ORDER BY i.finished_at DESC NULLS LAST, i.instance_id DESC",
@@ -235,8 +235,8 @@ pub async fn list_instances(
 /// gate got steadily slower the more instances were parked, which throttled
 /// intake exactly when a large sleeping population had accumulated.
 pub async fn count_instances_by_status(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     statuses: &[String],
     ceiling: i64,
 ) -> Result<i64, sqlx::Error> {
@@ -293,8 +293,8 @@ pub(crate) fn parked_count_sql(parked: &str) -> String {
 /// instances with 350k suspended, counting one tenant's 306k: 15,622 buffers
 /// before that index, 261 after.
 pub async fn count_parked_instances(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     parked: &str,
 ) -> Result<i64, sqlx::Error> {
     // Why the status is spliced rather than bound, which is the whole reason
@@ -328,8 +328,8 @@ pub async fn count_parked_instances(
 
 /// Count instances matching filters (for pagination total_count).
 pub async fn count_instances(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     options: &ListInstancesOptions,
 ) -> Result<i64, sqlx::Error> {
     let mut query = sqlx::QueryBuilder::new(
@@ -337,7 +337,7 @@ pub async fn count_instances(
          LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id AND i.tenant_id = ii.tenant_id
          LEFT JOIN images img ON ii.image_id = img.image_id AND ii.tenant_id = img.tenant_id",
     );
-    push_instance_filters(&mut query, tenant_id, options);
+    push_instance_filters(tenant_id, &mut query, options);
     let (count,): (i64,) = query.build_query_as().fetch_one(pool).await?;
     Ok(count)
 }
@@ -389,8 +389,8 @@ pub struct MetricsBucketRow {
 ///
 /// Returns all buckets in the time range, including empty ones (with zero counts).
 pub async fn get_tenant_metrics(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
     bucket_seconds: u32,

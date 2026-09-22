@@ -18,8 +18,8 @@ use super::types::{GetInstanceStatusRequest, GetInstanceStatusResponse, Instance
 /// - Output data (if completed) or error message (if failed)
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
 pub async fn handle_get_instance_status(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     request: GetInstanceStatusRequest,
 ) -> Result<GetInstanceStatusResponse> {
     debug!("Getting instance status");
@@ -74,7 +74,7 @@ mod tests {
             instance_id: "nonexistent".to_string(),
         };
 
-        let result = handle_get_instance_status(&state, &tenant_scope, request)
+        let result = handle_get_instance_status(&tenant_scope, &state, request)
             .await
             .unwrap();
         // Instance not found returns StatusUnknown
@@ -85,8 +85,8 @@ mod tests {
     async fn test_get_status_found() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             crate::domain::InstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -95,7 +95,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
         };
 
-        let result = handle_get_instance_status(&state, &tenant_scope, request)
+        let result = handle_get_instance_status(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert_eq!(result.status, InstanceStatus::StatusRunning as i32);

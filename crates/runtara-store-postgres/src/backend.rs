@@ -23,8 +23,8 @@ use runtara_core::TenantId;
 /// prevents deletion, ID reuse, and ownership updates until the transaction ends.
 /// All child SQL must execute on this transaction, never back on the pool.
 pub(crate) async fn begin_tenant_operation(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
 ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, CoreError> {
     let mut tx = pool.begin().await.db()?;
@@ -102,8 +102,8 @@ impl TryFrom<InstanceMetricRow> for InstanceCompletionMetrics {
 }
 
 async fn fetch_instance_status(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
@@ -120,8 +120,8 @@ async fn fetch_instance_status(
 }
 
 async fn fetch_instance_metric_row(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<InstanceMetricRow>, sqlx::Error> {
     sqlx::query_as::<_, InstanceMetricRow>(
@@ -154,12 +154,12 @@ fn is_reportable_terminal_status(status: &str) -> bool {
 /// A missing row or a read error is logged and dropped: reporting must never
 /// fail a completion.
 async fn report_completion(
+    tenant_id: &TenantId,
     sink: &dyn InstanceMetricsSink,
     pool: &PgPool,
-    tenant_id: &TenantId,
     instance_id: &str,
 ) {
-    match fetch_instance_metric_row(pool, tenant_id, instance_id).await {
+    match fetch_instance_metric_row(tenant_id, pool, instance_id).await {
         Ok(Some(row)) => match row.try_into() {
             Ok(metrics) => sink.on_terminal(&metrics),
             Err(error) => tracing::warn!(%error, "Invalid completion metric state"),
@@ -249,11 +249,11 @@ crate::ops_common::ops::impl_retention_ops!(
 
 /// Load the latest checkpoint for an instance.
 pub async fn load_latest_checkpoint(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<CheckpointRecord>, CoreError> {
-    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
+    let mut tx = begin_tenant_operation(tenant_id, pool, instance_id).await?;
     let record = sqlx::query_as::<_, crate::rows::CheckpointRow>(
         r#"
         SELECT instance_id, checkpoint_id, state, created_at
@@ -290,8 +290,8 @@ struct RetryAttemptRecord {
 /// Save a retry attempt record for audit trail.
 /// Retry attempts are stored in the checkpoints table with a unique checkpoint_id.
 async fn save_retry_attempt(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
     attempt_number: i32,
@@ -299,7 +299,7 @@ async fn save_retry_attempt(
 ) -> Result<(), CoreError> {
     // Create a unique checkpoint_id for this retry attempt
     let retry_checkpoint_id = format!("{}::retry::{}", checkpoint_id, attempt_number);
-    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
+    let mut tx = begin_tenant_operation(tenant_id, pool, instance_id).await?;
 
     sqlx::query(
         r#"
@@ -329,12 +329,12 @@ async fn save_retry_attempt(
 /// Load retry history for a checkpoint. Test-only; see `RetryAttemptRecord`.
 #[cfg(all(test, feature = "db-integration-tests"))]
 async fn load_retry_history(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
 ) -> Result<Vec<RetryAttemptRecord>, CoreError> {
-    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
+    let mut tx = begin_tenant_operation(tenant_id, pool, instance_id).await?;
     let pattern = format!("{}::retry::%", checkpoint_id);
 
     let records = sqlx::query_as::<_, RetryAttemptRecord>(
@@ -363,11 +363,11 @@ async fn load_retry_history(
 
 /// Insert an instance event.
 async fn insert_event(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     event: &EventRecord,
 ) -> Result<(), CoreError> {
-    let mut tx = begin_tenant_operation(pool, tenant_id, &event.instance_id).await?;
+    let mut tx = begin_tenant_operation(tenant_id, pool, &event.instance_id).await?;
     sqlx::query(
         r#"
         INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
@@ -400,14 +400,14 @@ async fn insert_event(
 /// Insert or update a pending signal.
 /// Replaces the previous command unless an unacknowledged cancellation dominates.
 async fn insert_signal(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
     signal_type: CoreSignalType,
     payload: &[u8],
 ) -> Result<(), CoreError> {
     let mut tx = pool.begin().await.db()?;
-    crate::lifecycle::lock_instance(&mut tx, tenant_id, instance_id).await?;
+    crate::lifecycle::lock_instance(tenant_id, &mut tx, instance_id).await?;
     let commands = crate::lifecycle::lock_commands(&mut tx, &[instance_id.to_owned()]).await?;
     if !runtara_core::lifecycle::may_replace_command(commands.first().map(|c| c.command())) {
         return Ok(());
@@ -433,8 +433,8 @@ async fn insert_signal(
 
 /// Insert or update a pending custom signal scoped to a checkpoint.
 async fn put_custom_signal(
-    pool: &PgPool,
     tenant_id: &TenantId,
+    pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
     payload: &[u8],
@@ -445,7 +445,7 @@ async fn put_custom_signal(
         Some(payload)
     };
 
-    let mut tx = begin_tenant_operation(pool, tenant_id, instance_id).await?;
+    let mut tx = begin_tenant_operation(tenant_id, pool, instance_id).await?;
     let signal_id = sqlx::query_scalar(
         r#"
         INSERT INTO pending_checkpoint_signals (instance_id, checkpoint_id, payload, created_at)
@@ -490,7 +490,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<(), CoreError> {
-        Self::op_register_instance(&self.pool, tenant_id, instance_id).await
+        Self::op_register_instance(tenant_id, &self.pool, instance_id).await
     }
 
     async fn try_register_instance(
@@ -499,7 +499,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         input: Option<&[u8]>,
     ) -> Result<bool, CoreError> {
-        Self::op_try_register_instance(&self.pool, tenant_id, instance_id, input).await
+        Self::op_try_register_instance(tenant_id, &self.pool, instance_id, input).await
     }
 
     async fn get_instance(
@@ -507,7 +507,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<InstanceRecord>, CoreError> {
-        Self::op_get_instance(&self.pool, tenant_id, instance_id).await
+        Self::op_get_instance(tenant_id, &self.pool, instance_id).await
     }
 
     async fn get_instance_meta(
@@ -515,7 +515,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<InstanceRecord>, CoreError> {
-        Self::op_get_instance_meta(&self.pool, tenant_id, instance_id).await
+        Self::op_get_instance_meta(tenant_id, &self.pool, instance_id).await
     }
 
     async fn update_instance_status(
@@ -525,7 +525,7 @@ impl Persistence for PostgresPersistence {
         status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
-        Self::op_update_instance_status(&self.pool, tenant_id, instance_id, status, started_at)
+        Self::op_update_instance_status(tenant_id, &self.pool, instance_id, status, started_at)
             .await
     }
 
@@ -535,7 +535,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
-        Self::op_update_instance_checkpoint(&self.pool, tenant_id, instance_id, checkpoint_id).await
+        Self::op_update_instance_checkpoint(tenant_id, &self.pool, instance_id, checkpoint_id).await
     }
 
     async fn complete_instance(
@@ -553,7 +553,7 @@ impl Persistence for PostgresPersistence {
         let records_metric =
             self.metrics_sink.is_some() && is_reportable_terminal_status(target_status);
         let previous_was_terminal = if records_metric {
-            match fetch_instance_status(&self.pool, tenant_id, &instance_id).await {
+            match fetch_instance_status(tenant_id, &self.pool, &instance_id).await {
                 Ok(Some(status)) => is_reportable_terminal_status(&status),
                 Ok(None) => false,
                 Err(error) => {
@@ -569,11 +569,11 @@ impl Persistence for PostgresPersistence {
             false
         };
 
-        let applied = Self::op_complete_instance_unified(&self.pool, tenant_id, params).await?;
+        let applied = Self::op_complete_instance_unified(tenant_id, &self.pool, params).await?;
         if applied && records_metric && !previous_was_terminal {
             // `records_metric` is only true when a sink is wired.
             if let Some(sink) = &self.metrics_sink {
-                report_completion(sink.as_ref(), &self.pool, tenant_id, &instance_id).await;
+                report_completion(tenant_id, sink.as_ref(), &self.pool, &instance_id).await;
             }
         }
 
@@ -587,7 +587,7 @@ impl Persistence for PostgresPersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
-        Self::op_save_checkpoint(&self.pool, tenant_id, instance_id, checkpoint_id, state).await
+        Self::op_save_checkpoint(tenant_id, &self.pool, instance_id, checkpoint_id, state).await
     }
 
     async fn load_checkpoint(
@@ -596,7 +596,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        Self::op_load_checkpoint(&self.pool, tenant_id, instance_id, checkpoint_id).await
+        Self::op_load_checkpoint(tenant_id, &self.pool, instance_id, checkpoint_id).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -611,8 +611,8 @@ impl Persistence for PostgresPersistence {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
         Self::op_list_checkpoints(
-            &self.pool,
             tenant_id,
+            &self.pool,
             instance_id,
             checkpoint_id,
             limit,
@@ -632,8 +632,8 @@ impl Persistence for PostgresPersistence {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError> {
         Self::op_count_checkpoints(
-            &self.pool,
             tenant_id,
+            &self.pool,
             instance_id,
             checkpoint_id,
             created_after,
@@ -647,7 +647,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         event: &EventRecord,
     ) -> Result<(), CoreError> {
-        insert_event(&self.pool, tenant_id, event).await
+        insert_event(tenant_id, &self.pool, event).await
     }
 
     async fn insert_signal(
@@ -657,7 +657,7 @@ impl Persistence for PostgresPersistence {
         signal_type: CoreSignalType,
         payload: &[u8],
     ) -> Result<(), CoreError> {
-        insert_signal(&self.pool, tenant_id, instance_id, signal_type, payload).await
+        insert_signal(tenant_id, &self.pool, instance_id, signal_type, payload).await
     }
 
     async fn get_pending_signal(
@@ -665,7 +665,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        Self::op_get_pending_signal(&self.pool, tenant_id, instance_id).await
+        Self::op_get_pending_signal(tenant_id, &self.pool, instance_id).await
     }
 
     async fn apply_lifecycle_command(
@@ -677,7 +677,7 @@ impl Persistence for PostgresPersistence {
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         use runtara_core::lifecycle::{self, Decision, Receipt};
         let mut tx = self.pool.begin().await.db()?;
-        let status = crate::lifecycle::lock_instance(&mut tx, tenant_id, instance_id).await?;
+        let status = crate::lifecycle::lock_instance(tenant_id, &mut tx, instance_id).await?;
         let ids = [instance_id.to_owned()];
         let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
         let decision = lifecycle::acknowledge(
@@ -696,7 +696,7 @@ impl Persistence for PostgresPersistence {
             && effects.report_completion
             && let Some(sink) = &self.metrics_sink
         {
-            report_completion(sink.as_ref(), &self.pool, tenant_id, instance_id).await;
+            report_completion(tenant_id, sink.as_ref(), &self.pool, instance_id).await;
         }
         Ok(decision)
     }
@@ -708,7 +708,7 @@ impl Persistence for PostgresPersistence {
         request: runtara_core::lifecycle::ParkRequest,
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
-        let status = crate::lifecycle::lock_instance(&mut tx, tenant_id, instance_id).await?;
+        let status = crate::lifecycle::lock_instance(tenant_id, &mut tx, instance_id).await?;
         let decision = runtara_core::lifecycle::park(status, request);
         if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
             crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
@@ -775,7 +775,7 @@ impl Persistence for PostgresPersistence {
                 && let Some(sink) = &self.metrics_sink
             {
                 for id in ids {
-                    report_completion(sink.as_ref(), &self.pool, tenant_id, &id).await;
+                    report_completion(tenant_id, sink.as_ref(), &self.pool, &id).await;
                 }
             }
         }
@@ -789,7 +789,7 @@ impl Persistence for PostgresPersistence {
         checkpoint_id: &str,
         payload: &[u8],
     ) -> Result<String, CoreError> {
-        put_custom_signal(&self.pool, tenant_id, instance_id, checkpoint_id, payload).await
+        put_custom_signal(tenant_id, &self.pool, instance_id, checkpoint_id, payload).await
     }
 
     async fn get_custom_signal(
@@ -798,7 +798,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        Self::op_get_custom_signal(&self.pool, tenant_id, instance_id, checkpoint_id).await
+        Self::op_get_custom_signal(tenant_id, &self.pool, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
@@ -810,8 +810,8 @@ impl Persistence for PostgresPersistence {
         error_message: Option<&str>,
     ) -> Result<(), CoreError> {
         save_retry_attempt(
-            &self.pool,
             tenant_id,
+            &self.pool,
             instance_id,
             checkpoint_id,
             attempt,
@@ -827,7 +827,7 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
+        Self::op_list_instances(tenant_id, &self.pool, status, limit, offset).await
     }
 
     async fn health_check(&self) -> Result<bool, CoreError> {
@@ -835,7 +835,7 @@ impl Persistence for PostgresPersistence {
     }
 
     async fn count_active_instances(&self, tenant_id: &TenantId) -> Result<i64, CoreError> {
-        Self::op_count_active_instances(&self.pool, tenant_id).await
+        Self::op_count_active_instances(tenant_id, &self.pool).await
     }
 
     async fn schedule_wake(
@@ -845,7 +845,7 @@ impl Persistence for PostgresPersistence {
         deadline: DateTime<Utc>,
         reason: runtara_core::domain::WakeReason,
     ) -> Result<(), CoreError> {
-        Self::op_set_instance_sleep(&self.pool, tenant_id, instance_id, deadline, reason).await
+        Self::op_set_instance_sleep(tenant_id, &self.pool, instance_id, deadline, reason).await
     }
 
     async fn mark_instance_running(
@@ -854,7 +854,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        Self::op_mark_instance_running(&self.pool, tenant_id, instance_id, started_at).await
+        Self::op_mark_instance_running(tenant_id, &self.pool, instance_id, started_at).await
     }
 
     async fn mark_instance_started(
@@ -863,7 +863,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<bool, CoreError> {
-        Self::op_mark_instance_started(&self.pool, tenant_id, instance_id, started_at).await
+        Self::op_mark_instance_started(tenant_id, &self.pool, instance_id, started_at).await
     }
 
     async fn clear_instance_sleep(
@@ -871,7 +871,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<(), CoreError> {
-        Self::op_clear_instance_sleep(&self.pool, tenant_id, instance_id).await
+        Self::op_clear_instance_sleep(tenant_id, &self.pool, instance_id).await
     }
 
     async fn claim_sleeping_instance(
@@ -879,7 +879,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<bool, CoreError> {
-        Self::op_claim_sleeping_instance(&self.pool, tenant_id, instance_id).await
+        Self::op_claim_sleeping_instance(tenant_id, &self.pool, instance_id).await
     }
 
     async fn get_sleeping_instances_due(
@@ -887,7 +887,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_get_sleeping_instances_due(&self.pool, tenant_id, limit).await
+        Self::op_get_sleeping_instances_due(tenant_id, &self.pool, limit).await
     }
 
     async fn claim_sleeping_instances_due(
@@ -896,7 +896,7 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_claim_sleeping_instances_due(&self.pool, tenant_id, limit, retry_at).await
+        Self::op_claim_sleeping_instances_due(tenant_id, &self.pool, limit, retry_at).await
     }
 
     async fn list_events(
@@ -907,7 +907,7 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EventRecord>, CoreError> {
-        Self::op_list_events(&self.pool, tenant_id, instance_id, filter, limit, offset).await
+        Self::op_list_events(tenant_id, &self.pool, instance_id, filter, limit, offset).await
     }
 
     async fn count_events(
@@ -916,7 +916,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
-        Self::op_count_events(&self.pool, tenant_id, instance_id, filter).await
+        Self::op_count_events(tenant_id, &self.pool, instance_id, filter).await
     }
 
     async fn list_paired_records(
@@ -929,8 +929,8 @@ impl Persistence for PostgresPersistence {
         offset: i64,
     ) -> Result<Vec<PairedRecordSummary>, CoreError> {
         Self::op_list_paired_records(
-            &self.pool,
             tenant_id,
+            &self.pool,
             instance_id,
             vocabulary,
             filter,
@@ -947,7 +947,7 @@ impl Persistence for PostgresPersistence {
         vocabulary: &EventVocabulary,
         filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
-        Self::op_count_paired_records(&self.pool, tenant_id, instance_id, vocabulary, filter).await
+        Self::op_count_paired_records(tenant_id, &self.pool, instance_id, vocabulary, filter).await
     }
 
     async fn store_instance_input(
@@ -956,7 +956,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         input: &[u8],
     ) -> Result<(), CoreError> {
-        Self::op_store_instance_input(&self.pool, tenant_id, instance_id, input).await
+        Self::op_store_instance_input(tenant_id, &self.pool, instance_id, input).await
     }
 
     async fn get_terminal_instances_older_than(
@@ -965,7 +965,7 @@ impl Persistence for PostgresPersistence {
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
-        Self::op_get_terminal_instances_older_than(&self.pool, tenant_id, older_than, limit).await
+        Self::op_get_terminal_instances_older_than(tenant_id, &self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(
@@ -973,7 +973,7 @@ impl Persistence for PostgresPersistence {
         tenant_id: &TenantId,
         instance_ids: &[String],
     ) -> Result<u64, CoreError> {
-        Self::op_delete_instances_batch(&self.pool, tenant_id, instance_ids).await
+        Self::op_delete_instances_batch(tenant_id, &self.pool, instance_ids).await
     }
 
     async fn delete_paired_events_older_than(
@@ -984,7 +984,7 @@ impl Persistence for PostgresPersistence {
         limit: i64,
     ) -> Result<u64, CoreError> {
         Self::op_delete_paired_events_older_than(
-            &self.pool, tenant_id, vocabulary, older_than, limit,
+            tenant_id, &self.pool, vocabulary, older_than, limit,
         )
         .await
     }
@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     // Helper to create a test instance
-    async fn create_test_instance(pool: &PgPool, instance_id: Uuid, tenant_id: &str) {
+    async fn create_test_instance(tenant_id: &str, pool: &PgPool, instance_id: Uuid) {
         sqlx::query(
             r#"
             INSERT INTO instances (instance_id, tenant_id, definition_version, status)
@@ -1345,11 +1345,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let result = PostgresPersistence::op_get_instance(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await;
@@ -1368,11 +1368,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let result = PostgresPersistence::op_update_instance_status(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             CoreInstanceStatus::Running,
             Some(Utc::now()),
@@ -1381,8 +1381,8 @@ mod tests {
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1399,11 +1399,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let result = PostgresPersistence::op_update_instance_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "checkpoint-1",
         )
@@ -1411,8 +1411,8 @@ mod tests {
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1428,13 +1428,13 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let output_data = b"success output";
         let instance_id_str = instance_id.to_string();
         let result = PostgresPersistence::op_complete_instance_unified(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             CompleteInstanceParams::new(&instance_id_str, CoreInstanceStatus::Completed)
                 .with_output(output_data),
         )
@@ -1442,8 +1442,8 @@ mod tests {
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1461,12 +1461,12 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let instance_id_str = instance_id.to_string();
         let result = PostgresPersistence::op_complete_instance_unified(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             CompleteInstanceParams::new(&instance_id_str, CoreInstanceStatus::Failed)
                 .with_error("test error"),
         )
@@ -1474,8 +1474,8 @@ mod tests {
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1493,12 +1493,12 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let state = b"test state data";
         let result = PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
             state,
@@ -1507,8 +1507,8 @@ mod tests {
         assert!(result.is_ok());
 
         let checkpoint = PostgresPersistence::op_load_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
         )
@@ -1525,12 +1525,12 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         // Save first checkpoint
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
             b"state-1",
@@ -1540,8 +1540,8 @@ mod tests {
 
         // Save again with same ID (should update)
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
             b"state-2",
@@ -1550,8 +1550,8 @@ mod tests {
         .unwrap();
 
         let checkpoint = PostgresPersistence::op_load_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
         )
@@ -1568,11 +1568,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
             b"state-1",
@@ -1580,8 +1580,8 @@ mod tests {
         .await
         .unwrap();
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-2",
             b"state-2",
@@ -1590,8 +1590,8 @@ mod tests {
         .unwrap();
 
         let cp1 = PostgresPersistence::op_load_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
         )
@@ -1601,8 +1601,8 @@ mod tests {
         assert_eq!(cp1.state, b"state-1".to_vec());
 
         let cp2 = PostgresPersistence::op_load_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-2",
         )
@@ -1619,11 +1619,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-1",
             b"state-1",
@@ -1633,8 +1633,8 @@ mod tests {
         // Small delay to ensure different timestamps
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-2",
             b"state-2",
@@ -1643,8 +1643,8 @@ mod tests {
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         PostgresPersistence::op_save_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "cp-3",
             b"state-3",
@@ -1653,8 +1653,8 @@ mod tests {
         .unwrap();
 
         let latest = load_latest_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1671,11 +1671,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let result = PostgresPersistence::op_load_checkpoint(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "nonexistent",
         )
@@ -1691,7 +1691,7 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let event = EventRecord {
             id: None,
@@ -1703,7 +1703,7 @@ mod tests {
             subtype: None,
         };
 
-        let result = insert_event(&pool, &TenantId::new("test-tenant").unwrap(), &event).await;
+        let result = insert_event(&TenantId::new("test-tenant").unwrap(), &pool, &event).await;
         assert!(result.is_ok());
 
         // Verify event was inserted
@@ -1723,11 +1723,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let result = insert_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             CoreSignalType::Cancel,
             b"reason",
@@ -1736,8 +1736,8 @@ mod tests {
         assert!(result.is_ok());
 
         let signal = PostgresPersistence::op_get_pending_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1755,11 +1755,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         insert_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             CoreSignalType::Pause,
             b"",
@@ -1768,8 +1768,8 @@ mod tests {
         .unwrap();
 
         let signal = PostgresPersistence::op_get_pending_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1785,11 +1785,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         let signal = PostgresPersistence::op_get_pending_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1804,11 +1804,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         insert_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             CoreSignalType::Cancel,
             b"",
@@ -1838,8 +1838,8 @@ mod tests {
 
         // Should no longer return as pending
         let signal = PostgresPersistence::op_get_pending_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
         )
         .await
@@ -1854,11 +1854,11 @@ mod tests {
         let pool = test_pool().await;
 
         let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance_id).await;
 
         put_custom_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "wait-1",
             b"custom-payload",
@@ -1868,8 +1868,8 @@ mod tests {
 
         // First read retrieves the signal.
         let signal = PostgresPersistence::op_get_custom_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "wait-1",
         )
@@ -1884,8 +1884,8 @@ mod tests {
         // lets a drained/resumed WaitForSignal re-read its retained signal
         // instead of dead-hanging.
         let signal = PostgresPersistence::op_get_custom_signal(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance_id.to_string(),
             "wait-1",
         )
@@ -1904,13 +1904,13 @@ mod tests {
 
         let instance1 = Uuid::new_v4();
         let instance2 = Uuid::new_v4();
-        create_test_instance(&pool, instance1, "test-tenant").await;
-        create_test_instance(&pool, instance2, "test-tenant").await;
+        create_test_instance("test-tenant", &pool, instance1).await;
+        create_test_instance("test-tenant", &pool, instance2).await;
 
         // Set one running, one suspended: only the running one is counted.
         PostgresPersistence::op_update_instance_status(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance1.to_string(),
             CoreInstanceStatus::Running,
             None,
@@ -1918,8 +1918,8 @@ mod tests {
         .await
         .unwrap();
         PostgresPersistence::op_update_instance_status(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance2.to_string(),
             CoreInstanceStatus::Suspended,
             None,
@@ -1954,8 +1954,8 @@ mod tests {
         // The global counter must see it too, whatever else is running.
         assert!(
             PostgresPersistence::op_count_active_instances(
-                &pool,
-                &TenantId::new("test-tenant").unwrap()
+                &TenantId::new("test-tenant").unwrap(),
+                &pool
             )
             .await
             .unwrap()
@@ -1965,8 +1965,8 @@ mod tests {
         // Park the running one. A suspended instance holds no concurrency slot,
         // so parked work cannot hold a cap closed against fresh registrations.
         PostgresPersistence::op_update_instance_status(
-            &pool,
             &TenantId::new("test-tenant").unwrap(),
+            &pool,
             &instance1.to_string(),
             CoreInstanceStatus::Suspended,
             None,
@@ -2794,8 +2794,8 @@ mod tests {
         .unwrap();
 
         let history = load_retry_history(
-            &pool,
             &TenantId::new(&tenant).unwrap(),
+            &pool,
             &instance_id,
             "durable-fn-1",
         )
@@ -2819,8 +2819,8 @@ mod tests {
         .unwrap();
 
         let history = load_retry_history(
-            &pool,
             &TenantId::new(&tenant).unwrap(),
+            &pool,
             &instance_id,
             "durable-fn-1",
         )

@@ -42,9 +42,9 @@ fn initial_request(
 ) -> InitialLaunchRequest {
     InitialLaunchRequest {
         launch: EnqueueRequest::immediate(
+            &fixture.tenant_id,
             launch_id,
             instance_id,
-            &fixture.tenant_id,
             &fixture.image_id,
             LaunchKind::Start,
             Duration::from_secs(60),
@@ -77,8 +77,8 @@ async fn claim_initial(
 }
 
 async fn mark_running_without_gate_confirmation(
-    repository: &LaunchRepository,
     tenant_id: &runtara_core::TenantId,
+    repository: &LaunchRepository,
     launch_id: &str,
 ) -> i32 {
     let owner = "workflow-launch-lease-test";
@@ -107,12 +107,12 @@ async fn mark_running_without_gate_confirmation(
 }
 
 async fn promote_running(
-    repository: &LaunchRepository,
     tenant_id: &runtara_core::TenantId,
+    repository: &LaunchRepository,
     launch_id: &str,
 ) {
     let attempt_count =
-        mark_running_without_gate_confirmation(repository, tenant_id, launch_id).await;
+        mark_running_without_gate_confirmation(tenant_id, repository, launch_id).await;
     assert!(
         repository
             .confirm_gate_open(tenant_id, launch_id, attempt_count)
@@ -231,8 +231,8 @@ async fn parked_history_is_lease_free_and_preserves_the_sleeping_marker() {
     for index in 0..3 {
         let launch = claim_initial(&repository, &fixture, true).await;
         promote_running(
-            &repository,
             &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+            &repository,
             &launch.launch_id,
         )
         .await;
@@ -289,8 +289,8 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
 
     let parked = claim_initial(&repository, &fixture, true).await;
     promote_running(
-        &repository,
         &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &repository,
         &parked.launch_id,
     )
     .await;
@@ -308,9 +308,9 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
         let repository = repository.clone();
         let barrier = barrier.clone();
         let request = EnqueueRequest::immediate(
+            fixture.tenant_id.clone(),
             Uuid::new_v4().to_string(),
             parked.instance_id.clone(),
-            fixture.tenant_id.clone(),
             fixture.image_id.clone(),
             LaunchKind::Wake,
             Duration::from_secs(60),
@@ -369,8 +369,8 @@ async fn reconciler_releases_a_lease_after_monitor_crash() {
 
     let running = claim_initial(&repository, &fixture, true).await;
     promote_running(
-        &repository,
         &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &repository,
         &running.launch_id,
     )
     .await;
@@ -417,8 +417,8 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
 
     let unconfirmed = claim_initial(&repository, &fixture, true).await;
     mark_running_without_gate_confirmation(
-        &repository,
         &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &repository,
         &unconfirmed.launch_id,
     )
     .await;
@@ -458,8 +458,8 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
 
     let confirmed = claim_initial(&repository, &fixture, true).await;
     let confirmed_attempt = mark_running_without_gate_confirmation(
-        &repository,
         &runtara_core::TenantId::new(&fixture.tenant_id).unwrap(),
+        &repository,
         &confirmed.launch_id,
     )
     .await;

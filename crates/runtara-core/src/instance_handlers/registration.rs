@@ -43,8 +43,8 @@ use crate::persistence::EventRecord;
     checkpoint_id = ?request.checkpoint_id,
 ))]
 pub async fn handle_register_instance(
-    state: &InstanceHandlerState,
     tenant_id: &TenantId,
+    state: &InstanceHandlerState,
     request: RegisterInstanceRequest,
 ) -> Result<RegisterInstanceResponse> {
     info!(
@@ -210,7 +210,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, &tenant_scope, request)
+        let result = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(!result.success);
@@ -229,7 +229,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let Err(error) = handle_register_instance(&state, &tenant_scope, request).await else {
+        let Err(error) = handle_register_instance(&tenant_scope, &state, request).await else {
             panic!("mismatched tenant must fail");
         };
         assert!(
@@ -249,7 +249,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, &tenant_scope, request)
+        let result = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.success);
@@ -260,8 +260,8 @@ mod tests {
     async fn test_register_existing_instance() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Pending,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -272,7 +272,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, &tenant_scope, request)
+        let result = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.success);
@@ -284,8 +284,8 @@ mod tests {
         let persistence = Arc::new(
             MockPersistence::new()
                 .with_instance(make_instance(
-                    "inst-1",
                     "tenant-1",
+                    "inst-1",
                     CoreInstanceStatus::Pending,
                 ))
                 .with_checkpoint(make_checkpoint("inst-1", "cp-1", b"state")),
@@ -298,7 +298,7 @@ mod tests {
             checkpoint_id: Some("cp-1".to_string()),
         };
 
-        let result = handle_register_instance(&state, &tenant_scope, request)
+        let result = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.success);
@@ -308,8 +308,8 @@ mod tests {
     async fn test_register_with_invalid_checkpoint() {
         let tenant_scope = crate::TenantId::new("tenant-1").unwrap();
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Pending,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -320,7 +320,7 @@ mod tests {
             checkpoint_id: Some("nonexistent".to_string()),
         };
 
-        let err = match handle_register_instance(&state, &tenant_scope, request).await {
+        let err = match handle_register_instance(&tenant_scope, &state, request).await {
             Ok(_) => panic!("a missing checkpoint must not report success: false"),
             Err(e) => e,
         };
@@ -348,7 +348,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let err = match handle_register_instance(&state, &tenant_scope, request).await {
+        let err = match handle_register_instance(&tenant_scope, &state, request).await {
             Ok(_) => panic!("a failed persistence write must not report success: false"),
             Err(e) => e,
         };
@@ -371,7 +371,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let err = match handle_register_instance(&state, &tenant_scope, request).await {
+        let err = match handle_register_instance(&tenant_scope, &state, request).await {
             Ok(_) => panic!("a failed status update must not report success: false"),
             Err(e) => e,
         };
@@ -394,7 +394,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let result = handle_register_instance(&state, &tenant_scope, request)
+        let result = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(result.success);
@@ -419,7 +419,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, &tenant_scope, request)
+        let resp = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(!resp.success);
@@ -432,8 +432,8 @@ mod tests {
         // Existing (resuming) instances must still be able to register — we only
         // want to keep out fresh work.
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
-            "inst-1",
             "tenant-1",
+            "inst-1",
             CoreInstanceStatus::Running,
         )));
         let state = InstanceHandlerState::new(persistence);
@@ -445,7 +445,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, &tenant_scope, request)
+        let resp = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(resp.success, "drain should not block resuming instances");
@@ -463,7 +463,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, &tenant_scope, request)
+        let resp = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(!resp.success);
@@ -482,7 +482,7 @@ mod tests {
             checkpoint_id: None,
         };
 
-        let resp = handle_register_instance(&state, &tenant_scope, request)
+        let resp = handle_register_instance(&tenant_scope, &state, request)
             .await
             .unwrap();
         assert!(resp.success);

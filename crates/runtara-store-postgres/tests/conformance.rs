@@ -42,12 +42,12 @@ async fn latest_checkpoint_helper_enforces_parent_tenancy() {
         .unwrap();
     for target in [&id[..], "latest-missing"] {
         assert!(matches!(
-            runtara_store_postgres::load_latest_checkpoint(&pool, &foreign, target).await,
+            runtara_store_postgres::load_latest_checkpoint(&foreign, &pool, target).await,
             Err(CoreError::InstanceNotFound { .. })
         ));
     }
     assert_eq!(
-        runtara_store_postgres::load_latest_checkpoint(&pool, &owner, &id)
+        runtara_store_postgres::load_latest_checkpoint(&owner, &pool, &id)
             .await
             .unwrap()
             .unwrap()

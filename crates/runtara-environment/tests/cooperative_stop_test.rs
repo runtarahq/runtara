@@ -229,9 +229,9 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
         .await?;
     let registry = ContainerRegistry::new(pool.clone());
     common::register_container_fixture(
+        &runtara_core::TenantId::new("stop-test").unwrap(),
         &pool,
         &registry,
-        &runtara_core::TenantId::new("stop-test").unwrap(),
         &ContainerInfo {
             container_id: handle.handle_id.clone(),
             launch_id: handle.launch_id.clone(),
@@ -258,8 +258,8 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
     let before = tokio::time::Instant::now();
     let grace = if cleanup == Cleanup::Stalled { 5 } else { 10 };
     let response = handle_stop_instance(
-        &state,
         &runtara_core::TenantId::new("stop-test").unwrap(),
+        &state,
         StopInstanceRequest {
             instance_id: id.clone(),
             reason: "user clicked Cancel".into(),

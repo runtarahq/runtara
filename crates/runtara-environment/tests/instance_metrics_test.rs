@@ -57,8 +57,8 @@ async fn resource_metrics_keep_the_first_observation() {
     let instance_id = registered_instance(&pool, "resources").await;
 
     metrics::record_resources_returning_status(
-        &pool,
         &runtara_core::TenantId::new("env-metrics-tenant-resources").unwrap(),
+        &pool,
         &instance_id,
         Some(1024 * 1024),
         Some(500_000),
@@ -81,8 +81,8 @@ async fn resource_metrics_keep_the_first_observation() {
     assert_eq!(row.1, Some(500_000));
 
     metrics::record_resources_returning_status(
-        &pool,
         &runtara_core::TenantId::new("env-metrics-tenant-resources").unwrap(),
+        &pool,
         &instance_id,
         Some(9_999_999),
         Some(1),
@@ -118,8 +118,8 @@ async fn recording_no_resources_leaves_the_columns_null() {
     let instance_id = registered_instance(&pool, "noop").await;
 
     let observed = metrics::record_resources_returning_status(
-        &pool,
         &runtara_core::TenantId::new("env-metrics-tenant-noop").unwrap(),
+        &pool,
         &instance_id,
         None,
         None,
@@ -154,16 +154,16 @@ async fn stderr_keeps_the_first_capture() {
     let instance_id = registered_instance(&pool, "stderr").await;
 
     metrics::record_instance_stderr(
-        &pool,
         &runtara_core::TenantId::new("env-metrics-tenant-stderr").unwrap(),
+        &pool,
         &instance_id,
         "Error: something went wrong\n",
     )
     .await
     .expect("failed to record stderr");
     metrics::record_instance_stderr(
-        &pool,
         &runtara_core::TenantId::new("env-metrics-tenant-stderr").unwrap(),
+        &pool,
         &instance_id,
         "second capture\n",
     )
@@ -197,8 +197,8 @@ async fn returning_status_reports_the_guest_status() {
     let instance_id = registered_instance(&pool, "returning").await;
 
     let observed = metrics::record_resources_returning_status(
-        &pool,
         &runtara_core::TenantId::new("env-metrics-tenant-returning").unwrap(),
+        &pool,
         &instance_id,
         Some(2048),
         Some(7),
@@ -210,8 +210,8 @@ async fn returning_status_reports_the_guest_status() {
 
     assert!(
         metrics::record_resources_returning_status(
-            &pool,
             &runtara_core::TenantId::new("env-metrics-tenant-returning").unwrap(),
+            &pool,
             "no-such-instance",
             None,
             None

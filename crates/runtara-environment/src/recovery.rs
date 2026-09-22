@@ -134,9 +134,9 @@ pub async fn recover_registered(
     {
         Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
             let outcome = recover_or_fail(
+                tenant_id,
                 pool,
                 persistence,
-                tenant_id,
                 &container.instance_id,
                 auto_recover,
             )
@@ -224,9 +224,9 @@ fn decide(
 /// A concurrent lifecycle transition returns `Unchanged`; a failed write
 /// returns an error, so callers do not retire tracking as though it succeeded.
 pub async fn recover_or_fail(
+    tenant_id: &runtara_core::TenantId,
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
-    tenant_id: &runtara_core::TenantId,
     instance_id: &str,
     auto_recover: bool,
 ) -> Result<RecoveryOutcome> {
@@ -460,9 +460,9 @@ mod persistence_tests {
             for auto_recover in [true, false] {
                 assert_eq!(
                     recover_or_fail(
+                        &runtara_core::TenantId::new("recovery-test").unwrap(),
                         &pool,
                         &persistence,
-                        &runtara_core::TenantId::new("recovery-test").unwrap(),
                         &id,
                         auto_recover
                     )
@@ -491,9 +491,9 @@ mod persistence_tests {
             .expect("create running instance");
             assert_eq!(
                 recover_or_fail(
+                    &runtara_core::TenantId::new("recovery-test").unwrap(),
                     &pool,
                     &persistence,
-                    &runtara_core::TenantId::new("recovery-test").unwrap(),
                     &id,
                     auto_recover
                 )
@@ -517,9 +517,9 @@ mod persistence_tests {
             }
             assert_eq!(
                 recover_or_fail(
+                    &runtara_core::TenantId::new("recovery-test").unwrap(),
                     &pool,
                     &persistence,
-                    &runtara_core::TenantId::new("recovery-test").unwrap(),
                     &id,
                     auto_recover
                 )
@@ -539,9 +539,9 @@ mod persistence_tests {
         for auto_recover in [true, false] {
             assert!(
                 recover_or_fail(
+                    &runtara_core::TenantId::new("recovery-test").unwrap(),
                     &pool,
                     &persistence,
-                    &runtara_core::TenantId::new("recovery-test").unwrap(),
                     "unavailable",
                     auto_recover
                 )

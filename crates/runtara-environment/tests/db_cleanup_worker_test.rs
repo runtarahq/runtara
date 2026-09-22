@@ -51,7 +51,7 @@ async fn get_test_pool() -> Option<PgPool> {
 }
 
 /// Create a test image in the database with a unique name
-async fn create_test_image(pool: &PgPool, tenant_id: &str) -> String {
+async fn create_test_image(tenant_id: &str, pool: &PgPool) -> String {
     let image_id = Uuid::new_v4().to_string();
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
@@ -71,9 +71,9 @@ async fn create_test_image(pool: &PgPool, tenant_id: &str) -> String {
 
 /// Create a test instance in the database
 async fn create_test_instance(
+    tenant_id: &str,
     pool: &PgPool,
     instance_id: &str,
-    tenant_id: &str,
     _image_id: &str,
     status: &str,
     finished_at: Option<chrono::DateTime<Utc>>,
@@ -94,7 +94,7 @@ async fn create_test_instance(
 }
 
 /// Create a test entry in instance_images table
-async fn create_instance_image(pool: &PgPool, instance_id: &str, image_id: &str, tenant_id: &str) {
+async fn create_instance_image(tenant_id: &str, pool: &PgPool, instance_id: &str, image_id: &str) {
     sqlx::query(
         r#"
         INSERT INTO instance_images (instance_id, image_id, tenant_id)
@@ -111,7 +111,7 @@ async fn create_instance_image(pool: &PgPool, instance_id: &str, image_id: &str,
 }
 
 /// Create a test entry in container_registry table
-async fn create_container_registry(pool: &PgPool, instance_id: &str, tenant_id: &str) {
+async fn create_container_registry(tenant_id: &str, pool: &PgPool, instance_id: &str) {
     sqlx::query(
         r#"
         INSERT INTO container_registry (container_id, launch_id, instance_id, tenant_id, binary_path, started_at)
@@ -192,7 +192,7 @@ async fn test_cleanup_old_terminal_instances() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     // Create instances with different statuses
     let old_completed = Uuid::new_v4().to_string();
@@ -205,44 +205,44 @@ async fn test_cleanup_old_terminal_instances() {
 
     // Old completed instance (should be deleted)
     create_test_instance(
+        &tenant_id,
         &pool,
         &old_completed,
-        &tenant_id,
         &image_id,
         "completed",
         Some(old_time),
     )
     .await;
-    create_instance_image(&pool, &old_completed, &image_id, &tenant_id).await;
-    create_container_registry(&pool, &old_completed, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &old_completed, &image_id).await;
+    create_container_registry(&tenant_id, &pool, &old_completed).await;
 
     // Old failed instance (should be deleted)
     create_test_instance(
+        &tenant_id,
         &pool,
         &old_failed,
-        &tenant_id,
         &image_id,
         "failed",
         Some(old_time),
     )
     .await;
-    create_instance_image(&pool, &old_failed, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &old_failed, &image_id).await;
 
     // Old running instance (should NOT be deleted - not terminal)
-    create_test_instance(&pool, &old_running, &tenant_id, &image_id, "running", None).await;
-    create_instance_image(&pool, &old_running, &image_id, &tenant_id).await;
+    create_test_instance(&tenant_id, &pool, &old_running, &image_id, "running", None).await;
+    create_instance_image(&tenant_id, &pool, &old_running, &image_id).await;
 
     // Recent completed instance (should NOT be deleted - too recent)
     create_test_instance(
+        &tenant_id,
         &pool,
         &recent_completed,
-        &tenant_id,
         &image_id,
         "completed",
         Some(recent_time),
     )
     .await;
-    create_instance_image(&pool, &recent_completed, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &recent_completed, &image_id).await;
 
     // Create cleanup worker with 30-day max age
     let config = DbCleanupWorkerConfig {
@@ -313,21 +313,21 @@ async fn test_cleanup_disabled_by_default() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     let old_completed = Uuid::new_v4().to_string();
     let old_time = Utc::now() - ChronoDuration::days(35);
 
     create_test_instance(
+        &tenant_id,
         &pool,
         &old_completed,
-        &tenant_id,
         &image_id,
         "completed",
         Some(old_time),
     )
     .await;
-    create_instance_image(&pool, &old_completed, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &old_completed, &image_id).await;
 
     // Create cleanup worker with cleanup DISABLED
     let config = DbCleanupWorkerConfig {
@@ -454,7 +454,7 @@ async fn events_exist(pool: &PgPool, instance_id: &str) -> bool {
 }
 
 /// Count instances in the database for a tenant
-async fn count_instances(pool: &PgPool, tenant_id: &str) -> i64 {
+async fn count_instances(tenant_id: &str, pool: &PgPool) -> i64 {
     let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM instances WHERE tenant_id = $1")
         .bind(tenant_id)
         .fetch_one(pool)
@@ -470,22 +470,22 @@ async fn test_e2e_cascade_deletion_checkpoints_and_events() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     let instance_id = Uuid::new_v4().to_string();
     let old_time = Utc::now() - ChronoDuration::days(35);
 
     // Create instance with checkpoints and events
     create_test_instance(
+        &tenant_id,
         &pool,
         &instance_id,
-        &tenant_id,
         &image_id,
         "completed",
         Some(old_time),
     )
     .await;
-    create_instance_image(&pool, &instance_id, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &instance_id, &image_id).await;
 
     // Create multiple checkpoints
     create_checkpoint(&pool, &instance_id, "checkpoint-1").await;
@@ -557,7 +557,7 @@ async fn test_e2e_batch_processing() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     let old_time = Utc::now() - ChronoDuration::days(35);
     let batch_size = 3i64;
@@ -568,21 +568,21 @@ async fn test_e2e_batch_processing() {
     for _ in 0..total_instances {
         let instance_id = Uuid::new_v4().to_string();
         create_test_instance(
+            &tenant_id,
             &pool,
             &instance_id,
-            &tenant_id,
             &image_id,
             "completed",
             Some(old_time),
         )
         .await;
-        create_instance_image(&pool, &instance_id, &image_id, &tenant_id).await;
+        create_instance_image(&tenant_id, &pool, &instance_id, &image_id).await;
         instance_ids.push(instance_id);
     }
 
     // Verify all instances exist
     assert_eq!(
-        count_instances(&pool, &tenant_id).await,
+        count_instances(&tenant_id, &pool).await,
         total_instances as i64
     );
 
@@ -615,7 +615,7 @@ async fn test_e2e_batch_processing() {
 
     // All instances should be deleted (processed in batches)
     assert_eq!(
-        count_instances(&pool, &tenant_id).await,
+        count_instances(&tenant_id, &pool).await,
         0,
         "All instances should be deleted via batching"
     );
@@ -631,22 +631,22 @@ async fn test_e2e_cancelled_instances_deleted() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     let old_cancelled = Uuid::new_v4().to_string();
     let old_time = Utc::now() - ChronoDuration::days(35);
 
     // Create old cancelled instance (should be deleted - cancelled is terminal)
     create_test_instance(
+        &tenant_id,
         &pool,
         &old_cancelled,
-        &tenant_id,
         &image_id,
         "cancelled",
         Some(old_time),
     )
     .await;
-    create_instance_image(&pool, &old_cancelled, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &old_cancelled, &image_id).await;
 
     assert!(instance_exists(&pool, &old_cancelled).await);
 
@@ -693,7 +693,7 @@ async fn test_e2e_suspended_instances_not_deleted() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     let old_suspended = Uuid::new_v4().to_string();
 
@@ -710,7 +710,7 @@ async fn test_e2e_suspended_instances_not_deleted() {
     .await
     .expect("Failed to create suspended instance");
 
-    create_instance_image(&pool, &old_suspended, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &old_suspended, &image_id).await;
 
     assert!(instance_exists(&pool, &old_suspended).await);
 
@@ -757,7 +757,7 @@ async fn test_e2e_pending_instances_not_deleted() {
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
 
     let old_pending = Uuid::new_v4().to_string();
 
@@ -774,7 +774,7 @@ async fn test_e2e_pending_instances_not_deleted() {
     .await
     .expect("Failed to create pending instance");
 
-    create_instance_image(&pool, &old_pending, &image_id, &tenant_id).await;
+    create_instance_image(&tenant_id, &pool, &old_pending, &image_id).await;
 
     assert!(instance_exists(&pool, &old_pending).await);
 
@@ -871,11 +871,11 @@ async fn debug_events_age_out_before_their_instance_does() {
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
 
     let tenant_id = format!("debug-sweep-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     // Still running, so instance retention can never be what removes these.
     let instance_id = Uuid::new_v4().to_string();
-    create_test_instance(&pool, &instance_id, &tenant_id, &image_id, "running", None).await;
-    create_instance_image(&pool, &instance_id, &image_id, &tenant_id).await;
+    create_test_instance(&tenant_id, &pool, &instance_id, &image_id, "running", None).await;
+    create_instance_image(&tenant_id, &pool, &instance_id, &image_id).await;
 
     create_aged_event(&pool, &instance_id, "custom", Some("step_debug_start"), 48).await;
     create_aged_event(&pool, &instance_id, "custom", Some("step_debug_end"), 48).await;
@@ -945,10 +945,10 @@ async fn debug_sweep_is_off_when_no_window_is_configured() {
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
 
     let tenant_id = format!("debug-sweep-off-{}", Uuid::new_v4());
-    let image_id = create_test_image(&pool, &tenant_id).await;
+    let image_id = create_test_image(&tenant_id, &pool).await;
     let instance_id = Uuid::new_v4().to_string();
-    create_test_instance(&pool, &instance_id, &tenant_id, &image_id, "running", None).await;
-    create_instance_image(&pool, &instance_id, &image_id, &tenant_id).await;
+    create_test_instance(&tenant_id, &pool, &instance_id, &image_id, "running", None).await;
+    create_instance_image(&tenant_id, &pool, &instance_id, &image_id).await;
     create_aged_event(&pool, &instance_id, "custom", Some("step_debug_start"), 999).await;
 
     let config = DbCleanupWorkerConfig {

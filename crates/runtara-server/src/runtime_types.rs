@@ -301,7 +301,7 @@ pub struct StartInstanceOptions {
 
 impl StartInstanceOptions {
     /// Create new options with required fields.
-    pub fn new(image_id: impl Into<String>, tenant_id: impl Into<String>) -> Self {
+    pub fn new(tenant_id: impl Into<String>, image_id: impl Into<String>) -> Self {
         Self {
             image_id: image_id.into(),
             tenant_id: tenant_id.into(),
@@ -1601,7 +1601,7 @@ mod tests {
 
     #[test]
     fn test_start_instance_options_builder() {
-        let opts = StartInstanceOptions::new("image-123", "tenant-1")
+        let opts = StartInstanceOptions::new("tenant-1", "image-123")
             .with_instance_id("custom-id")
             .with_input(json!({"key": "value"}))
             .with_timeout(60);
@@ -1615,7 +1615,7 @@ mod tests {
 
     #[test]
     fn test_start_instance_options_defaults() {
-        let opts = StartInstanceOptions::new("image-123", "tenant-1");
+        let opts = StartInstanceOptions::new("tenant-1", "image-123");
 
         assert_eq!(opts.image_id, "image-123");
         assert_eq!(opts.tenant_id, "tenant-1");

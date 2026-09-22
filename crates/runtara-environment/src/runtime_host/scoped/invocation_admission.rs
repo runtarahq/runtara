@@ -21,8 +21,8 @@ pub(super) struct InvocationAdmission {
 
 impl InvocationAdmission {
     pub(super) fn new(
-        persistence: Arc<dyn Persistence>,
         tenant_id: TenantId,
+        persistence: Arc<dyn Persistence>,
         lease: InvocationLease,
         path: String,
         timeout: Duration,
@@ -82,8 +82,8 @@ impl InvocationAdmission {
                 if attempt.fence.lease == self.lease && attempt.fence.start_id == self.start_id =>
             {
                 let io = InvocationIo::new(
-                    self.persistence.clone(),
                     self.tenant_id.clone(),
+                    self.persistence.clone(),
                     attempt.fence.clone(),
                     self.timeout,
                 )

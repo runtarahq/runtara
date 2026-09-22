@@ -29,8 +29,8 @@ impl Fixture {
             .await
             .unwrap();
         let admission = Arc::new(InvocationAdmission::new(
-            persistence,
             runtara_core::TenantId::new("admission-tenant").unwrap(),
+            persistence,
             lease,
             "parent/child".into(),
             timeout,
@@ -321,8 +321,8 @@ async fn initial_admission_observes_old_lease_cancel_tombstone_without_child_io(
         .await
         .unwrap();
     fx.admission = Arc::new(InvocationAdmission::new(
-        fx.admission.persistence.clone(),
         runtara_core::TenantId::new("admission-tenant").unwrap(),
+        fx.admission.persistence.clone(),
         lease,
         old.fence.path.clone(),
         Duration::from_secs(3),

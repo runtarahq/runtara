@@ -118,8 +118,8 @@ impl InstanceMetricsSink for OtlpMetricsSink {
 /// [`InstanceRepository`](crate::instance_repository::InstanceRepository); what
 /// stays here is the OTLP vocabulary, which is this module's whole job.
 pub async fn record_resources_returning_status(
-    pool: &PgPool,
     tenant_id: &runtara_core::TenantId,
+    pool: &PgPool,
     instance_id: &str,
     memory_peak_bytes: Option<u64>,
     cpu_usage_usec: Option<u64>,
@@ -148,8 +148,8 @@ pub async fn record_resources_returning_status(
 
 /// Store raw stderr captured from the runner, for debugging.
 pub async fn record_instance_stderr(
-    pool: &PgPool,
     tenant_id: &runtara_core::TenantId,
+    pool: &PgPool,
     instance_id: &str,
     stderr: &str,
 ) -> Result<()> {

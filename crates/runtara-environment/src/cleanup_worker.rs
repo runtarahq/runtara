@@ -132,7 +132,7 @@ impl CleanupWorker {
         let mut errors = 0u64;
 
         let runs_dir =
-            crate::artifact_paths::tenant_root(&self.config.data_dir, self.tenant_id.as_str())
+            crate::artifact_paths::tenant_root(self.tenant_id.as_str(), &self.config.data_dir)
                 .join("runs");
         if tokio::fs::try_exists(&runs_dir).await? {
             (cleaned, errors) = self.cleanup_tenant_runs(&runs_dir, cutoff).await;
@@ -333,7 +333,7 @@ mod tests {
 
         // Create a tenant with old run directory
         let runs_dir =
-            crate::artifact_paths::tenant_root(temp_dir.path(), "test-tenant").join("runs");
+            crate::artifact_paths::tenant_root("test-tenant", temp_dir.path()).join("runs");
         let old_run = runs_dir.join("old-instance");
         tokio::fs::create_dir_all(&old_run).await.unwrap();
 
@@ -361,10 +361,10 @@ mod tests {
     #[tokio::test]
     async fn cleanup_only_visits_its_assigned_tenant() {
         let root = TempDir::new().unwrap();
-        let a = crate::artifact_paths::tenant_root(root.path(), "a")
+        let a = crate::artifact_paths::tenant_root("a", root.path())
             .join("runs")
             .join("old");
-        let b = crate::artifact_paths::tenant_root(root.path(), "b")
+        let b = crate::artifact_paths::tenant_root("b", root.path())
             .join("runs")
             .join("old");
         let legacy = root.path().join("a/runs/old");

@@ -50,7 +50,7 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 /// let persistence: Arc<dyn Persistence> = create_persistence()?;
 ///
 /// let tenant_id = runtara_core::TenantId::new("my-tenant")?;
-/// let mut sdk = RuntaraSdk::embedded(persistence, "my-instance", tenant_id);
+/// let mut sdk = RuntaraSdk::embedded(tenant_id, persistence, "my-instance");
 /// sdk.connect()?;  // No-op for embedded
 /// sdk.register(None)?;
 ///
@@ -124,13 +124,13 @@ impl RuntaraSdk {
     /// Note: Signals and durable sleep are not supported in embedded mode.
     #[cfg(feature = "embedded")]
     pub fn embedded(
+        tenant_id: runtara_core::TenantId,
         persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
         instance_id: impl Into<String>,
-        tenant_id: runtara_core::TenantId,
     ) -> Self {
         use crate::backend::embedded::EmbeddedBackend;
 
-        let backend = EmbeddedBackend::new(persistence, instance_id, tenant_id);
+        let backend = EmbeddedBackend::new(tenant_id, persistence, instance_id);
 
         Self {
             backend: std::sync::Arc::new(backend),
@@ -150,15 +150,15 @@ impl RuntaraSdk {
     /// while using direct database access.
     #[cfg(feature = "embedded")]
     pub fn with_embedded_backend(
+        tenant_id: runtara_core::TenantId,
         persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
         instance_id: impl Into<String>,
-        tenant_id: runtara_core::TenantId,
         signal_poll_interval_ms: u64,
         heartbeat_interval_ms: u64,
     ) -> Self {
         use crate::backend::embedded::EmbeddedBackend;
 
-        let backend = EmbeddedBackend::new(persistence, instance_id, tenant_id);
+        let backend = EmbeddedBackend::new(tenant_id, persistence, instance_id);
 
         Self {
             backend: std::sync::Arc::new(backend),

@@ -88,7 +88,7 @@ impl std::fmt::Debug for EnvironmentClient {
 
 impl EnvironmentClient {
     /// Wrap the running environment's shared handler state.
-    pub fn new(state: Arc<EnvironmentHandlerState>, tenant_id: runtara_core::TenantId) -> Self {
+    pub fn new(tenant_id: runtara_core::TenantId, state: Arc<EnvironmentHandlerState>) -> Self {
         Self { state, tenant_id }
     }
 
@@ -218,8 +218,8 @@ impl EnvironmentClient {
         info!("Starting instance");
 
         let resp = handlers::handle_start_instance(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             StartInstanceRequest {
                 image_id: options.image_id,
                 tenant_id: options.tenant_id,
@@ -267,8 +267,8 @@ impl EnvironmentClient {
         info!(reason = %options.reason, "Stopping instance");
 
         let resp = handlers::handle_stop_instance(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             StopInstanceRequest {
                 instance_id: options.instance_id,
                 reason: options.reason,
@@ -286,8 +286,8 @@ impl EnvironmentClient {
         info!("Resuming instance");
 
         let resp = handlers::handle_resume_instance(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             ResumeInstanceRequest {
                 instance_id: instance_id.to_string(),
             },
@@ -318,8 +318,8 @@ impl EnvironmentClient {
         };
 
         match handlers::handle_send_signal(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             instance_id,
             signal_str,
             payload,
@@ -351,8 +351,8 @@ impl EnvironmentClient {
         info!("Sending custom signal to instance");
 
         match handlers::handle_send_custom_signal(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             instance_id,
             checkpoint_id,
             payload,
@@ -440,7 +440,7 @@ impl EnvironmentClient {
 
     /// Get one image, scoped to a tenant.
     #[instrument(skip(self), fields(image_id = %image_id, tenant_id = %tenant_id), level = "debug")]
-    pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
+    pub async fn get_image(&self, tenant_id: &str, image_id: &str) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
         self.require_bound_tenant(Some(tenant_id))?;
 
@@ -492,8 +492,8 @@ impl EnvironmentClient {
         }
 
         let image_id = handlers::handle_store_image(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             handlers::StoreImageParams {
                 tenant_id: options.tenant_id,
                 name: options.name,
@@ -539,8 +539,8 @@ impl EnvironmentClient {
         let offset = options.offset.unwrap_or(0);
 
         let result = handlers::handle_list_checkpoints(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             instance_id,
             &handlers::ListCheckpointsParams {
                 checkpoint_id: options.checkpoint_id,
@@ -616,8 +616,8 @@ impl EnvironmentClient {
         };
 
         let result = handlers::handle_list_events(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             instance_id,
             &filter,
             i64::from(limit),
@@ -680,8 +680,8 @@ impl EnvironmentClient {
         };
 
         let result = handlers::handle_list_step_summaries(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             instance_id,
             &filter,
             i64::from(limit),
@@ -726,8 +726,8 @@ impl EnvironmentClient {
         debug!("Getting scope ancestors");
 
         Ok(handlers::handle_get_scope_ancestors(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             instance_id,
             scope_id,
         )
@@ -768,8 +768,8 @@ impl EnvironmentClient {
         let granularity = options.granularity.unwrap_or(MetricsGranularity::Hourly);
 
         let buckets = handlers::handle_get_tenant_metrics(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             &handlers::TenantMetricsOptions {
                 tenant_id: options.tenant_id.clone(),
                 start_time,
@@ -966,13 +966,13 @@ mod tests {
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
         let client = EnvironmentClient::new(
+            runtara_core::TenantId::new("tenant-1").unwrap(),
             Arc::new(EnvironmentHandlerState::new(
                 pool,
                 persistence.clone(),
                 Arc::new(MockRunner::new()),
                 std::env::temp_dir(),
             )),
-            runtara_core::TenantId::new("tenant-1").unwrap(),
         );
 
         // Lone continuation bytes and an interior NUL: not valid UTF-8, so
@@ -1045,13 +1045,13 @@ mod tests {
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
         let client = EnvironmentClient::new(
+            runtara_core::TenantId::new("test-tenant").unwrap(),
             Arc::new(EnvironmentHandlerState::new(
                 pool,
                 persistence,
                 Arc::new(MockRunner::new()),
                 std::env::temp_dir(),
             )),
-            runtara_core::TenantId::new("test-tenant").unwrap(),
         );
         for (name, _) in events {
             let page = client

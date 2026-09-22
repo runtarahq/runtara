@@ -93,8 +93,8 @@ pub struct PersistenceRuntimeHost {
 impl PersistenceRuntimeHost {
     /// Host for `instance_id` over the environment's shared handler state.
     pub fn new(
-        state: Arc<InstanceHandlerState>,
         tenant_id: TenantId,
+        state: Arc<InstanceHandlerState>,
         instance_id: String,
         debug_mode: bool,
     ) -> Self {
@@ -142,14 +142,14 @@ impl PersistenceRuntimeHost {
 
     /// Host over a bare persistence handle (constructs its own handler state).
     pub fn from_persistence(
-        persistence: Arc<dyn Persistence>,
         tenant_id: TenantId,
+        persistence: Arc<dyn Persistence>,
         instance_id: String,
         debug_mode: bool,
     ) -> Self {
         Self::new(
-            Arc::new(InstanceHandlerState::new(persistence)),
             tenant_id,
+            Arc::new(InstanceHandlerState::new(persistence)),
             instance_id,
             debug_mode,
         )
@@ -183,8 +183,8 @@ impl PersistenceRuntimeHost {
         }
 
         let response = handle_poll_signals(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             PollSignalsRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id: None,
@@ -286,8 +286,8 @@ impl PersistenceRuntimeHost {
     /// Apply only the command the guest actually observed.
     async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
         handle_signal_ack_decision(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             SignalAck {
                 command_id: command_id.to_owned(),
                 instance_id: self.instance_id.clone(),
@@ -331,8 +331,8 @@ impl PersistenceRuntimeHost {
             return Ok(());
         }
         handle_instance_event(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             InstanceEvent {
                 instance_id: self.instance_id.clone(),
                 event_type: event_type as i32,
@@ -416,8 +416,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
             .ok()
             .flatten();
         runtara_core::instance_handlers::handle_instance_event_with_run_label(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             InstanceEvent {
                 instance_id: self.instance_id.clone(),
                 event_type: InstanceEventType::EventCompleted as i32,
@@ -505,8 +505,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.escalate_if_cancel_ignored().await;
         let response = handle_poll_signals(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             PollSignalsRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id: Some(checkpoint_id),
@@ -520,8 +520,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.escalate_if_cancel_ignored().await;
         let response = handle_get_checkpoint(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             GetCheckpointRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
@@ -539,8 +539,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
     ) -> Result<RuntimeCheckpointResult, String> {
         self.escalate_if_cancel_ignored().await;
         let response = handle_checkpoint(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             CheckpointRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
@@ -594,8 +594,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
     ) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
         handle_retry_attempt(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             RetryAttemptEvent {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
@@ -624,8 +624,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
             return Ok(());
         }
         let response = handle_sleep(
-            &self.state,
             &self.tenant_id,
+            &self.state,
             SleepRequest {
                 instance_id: self.instance_id.clone(),
                 duration_ms: ms,
@@ -674,8 +674,8 @@ mod tests {
             .await
             .expect("store input");
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&persistence),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&persistence),
             instance_id.clone(),
             false,
         )
@@ -1049,8 +1049,8 @@ mod tests {
     async fn poll_signal_after_interrupted_sleep_observes_without_publishing_cancellation() {
         let (p, _, id) = setup().await;
         let host = PersistenceRuntimeHost::from_persistence(
-            p.clone(),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            p.clone(),
             id.clone(),
             false,
         )
@@ -1415,8 +1415,8 @@ mod tests {
     async fn sleep_interrupted_by_cancel_is_visible_to_the_next_check_signals() {
         let (p, _host, inst_id) = setup().await;
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             inst_id.clone(),
             false,
         )
@@ -1469,8 +1469,8 @@ mod tests {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             inst_id.clone(),
             false,
         )
@@ -1554,8 +1554,8 @@ mod tests {
             let cancel = Arc::clone(&cancel);
             let seen = Arc::clone(&flag_at_interrupt);
             PersistenceRuntimeHost::from_persistence(
-                Arc::clone(&p),
                 runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                Arc::clone(&p),
                 inst_id.clone(),
                 false,
             )
@@ -1617,8 +1617,8 @@ mod tests {
         let host = {
             let fired = Arc::clone(&interrupts);
             PersistenceRuntimeHost::from_persistence(
-                Arc::clone(&p),
                 runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+                Arc::clone(&p),
                 inst_id.clone(),
                 false,
             )
@@ -1654,8 +1654,8 @@ mod tests {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             inst_id.clone(),
             false,
         )
@@ -1709,8 +1709,8 @@ mod tests {
         let (p, _, id) = setup().await;
         let cancel = Arc::new(AtomicBool::new(true));
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             id.clone(),
             false,
         )
@@ -1748,8 +1748,8 @@ mod tests {
         let (p, _, id) = setup().await;
         let cancel = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             id.clone(),
             false,
         )
@@ -1781,8 +1781,8 @@ mod tests {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             inst_id.clone(),
             false,
         )
@@ -1853,8 +1853,8 @@ mod tests {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             inst_id.clone(),
             false,
         )
@@ -1886,8 +1886,8 @@ mod tests {
     async fn signal_poll_rate_limiter_suppresses_back_to_back_polls() {
         let (p, _host, inst_id) = setup().await;
         let host = PersistenceRuntimeHost::from_persistence(
-            Arc::clone(&p),
             runtara_core::TenantId::new("rt-host-tenant").unwrap(),
+            Arc::clone(&p),
             inst_id.clone(),
             false,
         )

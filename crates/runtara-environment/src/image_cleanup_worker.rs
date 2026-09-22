@@ -173,7 +173,7 @@ impl ImageCleanupWorker {
     /// `(tenant_id, name)` with a new `image_id` — the old directory is left behind.
     async fn cleanup_orphaned_directories(&self) -> u64 {
         let images_dir =
-            crate::artifact_paths::images_dir(&self.config.data_dir, self.tenant_id.as_str());
+            crate::artifact_paths::images_dir(self.tenant_id.as_str(), &self.config.data_dir);
 
         // Read all subdirectory names from disk
         let mut dir_entries = match tokio::fs::read_dir(&images_dir).await {
@@ -257,8 +257,8 @@ impl ImageCleanupWorker {
         for image_id in &stale_images {
             // Delete disk directory
             let image_dir = crate::artifact_paths::image_dir(
-                &self.config.data_dir,
                 self.tenant_id.as_str(),
+                &self.config.data_dir,
                 image_id,
             );
             if let Err(e) = tokio::fs::remove_dir_all(&image_dir).await
@@ -475,7 +475,7 @@ mod tests {
         for tenant in [&a, &b] {
             for label in ["stale", "active", "orphan"] {
                 let id = crate::test_support::unique_id(label);
-                let path = crate::artifact_paths::image_dir(root.path(), tenant.as_str(), &id)
+                let path = crate::artifact_paths::image_dir(tenant.as_str(), root.path(), &id)
                     .join("binary");
                 tokio::fs::create_dir_all(path.parent().unwrap())
                     .await

@@ -962,9 +962,9 @@ impl EmbeddedWasmRunner {
 
     fn merged_env(&self, options: &LaunchOptions) -> HashMap<String, String> {
         let mut env = common::build_env(
+            &options.tenant_id,
             &self.config,
             &options.instance_id,
-            &options.tenant_id,
             options.checkpoint_id.as_deref(),
             self.core_http_url.as_deref(),
         );
@@ -975,8 +975,8 @@ impl EmbeddedWasmRunner {
     #[allow(clippy::too_many_arguments)]
     fn run_spec(
         &self,
-        options: &LaunchOptions,
         tenant_id: runtara_core::TenantId,
+        options: &LaunchOptions,
         env: HashMap<String, String>,
         stderr: Option<std::fs::File>,
         timeout: Duration,
@@ -993,8 +993,8 @@ impl EmbeddedWasmRunner {
         // unchanged, without a rebuild, through the same spec.
         let debug_mode = env.get("DEBUG_MODE").is_some_and(|value| value == "true");
         let mut host = crate::runtime_host::PersistenceRuntimeHost::new(
-            Arc::clone(&self.handler_state),
             tenant_id,
+            Arc::clone(&self.handler_state),
             options.instance_id.clone(),
             debug_mode,
         )
@@ -1756,8 +1756,8 @@ impl Runner for EmbeddedWasmRunner {
         let tenant_id = runtara_core::TenantId::new(options.tenant_id.clone())
             .map_err(|error| RunnerError::StartFailed(error.to_string()))?;
         let (spec, runtime_host) = self.run_spec(
-            options,
             tenant_id.clone(),
+            options,
             env,
             // Durable prepared launches intentionally do not create a
             // per-run stderr file in the parent. See `prepare_embedded_launch`:
@@ -2008,8 +2008,8 @@ impl Runner for EmbeddedWasmRunner {
         // Output is read from runtara-core by the container monitor, not from
         // files. collect_result only provides stderr for diagnostics.
         let stderr = common::load_stderr(
-            &self.config.data_dir,
             &handle.tenant_id,
+            &self.config.data_dir,
             &handle.instance_id,
             &handle.launch_id,
         )

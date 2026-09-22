@@ -319,9 +319,9 @@ pub enum InitialLaunchOutcome {
 impl EnqueueRequest {
     /// Build a launch that is claimable immediately.
     pub fn immediate(
+        tenant_id: impl Into<String>,
         launch_id: impl Into<String>,
         instance_id: impl Into<String>,
-        tenant_id: impl Into<String>,
         image_id: impl Into<String>,
         kind: LaunchKind,
         queue_timeout: Duration,
@@ -765,16 +765,16 @@ impl LaunchRepository {
         // exclusively, so ordinary starts take it shared and stay concurrent.
         if let Some(scope) = workflow_scope.as_ref() {
             acquire_workflow_scope_lock(
-                &mut tx,
                 &request.launch.tenant_id,
+                &mut tx,
                 &scope.workflow_id,
                 scope.single_instance,
             )
             .await?;
             if scope.single_instance
                 && has_active_workflow_launch(
-                    &mut tx,
                     &request.launch.tenant_id,
+                    &mut tx,
                     &scope.workflow_id,
                 )
                 .await?
@@ -975,14 +975,14 @@ impl LaunchRepository {
 
             if let Some(scope) = workflow_scope.as_ref() {
                 acquire_workflow_scope_lock(
-                    &mut tx,
                     &request.tenant_id,
+                    &mut tx,
                     &scope.workflow_id,
                     scope.single_instance,
                 )
                 .await?;
                 if scope.single_instance
-                    && has_active_workflow_launch(&mut tx, &request.tenant_id, &scope.workflow_id)
+                    && has_active_workflow_launch(&request.tenant_id, &mut tx, &scope.workflow_id)
                         .await?
                 {
                     tx.commit().await?;
@@ -2297,8 +2297,8 @@ impl TryFrom<LaunchRow> for Launch {
 /// the shared mode and proceed concurrently. Holding the exclusive mode for
 /// every launch serialized a hot workflow's entire pipeline on one lock.
 async fn acquire_workflow_scope_lock(
-    tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
+    tx: &mut Transaction<'_, Postgres>,
     workflow_id: &str,
     single_instance: bool,
 ) -> Result<(), LaunchQueueError> {
@@ -2315,8 +2315,8 @@ async fn acquire_workflow_scope_lock(
 /// Whether any active generation for a workflow currently owns its durable
 /// lease. The caller must hold [`acquire_workflow_scope_lock`] for this key.
 async fn has_active_workflow_launch(
-    tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
+    tx: &mut Transaction<'_, Postgres>,
     workflow_id: &str,
 ) -> Result<bool, LaunchQueueError> {
     let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
@@ -2492,9 +2492,9 @@ mod tests {
     #[test]
     fn immediate_requests_are_ready_without_a_host_clock_timestamp() {
         let request = EnqueueRequest::immediate(
+            "tenant-1",
             "launch-1",
             "instance-1",
-            "tenant-1",
             "image-1",
             LaunchKind::Start,
             Duration::from_secs(60),

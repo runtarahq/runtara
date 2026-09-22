@@ -24,8 +24,8 @@ impl InvocationIo {
     /// `control_timeout` bounds each control transaction (revalidation,
     /// settlement and any failure revocation), independently of guest execution.
     pub fn new(
-        persistence: Arc<dyn Persistence>,
         tenant_id: TenantId,
+        persistence: Arc<dyn Persistence>,
         fence: AttemptFence,
         control_timeout: Duration,
     ) -> Result<Self, String> {
@@ -219,8 +219,8 @@ impl ScopedRuntimeHost {
         // command, but a custom signal is returned only on a hit or insertion.
         let signals = io.read_result(
             handle_poll_signals(
-                &self.owner.root.state,
                 &self.owner.root.tenant_id,
+                &self.owner.root.state,
                 PollSignalsRequest {
                     instance_id: self.owner.root.instance_id.clone(),
                     checkpoint_id: (stored.found || !probe).then_some(key),
@@ -324,8 +324,8 @@ impl ScopedRuntimeHost {
                 .await?;
             let signals = io.read_result(
                 handle_poll_signals(
-                    &self.owner.root.state,
                     &self.owner.root.tenant_id,
+                    &self.owner.root.state,
                     PollSignalsRequest {
                         instance_id: self.owner.root.instance_id.clone(),
                         checkpoint_id: None,

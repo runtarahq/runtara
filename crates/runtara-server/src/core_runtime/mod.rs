@@ -266,9 +266,9 @@ impl CoreRuntimeConfig {
         let server_shutdown = Arc::clone(&shutdown_signal);
         let server_handle = tokio::spawn(async move {
             http_server::run_http_server_with_shutdown(
+                tenant_id,
                 bind_addr,
                 server_state,
-                tenant_id,
                 async move { server_shutdown.notified().await },
             )
             .await

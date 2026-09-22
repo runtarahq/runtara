@@ -218,7 +218,7 @@ impl InstanceRepository {
         tenant_id: &TenantId,
         instance_id: &str,
     ) -> Result<Option<InstanceDetail>> {
-        let Some(inst) = crate::db::get_instance_full(&self.pool, tenant_id, instance_id).await?
+        let Some(inst) = crate::db::get_instance_full(tenant_id, &self.pool, instance_id).await?
         else {
             return Ok(None);
         };
@@ -255,8 +255,8 @@ impl InstanceRepository {
         tenant_id: &TenantId,
         options: &ListInstancesOptions,
     ) -> Result<InstancePage> {
-        let instances = crate::db::list_instances(&self.pool, tenant_id, options).await?;
-        let total_count = crate::db::count_instances(&self.pool, tenant_id, options).await?;
+        let instances = crate::db::list_instances(tenant_id, &self.pool, options).await?;
+        let total_count = crate::db::count_instances(tenant_id, &self.pool, options).await?;
 
         Ok(InstancePage {
             instances: instances
@@ -291,7 +291,7 @@ impl InstanceRepository {
         statuses: &[String],
         ceiling: i64,
     ) -> Result<i64> {
-        Ok(crate::db::count_instances_by_status(&self.pool, tenant_id, statuses, ceiling).await?)
+        Ok(crate::db::count_instances_by_status(tenant_id, &self.pool, statuses, ceiling).await?)
     }
 
     /// How many of a tenant's instances are parked.
@@ -311,8 +311,8 @@ impl InstanceRepository {
     /// to reach that index; [`crate::db::count_parked_instances`] says why.
     pub async fn count_parked(&self, tenant_id: &TenantId) -> Result<i64> {
         Ok(crate::db::count_parked_instances(
-            &self.pool,
             tenant_id,
+            &self.pool,
             crate::core_types::status_name(InstanceStatus::Suspended),
         )
         .await?)
