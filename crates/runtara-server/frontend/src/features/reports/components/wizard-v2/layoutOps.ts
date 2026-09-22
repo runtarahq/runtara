@@ -51,18 +51,6 @@ export function newDefaultLayout(): ReportGridLayoutNode {
 // Walkers
 // ============================================================================
 
-/** Returns the ordered list of block ids that appear anywhere in the
- *  layout tree. Recurses from the root grid through every nested item. */
-export function collectLayoutBlockIds(
-  layout: ReportGridLayoutNode | undefined
-): string[] {
-  const ids: string[] = [];
-  walkLayout(layout, (node) => {
-    if (node.type === 'block') ids.push(node.blockId);
-  });
-  return ids;
-}
-
 /** Visits every layout node depth-first starting at the root grid's items
  *  (the root grid itself is not visited — callers that need it should
  *  read `definition.layout` directly). */
@@ -90,30 +78,6 @@ function walkItems(
 // Block-side operations
 // ============================================================================
 
-/** Returns the visible-to-editor ordered list of blocks: each block from
- *  `definition.blocks` is listed in the order they appear in the layout tree.
- *  Blocks present in `blocks` but missing from `layout` are appended at the
- *  end (the wizard surfaces them as "unplaced"). */
-export function orderedBlocksFromDefinition(
-  definition: ReportDefinition
-): ReportBlockDefinition[] {
-  const layoutOrder = collectLayoutBlockIds(definition.layout);
-  const byId = new Map(definition.blocks.map((block) => [block.id, block]));
-  const ordered: ReportBlockDefinition[] = [];
-  const consumed = new Set<string>();
-  for (const id of layoutOrder) {
-    const block = byId.get(id);
-    if (block && !consumed.has(id)) {
-      ordered.push(block);
-      consumed.add(id);
-    }
-  }
-  for (const block of definition.blocks) {
-    if (!consumed.has(block.id)) ordered.push(block);
-  }
-  return ordered;
-}
-
 /** Replaces the block with `blockId` using `updater(prev)`. No-op if missing. */
 export function updateBlock(
   definition: ReportDefinition,
@@ -126,61 +90,6 @@ export function updateBlock(
       block.id === blockId ? updater(block) : block
     ),
   };
-}
-
-/** Appends `block` to `definition.blocks` and adds it as a new item at
- *  the end of the root grid (or a specified target grid). Returns the
- *  updated definition. */
-export function addBlock(
-  definition: ReportDefinition,
-  block: ReportBlockDefinition,
-  target?: LayoutTarget
-): ReportDefinition {
-  const layoutNode: ReportLayoutNode = {
-    id: `n_${block.id}`,
-    type: 'block',
-    blockId: block.id,
-  };
-  const withBlock = { ...definition, blocks: [...definition.blocks, block] };
-  return addLayoutNode(
-    withBlock,
-    layoutNode,
-    target ?? { parentGridId: ROOT_GRID_ID }
-  );
-}
-
-/** Removes the block with `blockId` from both `blocks` and the layout
- *  tree. Strips every grid item whose `child` references that block. */
-export function removeBlock(
-  definition: ReportDefinition,
-  blockId: string
-): ReportDefinition {
-  return {
-    ...definition,
-    blocks: definition.blocks.filter((block) => block.id !== blockId),
-    layout: stripBlockReferencesFromGrid(definition.layout, blockId),
-  };
-}
-
-function stripBlockReferencesFromGrid<T extends ReportGridLayoutNode>(
-  grid: T | undefined,
-  blockId: string
-): T {
-  if (!grid) return newDefaultLayout() as T;
-  const items: ReportGridLayoutItem[] = (grid.items ?? [])
-    .filter(
-      (item) => !(item.child.type === 'block' && item.child.blockId === blockId)
-    )
-    .map((item) => {
-      if (item.child.type === 'grid') {
-        return {
-          ...item,
-          child: stripBlockReferencesFromGrid(item.child, blockId),
-        };
-      }
-      return item;
-    });
-  return { ...grid, items };
 }
 
 // ============================================================================
@@ -400,37 +309,6 @@ function updateGridInTree<T extends ReportGridLayoutNode>(
       ...item,
       child: updateGridInTree(item.child, gridId, updater),
     };
-  });
-  return { ...grid, items };
-}
-
-/** Patches a single grid item (col_span / row_span / id) inside any grid
- *  in the tree. Useful when a block's grid-cell sizing changes. */
-export function updateGridItem(
-  definition: ReportDefinition,
-  itemId: string,
-  updater: (item: ReportGridLayoutItem) => ReportGridLayoutItem
-): ReportDefinition {
-  return {
-    ...definition,
-    layout: updateGridItemInTree(definition.layout, itemId, updater),
-  };
-}
-
-function updateGridItemInTree<T extends ReportGridLayoutNode>(
-  grid: T,
-  itemId: string,
-  updater: (item: ReportGridLayoutItem) => ReportGridLayoutItem
-): T {
-  const items: ReportGridLayoutItem[] = (grid.items ?? []).map((item) => {
-    if (item.id === itemId) return updater(item);
-    if (item.child.type === 'grid') {
-      return {
-        ...item,
-        child: updateGridItemInTree(item.child, itemId, updater),
-      };
-    }
-    return item;
   });
   return { ...grid, items };
 }

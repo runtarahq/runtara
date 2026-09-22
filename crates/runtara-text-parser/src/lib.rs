@@ -55,32 +55,3 @@ pub fn evaluate_visible_when(vw: &VisibleWhen, collected: &Map<String, Value>) -
         true
     }
 }
-
-/// Build a structured payload from a schema with only a single field,
-/// parsing the raw text directly. Returns `None` if the schema has != 1 field.
-pub fn try_single_field_parse(
-    schema: &HashMap<String, SchemaField>,
-    input: &str,
-) -> Option<(String, ParseResult)> {
-    if schema.len() != 1 {
-        return None;
-    }
-    let (name, field) = schema.iter().next().unwrap();
-    Some((name.clone(), parse_text(input, field)))
-}
-
-/// Check if a schema represents a "simple message" form
-/// (empty, or a single field named "message" with type string).
-pub fn is_message_schema(schema: &HashMap<String, SchemaField>) -> bool {
-    if schema.is_empty() {
-        return true;
-    }
-    if schema.len() == 1
-        && let Some(field) = schema.get("message")
-    {
-        return field.field_type == runtara_dsl::SchemaFieldType::String
-            && field.enum_values.is_none()
-            && field.format.is_none();
-    }
-    false
-}

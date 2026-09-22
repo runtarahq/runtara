@@ -3,13 +3,10 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import { ReportBuilderWizardV2 } from '../ReportBuilderWizardV2';
-import { ReportBlockDefinition, ReportDefinition } from '../../../types';
+import { ReportDefinition } from '../../../types';
 import {
-  addBlock,
-  collectLayoutBlockIds,
   moveLayoutNode,
   pathToLayoutNode,
-  removeBlock,
   updateBlock,
   walkLayout,
 } from '../layoutOps';
@@ -59,9 +56,8 @@ describe('wizard v2 identity-edit round-trip', () => {
 
   for (const fixture of fixtures) {
     it(`${fixture.name}: every block round-trips through layoutOps.updateBlock`, () => {
-      const ids = collectLayoutBlockIds(fixture.definition.layout);
       let working = fixture.definition;
-      for (const id of ids) {
+      for (const { id } of fixture.definition.blocks) {
         const before = JSON.stringify(working.blocks.find((b) => b.id === id));
         working = updateBlock(working, id, (block) => block);
         const after = JSON.stringify(working.blocks.find((b) => b.id === id));
@@ -93,23 +89,6 @@ describe('wizard v2 identity-edit round-trip', () => {
       );
       expect(JSON.stringify(next.blocks)).toBe(
         JSON.stringify(fixture.definition.blocks)
-      );
-    });
-
-    it(`${fixture.name}: add then remove a block is a no-op`, () => {
-      const probe: ReportBlockDefinition = {
-        id: '__test_probe__',
-        type: 'markdown',
-        source: { schema: '' },
-        markdown: { content: '' },
-      };
-      const added = addBlock(fixture.definition, probe);
-      const removed = removeBlock(added, probe.id);
-      expect(JSON.stringify(removed.blocks)).toBe(
-        JSON.stringify(fixture.definition.blocks)
-      );
-      expect(JSON.stringify(removed.layout)).toBe(
-        JSON.stringify(fixture.definition.layout)
       );
     });
   }

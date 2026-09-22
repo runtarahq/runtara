@@ -871,20 +871,6 @@ impl RuntimeClient {
     }
 }
 
-/// Build a legacy human-readable image-name prefix.
-///
-/// Compiled workflow artifacts append an opaque `@` fingerprint to this form
-/// so a recompile cannot replace the binary used by an already-selected image
-/// UUID. This helper remains for legacy callers that only need the stable
-/// `{workflow_id}:{version}` prefix.
-///
-/// **IMPORTANT**: This is a name, NOT the ID for execution!
-/// When executing, you must use the UUID returned from `register_image_stream`.
-/// The UUID is stored in `workflow_compilations.registered_image_id`.
-pub fn build_image_name(workflow_id: &str, version: u32) -> String {
-    format!("{}:{}", workflow_id, version)
-}
-
 #[cfg(test)]
 mod classify_observed_status_tests {
     use super::*;

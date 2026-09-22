@@ -196,15 +196,6 @@ export function stickyChokepoint(
   return null;
 }
 
-/// Is the steps-per-second figure a measurement or an absence of one?
-///
-/// `trackEvents` is compile-time, so a workflow built without it runs perfectly
-/// and reports nothing. Rendering that absence as `0/s` would let a reader
-/// conclude a healthy deployment had stopped dead.
-export function stepsAreMeasured(rates: PipelineRates | null): boolean {
-  return rates !== null && rates.steps !== null;
-}
-
 /// Format an age for display, coarsening as it grows.
 ///
 /// Sub-second precision matters when permits recycle in milliseconds; at

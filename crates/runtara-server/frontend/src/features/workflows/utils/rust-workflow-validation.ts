@@ -2,7 +2,6 @@ import {
   ensureWorkflowValidationInitialized,
   getAgentJson,
   getAgentsJson,
-  getCapabilitySchemaJson,
   getStepTypeSchemaJson,
   getStepTypesJson,
   validateExecutionGraphJson,
@@ -11,7 +10,6 @@ import {
 } from '@/shared/lib/rust-validation-wasm';
 import {
   AgentInfo,
-  CapabilityInfo,
   ListStepTypesResponse,
 } from '@/generated/RuntaraRuntimeApi';
 
@@ -245,19 +243,4 @@ export async function getStaticAgentWithRust(
 
   await ensureRustValidatorInitialized();
   return parseRustJson<AgentInfo | null>(getAgentJson(agentId), null);
-}
-
-export async function getStaticCapabilitySchemaWithRust(
-  agentId: string,
-  capabilityId: string
-): Promise<CapabilityInfo | null> {
-  if (!agentId || !capabilityId) {
-    return null;
-  }
-
-  await ensureRustValidatorInitialized();
-  return parseRustJson<CapabilityInfo | null>(
-    getCapabilitySchemaJson(agentId, capabilityId),
-    null
-  );
 }

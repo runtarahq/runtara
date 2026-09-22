@@ -9,7 +9,6 @@ import {
   severityOf,
   sparklinePath,
   snapshotStuckAfterMs,
-  stepsAreMeasured,
   stickyChokepoint,
   utilisation,
   type PipelineStage,
@@ -257,34 +256,6 @@ describe('stickyChokepoint', () => {
 
   it('does not resurrect a stage that has vanished from the snapshot', () => {
     expect(stickyChokepoint([], 'runPermits')).toBeNull();
-  });
-});
-
-describe('stepsAreMeasured', () => {
-  it('treats a null steps rate as unmeasured, not as zero', () => {
-    // trackEvents is compile-time: a workflow built without it runs perfectly
-    // and reports nothing. Rendering that as 0/s would let a reader conclude a
-    // healthy deployment had stopped dead.
-    const rates = {
-      offered: 400,
-      accepted: 400,
-      denied: 0,
-      started: 398,
-      finished: 396,
-      steps: null,
-    };
-    expect(stepsAreMeasured(rates)).toBe(false);
-    expect(stepsAreMeasured({ ...rates, steps: 0 })).toBe(true);
-  });
-
-  it('is false before the first window closes', () => {
-    const snapshot: PipelineSnapshot = {
-      capturedAt: '2026-09-02T00:00:00Z',
-      windowMs: 0,
-      rates: null,
-      stages: [],
-    };
-    expect(stepsAreMeasured(snapshot.rates)).toBe(false);
   });
 });
 

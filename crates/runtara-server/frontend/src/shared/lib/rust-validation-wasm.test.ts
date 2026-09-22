@@ -17,7 +17,6 @@ vi.mock('@/wasm/validation/runtara_validation.js', () => ({
   evaluateConditionJson: wasm.evaluateConditionJson,
   getAgentJson: vi.fn(),
   getAgentsJson: vi.fn(),
-  getCapabilitySchemaJson: vi.fn(),
   getStepTypeSchemaJson: vi.fn(),
   getStepTypesJson: vi.fn(),
   normalizeSchemaFieldsFormJson: vi.fn(),

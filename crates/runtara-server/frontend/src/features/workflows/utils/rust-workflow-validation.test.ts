@@ -12,7 +12,6 @@ import {
 import {
   getStaticAgentWithRust,
   getStaticAgentsWithRust,
-  getStaticCapabilitySchemaWithRust,
   getStaticStepTypeSchemaWithRust,
   getStaticStepTypesWithRust,
   validateExecutionGraphWithRust,
@@ -282,16 +281,13 @@ describe('rust workflow validation WASM', () => {
     const agent = await getStaticAgentWithRust(firstAgent!.id);
     expect(agent).toEqual(expect.objectContaining({ id: firstAgent!.id }));
 
-    const capability = firstAgent!.capabilities[0];
-    const capabilitySchema = await getStaticCapabilitySchemaWithRust(
-      firstAgent!.id,
-      capability.id
-    );
-    expect(capabilitySchema).toEqual(
-      expect.objectContaining({
-        id: capability.id,
-        inputs: expect.any(Array),
-      })
+    expect(agent?.capabilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: firstAgent!.capabilities[0].id,
+          inputs: expect.any(Array),
+        }),
+      ])
     );
   });
 

@@ -757,54 +757,6 @@ impl RateLimitService {
         Ok(count)
     }
 
-    /// Reset window counters (called when a new window starts)
-    #[allow(dead_code)]
-    pub async fn reset_window_counters(
-        &self,
-        connection_id: &str,
-    ) -> Result<(), redis::RedisError> {
-        let Some(mut conn) = self.redis_manager.clone() else {
-            return Ok(());
-        };
-
-        let key = format!("rate_limit:{}", connection_id);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-
-        // Reset window counter and update window start
-        let mut pipe = redis::pipe();
-        pipe.hset(&key, "calls_window", 0i64);
-        pipe.hset(&key, "window_start", now_ms);
-        let _: () = pipe.query_async(&mut conn).await?;
-
-        Ok(())
-    }
-
-    /// Delete old rate limit events (for cleanup job)
-    #[allow(dead_code)]
-    pub async fn cleanup_old_events(&self, retention_days: i32) -> Result<i64, ServiceError> {
-        let Some(ref pool) = self.db_pool else {
-            return Err(ServiceError::DatabaseError(
-                "Database pool not configured".to_string(),
-            ));
-        };
-
-        let result = sqlx::query(
-            r#"
-            DELETE FROM rate_limit_events
-            WHERE created_at < NOW() - ($1 || ' days')::INTERVAL
-            "#,
-        )
-        .bind(retention_days)
-        .execute(pool)
-        .await
-        .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
-
-        Ok(result.rows_affected() as i64)
-    }
-
     /// Parse interval string to chrono::Duration
     /// Valid values: 1h, 24h, 7d, 30d
     pub fn parse_interval(interval: &str) -> Result<chrono::Duration, ServiceError> {

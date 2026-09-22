@@ -692,27 +692,6 @@ impl ExecutionEngine {
         }
     }
 
-    /// Lifecycle hook for P0.1: release the durable source reservation once a
-    /// launch reaches a terminal/suspended handoff. It is idempotent so the
-    /// lifecycle callback and the crash-recovery reconciler can race safely.
-    pub async fn release_durable_admission_for_instance(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        reason: &str,
-    ) -> Result<bool, ExecutionError> {
-        self.outbox
-            .release_admission_for_instance(tenant_id, instance_id, reason)
-            .await
-            .map_err(map_outbox_error)
-    }
-
-    /// Check if the runtime client is available.
-    #[allow(dead_code)]
-    pub fn has_runtime(&self) -> bool {
-        self.runtime_client.is_some()
-    }
-
     async fn workflow_id_for_instance_image(
         &self,
         tenant_id: &str,
