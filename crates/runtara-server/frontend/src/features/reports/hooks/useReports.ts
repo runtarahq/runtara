@@ -8,7 +8,6 @@ import { queryKeys } from '@/shared/queries/query-keys';
 import {
   createReport,
   deleteReport,
-  editReport,
   getReport,
   getReportBlockData,
   getReportLookupOptions,
@@ -26,7 +25,6 @@ import {
   ReportDatasetQueryRequest,
   ReportDatasetQueryResponse,
   ReportDto,
-  ReportEditOp,
   ReportLookupOptionsRequest,
   ReportLookupOptionsResponse,
   ReportPreviewRequest,
@@ -195,28 +193,6 @@ export function useUpdateReport() {
     { id: string; data: UpdateReportRequest }
   >({
     mutationFn: (token, request) => updateReport(token, request),
-    onSuccess: (report) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.reports.lists() });
-      queryClient.setQueryData(queryKeys.reports.byId(report.id), report);
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.reports.byId(report.id),
-      });
-    },
-  });
-}
-
-/** Canonical partial-mutation hook backed by `POST /reports/{id}/edit`.
- *  Applies a batch of `ReportEditOp`s atomically server-side. Prefer this
- *  over `useUpdateReport` (full PUT) for targeted edits — MCP authoring
- *  flows and any future per-block UIs should route through here.
- *
- *  @lintignore Public binding for the edit endpoint, kept ahead of the
- *  per-block UIs that will consume it. */
-export function useEditReport() {
-  const queryClient = useQueryClient();
-
-  return useCustomMutation<ReportDto, { id: string; ops: ReportEditOp[] }>({
-    mutationFn: (token, request) => editReport(token, request),
     onSuccess: (report) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.reports.lists() });
       queryClient.setQueryData(queryKeys.reports.byId(report.id), report);

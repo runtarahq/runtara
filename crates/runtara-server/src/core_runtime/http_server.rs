@@ -867,20 +867,6 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
         .with_state(state)
 }
 
-/// Run the instance HTTP server until the process ends.
-///
-/// Starts an axum HTTP server on the given address, serving the instance
-/// protocol API for all clients (native workflows, WASM workflows, debugging, etc.).
-///
-/// This never returns on its own. To be able to stop the server without
-/// severing in-flight requests, use [`run_http_server_with_shutdown`].
-pub async fn run_http_server(
-    bind_addr: SocketAddr,
-    state: Arc<InstanceHandlerState>,
-) -> anyhow::Result<()> {
-    run_http_server_with_shutdown(bind_addr, state, std::future::pending()).await
-}
-
 /// Run the instance HTTP server until `shutdown` resolves.
 ///
 /// Once `shutdown` completes the listener stops accepting, and the server waits

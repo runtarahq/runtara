@@ -6,9 +6,6 @@ use std::fmt;
 use std::ops::Deref;
 use utoipa::ToSchema;
 
-// Re-export CancellationHandle from workers module
-pub use crate::workers::CancellationHandle;
-
 /// Execution status representing the current state of a workflow execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, ToSchema)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]

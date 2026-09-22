@@ -67,14 +67,6 @@ pub fn provider_for_integration(integration_id: &str) -> Option<&'static str> {
 /// * `model` - Model identifier (e.g., "gpt-4o"). Defaults to
 ///   [`crate::defaults::DEFAULT_OPENAI_MODEL`] if None.
 /// * `connection_id` - Optional connection ID for proxy mode
-pub fn create_openai_model(
-    parameters: &Value,
-    model: Option<&str>,
-) -> Result<openai::OpenAICompletionModel, ProviderError> {
-    create_openai_model_with_connection(parameters, model, None)
-}
-
-/// Create an OpenAI completion model, optionally using the proxy pattern.
 pub fn create_openai_model_with_connection(
     parameters: &Value,
     model: Option<&str>,
@@ -144,7 +136,8 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
     }
 }
 
-/// Dispatch to the appropriate LLM provider based on provider or integration id.
+/// Dispatch to the appropriate LLM provider based on provider or integration id,
+/// optionally using the proxy pattern.
 ///
 /// Currently supports:
 /// - `openai` / `openai_api_key` → OpenAI-compatible chat completions
@@ -152,15 +145,6 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
 ///
 /// Returns a boxed `CompletionModel` so the caller doesn't need to know
 /// which concrete provider type is in use.
-pub fn create_completion_model(
-    integration_id: &str,
-    parameters: &Value,
-    model: Option<&str>,
-) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
-    create_completion_model_with_connection(integration_id, parameters, model, None)
-}
-
-/// Dispatch to the appropriate LLM provider, optionally using the proxy pattern.
 ///
 /// The first argument is the explicit provider id for AI Agent calls, but this
 /// function also accepts legacy connection integration ids for direct callers.

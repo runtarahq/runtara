@@ -35,7 +35,6 @@ use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository}
 use crate::metrics::MetricsService;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::{RuntimeClient, RuntimeError};
-use crate::workers::CancellationHandle;
 use crate::workers::execution_outbox::{
     EnqueuedExecution, ExecutionOutbox, ExecutionOutboxError, source_idempotency_key,
 };
@@ -339,8 +338,6 @@ pub struct ExecutionEngine {
     trigger_stream: Option<Arc<TriggerStreamPublisher>>,
     /// Durable source request + admission reservation writer.
     outbox: ExecutionOutbox,
-    #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
-    running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     /// Sink for product-analytics execution events.
     events: ProductEventSink,
     /// Short-lived cache of the per-tenant in-flight count used by the
@@ -408,13 +405,11 @@ fn retained_reservations(subsumed: u64, current: u64) -> u64 {
 
 impl ExecutionEngine {
     /// Create a new execution engine.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         workflow_repo: Arc<WorkflowRepository>,
         runtime_client: Option<Arc<RuntimeClient>>,
         trigger_stream: Option<Arc<TriggerStreamPublisher>>,
-        running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
         events: ProductEventSink,
         gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
     ) -> Self {
@@ -424,7 +419,6 @@ impl ExecutionEngine {
             runtime_client,
             trigger_stream,
             outbox: ExecutionOutbox::new(pool.clone()),
-            running_executions,
             events,
             concurrency_counts: Arc::new(DashMap::new()),
             concurrency_reservations: Arc::new(DashMap::new()),
@@ -696,27 +690,6 @@ impl ExecutionEngine {
                 Err(map_outbox_error(error))
             }
         }
-    }
-
-    /// Lifecycle hook for P0.1: release the durable source reservation once a
-    /// launch reaches a terminal/suspended handoff. It is idempotent so the
-    /// lifecycle callback and the crash-recovery reconciler can race safely.
-    pub async fn release_durable_admission_for_instance(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        reason: &str,
-    ) -> Result<bool, ExecutionError> {
-        self.outbox
-            .release_admission_for_instance(tenant_id, instance_id, reason)
-            .await
-            .map_err(map_outbox_error)
-    }
-
-    /// Check if the runtime client is available.
-    #[allow(dead_code)]
-    pub fn has_runtime(&self) -> bool {
-        self.runtime_client.is_some()
     }
 
     async fn workflow_id_for_instance_image(
@@ -2710,7 +2683,6 @@ mod tests {
             Arc::new(WorkflowRepository::new(pool)),
             None,
             None,
-            None,
             ProductEventSink::new(tx),
             crate::workers::pipeline_gauges::PipelineGauges::new(),
         );
@@ -2754,7 +2726,6 @@ mod tests {
         let engine = ExecutionEngine::new(
             pool.clone(),
             Arc::new(WorkflowRepository::new(pool)),
-            None,
             None,
             None,
             ProductEventSink::new(tx),

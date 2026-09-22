@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Native reproductions for docs/wasm-emitter-audit.md.
+//! Native WASM emitter regression reproductions and controls.
 //! Ignored cases assert the desired contract, not the observed defect.
 #![cfg(feature = "compiler")]
 

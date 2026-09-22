@@ -1,7 +1,6 @@
 export * from './api';
 export * from './use-is-mobile';
 export * from './useAutoSignin';
-export * from './useDialogState';
 export * from './usePageTitle';
 export * from './usePagination';
 export * from './useMe';

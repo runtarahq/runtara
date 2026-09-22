@@ -240,12 +240,6 @@ fn validation_wasm_inputs(workspace_root: &Path) -> Vec<PathBuf> {
         "crates/runtara-workflow-stdlib/src",
         "crates/runtara-dsl/Cargo.toml",
         "crates/runtara-dsl/src",
-        "crates/runtara-agents/Cargo.toml",
-        "crates/runtara-agents/src",
-        "crates/runtara-ai/Cargo.toml",
-        "crates/runtara-ai/src",
-        "crates/runtara-http/Cargo.toml",
-        "crates/runtara-http/src",
     ]
     .into_iter()
     .map(|path| workspace_root.join(path))

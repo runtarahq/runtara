@@ -5,14 +5,12 @@ use axum::{
     response::Json,
     routing::{delete, get, patch, post, put},
 };
-use dashmap::DashMap;
 use rmcp::transport::streamable_http_server::session::SessionStore;
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
-use uuid::Uuid;
 
 use crate::api;
 use crate::auth;
@@ -26,7 +24,6 @@ use crate::observability;
 use crate::plan_check;
 use crate::product_events;
 use crate::runtime_client;
-use crate::types;
 use crate::valkey;
 use crate::workers;
 
@@ -531,9 +528,6 @@ struct AppState {
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
     agent_testing: Option<AgentTestingService>,
-    /// Map of running executions for cancellation support
-    /// Key: instance_id, Value: CancellationHandle
-    running_executions: Arc<DashMap<Uuid, types::CancellationHandle>>,
     /// Runtime client for workflow execution via Management SDK (None if not configured)
     runtime_client: Option<Arc<RuntimeClient>>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
@@ -608,13 +602,6 @@ impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCata
 impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
     fn from_ref(state: &AppState) -> product_events::ProductEventSink {
         state.events.clone()
-    }
-}
-
-// Implement FromRef to allow extracting running_executions from AppState
-impl axum::extract::FromRef<AppState> for Arc<DashMap<Uuid, types::CancellationHandle>> {
-    fn from_ref(state: &AppState) -> Arc<DashMap<Uuid, types::CancellationHandle>> {
-        state.running_executions.clone()
     }
 }
 
@@ -1405,14 +1392,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Execution admission lifecycle observer installed");
     }
 
-    // Create running executions map for cancellation support
-    let running_executions = Arc::new(DashMap::new());
-
-    // Build the shutdown coordinator. It shares the DashMap of running
-    // executions so SIGTERM/SIGINT can signal each for graceful drain.
+    // Coordinate intake shutdown and retain the grace period used by the
+    // embedded runtime to drain active instances.
     let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
-        running_executions.clone(),
-        runtime_client.clone(),
         config::shutdown_grace(),
     ));
     let shutdown_signal = shutdown_coordinator.signal();
@@ -1507,7 +1489,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Clone resources for trigger worker
         let trigger_pool = pool.clone();
         let trigger_runtime_client = runtime_client.clone();
-        let trigger_running_executions = running_executions.clone();
 
         // Start trigger worker (replaces native_worker for stream-based execution)
         // NOTE: Trigger worker does NOT compile - it only executes pre-compiled workflows.
@@ -1555,7 +1536,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             let trigger_shutdown = shutdown_signal.clone();
             let trigger_events = product_event_sink.clone();
             let pool_for_worker = trigger_pool.clone();
-            let running_for_worker = trigger_running_executions.clone();
             let client_for_worker = trigger_runtime_client.clone();
             let cfg_for_worker = trigger_worker_config.clone();
             shutdown_coordinator.spawn_intake(async move {
@@ -1568,7 +1548,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
                 workers::trigger_worker::run(
                     pool_for_worker,
-                    running_for_worker,
                     client_for_worker,
                     cfg_for_worker,
                     worker_config,
@@ -1709,7 +1688,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         workflow_repo_for_engine,
         runtime_client.clone(),
         trigger_stream.clone(),
-        Some(running_executions.clone()),
         product_event_sink.clone(),
         Arc::clone(&pipeline_gauges),
     ));
@@ -2189,7 +2167,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
             agent_testing: agent_testing.clone(),
-            running_executions: running_executions.clone(),
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
@@ -2423,7 +2400,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
             agent_testing: agent_testing.clone(),
-            running_executions: running_executions.clone(),
             runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
@@ -2818,9 +2794,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // that park on the signal return immediately, so Ctrl+C stays prompt
         // unless something is genuinely mid-task.
         //
-        // Before the execution drain, not after — `drain_executions` takes its
-        // list of executions up front, so an execution a trigger worker is
-        // still launching would never be signalled.
+        // Before the Environment drain, so intake workers can finish handing
+        // off launches before the runtime stops dispatch and snapshots its
+        // active instances.
         shutdown_coordinator.drain_intake().await;
 
         // Drain running executions and embedded instances unless we're in dev
@@ -2836,26 +2812,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                  Set RUNTARA_DEV_MODE=false (or run a release build) to enable. \
                  In-flight workers will finish their current task before exiting."
             );
-        } else {
-            tracing::info!("Draining running executions before stopping embedded services");
-            shutdown_coordinator.drain_executions().await;
-            if let Some(runtara) = embedded_runtara.as_ref() {
-                println!("Draining embedded Runtara environment...");
-                match runtara.drain(shutdown_coordinator.grace()).await {
-                    // A drain that could not enumerate what to park leaves every
-                    // guest to die with the process, so say so rather than let
-                    // shutdown read as orderly.
-                    Err(e) => eprintln!("Error draining embedded Runtara: {e}"),
-                    Ok(report) if report.is_clean() => {
-                        println!("Drained {} instance(s) cleanly", report.settled);
-                    }
-                    Ok(report) => {
-                        eprintln!(
-                            "Drain finished with {} of {} instance(s) parked on their own, \
-                             {} force-stopped, {} operation(s) failed",
-                            report.settled, report.active, report.force_stopped, report.failures
-                        );
-                    }
+        } else if let Some(runtara) = embedded_runtara.as_ref() {
+            println!("Draining embedded Runtara environment...");
+            match runtara.drain(shutdown_coordinator.grace()).await {
+                // A drain that could not enumerate what to park leaves every
+                // guest to die with the process, so say so rather than let
+                // shutdown read as orderly.
+                Err(e) => eprintln!("Error draining embedded Runtara: {e}"),
+                Ok(report) if report.is_clean() => {
+                    println!("Drained {} instance(s) cleanly", report.settled);
+                }
+                Ok(report) => {
+                    eprintln!(
+                        "Drain finished with {} of {} instance(s) parked on their own, \
+                         {} force-stopped, {} operation(s) failed",
+                        report.settled, report.active, report.force_stopped, report.failures
+                    );
                 }
             }
         }

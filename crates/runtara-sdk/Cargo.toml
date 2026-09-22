@@ -35,7 +35,7 @@ wasi = ["runtara-http?/wasi"]
 # On by default for native consumers. WASI workflow builds disable this
 # (via default-features = false) to shed ~3 transitive crates from the .wasm
 # (tracing, tracing-core, tracing-attributes, pin-project-lite).
-tracing = ["dep:tracing", "dep:tracing-attributes"]
+tracing = ["dep:tracing"]
 
 [dependencies]
 # Core (optional, for embedded mode)
@@ -61,7 +61,6 @@ thiserror = "2"
 
 # Observability (optional — off for WASI workflow builds, on by default for native)
 tracing = { version = "0.1", optional = true }
-tracing-attributes = { version = "0.1", optional = true }
 
 # Time
 chrono = { workspace = true }

@@ -587,26 +587,6 @@ impl RuntimeClient {
         self.stop_instance(instance_id).await
     }
 
-    /// Write a `Shutdown` signal for an in-flight execution. Unlike
-    /// [`Self::cancel_instance`], the SDK treats this as a graceful suspend:
-    /// it checkpoints and exits so the instance can be resumed post-restart.
-    ///
-    /// Accepts any identifier (UUID or string) — the management SDK speaks strings.
-    pub async fn signal_shutdown(&self, execution_id: uuid::Uuid) -> Result<(), RuntimeError> {
-        let sdk = &self.client;
-
-        sdk.send_signal(
-            &execution_id.to_string(),
-            crate::runtime_types::SignalType::Shutdown,
-            None,
-        )
-        .await
-        .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
-
-        debug!(execution_id = %execution_id, "Sent shutdown signal to workflow instance");
-        Ok(())
-    }
-
     /// Pause a running workflow instance
     ///
     /// Sends a pause signal to the instance. The instance will checkpoint its state
@@ -876,20 +856,6 @@ impl RuntimeClient {
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
-}
-
-/// Build a legacy human-readable image-name prefix.
-///
-/// Compiled workflow artifacts append an opaque `@` fingerprint to this form
-/// so a recompile cannot replace the binary used by an already-selected image
-/// UUID. This helper remains for legacy callers that only need the stable
-/// `{workflow_id}:{version}` prefix.
-///
-/// **IMPORTANT**: This is a name, NOT the ID for execution!
-/// When executing, you must use the UUID returned from `register_image_stream`.
-/// The UUID is stored in `workflow_compilations.registered_image_id`.
-pub fn build_image_name(workflow_id: &str, version: u32) -> String {
-    format!("{}:{}", workflow_id, version)
 }
 
 #[cfg(test)]

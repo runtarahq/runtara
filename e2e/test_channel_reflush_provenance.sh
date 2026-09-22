@@ -17,12 +17,15 @@
 # session_loop terminal branch sends "Sorry" via TeamsChannel -> mock connector.
 #
 # Cases:
-#   A. First delivery of activity A  -> 1 instance, 1 "Sorry" reply (owner).
+#   A. With SESSION_TOKEN_SECRET absent, first delivery of activity A
+#      -> 1 instance, 1 "Sorry" reply (owner); HTTP 200 alone is insufficient.
 #   B. RESIDUAL WINDOW: delete the Valkey dedup key, redeliver the SAME activity A
 #      -> still 1 instance (Environment dedups the deterministic id) AND still
 #      1 "Sorry" reply total (the foreign session SUPPRESSED — the fix).
 #   C. A different activity B -> 2 instances, 2 "Sorry" replies (owned sessions
 #      always reply; suppression is provenance-scoped, not a blanket drop).
+#   D. HTTP session creation and reconnect succeed without the retired secret
+#      and emit session/instance IDs without a token field.
 #
 # The owner-died-before-flush corner (Layer-1 loss AND the owning session dead)
 # is an accepted, documented v1 limitation (see the plan) — not simulated here.
@@ -85,6 +88,10 @@ cleanup() {
     [ -n "${SERVER_PID}" ] && kill "${SERVER_PID}" 2>/dev/null && wait "${SERVER_PID}" 2>/dev/null || true
     [ -n "${MOCK_PID}" ] && kill "${MOCK_PID}" 2>/dev/null && wait "${MOCK_PID}" 2>/dev/null || true
     [ -n "${VALKEY_CONTAINER}" ] && docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
+    if [ "${KEEP_DB:-0}" = "1" ]; then
+        echo "KEEP_DB=1 — leaving ${TEST_DB_SERVER}/${TEST_DB_RUNTIME} and ${TEST_DATA_DIR}"
+        return
+    fi
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
     rm -rf "${TEST_DATA_DIR}" 2>/dev/null || true
@@ -215,7 +222,13 @@ psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
 
-print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
+print_step "Starting runtara-server without SESSION_TOKEN_SECRET on :${TEST_PORT_PUBLIC}..."
+# A fresh process avoids the signing module's OnceLock. An empty local dotenv
+# file prevents the server from loading a developer's signing secret at startup.
+: > "${TEST_DATA_DIR}/.env"
+(
+cd "${TEST_DATA_DIR}"
+unset SESSION_TOKEN_SECRET
 RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
 OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
 RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
@@ -224,7 +237,6 @@ INTERNAL_PORT="${TEST_PORT_INTERNAL}" RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
 RUNTARA_ENVIRONMENT_PORT="${TEST_ENV_PORT}" RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
 RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
 DATA_DIR="${TEST_DATA_DIR}" RUST_LOG="warn,runtara_server=info" AUTH_PROVIDER=local \
-SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
 RUNTARA_ENDPOINT_REF_SECRET="reflush-e2e-secret-$$" \
 RUNTARA_TEAMS_OPENID_CONFIG_URL="${MOCK_BASE}/bf/openid" \
 RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL=1 \
@@ -233,7 +245,8 @@ RUNTARA_PROXY_ALLOW_HTTP_HOSTS=127.0.0.1 \
 RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS=127.0.0.1 \
 VALKEY_HOST=127.0.0.1 VALKEY_PORT="${TEST_VALKEY_PORT}" \
 OTEL_SDK_DISABLED=true RUNTARA_SDK_BACKEND=http SQLX_OFFLINE="${SQLX_OFFLINE}" \
-"${RUNTARA_SERVER_BIN}" >"${TEST_LOG}" 2>&1 &
+exec "${RUNTARA_SERVER_BIN}"
+) >"${TEST_LOG}" 2>&1 &
 SERVER_PID=$!
 for _ in {1..60}; do
     curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2" && break
@@ -345,8 +358,10 @@ wait_for_replies() {    # $1 = want ; echoes final
 print_step "Case A: first delivery of activity A → 1 instance + 1 reply (owner)..."
 CODE=$(post_activity "activity-A")
 [ "${CODE}" != "200" ] && { print_error "Expected 200, got ${CODE}"; tail -60 "${TEST_LOG}"; exit 1; }
-IC=$(wait_for_instances 1); RC=$(wait_for_replies 1)
-[ "${IC}" -lt 1 ] && { print_error "No instance started"; tail -80 "${TEST_LOG}"; exit 1; }
+echo "  Webhook acknowledged with HTTP ${CODE}; checking durable execution..."
+IC=$(wait_for_instances 1)
+[ "${IC}" -lt 1 ] && { print_error "Webhook returned ${CODE} but no instance started without SESSION_TOKEN_SECRET"; tail -80 "${TEST_LOG}"; exit 1; }
+RC=$(wait_for_replies 1)
 [ "${RC}" -lt 1 ] && { print_error "Owner did not emit the failure reply (replies=${RC})"; tail -80 "${TEST_LOG}"; exit 1; }
 # Give any stray duplicate a chance to appear, then pin exact counts.
 sleep 2
@@ -376,5 +391,58 @@ IC=$(wait_for_instances 2); RC=$(wait_for_replies 2)
 [ "${IC}" -lt 2 ] && { print_error "Distinct activity did not start a new instance (count=${IC})"; tail -80 "${TEST_LOG}"; exit 1; }
 [ "${RC}" -lt 2 ] && { print_error "Owned new instance did not reply (replies=${RC}) — suppression must be provenance-scoped, not blanket"; tail -80 "${TEST_LOG}"; exit 1; }
 echo "  2 instances, 2 replies — suppression is provenance-scoped ✓"
+
+# --- Case D: HTTP sessions need no signing secret -------------------------
+print_step "Case D: HTTP session creation and reconnect without a signing secret..."
+python3 - "${API}" "${WF_ID}" <<'PY_SESSION'
+import json
+import sys
+import time
+import urllib.request
+import uuid
+
+api, workflow_id = sys.argv[1:]
+
+def wait_for_instance(instance_id):
+    # Admission is asynchronous; keep the SSE connection alive until the
+    # accepted instance has reached the runtime's persisted-instance listing.
+    for _ in range(40):
+        with urllib.request.urlopen(f"{api}/workflows/{workflow_id}/instances?size=100", timeout=10) as response:
+            instances = json.load(response)["data"]["content"]
+        if any(instance["id"] == instance_id for instance in instances):
+            return
+        time.sleep(0.25)
+    raise AssertionError("HTTP session did not create a durable instance")
+
+def session_preamble(path, data=None):
+    request = urllib.request.Request(
+        api + path,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200, response.status
+        assert response.headers.get_content_type() == "text/event-stream"
+        event_type = None
+        for raw in response:
+            line = raw.decode().strip()
+            if line.startswith("event:"):
+                event_type = line.removeprefix("event:").strip()
+            elif line.startswith("data:") and event_type == "session_created":
+                event = json.loads(line.removeprefix("data:").strip())
+                assert set(event) == {"type", "sessionId", "instanceId"}, "Unexpected session preamble fields"
+                assert event["type"] == "session_created"
+                uuid.UUID(event["sessionId"])
+                uuid.UUID(event["instanceId"])
+                if data is not None:
+                    wait_for_instance(event["instanceId"])
+                return event
+    raise AssertionError("Missing session_created SSE event")
+
+created = session_preamble(f"/workflows/{workflow_id}/sessions", b"{}")
+reconnected = session_preamble(f"/sessions/{created['sessionId']}/events")
+assert reconnected == created, "Reconnect changed the session/instance identifiers"
+print("  HTTP creation and reconnect succeeded; durable instance exists; no token field")
+PY_SESSION
 
 print_success "Re-flush guard: owner replies once; foreign redelivery suppressed (no duplicate); distinct activity still replies"

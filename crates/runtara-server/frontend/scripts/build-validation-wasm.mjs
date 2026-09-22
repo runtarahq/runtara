@@ -50,12 +50,6 @@ const inputs = [
   'crates/runtara-workflow-stdlib/src',
   'crates/runtara-dsl/Cargo.toml',
   'crates/runtara-dsl/src',
-  'crates/runtara-agents/Cargo.toml',
-  'crates/runtara-agents/src',
-  'crates/runtara-ai/Cargo.toml',
-  'crates/runtara-ai/src',
-  'crates/runtara-http/Cargo.toml',
-  'crates/runtara-http/src',
 ].map((input) => path.join(workspaceRoot, input));
 
 function collectFiles(inputPath, files) {

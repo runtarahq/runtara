@@ -1,8 +1,5 @@
 //! Background workers for workflow execution
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
 pub mod admission_counter;
 pub mod compilation_worker;
 pub mod cron_scheduler;
@@ -14,9 +11,3 @@ pub mod pipeline_sampler;
 pub mod runtara_dto;
 pub mod step_counter;
 pub mod trigger_worker;
-
-/// Cancellation handle for running executions
-pub struct CancellationHandle {
-    pub task_handle: tokio::task::JoinHandle<()>,
-    pub cancel_flag: Arc<AtomicBool>,
-}

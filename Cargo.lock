@@ -4677,12 +4677,7 @@ dependencies = [
  "runtara-dsl",
  "serde",
  "serde_json",
- "serial_test",
- "strum",
- "tempfile",
- "tokio",
  "tracing",
- "wiremock",
 ]
 
 [[package]]
@@ -4781,7 +4776,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "runtara-dsl",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -4836,7 +4830,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "wat",
 ]
@@ -4888,7 +4881,6 @@ name = "runtara-report-dsl"
 version = "8.9.10"
 dependencies = [
  "chrono",
- "insta",
  "minijinja",
  "runtara-dsl",
  "runtara-object-store",
@@ -4921,7 +4913,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-attributes",
 ]
 
 [[package]]
@@ -4995,7 +4986,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "testcontainers",
- "testcontainers-modules",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",

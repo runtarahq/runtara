@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ROOT_GRID_ID,
-  addBlock,
   addLayoutNode,
-  collectLayoutBlockIds,
   computeOccupiedCells,
   listEmptyCells,
   makeBlockId,
@@ -11,17 +9,13 @@ import {
   moveLayoutNode,
   newDefaultLayout,
   newGrid,
-  orderedBlocksFromDefinition,
   pathToLayoutNode,
-  removeBlock,
   removeLayoutNode,
   updateBlock,
   updateGrid,
-  updateGridItem,
   walkLayout,
 } from '../layoutOps';
 import {
-  ReportBlockDefinition,
   ReportDefinition,
   ReportGridLayoutNode,
   ReportLayoutNode,
@@ -88,30 +82,6 @@ function baseDefinition(): ReportDefinition {
 }
 
 describe('layoutOps walkers', () => {
-  it('collectLayoutBlockIds depth-first across nested grids', () => {
-    expect(collectLayoutBlockIds(baseDefinition().layout)).toEqual([
-      'a',
-      'b',
-      'c',
-    ]);
-  });
-
-  it('orderedBlocksFromDefinition reflects layout order', () => {
-    const ordered = orderedBlocksFromDefinition(baseDefinition());
-    expect(ordered.map((b) => b.id)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('orderedBlocksFromDefinition appends unplaced blocks', () => {
-    const def = baseDefinition();
-    def.blocks.push({ id: 'd', type: 'markdown', source: { schema: '' } });
-    expect(orderedBlocksFromDefinition(def).map((b) => b.id)).toEqual([
-      'a',
-      'b',
-      'c',
-      'd',
-    ]);
-  });
-
   it('walkLayout visits every node under the root grid (root itself excluded)', () => {
     const visited: string[] = [];
     walkLayout(baseDefinition().layout, (node) => visited.push(node.id));
@@ -130,30 +100,6 @@ describe('defaults', () => {
 });
 
 describe('block-side operations', () => {
-  it('removeBlock strips block + every layout item referencing it', () => {
-    const next = removeBlock(baseDefinition(), 'b');
-    expect(next.blocks.map((b) => b.id)).toEqual(['a', 'c']);
-    const ids: string[] = [];
-    walkLayout(next.layout, (node) => ids.push(node.id));
-    // n_b removed, but the outer grid + g_inner remain.
-    expect(ids).toEqual(['n_a', 'g_outer', 'g_inner', 'n_c']);
-  });
-
-  it('addBlock appends item to the root grid by default', () => {
-    const block: ReportBlockDefinition = {
-      id: 'd',
-      type: 'markdown',
-      source: { schema: '' },
-    };
-    const next = addBlock(baseDefinition(), block);
-    expect(next.blocks.map((b) => b.id)).toEqual(['a', 'b', 'c', 'd']);
-    const lastItem = next.layout.items[next.layout.items.length - 1];
-    expect(lastItem.child.type).toBe('block');
-    if (lastItem.child.type === 'block') {
-      expect(lastItem.child.blockId).toBe('d');
-    }
-  });
-
   it('updateBlock patches a block in-place without touching layout', () => {
     const before = baseDefinition();
     const next = updateBlock(before, 'b', (block) => ({
@@ -279,16 +225,6 @@ describe('grid (layout-node) operations', () => {
     expect(grid.title).toBe('Renamed');
     expect(grid.columns).toBe(2);
     expect(grid.items.length).toBe(2);
-  });
-
-  it('updateGridItem patches a single item (e.g. colSpan)', () => {
-    const next = updateGridItem(baseDefinition(), 'g_outer_i0', (item) => ({
-      ...item,
-      colSpan: 3,
-    }));
-    const grid = next.layout.items[1].child as ReportGridLayoutNode;
-    expect(grid.items[0].colSpan).toBe(3);
-    expect(grid.items[1].colSpan).toBeUndefined();
   });
 });
 

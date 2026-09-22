@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
 use opentelemetry::KeyValue;
 use sqlx::PgPool;
 use tracing::{error, info, instrument, warn};
@@ -18,7 +17,6 @@ use crate::observability::metrics;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
-use crate::types::CancellationHandle;
 use crate::valkey::ValkeyConfig;
 use crate::valkey::client::ValkeyClient;
 use crate::valkey::stream::{StreamAcker, StreamConsumer};
@@ -96,18 +94,10 @@ impl Default for TriggerWorkerConfig {
 
 /// Background worker that consumes trigger events from Valkey streams
 /// and executes workflows using the ExecutionEngine.
-#[instrument(skip(
-    pool,
-    running_executions,
-    runtime_client,
-    valkey_config,
-    shutdown,
-    event_sink
-))]
+#[instrument(skip(pool, runtime_client, valkey_config, shutdown, event_sink))]
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     pool: PgPool,
-    running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
     runtime_client: Option<Arc<RuntimeClient>>,
     valkey_config: ValkeyConfig,
     worker_config: TriggerWorkerConfig,
@@ -186,7 +176,6 @@ pub async fn run(
         workflow_repo,
         runtime_client,
         None, // trigger_stream not needed for the trigger worker
-        Some(running_executions.clone()),
         event_sink.clone(),
         Arc::clone(&gauges),
     ));
@@ -235,7 +224,6 @@ pub async fn run(
                     let acker = acker.clone();
                     let engine = Arc::clone(&engine);
                     let outbox = Arc::clone(&outbox);
-                    let running_executions = Arc::clone(&running_executions);
                     let event_sink = event_sink.clone();
                     let handoff_owner = worker_id.clone();
                     let max_retries = worker_config.max_retries;
@@ -251,7 +239,6 @@ pub async fn run(
                             &handoff_owner,
                             &entry_id,
                             &valkey_event,
-                            &running_executions,
                             max_retries,
                             true, // is_retry
                             &event_sink,
@@ -309,7 +296,6 @@ pub async fn run(
                     let acker = acker.clone();
                     let engine = Arc::clone(&engine);
                     let outbox = Arc::clone(&outbox);
-                    let running_executions = Arc::clone(&running_executions);
                     let event_sink = event_sink.clone();
                     let handoff_owner = worker_id.clone();
                     let max_retries = worker_config.max_retries;
@@ -326,7 +312,6 @@ pub async fn run(
                             &handoff_owner,
                             &entry_id,
                             &valkey_event,
-                            &running_executions,
                             max_retries,
                             false, // is_retry
                             &event_sink,
@@ -405,7 +390,6 @@ async fn process_event(
     handoff_owner: &str,
     entry_id: &str,
     valkey_event: &crate::valkey::events::ValkeyEvent,
-    _running_executions: &Arc<DashMap<Uuid, CancellationHandle>>,
     max_retries: u64,
     is_retry: bool,
     event_sink: &ProductEventSink,

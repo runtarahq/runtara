@@ -6,9 +6,8 @@ runtara-server binary and built Agent components. All credentials are generated
 in memory. Only newly created processes/containers are stopped; databases and
 logs are retained. This does not read repository dotenv files or existing keys.
 
-Progress snapshot: all four owner/peer header/body cases pass, together with the
-sustained-renewal case, since AUDIT-23/26/27 gave every accepted handoff a
-physical execution handle. See docs/wasm-emitter-audit.md.
+Covers owner/peer header/body cancellation and sustained lease renewal,
+including physical execution-handle ownership for accepted handoffs.
 """
 import argparse
 import base64

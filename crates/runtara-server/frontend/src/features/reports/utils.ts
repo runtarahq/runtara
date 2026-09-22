@@ -216,21 +216,6 @@ export function getDefaultReportViewTarget(
   return stageGroup?.id ?? viewId;
 }
 
-/** @lintignore Public view-group helper exported alongside
- *  getDefaultReportViewId / getCanonicalReportViewTarget for consumer use. */
-export function getReportViewGroupViewIds(
-  definition: ReportDefinition,
-  groupId: string
-): string[] {
-  const group = (definition.viewGroups ?? []).find(
-    (candidate) => candidate.id === groupId
-  );
-  if (!group) return [];
-  return group.mode === 'stages'
-    ? (group.stages ?? []).map((stage) => stage.viewId)
-    : (group.viewIds ?? []);
-}
-
 export function getCanonicalReportViewTarget(
   definition: ReportDefinition,
   requestedViewId: string | null,

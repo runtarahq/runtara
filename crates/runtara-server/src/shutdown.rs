@@ -2,45 +2,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Graceful shutdown coordinator for the server process.
 //!
-//! Owns the server-wide shutdown signal that:
+//! Owns the server-wide shutdown signal and tracks intake workers (trigger,
+//! compilation, cron, cleanup) spawned through [`ShutdownCoordinator::spawn_intake`].
+//! Workers observe the signal and exit at the next loop boundary.
+//! [`ShutdownCoordinator::drain_intake`] waits up to
+//! `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` for them to return; workers still running
+//! after that budget are left alive until process exit.
 //!
-//! 1. Stops new intake — background workers (trigger, compilation, cron,
-//!    cleanup) observe the flag and exit at the next loop boundary.
-//!    [`ShutdownCoordinator::drain_intake`] then waits up to
-//!    `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` for them to actually return, so a
-//!    worker that is mid-launch finishes rather than being aborted when the
-//!    process drops the runtime. Only workers spawned through
-//!    [`ShutdownCoordinator::spawn_intake`] are waited on.
-//! 2. Drains active synchronous executions — the DashMap of
-//!    `CancellationHandle`s is walked, each `cancel_flag` is flipped, and a
-//!    `Shutdown` signal is written via the `RuntimeClient` so the SDK
-//!    suspends at its next checkpoint.
-//! 3. Force-stops stragglers after `RUNTARA_SHUTDOWN_GRACE_MS` so deploys
-//!    are bounded.
-//!
-//! Intake is drained before executions on purpose: [`drain_executions`] takes
-//! its list of executions up front, so a trigger worker still launching would
-//! slip past it and die with the process.
-//!
-//! The actual orchestration lives in [`ShutdownCoordinator::drain`]; workers
-//! only need a read-only handle via [`ShutdownSignal`].
-//!
-//! [`drain_executions`]: ShutdownCoordinator::drain_executions
+//! The server drains intake before calling the embedded runtime's drain, which
+//! stops dispatch, snapshots active instances, signals them to checkpoint, and
+//! force-stops stragglers after `RUNTARA_SHUTDOWN_GRACE_MS`. The internal API and
+//! core remain available until that drain finishes. This coordinator retains
+//! the configured execution grace for that call; Environment owns the active
+//! instance registry and execution drain.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dashmap::DashMap;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::config::ShutdownGrace;
-use crate::runtime_client::RuntimeClient;
-use crate::types::CancellationHandle;
 
 /// Default grace period for waiting on in-flight executions to reach a
 /// checkpoint before force-stopping them.
@@ -101,11 +86,9 @@ impl Default for ShutdownSignal {
     }
 }
 
-/// Orchestrates server shutdown across intake workers and running executions.
+/// Coordinates intake shutdown and holds the grace periods for server shutdown.
 pub struct ShutdownCoordinator {
     signal: ShutdownSignal,
-    running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
-    runtime_client: Option<Arc<RuntimeClient>>,
     grace: Duration,
     intake_grace: Duration,
     /// Handles of the intake workers spawned through [`spawn_intake`], so
@@ -126,15 +109,9 @@ impl ShutdownCoordinator {
     /// parsed. The variables behind them are read in [`crate::config`], with
     /// the rest of the configuration, so a malformed value stops the process
     /// before it opens a pool or recovers any instance.
-    pub fn new(
-        running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
-        runtime_client: Option<Arc<RuntimeClient>>,
-        grace: ShutdownGrace,
-    ) -> Self {
+    pub fn new(grace: ShutdownGrace) -> Self {
         Self {
             signal: ShutdownSignal::new(),
-            running_executions,
-            runtime_client,
             grace: grace.executions,
             intake_grace: grace.intake,
             intake_workers: Mutex::new(JoinSet::new()),
@@ -261,66 +238,6 @@ impl ShutdownCoordinator {
             }
         }
     }
-
-    /// Drain active synchronous executions. For each entry in the running
-    /// executions map:
-    ///
-    /// 1. Set the per-execution `cancel_flag`.
-    /// 2. If a `RuntimeClient` is configured, call
-    ///    [`RuntimeClient::signal_shutdown`] so the environment writes a
-    ///    `"shutdown"` signal via core (the SDK picks it up at next checkpoint).
-    ///
-    /// Then poll the DashMap every 250 ms until it's empty or the grace
-    /// period expires.
-    pub async fn drain_executions(&self) {
-        if self.running_executions.is_empty() {
-            info!("No running executions to drain");
-            return;
-        }
-
-        info!(
-            count = self.running_executions.len(),
-            grace_secs = self.grace.as_secs(),
-            "Signalling running executions"
-        );
-
-        // Collect ids up front so we don't race the map mutating under us.
-        let ids: Vec<Uuid> = self
-            .running_executions
-            .iter()
-            .map(|entry| *entry.key())
-            .collect();
-
-        for id in &ids {
-            if let Some(entry) = self.running_executions.get(id) {
-                entry.cancel_flag.store(true, Ordering::SeqCst);
-            }
-            if let Some(client) = self.runtime_client.as_ref()
-                && let Err(e) = client.signal_shutdown(*id).await
-            {
-                warn!(
-                    execution_id = %id,
-                    error = %e,
-                    "Failed to write shutdown signal via runtime client"
-                );
-            }
-        }
-
-        let deadline = tokio::time::Instant::now() + self.grace;
-        let poll_interval = Duration::from_millis(250);
-        while tokio::time::Instant::now() < deadline {
-            if self.running_executions.is_empty() {
-                info!("All executions drained gracefully");
-                return;
-            }
-            tokio::time::sleep(poll_interval).await;
-        }
-
-        warn!(
-            stragglers = self.running_executions.len(),
-            "Grace period expired; remaining executions will be force-stopped downstream"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -329,16 +246,12 @@ mod tests {
     use crate::config::ShutdownGrace;
     use std::sync::atomic::AtomicUsize;
 
-    /// A coordinator with no running executions and the given intake budget.
+    /// A coordinator with the given intake budget.
     fn coordinator(intake: Duration) -> ShutdownCoordinator {
-        ShutdownCoordinator::new(
-            Arc::new(DashMap::new()),
-            None,
-            ShutdownGrace {
-                executions: Duration::from_millis(DEFAULT_SHUTDOWN_GRACE_MS),
-                intake,
-            },
-        )
+        ShutdownCoordinator::new(ShutdownGrace {
+            executions: Duration::from_millis(DEFAULT_SHUTDOWN_GRACE_MS),
+            intake,
+        })
     }
 
     /// The ordinary path: workers that park on the signal come back as soon as
