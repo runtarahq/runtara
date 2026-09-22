@@ -5216,9 +5216,9 @@ fn validate_reference_root(
 ) {
     match reference_root(reference) {
         "data" => {
-            let Some((_, _)) = parse_reference(reference) else {
+            if parse_reference(reference).is_none() {
                 return;
-            };
+            }
             validate_data_reference_in_scope(
                 step_id,
                 reference,
@@ -5382,57 +5382,62 @@ fn validate_workflow_reference(
     available_variables: &[String],
     result: &mut ValidationResult,
 ) {
-    const DATA_PREFIX: &str = "workflow.inputs.data";
-    const VARIABLES_PREFIX: &str = "workflow.inputs.variables";
+    // Matched on tokenized segments rather than literal dotted prefixes: a
+    // bracketed root carries no `.` after `workflow`, so a prefix test sends
+    // `workflow.inputs.variables["rows"]` to the catch-all and rejects a
+    // reference the runtime resolves exactly like its dotted spelling.
+    let segments = reference_segments(reference);
+    let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
 
-    if reference == "workflow" || reference == "workflow.inputs" || reference == DATA_PREFIX {
-        return;
-    }
+    let tail = match segments.as_slice() {
+        ["workflow"] => return,
+        ["workflow", "inputs", tail @ ..] => tail,
+        _ => {
+            push_invalid_workflow_reference(step_id, reference, result);
+            return;
+        }
+    };
 
-    if reference.starts_with("workflow.inputs.data.") {
-        validate_data_reference_in_scope(
+    match tail {
+        // `workflow.inputs` and either bare scope address a whole object;
+        // there is nothing below them to check.
+        [] | ["data"] | ["variables"] => {}
+        ["data", ..] => validate_data_reference_in_scope(
             step_id,
             reference,
             &["workflow", "inputs", "data"],
             graph,
             data_scope,
             result,
-        );
-        return;
-    }
-
-    if reference == VARIABLES_PREFIX {
-        return;
-    }
-
-    if let Some(rest) = reference.strip_prefix("workflow.inputs.variables.") {
-        let field_segment = reference_segments(rest)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| rest.to_string());
-        let field_name = field_segment.as_str();
-        if !all_variables.contains(field_name) {
-            result
-                .errors
-                .push(ValidationError::UndefinedVariableReference {
-                    step_id: step_id.to_string(),
-                    reference: reference.to_string(),
-                    variable_name: field_name.to_string(),
-                    available_variables: available_variables.to_vec(),
-                });
-        } else if let Some(variable) = graph.variables.get(field_name) {
-            validate_variable_reference_path(
-                step_id,
-                reference,
-                &["workflow", "inputs", "variables"],
-                field_name,
-                &variable.value,
-                result,
-            );
+        ),
+        ["variables", field_name, ..] => {
+            let field_name = *field_name;
+            if !all_variables.contains(field_name) {
+                result
+                    .errors
+                    .push(ValidationError::UndefinedVariableReference {
+                        step_id: step_id.to_string(),
+                        reference: reference.to_string(),
+                        variable_name: field_name.to_string(),
+                        available_variables: available_variables.to_vec(),
+                    });
+            } else if let Some(variable) = graph.variables.get(field_name) {
+                validate_variable_reference_path(
+                    step_id,
+                    reference,
+                    &["workflow", "inputs", "variables"],
+                    field_name,
+                    &variable.value,
+                    result,
+                );
+            }
         }
-        return;
+        _ => push_invalid_workflow_reference(step_id, reference, result),
     }
+}
 
+/// The catch-all for a `workflow.*` reference that names neither input scope.
+fn push_invalid_workflow_reference(step_id: &str, reference: &str, result: &mut ValidationResult) {
     result.errors.push(ValidationError::InvalidReferencePath {
         step_id: step_id.to_string(),
         reference_path: reference.to_string(),
@@ -10489,6 +10494,101 @@ mod tests {
         );
 
         validate_workflow(&graph, &test_catalog())
+    }
+
+    /// The `workflow.inputs.*` spelling selected its branch with literal dotted
+    /// prefixes. A bracketed root carries no `.` after `workflow`, so it missed
+    /// every branch and was rejected outright — though the runtime resolves it
+    /// exactly like the dotted form.
+    #[test]
+    fn test_bracketed_workflow_inputs_reference_takes_the_same_branch() {
+        let variables = validate_indexed_variable_reference(r#"workflow.inputs.variables["rows"]"#);
+        assert!(
+            !variables.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidReferencePath { .. }
+                    | ValidationError::UndefinedVariableReference { .. }
+            )),
+            "bracketed variables root must resolve to `rows`: {:?}",
+            variables.errors
+        );
+
+        // Fully bracketed — the tokenizer flattens this to the same segments.
+        let nested =
+            validate_indexed_variable_reference(r#"workflow["inputs"]["variables"]["rows"]"#);
+        assert!(
+            !nested.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidReferencePath { .. }
+                    | ValidationError::UndefinedVariableReference { .. }
+            )),
+            "fully bracketed variables root must resolve to `rows`: {:?}",
+            nested.errors
+        );
+
+        // The data side reaches the schema walk rather than the catch-all.
+        let declared = validate_root_bracket_reference(r#"workflow.inputs.data["a.b"]"#);
+        assert!(
+            !declared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidReferencePath { .. }
+                    | ValidationError::UndefinedDataReference { .. }
+            )),
+            "declared key `a.b` must validate through workflow.inputs.data: {:?}",
+            declared.errors
+        );
+
+        let undeclared = validate_root_bracket_reference(r#"workflow.inputs.data["c.d"]"#);
+        assert!(
+            undeclared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "c.d"
+            )),
+            "undeclared key `c.d` must be rejected: {:?}",
+            undeclared.errors
+        );
+    }
+
+    /// Selecting the branch from segments must not widen what `workflow.*`
+    /// accepts: a reference naming neither input scope is still rejected, and
+    /// the bare scopes still pass without a diagnostic.
+    #[test]
+    fn test_workflow_reference_scope_rejections_are_preserved() {
+        for reference in [
+            "workflow.foo",
+            "workflow.inputs.other",
+            "workflow.inputs.other.field",
+            r#"workflow["inputs"]["other"]"#,
+        ] {
+            let result = validate_root_bracket_reference(reference);
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, .. }
+                        if reference_path == reference
+                )),
+                "`{reference}` must stay rejected: {:?}",
+                result.errors
+            );
+        }
+
+        for reference in [
+            "workflow",
+            "workflow.inputs",
+            "workflow.inputs.data",
+            "workflow.inputs.variables",
+        ] {
+            let result = validate_root_bracket_reference(reference);
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidReferencePath { .. })),
+                "`{reference}` addresses a whole object and must pass: {:?}",
+                result.errors
+            );
+        }
     }
 
     /// Negative array indices resolve Python-style at run time, so authoring
