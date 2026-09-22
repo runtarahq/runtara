@@ -2281,7 +2281,10 @@ const WAIT_ON_WAIT_SCOPE_VARIABLES: &[&str] = &["_signal_id"];
 /// `steps.__error` is the error context populated inside onError handlers.
 /// Referencing one outside its scope resolves to null at runtime, matching the
 /// other built-in bindings, so it is accepted everywhere.
-const RESERVED_IMPLICIT_STEP_IDS: &[&str] = &["__error"];
+/// Step ids the runtime injects rather than the author declaring them.
+/// `error_steps` in the direct-json runtime writes the captured envelope under
+/// both `__error` and its `error` alias, so a reference to either resolves.
+const RESERVED_IMPLICIT_STEP_IDS: &[&str] = &["__error", "error"];
 
 /// Validates references in a graph, considering inherited variables from parent scope.
 ///
@@ -2502,19 +2505,6 @@ fn validate_step_reference(
     let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) else {
         return;
     };
-
-    // `steps..foo` and `steps[""]` tokenize to an empty id. Naming it as a
-    // missing step would print `step '' does not exist`; the defect is the
-    // empty segment itself, which is what the mapping walk reports for the
-    // same text.
-    if referenced_step_id.is_empty() {
-        result.errors.push(ValidationError::InvalidReferencePath {
-            step_id: step_id.to_string(),
-            reference_path: ref_path.to_string(),
-            reason: "empty path segment (consecutive dots)".to_string(),
-        });
-        return;
-    }
 
     // Check if step references itself (warning, not error)
     if referenced_step_id == step_id {
@@ -4671,29 +4661,18 @@ fn extract_step_ids_from_mapping_value(value: &MappingValue) -> Vec<String> {
 
 /// Extract step ID from a reference path like "steps.my_step.outputs.foo"
 /// or "steps['my-step'].outputs.foo" (bracket notation for IDs with special chars)
+/// The step a `steps.*` reference names, or `None` for any other root.
+///
+/// Tokenized rather than split on the first `.`, so a bracketed tail belongs to
+/// the path instead of the step id: `steps.init["outputs"]` names `init`, not
+/// `init["outputs"]`. Splitting naively here reported the whole bracketed text
+/// as a step that does not exist, rejecting a reference the runtime resolves.
 fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
-    // Handle bracket notation: steps['step-id'] or steps["step-id"]
-    // Note: no dot between "steps" and bracket
-    if ref_path.starts_with("steps[") {
-        let rest = &ref_path[5..]; // Skip "steps", keep the bracket
-        if let Some(end) = rest.find(']') {
-            let inner = &rest[1..end]; // Skip opening bracket
-            // Remove quotes if present
-            let step_id = inner.trim_matches(|c| c == '\'' || c == '"');
-            return Some(step_id.to_string());
-        }
+    let mut segments = reference_segments(ref_path).into_iter();
+    if segments.next().as_deref() != Some("steps") {
+        return None;
     }
-
-    // Handle dot notation: steps.step_id.outputs
-    if let Some(rest) = ref_path.strip_prefix("steps.") {
-        if let Some(dot_pos) = rest.find('.') {
-            return Some(rest[..dot_pos].to_string());
-        } else {
-            // Reference is just "steps.step_id" (unlikely but possible)
-            return Some(rest.to_string());
-        }
-    }
-    None
+    segments.next()
 }
 
 /// Extract variable name from a reference path like "variables.my_var" or "variables.counter.value"
@@ -8617,42 +8596,81 @@ mod tests {
         );
     }
 
-    /// The step-reference checks a condition now gets are the same ones a
-    /// mapping gets, so the diagnostics have to match too — an empty segment is
-    /// reported as such rather than as a step named the empty string, and the
-    /// bare `__error` alias still earns its warning.
+    /// A bracketed *tail* is part of the path, not the step id. Extracting the
+    /// id by splitting on the first `.` read `steps.init["outputs"]` as a step
+    /// literally named `init["outputs"]`, so the bracket spelling of a valid
+    /// reference was rejected while its dotted twin passed.
     #[test]
-    fn test_condition_reference_diagnostics_match_the_mapping_walk() {
-        let empty_segment = Step::Conditional(runtara_dsl::ConditionalStep {
-            id: "branch".to_string(),
-            name: None,
-            condition: create_lt_condition("steps..foo", "steps.init.outputs.value"),
-            breakpoint: None,
-        });
+    fn test_bracket_spelled_step_reference_is_accepted() {
+        let switch_on = |reference: &str| {
+            Step::Switch(runtara_dsl::SwitchStep {
+                id: "route".to_string(),
+                name: None,
+                config: Some(runtara_dsl::SwitchConfig {
+                    value: ref_value(reference),
+                    cases: Vec::new(),
+                    default: None,
+                }),
+                breakpoint: None,
+            })
+        };
+
+        for reference in [
+            "steps.init.outputs",
+            r#"steps.init["outputs"]"#,
+            r#"steps['init']["outputs"]"#,
+        ] {
+            let result = validate_workflow(
+                &graph_with_subject("route", switch_on(reference)),
+                &test_catalog(),
+            );
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
+                "`{reference}` names the existing step `init`: {:?}",
+                result.errors
+            );
+        }
+
+        // The discriminating half: the bracket spelling of a *missing* step is
+        // still rejected, and names the step rather than the bracket text.
         let result = validate_workflow(
-            &graph_with_subject("branch", empty_segment),
+            &graph_with_subject("route", switch_on(r#"steps.absent["outputs"]"#)),
             &test_catalog(),
         );
-        assert!(
-            result.errors.iter().any(|error| matches!(
-                error,
-                ValidationError::InvalidReferencePath { reason, .. }
-                    if reason.contains("empty path segment")
-            )),
-            "an empty segment must be named as such: {:?}",
-            result.errors
-        );
-        assert!(
-            !result.errors.iter().any(|error| matches!(
-                error,
-                ValidationError::InvalidStepReference {
-                    referenced_step_id, ..
-                } if referenced_step_id.is_empty()
-            )),
-            "an empty segment must not be reported as a missing step: {:?}",
-            result.errors
-        );
+        assert_dangling(&result, "absent", "a bracketed reference to a missing step");
+    }
 
+    /// `error_steps` in the direct-json runtime writes the captured envelope
+    /// under both `__error` and its `error` alias, so both spellings resolve and
+    /// neither may be reported as a step that does not exist.
+    #[test]
+    fn test_both_implicit_error_step_aliases_are_accepted() {
+        for reference in ["steps.__error.message", "steps.error.message"] {
+            let subject = Step::Conditional(runtara_dsl::ConditionalStep {
+                id: "branch".to_string(),
+                name: None,
+                condition: create_lt_condition(reference, "steps.init.outputs.value"),
+                breakpoint: None,
+            });
+            let result = validate_workflow(&graph_with_subject("branch", subject), &test_catalog());
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
+                "`{reference}` is injected by the runtime: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// The bare `__error` alias still earns its steer toward the canonical
+    /// spelling, from a condition as well as from a mapping.
+    #[test]
+    fn test_condition_reference_diagnostics_match_the_mapping_walk() {
         let bare_error = Step::Conditional(runtara_dsl::ConditionalStep {
             id: "branch".to_string(),
             name: None,
