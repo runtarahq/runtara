@@ -914,14 +914,7 @@ impl DrainReport {
 async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistence) -> Result<()> {
     let registry = ContainerRegistry::new(pool.clone());
     for container in registry.list_all_registered().await? {
-        match crate::recovery::recover_registered(
-            pool,
-            persistence,
-            &container,
-            crate::recovery::auto_recover_enabled(),
-        )
-        .await
-        {
+        match crate::recovery::recover_registered(pool, persistence, &container).await {
             Ok(Some(outcome)) => {
                 info!(instance_id = %container.instance_id, ?outcome, "Reconciled orphaned registration");
             }

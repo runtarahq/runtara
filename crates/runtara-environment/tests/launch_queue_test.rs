@@ -181,7 +181,8 @@ async fn owned_running_registration(
 #[tokio::test]
 async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
     use runtara_environment::{
-        container_registry::ContainerRegistry, recovery::recover_registered,
+        container_registry::ContainerRegistry,
+        recovery::{RecoveryPolicy, recover_registered_with},
     };
     let context = TestContext::new().await.unwrap();
     let (fixture, running, container) = owned_running_registration(&context).await;
@@ -189,10 +190,15 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
     assert!(running.lease_expires_at.is_some());
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert!(
-        recover_registered(&context.pool, &persistence, &container, true)
-            .await
-            .unwrap()
-            .is_none()
+        recover_registered_with(
+            &context.pool,
+            &persistence,
+            &container,
+            RecoveryPolicy::default(),
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert_eq!(
         instance_result(&context.pool, &fixture.instance_id).await.0,
@@ -253,7 +259,7 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
 async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     use runtara_environment::{
         container_registry::ContainerRegistry,
-        recovery::{RecoveryOutcome, recover_registered},
+        recovery::{RecoveryOutcome, RecoveryPolicy, recover_registered_with},
     };
     let context = TestContext::new().await.unwrap();
     let (fixture, running, container) = owned_running_registration(&context).await;
@@ -274,9 +280,14 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     );
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert_eq!(
-        recover_registered(&context.pool, &persistence, &container, true)
-            .await
-            .unwrap(),
+        recover_registered_with(
+            &context.pool,
+            &persistence,
+            &container,
+            RecoveryPolicy::default(),
+        )
+        .await
+        .unwrap(),
         Some(RecoveryOutcome::Recovered)
     );
     assert_eq!(
@@ -291,10 +302,15 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
             .is_none()
     );
     assert!(
-        recover_registered(&context.pool, &persistence, &container, true)
-            .await
-            .unwrap()
-            .is_none()
+        recover_registered_with(
+            &context.pool,
+            &persistence,
+            &container,
+            RecoveryPolicy::default(),
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     context.cleanup_tenant(&fixture.tenant_id).await;
 }
@@ -302,7 +318,8 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
 #[tokio::test]
 async fn expired_owner_snapshot_cannot_recover_a_replacement_handle() {
     use runtara_environment::{
-        container_registry::ContainerRegistry, recovery::recover_registered,
+        container_registry::ContainerRegistry,
+        recovery::{RecoveryPolicy, recover_registered_with},
     };
     let context = TestContext::new().await.unwrap();
     let (fixture, running, old) = owned_running_registration(&context).await;
@@ -314,7 +331,7 @@ async fn expired_owner_snapshot_cannot_recover_a_replacement_handle() {
     registry.register(&current).await.unwrap();
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert!(
-        recover_registered(&context.pool, &persistence, &old, true)
+        recover_registered_with(&context.pool, &persistence, &old, RecoveryPolicy::default(),)
             .await
             .unwrap()
             .is_none()

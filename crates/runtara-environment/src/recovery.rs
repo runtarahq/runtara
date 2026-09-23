@@ -61,6 +61,41 @@ fn auto_recover_enabled_from(vars: &dyn Vars) -> bool {
     parse_enabled(vars.get("RUNTARA_AUTO_RECOVER").as_deref())
 }
 
+/// The Environment-wide restart-recovery settings, applied identically to
+/// every orphaned instance. There is no per-workflow override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryPolicy {
+    /// See [`auto_recover_enabled`].
+    pub auto_recover: bool,
+    /// See [`max_auto_restarts`].
+    pub max_auto_restarts: i32,
+}
+
+impl RecoveryPolicy {
+    /// Read `RUNTARA_AUTO_RECOVER` and `RUNTARA_MAX_AUTO_RESTARTS`.
+    pub fn from_env() -> Self {
+        Self::from_vars(&ProcessEnv)
+    }
+
+    /// [`RecoveryPolicy::from_env`] against a supplied set of values.
+    fn from_vars(vars: &dyn Vars) -> Self {
+        Self {
+            auto_recover: auto_recover_enabled_from(vars),
+            max_auto_restarts: max_auto_restarts_from(vars),
+        }
+    }
+}
+
+/// What an Environment with neither variable set runs with.
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            auto_recover: true,
+            max_auto_restarts: DEFAULT_MAX_AUTO_RESTARTS,
+        }
+    }
+}
+
 /// Outcome of a recovery decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryOutcome {
@@ -78,11 +113,24 @@ pub enum RecoveryOutcome {
 /// launch. Holding that lock across the Core write prevents queue reconciliation
 /// and a new start from replacing the generation midway through recovery.
 /// None means a live claim or a replacement owns the observation now.
+///
+/// Whether a recovered instance is relaunched or failed follows
+/// [`recover_or_fail`], i.e. the Environment-wide [`RecoveryPolicy`].
 pub async fn recover_registered(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     container: &crate::container_registry::ContainerInfo,
-    auto_recover: bool,
+) -> Result<Option<RecoveryOutcome>> {
+    recover_registered_with(pool, persistence, container, RecoveryPolicy::from_env()).await
+}
+
+/// [`recover_registered`] with the policy supplied rather than read from the
+/// process environment.
+pub async fn recover_registered_with(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    container: &crate::container_registry::ContainerInfo,
+    policy: RecoveryPolicy,
 ) -> Result<Option<RecoveryOutcome>> {
     let mut guard = pool.begin().await?;
     let launch_state: Option<String> =
@@ -124,7 +172,7 @@ pub async fn recover_registered(
     {
         Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
             let outcome =
-                recover_or_fail(pool, persistence, &container.instance_id, auto_recover).await?;
+                recover_or_fail_with(pool, persistence, &container.instance_id, policy).await?;
             if outcome == RecoveryOutcome::Unchanged {
                 return Ok(Some(outcome));
             }
@@ -159,7 +207,8 @@ enum Decision {
 }
 
 /// Decide whether to recover, given the prior counters, the current progress
-/// fingerprint (checkpoint count), the cap, and the per-workflow policy.
+/// fingerprint (checkpoint count), the cap, and the Environment-wide
+/// auto-recovery switch.
 ///
 /// The counter resets to 1 when progress advanced since the last recovery (or
 /// there was no prior recovery); otherwise it increments. Once it would exceed
@@ -179,9 +228,9 @@ fn decide(
 
     if !auto_recover {
         return Decision::Fail {
-            error:
-                "Killed by Environment restart; automatic recovery is disabled for this workflow"
-                    .to_string(),
+            error: "Killed by Environment restart; automatic recovery is disabled for this \
+                    Environment (RUNTARA_AUTO_RECOVER)"
+                .to_string(),
         };
     }
     if attempt > cap {
@@ -202,16 +251,31 @@ fn decide(
 /// wake scheduler relaunches the instance on its next poll. On `Failed`, the
 /// instance is left in a terminal state with a clear operator-facing reason.
 ///
-/// `auto_recover` is the per-workflow policy (default `true`; Phase 3 wires the
-/// real value through from the workflow definition).
+/// Recovery is governed by the Environment-wide [`RecoveryPolicy`]; there is
+/// no per-workflow override, so every orphaned instance in this Environment
+/// gets the same answer.
 /// A concurrent lifecycle transition returns `Unchanged`; a failed write
 /// returns an error, so callers do not retire tracking as though it succeeded.
 pub async fn recover_or_fail(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     instance_id: &str,
-    auto_recover: bool,
 ) -> Result<RecoveryOutcome> {
+    recover_or_fail_with(pool, persistence, instance_id, RecoveryPolicy::from_env()).await
+}
+
+/// [`recover_or_fail`] with the policy supplied rather than read from the
+/// process environment.
+async fn recover_or_fail_with(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    policy: RecoveryPolicy,
+) -> Result<RecoveryOutcome> {
+    let RecoveryPolicy {
+        auto_recover,
+        max_auto_restarts: cap,
+    } = policy;
     // Progress fingerprint: total checkpoints written for this instance.
     // Monotonic, so a higher count than the last recovery means the instance
     // made forward progress across the restart.
@@ -227,8 +291,6 @@ pub async fn recover_or_fail(
         Ok(Some(inst)) => (inst.recovery_attempts, inst.recovery_marker),
         _ => (0, None),
     };
-
-    let cap = max_auto_restarts();
 
     match decide(
         prev_attempts,
@@ -281,7 +343,9 @@ pub async fn recover_or_fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, auto_recover_enabled_from, decide, max_auto_restarts_from};
+    use super::{
+        Decision, RecoveryPolicy, auto_recover_enabled_from, decide, max_auto_restarts_from,
+    };
     use crate::config::FixedVars;
 
     #[test]
@@ -329,7 +393,11 @@ mod tests {
     #[test]
     fn disabled_auto_recover_always_fails() {
         match decide(0, None, 10, 5, false) {
-            Decision::Fail { error } => assert!(error.contains("disabled")),
+            Decision::Fail { error } => assert_eq!(
+                error,
+                "Killed by Environment restart; automatic recovery is disabled for this \
+                 Environment (RUNTARA_AUTO_RECOVER)"
+            ),
             other => panic!("expected Fail, got {other:?}"),
         }
     }
@@ -370,13 +438,40 @@ mod tests {
             assert!(auto_recover_enabled_from(&vars), "{value:?}");
         }
     }
+
+    /// The policy reads both variables, and an unset environment yields the
+    /// same policy as `Default`.
+    #[test]
+    fn policy_reads_both_variables_and_defaults_match() {
+        assert_eq!(
+            RecoveryPolicy::from_vars(&FixedVars::empty()),
+            RecoveryPolicy::default()
+        );
+        assert_eq!(
+            RecoveryPolicy::from_vars(&FixedVars::new([
+                ("RUNTARA_AUTO_RECOVER", "off"),
+                ("RUNTARA_MAX_AUTO_RESTARTS", "9"),
+            ])),
+            RecoveryPolicy {
+                auto_recover: false,
+                max_auto_restarts: 9,
+            }
+        );
+    }
 }
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod persistence_tests {
-    use super::{RecoveryOutcome, recover_or_fail};
+    use super::{RecoveryOutcome, RecoveryPolicy, recover_or_fail_with};
     use crate::instance_repository::InstanceRepository;
     use runtara_store_postgres::PostgresPersistence;
+
+    fn policy(auto_recover: bool) -> RecoveryPolicy {
+        RecoveryPolicy {
+            auto_recover,
+            ..RecoveryPolicy::default()
+        }
+    }
 
     async fn snapshot(pool: &sqlx::PgPool, id: &str) -> serde_json::Value {
         sqlx::query_scalar(
@@ -434,7 +529,7 @@ mod persistence_tests {
             let persistence = PostgresPersistence::new(pool.clone());
             for auto_recover in [true, false] {
                 assert_eq!(
-                    recover_or_fail(&pool, &persistence, &id, auto_recover)
+                    recover_or_fail_with(&pool, &persistence, &id, policy(auto_recover))
                         .await
                         .expect("resolve stale recovery"),
                     RecoveryOutcome::Unchanged
@@ -459,7 +554,7 @@ mod persistence_tests {
             .await
             .expect("create running instance");
             assert_eq!(
-                recover_or_fail(&pool, &persistence, &id, auto_recover)
+                recover_or_fail_with(&pool, &persistence, &id, policy(auto_recover))
                     .await
                     .expect("apply recovery decision"),
                 if auto_recover {
@@ -479,7 +574,7 @@ mod persistence_tests {
                 assert_eq!(after["recovery_attempts"], 1);
             }
             assert_eq!(
-                recover_or_fail(&pool, &persistence, &id, auto_recover)
+                recover_or_fail_with(&pool, &persistence, &id, policy(auto_recover))
                     .await
                     .expect("repeat recovery decision"),
                 RecoveryOutcome::Unchanged
@@ -495,7 +590,7 @@ mod persistence_tests {
         pool.close().await;
         for auto_recover in [true, false] {
             assert!(
-                recover_or_fail(&pool, &persistence, "unavailable", auto_recover)
+                recover_or_fail_with(&pool, &persistence, "unavailable", policy(auto_recover))
                     .await
                     .is_err()
             );
