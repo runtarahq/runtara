@@ -486,8 +486,8 @@ impl HeartbeatMonitor {
     /// Recover an orphaned instance (Core shows it running, but no Environment
     /// tracks it — the tracking Environment went away). Route it into the
     /// suspend → wake → relaunch recovery path, gated by the crash-loop cap,
-    /// instead of failing it outright. Per-workflow opt-out is wired in a later
-    /// phase; default is to recover.
+    /// instead of failing it outright. `RUNTARA_AUTO_RECOVER` turns this off
+    /// for the whole Environment; there is no per-workflow opt-out.
     async fn recover_orphaned_instance(&self, instance: &OrphanedInstance) {
         warn!(
             instance_id = %instance.instance_id,
