@@ -2357,7 +2357,17 @@ fn validate_references_with_inherited(
         // and running the full mapping walk over them would report every such
         // mistake twice.
         for reference in collect_unmapped_step_references(step) {
-            validate_step_reference(step_id, &reference, &step_ids, &step_types, result);
+            validate_step_reference(step_id, &reference, &step_ids, &step_types, true, result);
+        }
+    }
+
+    // Edge conditions live on the graph, not on a step, so no per-step walk
+    // reaches them. They are evaluated after the source step completes, so a
+    // reference to that step's own outputs is the normal case, not a
+    // self-reference worth warning about.
+    for (from_step, references) in collect_edge_condition_references(graph) {
+        for reference in references {
+            validate_step_reference(from_step, &reference, &step_ids, &step_types, false, result);
         }
     }
 
@@ -2487,11 +2497,15 @@ fn validate_mapping_value_references(
 /// [`collect_unmapped_step_references`] — get the same step-reference checks
 /// without also re-running the variable checks that already reach them through
 /// reference-root validation, which would report each mistake twice.
+///
+/// `warn_on_self_reference` is off for edge conditions, which are attributed
+/// to the edge's source step and routinely read that step's own outputs.
 fn validate_step_reference(
     step_id: &str,
     ref_path: &str,
     valid_step_ids: &HashSet<String>,
     step_types: &HashMap<String, &'static str>,
+    warn_on_self_reference: bool,
     result: &mut ValidationResult,
 ) {
     if ref_path == "__error" || ref_path.starts_with("__error.") {
@@ -2507,7 +2521,7 @@ fn validate_step_reference(
     };
 
     // Check if step references itself (warning, not error)
-    if referenced_step_id == step_id {
+    if warn_on_self_reference && referenced_step_id == step_id {
         result.warnings.push(ValidationWarning::SelfReference {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
@@ -2555,7 +2569,7 @@ fn validate_reference(
     // runtime still mirrors it to the source root for back-compat (see
     // `build_source`), but the bare form bypasses step-id typo checking, so
     // steer authors to the canonical `steps.__error.*` path.
-    validate_step_reference(step_id, ref_path, valid_step_ids, step_types, result);
+    validate_step_reference(step_id, ref_path, valid_step_ids, step_types, true, result);
 
     // Check for variable references
     if let Some(variable_name) = extract_variable_name_from_reference(ref_path)
@@ -2756,11 +2770,16 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
             // GroupBy step has config.value which is a MappingValue, not input mappings
             // The value references are validated separately
         }
-        Step::Conditional(_)
-        | Step::Switch(_)
-        | Step::Delay(_)
-        | Step::WaitForSignal(_)
-        | Step::AiAgent(_) => {}
+        Step::WaitForSignal(wait_step) => {
+            // Not typed as `InputMapping`, but structurally one: the runtime
+            // resolves both through `apply_input_mapping` when the wait is
+            // reached, with the same source as any other step input.
+            if let Some(action) = &wait_step.action {
+                mappings.push(&action.correlation);
+                mappings.push(&action.context);
+            }
+        }
+        Step::Conditional(_) | Step::Switch(_) | Step::Delay(_) | Step::AiAgent(_) => {}
     }
 
     mappings
@@ -2780,9 +2799,8 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
 /// compile until someone has decided which collector owns its references. That
 /// is not the same as covering every reference-bearing *field*: a new
 /// `MappingValue` field on an existing variant still has to be added here by
-/// hand. Two such fields are known to be uncovered today —
-/// `WaitForSignal::action`'s `correlation`/`context` maps, and
-/// `ExecutionPlanEdge::condition`, which a `&Step` cannot reach at all.
+/// hand. `ExecutionPlanEdge::condition` is not a step field at all; see
+/// [`collect_edge_condition_references`].
 fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
     let mut refs = Vec::new();
 
@@ -2846,6 +2864,29 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
     }
 
     refs
+}
+
+/// Reference strings from each conditional edge in `graph` (not its
+/// subgraphs), paired with the edge's source step.
+///
+/// An edge condition is evaluated once its source step has finished, against
+/// the same scope as that graph's steps, so every check a step's own condition
+/// gets applies here with the source step standing in for the step. Edges
+/// whose source step does not exist are skipped — that is a structural error
+/// reported elsewhere, and attributing references to a missing step would
+/// only add noise to it.
+fn collect_edge_condition_references(graph: &ExecutionGraph) -> Vec<(&str, Vec<String>)> {
+    graph
+        .execution_plan
+        .iter()
+        .filter(|edge| graph.steps.contains_key(&edge.from_step))
+        .filter_map(|edge| {
+            let condition = edge.condition.as_ref()?;
+            let mut refs = Vec::new();
+            extract_references_from_condition(condition, &mut refs);
+            (!refs.is_empty()).then_some((edge.from_step.as_str(), refs))
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -2913,6 +2954,27 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
             {
                 result.errors.push(ValidationError::StepNotYetExecuted {
                     step_id: step_id.clone(),
+                    referenced_step_id,
+                });
+            }
+        }
+    }
+
+    // An edge condition runs as its source step finishes, so it may read that
+    // step and anything upstream of it — nothing downstream.
+    for (from_step, references) in collect_edge_condition_references(graph) {
+        for reference in references {
+            let Some(referenced_step_id) = extract_step_id_from_reference(&reference) else {
+                continue;
+            };
+            if referenced_step_id == from_step {
+                continue;
+            }
+            if graph.steps.contains_key(&referenced_step_id)
+                && !has_path(&adjacency, &referenced_step_id, from_step)
+            {
+                result.errors.push(ValidationError::StepNotYetExecuted {
+                    step_id: from_step.to_string(),
                     referenced_step_id,
                 });
             }
@@ -5249,6 +5311,24 @@ fn validate_data_and_variable_references_with_context(
         }
     }
 
+    // Edge conditions see the same scope as the graph's steps.
+    for (from_step, references) in collect_edge_condition_references(graph) {
+        for reference in &references {
+            validate_reference_root(
+                from_step,
+                reference,
+                graph,
+                data_scope,
+                &all_variables,
+                &available_variables,
+                has_loop_context,
+                has_item_context,
+                has_iteration_context,
+                result,
+            );
+        }
+    }
+
     // Recursively validate subgraphs
     for step in graph.steps.values() {
         match step {
@@ -5400,7 +5480,8 @@ fn validate_reference_root(
             // (`InvalidStepReference`) — through the mapping walk for anything
             // inside an `InputMapping`, and through
             // `collect_unmapped_step_references` for conditions and bare config
-            // values. The bare `__error`/`error` alias gets its own
+            // values, and through `collect_edge_condition_references` for
+            // edge conditions. The bare `__error`/`error` alias gets its own
             // `BareErrorReference` warning there too.
             //
             // Deliberately not re-checked here: a reference that reached this
@@ -5656,6 +5737,10 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
         Step::WaitForSignal(wait_step) => {
             if let Some(ref timeout) = wait_step.timeout_ms {
                 extract_references_from_mapping_value(timeout, &mut refs);
+            }
+            if let Some(ref action) = wait_step.action {
+                extract_references_from_input_mapping(&action.correlation, &mut refs);
+                extract_references_from_input_mapping(&action.context, &mut refs);
             }
         }
         Step::Error(error_step) => {
@@ -8715,6 +8800,253 @@ mod tests {
         assert_eq!(
             count, 1,
             "an ordinary mapping reference must be reported exactly once: {:?}",
+            result.errors
+        );
+    }
+
+    /// `graph_with_subject` with a condition on the `subject -> finish` edge.
+    fn graph_with_edge_condition(
+        subject_id: &str,
+        subject: Step,
+        condition: runtara_dsl::ConditionExpression,
+    ) -> ExecutionGraph {
+        let mut graph = graph_with_subject(subject_id, subject);
+        graph.execution_plan[1].condition = Some(condition);
+        graph
+    }
+
+    fn assert_no_step_reference_diagnostics(result: &ValidationResult, what: &str) {
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidStepReference { .. }
+                    | ValidationError::StepNotYetExecuted { .. }
+            )),
+            "{what} must stay clean: {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, ValidationWarning::SelfReference { .. })),
+            "{what} must not warn about a self-reference: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Edge conditions live on the graph, not on a step, so no per-step
+    /// collector could see them — a dangling step id passed clean.
+    #[test]
+    fn test_edge_condition_rejects_dangling_step_reference() {
+        let graph = graph_with_edge_condition(
+            "work",
+            create_log_step("work", None),
+            create_lt_condition("steps.totally_absent.outputs.v", "steps.init.outputs.value"),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_dangling(&result, "totally_absent", "an edge condition");
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidStepReference { step_id, .. } if step_id == "work"
+            )),
+            "the error must be attributed to the edge's source step: {:?}",
+            result.errors
+        );
+    }
+
+    /// An edge condition is evaluated once its source step has finished, so
+    /// reading that step's own outputs — the usual case — is neither a
+    /// self-reference nor out of order, and upstream steps are fine too.
+    #[test]
+    fn test_edge_condition_may_read_its_source_and_upstream_steps() {
+        let graph = graph_with_edge_condition(
+            "work",
+            create_log_step("work", None),
+            create_lt_condition("steps.work.outputs.value", "steps.init.outputs.value"),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_no_step_reference_diagnostics(&result, "an edge condition reading its source step");
+    }
+
+    /// The captured error envelope is what an `onError` edge condition is for.
+    #[test]
+    fn test_on_error_edge_condition_may_read_the_error_envelope() {
+        let mut graph = graph_with_subject("work", create_log_step("work", None));
+        graph.execution_plan.push(runtara_dsl::ExecutionPlanEdge {
+            label: Some("onError".to_string()),
+            condition: Some(create_lt_condition(
+                "steps.__error.category",
+                "steps.error.message",
+            )),
+            ..plan_edge("work", "finish")
+        });
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_no_step_reference_diagnostics(&result, "an onError edge reading steps.__error");
+    }
+
+    /// Non-step roots in an edge condition get the same root checks as a
+    /// step's own references.
+    #[test]
+    fn test_edge_condition_rejects_undefined_variable() {
+        let graph = graph_with_edge_condition(
+            "work",
+            create_log_step("work", None),
+            create_lt_condition("variables.never_declared", "steps.work.outputs.value"),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedVariableReference { variable_name, .. }
+                    if variable_name == "never_declared"
+            )),
+            "an edge condition naming an undeclared variable must fail: {:?}",
+            result.errors
+        );
+    }
+
+    /// An edge condition runs before anything downstream of its source step.
+    #[test]
+    fn test_edge_condition_referencing_a_later_step_is_out_of_order() {
+        let mut graph = graph_with_subject("work", create_log_step("work", None));
+        graph.execution_plan[0].condition = Some(create_lt_condition(
+            "steps.work.outputs.value",
+            "steps.init.outputs.value",
+        ));
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::StepNotYetExecuted {
+                    step_id,
+                    referenced_step_id,
+                } if step_id == "init" && referenced_step_id == "work"
+            )),
+            "an edge condition naming a downstream step must be out-of-order: {:?}",
+            result.errors
+        );
+    }
+
+    /// Subgraph edges are resolved against that subgraph's own step ids.
+    #[test]
+    fn test_edge_condition_inside_a_subgraph_is_validated() {
+        let mut sub_steps = HashMap::new();
+        sub_steps.insert("a".to_string(), create_log_step("a", None));
+        sub_steps.insert("b".to_string(), create_log_step("b", None));
+        let mut subgraph = create_basic_graph(sub_steps, "a");
+        subgraph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            condition: Some(create_lt_condition(
+                "steps.absent_in_split.outputs.value",
+                "steps.a.outputs.value",
+            )),
+            ..plan_edge("a", "b")
+        }];
+
+        let split = Step::Split(runtara_dsl::SplitStep {
+            id: "split".to_string(),
+            name: None,
+            subgraph: Box::new(subgraph),
+            config: Some(runtara_dsl::SplitConfig {
+                value: ref_value("steps.init.outputs.rows"),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: None,
+                convert_single_value: None,
+                batch_size: None,
+            }),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            breakpoint: None,
+            durable: None,
+        });
+        let result = validate_workflow(&graph_with_subject("split", split), &test_catalog());
+        assert_dangling(
+            &result,
+            "absent_in_split",
+            "an edge condition inside a Split",
+        );
+    }
+
+    fn wait_with_action(
+        correlation: HashMap<String, MappingValue>,
+        context: HashMap<String, MappingValue>,
+    ) -> Step {
+        Step::WaitForSignal(runtara_dsl::WaitForSignalStep {
+            id: "wait".to_string(),
+            name: None,
+            on_wait: None,
+            timeout_ms: None,
+            poll_interval_ms: None,
+            response_schema: None,
+            action: Some(runtara_dsl::WaitForSignalActionConfig {
+                key: Some("case_review_decision".to_string()),
+                correlation,
+                context,
+            }),
+            breakpoint: None,
+        })
+    }
+
+    /// `correlation`/`context` are `InputMapping`s in all but name, and no
+    /// collector walked them — a wrong step id silently emitted `null` and
+    /// report filtering stopped matching.
+    #[test]
+    fn test_wait_action_maps_reject_dangling_step_references() {
+        let subject = wait_with_action(
+            HashMap::from([(
+                "case_id".to_string(),
+                ref_value("steps.absent_correlation.outputs.id"),
+            )]),
+            HashMap::from([(
+                "title".to_string(),
+                ref_value("steps.absent_context.outputs.title"),
+            )]),
+        );
+        let result = validate_workflow(&graph_with_subject("wait", subject), &test_catalog());
+        assert_dangling(
+            &result,
+            "absent_correlation",
+            "a WaitForSignal action.correlation",
+        );
+        assert_dangling(&result, "absent_context", "a WaitForSignal action.context");
+    }
+
+    #[test]
+    fn test_wait_action_maps_reject_out_of_order_and_accept_upstream_references() {
+        let subject = wait_with_action(
+            HashMap::from([("case_id".to_string(), ref_value("steps.init.outputs.id"))]),
+            HashMap::from([("title".to_string(), ref_value("steps.finish.outputs.title"))]),
+        );
+        let result = validate_workflow(&graph_with_subject("wait", subject), &test_catalog());
+        let out_of_order: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|error| match error {
+                ValidationError::StepNotYetExecuted {
+                    referenced_step_id, ..
+                } => Some(referenced_step_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            out_of_order,
+            vec!["finish"],
+            "only the downstream reference is out of order: {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
+            "both steps exist: {:?}",
             result.errors
         );
     }
