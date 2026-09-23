@@ -2362,12 +2362,17 @@ fn validate_references_with_inherited(
     }
 
     // Edge conditions live on the graph, not on a step, so no per-step walk
-    // reaches them. They are evaluated after the source step completes, so a
-    // reference to that step's own outputs is the normal case, not a
-    // self-reference worth warning about.
-    for (from_step, references) in collect_edge_condition_references(graph) {
-        for reference in references {
-            validate_step_reference(from_step, &reference, &step_ids, &step_types, false, result);
+    // reaches them.
+    for edge in collect_edge_condition_references(graph, extract_references_from_condition) {
+        for reference in &edge.references {
+            validate_step_reference(
+                edge.from_step,
+                reference,
+                &step_ids,
+                &step_types,
+                edge.warn_on_self_reference,
+                result,
+            );
         }
     }
 
@@ -2866,8 +2871,21 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
     refs
 }
 
-/// Reference strings from each conditional edge in `graph` (not its
-/// subgraphs), paired with the edge's source step.
+/// The references in one edge's condition, attributed to its source step.
+struct EdgeConditionReferences<'a> {
+    from_step: &'a str,
+    /// Whether a reference back to `from_step` should warn as a
+    /// self-reference. Normally it should not: the condition runs after the
+    /// source step completes and reading its outputs is the usual case. On an
+    /// `onError` route the source step failed instead, and the runtime adds
+    /// only `__error`/`error` to `steps` (see `error_steps` in the direct-json
+    /// runtime), so a reference to the source step there always reads null.
+    warn_on_self_reference: bool,
+    references: Vec<String>,
+}
+
+/// References from each conditional edge in `graph` (not its subgraphs), as
+/// pulled out by `extract` — plain references or template-embedded ones.
 ///
 /// An edge condition is evaluated once its source step has finished, against
 /// the same scope as that graph's steps, so every check a step's own condition
@@ -2875,16 +2893,23 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
 /// whose source step does not exist are skipped — that is a structural error
 /// reported elsewhere, and attributing references to a missing step would
 /// only add noise to it.
-fn collect_edge_condition_references(graph: &ExecutionGraph) -> Vec<(&str, Vec<String>)> {
+fn collect_edge_condition_references(
+    graph: &ExecutionGraph,
+    extract: fn(&runtara_dsl::ConditionExpression, &mut Vec<String>),
+) -> Vec<EdgeConditionReferences<'_>> {
     graph
         .execution_plan
         .iter()
         .filter(|edge| graph.steps.contains_key(&edge.from_step))
         .filter_map(|edge| {
             let condition = edge.condition.as_ref()?;
-            let mut refs = Vec::new();
-            extract_references_from_condition(condition, &mut refs);
-            (!refs.is_empty()).then_some((edge.from_step.as_str(), refs))
+            let mut references = Vec::new();
+            extract(condition, &mut references);
+            (!references.is_empty()).then(|| EdgeConditionReferences {
+                from_step: edge.from_step.as_str(),
+                warn_on_self_reference: edge.label.as_deref() == Some("onError"),
+                references,
+            })
         })
         .collect()
 }
@@ -2962,19 +2987,19 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
 
     // An edge condition runs as its source step finishes, so it may read that
     // step and anything upstream of it — nothing downstream.
-    for (from_step, references) in collect_edge_condition_references(graph) {
-        for reference in references {
-            let Some(referenced_step_id) = extract_step_id_from_reference(&reference) else {
+    for edge in collect_edge_condition_references(graph, extract_references_from_condition) {
+        for reference in &edge.references {
+            let Some(referenced_step_id) = extract_step_id_from_reference(reference) else {
                 continue;
             };
-            if referenced_step_id == from_step {
+            if referenced_step_id == edge.from_step {
                 continue;
             }
             if graph.steps.contains_key(&referenced_step_id)
-                && !has_path(&adjacency, &referenced_step_id, from_step)
+                && !has_path(&adjacency, &referenced_step_id, edge.from_step)
             {
                 result.errors.push(ValidationError::StepNotYetExecuted {
-                    step_id: from_step.to_string(),
+                    step_id: edge.from_step.to_string(),
                     referenced_step_id,
                 });
             }
@@ -3092,7 +3117,23 @@ fn validate_template_static_references_with_context(
 
     for (step_id, step) in &graph.steps {
         for reference in collect_template_static_references_from_step(step) {
-            validate_template_static_reference(step_id, &reference, &context, result);
+            validate_template_static_reference(step_id, &reference, true, &context, result);
+        }
+    }
+
+    // A template argument in an edge condition names steps just like a plain
+    // reference does — see `collect_edge_condition_references`.
+    for edge in
+        collect_edge_condition_references(graph, extract_template_static_references_from_condition)
+    {
+        for reference in &edge.references {
+            validate_template_static_reference(
+                edge.from_step,
+                reference,
+                edge.warn_on_self_reference,
+                &context,
+                result,
+            );
         }
     }
 
@@ -3167,6 +3208,7 @@ struct TemplateStaticReferenceContext<'a> {
 fn validate_template_static_reference(
     step_id: &str,
     reference: &str,
+    warn_on_self_reference: bool,
     context: &TemplateStaticReferenceContext<'_>,
     result: &mut ValidationResult,
 ) {
@@ -3181,7 +3223,7 @@ fn validate_template_static_reference(
     }
 
     if let Some(referenced_step_id) = extract_step_id_from_reference(reference) {
-        if referenced_step_id == step_id {
+        if warn_on_self_reference && referenced_step_id == step_id {
             result.warnings.push(ValidationWarning::SelfReference {
                 step_id: step_id.to_string(),
                 reference_path: reference.to_string(),
@@ -5312,10 +5354,10 @@ fn validate_data_and_variable_references_with_context(
     }
 
     // Edge conditions see the same scope as the graph's steps.
-    for (from_step, references) in collect_edge_condition_references(graph) {
-        for reference in &references {
+    for edge in collect_edge_condition_references(graph, extract_references_from_condition) {
+        for reference in &edge.references {
             validate_reference_root(
-                from_step,
+                edge.from_step,
                 reference,
                 graph,
                 data_scope,
@@ -5873,6 +5915,13 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
         Step::WaitForSignal(wait_step) => {
             if let Some(ref timeout) = wait_step.timeout_ms {
                 extract_template_static_references_from_mapping_value(timeout, &mut refs);
+            }
+            if let Some(ref action) = wait_step.action {
+                extract_template_static_references_from_input_mapping(
+                    &action.correlation,
+                    &mut refs,
+                );
+                extract_template_static_references_from_input_mapping(&action.context, &mut refs);
             }
         }
         Step::Error(error_step) => {
@@ -9047,6 +9096,126 @@ mod tests {
                 .iter()
                 .any(|error| matches!(error, ValidationError::InvalidStepReference { .. })),
             "both steps exist: {:?}",
+            result.errors
+        );
+    }
+
+    fn template(value: &str) -> MappingValue {
+        MappingValue::Template(runtara_dsl::TemplateValue {
+            value: value.to_string(),
+        })
+    }
+
+    fn template_issue_steps(result: &ValidationResult) -> Vec<(&str, &str)> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                ValidationWarning::TemplateReferenceIssue {
+                    step_id, reference, ..
+                } => Some((step_id.as_str(), reference.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Templates in the action maps go through the static template-reference
+    /// check like any other step's input mapping.
+    #[test]
+    fn test_wait_action_map_templates_are_checked() {
+        let subject = wait_with_action(
+            HashMap::from([(
+                "case_id".to_string(),
+                template("{{ steps.absent_tmpl_corr.outputs.id }}"),
+            )]),
+            HashMap::from([(
+                "title".to_string(),
+                template("{{ steps.init.outputs.title }}"),
+            )]),
+        );
+        let result = validate_workflow(&graph_with_subject("wait", subject), &test_catalog());
+        assert_eq!(
+            template_issue_steps(&result),
+            vec![("wait", "steps.absent_tmpl_corr.outputs.id")],
+            "only the dangling template reference is flagged: {:?}",
+            result.warnings
+        );
+    }
+
+    /// A template argument in an edge condition names steps just like a plain
+    /// reference, so it gets the same template-reference check a Conditional
+    /// step's condition does.
+    #[test]
+    fn test_edge_condition_templates_are_checked() {
+        use runtara_dsl::{ConditionArgument, ConditionExpression, ConditionOperation};
+        let condition = |left: &str| {
+            ConditionExpression::Operation(ConditionOperation {
+                op: runtara_dsl::ConditionOperator::Eq,
+                arguments: vec![
+                    ConditionArgument::Value(template(left)),
+                    ConditionArgument::Value(ref_value("steps.init.outputs.value")),
+                ],
+            })
+        };
+
+        let graph = graph_with_edge_condition(
+            "work",
+            create_log_step("work", None),
+            condition("{{ steps.absent_tmpl_edge.outputs.v }}"),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+        assert_eq!(
+            template_issue_steps(&result),
+            vec![("work", "steps.absent_tmpl_edge.outputs.v")],
+            "a dangling template reference in an edge condition must be flagged: {:?}",
+            result.warnings
+        );
+
+        // Reading the source step through a template is the usual case too.
+        let graph = graph_with_edge_condition(
+            "work",
+            create_log_step("work", None),
+            condition("{{ steps.work.outputs.v }}"),
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            template_issue_steps(&result).is_empty(),
+            "a template reading the source step must stay clean: {:?}",
+            result.warnings
+        );
+        assert_no_step_reference_diagnostics(&result, "a template reading the source step");
+    }
+
+    /// On an `onError` route the source step failed and its outputs are never
+    /// in `steps`, so reading them always yields null — worth a warning there,
+    /// unlike on a normal edge.
+    #[test]
+    fn test_on_error_edge_reading_its_failed_source_step_warns() {
+        let mut graph = graph_with_subject("work", create_log_step("work", None));
+        graph.execution_plan.push(runtara_dsl::ExecutionPlanEdge {
+            label: Some("onError".to_string()),
+            condition: Some(create_lt_condition(
+                "steps.work.outputs.value",
+                "steps.init.outputs.value",
+            )),
+            ..plan_edge("work", "finish")
+        });
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            result.warnings.iter().any(|warning| matches!(
+                warning,
+                ValidationWarning::SelfReference { step_id, reference_path }
+                    if step_id == "work" && reference_path == "steps.work.outputs.value"
+            )),
+            "an onError edge reading its failed source step must warn: {:?}",
+            result.warnings
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::StepNotYetExecuted { .. })),
+            "it is a warning, not an ordering error: {:?}",
             result.errors
         );
     }
