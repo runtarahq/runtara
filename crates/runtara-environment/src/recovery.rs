@@ -78,11 +78,13 @@ pub enum RecoveryOutcome {
 /// launch. Holding that lock across the Core write prevents queue reconciliation
 /// and a new start from replacing the generation midway through recovery.
 /// None means a live claim or a replacement owns the observation now.
+///
+/// Whether a recovered instance is relaunched or failed follows
+/// [`recover_or_fail`], i.e. the Environment-wide [`auto_recover_enabled`].
 pub async fn recover_registered(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     container: &crate::container_registry::ContainerInfo,
-    auto_recover: bool,
 ) -> Result<Option<RecoveryOutcome>> {
     let mut guard = pool.begin().await?;
     let launch_state: Option<String> =
@@ -123,8 +125,7 @@ pub async fn recover_registered(
         .await?
     {
         Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
-            let outcome =
-                recover_or_fail(pool, persistence, &container.instance_id, auto_recover).await?;
+            let outcome = recover_or_fail(pool, persistence, &container.instance_id).await?;
             if outcome == RecoveryOutcome::Unchanged {
                 return Ok(Some(outcome));
             }
@@ -159,7 +160,8 @@ enum Decision {
 }
 
 /// Decide whether to recover, given the prior counters, the current progress
-/// fingerprint (checkpoint count), the cap, and the per-workflow policy.
+/// fingerprint (checkpoint count), the cap, and the Environment-wide
+/// auto-recovery switch.
 ///
 /// The counter resets to 1 when progress advanced since the last recovery (or
 /// there was no prior recovery); otherwise it increments. Once it would exceed
@@ -179,9 +181,9 @@ fn decide(
 
     if !auto_recover {
         return Decision::Fail {
-            error:
-                "Killed by Environment restart; automatic recovery is disabled for this workflow"
-                    .to_string(),
+            error: "Killed by Environment restart; automatic recovery is disabled for this \
+                    Environment (RUNTARA_AUTO_RECOVER)"
+                .to_string(),
         };
     }
     if attempt > cap {
@@ -202,11 +204,22 @@ fn decide(
 /// wake scheduler relaunches the instance on its next poll. On `Failed`, the
 /// instance is left in a terminal state with a clear operator-facing reason.
 ///
-/// `auto_recover` is the per-workflow policy (default `true`; Phase 3 wires the
-/// real value through from the workflow definition).
+/// Recovery is governed by the Environment-wide [`auto_recover_enabled`]
+/// switch; there is no per-workflow override, so every orphaned instance in
+/// this Environment gets the same answer.
 /// A concurrent lifecycle transition returns `Unchanged`; a failed write
 /// returns an error, so callers do not retire tracking as though it succeeded.
 pub async fn recover_or_fail(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+) -> Result<RecoveryOutcome> {
+    recover_or_fail_with(pool, persistence, instance_id, auto_recover_enabled()).await
+}
+
+/// [`recover_or_fail`] with the auto-recovery switch supplied rather than read
+/// from the process environment.
+async fn recover_or_fail_with(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     instance_id: &str,
@@ -329,7 +342,11 @@ mod tests {
     #[test]
     fn disabled_auto_recover_always_fails() {
         match decide(0, None, 10, 5, false) {
-            Decision::Fail { error } => assert!(error.contains("disabled")),
+            Decision::Fail { error } => assert_eq!(
+                error,
+                "Killed by Environment restart; automatic recovery is disabled for this \
+                 Environment (RUNTARA_AUTO_RECOVER)"
+            ),
             other => panic!("expected Fail, got {other:?}"),
         }
     }
@@ -374,7 +391,7 @@ mod tests {
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod persistence_tests {
-    use super::{RecoveryOutcome, recover_or_fail};
+    use super::{RecoveryOutcome, recover_or_fail_with};
     use crate::instance_repository::InstanceRepository;
     use runtara_store_postgres::PostgresPersistence;
 
@@ -434,7 +451,7 @@ mod persistence_tests {
             let persistence = PostgresPersistence::new(pool.clone());
             for auto_recover in [true, false] {
                 assert_eq!(
-                    recover_or_fail(&pool, &persistence, &id, auto_recover)
+                    recover_or_fail_with(&pool, &persistence, &id, auto_recover)
                         .await
                         .expect("resolve stale recovery"),
                     RecoveryOutcome::Unchanged
@@ -459,7 +476,7 @@ mod persistence_tests {
             .await
             .expect("create running instance");
             assert_eq!(
-                recover_or_fail(&pool, &persistence, &id, auto_recover)
+                recover_or_fail_with(&pool, &persistence, &id, auto_recover)
                     .await
                     .expect("apply recovery decision"),
                 if auto_recover {
@@ -479,7 +496,7 @@ mod persistence_tests {
                 assert_eq!(after["recovery_attempts"], 1);
             }
             assert_eq!(
-                recover_or_fail(&pool, &persistence, &id, auto_recover)
+                recover_or_fail_with(&pool, &persistence, &id, auto_recover)
                     .await
                     .expect("repeat recovery decision"),
                 RecoveryOutcome::Unchanged
@@ -495,7 +512,7 @@ mod persistence_tests {
         pool.close().await;
         for auto_recover in [true, false] {
             assert!(
-                recover_or_fail(&pool, &persistence, "unavailable", auto_recover)
+                recover_or_fail_with(&pool, &persistence, "unavailable", auto_recover)
                     .await
                     .is_err()
             );

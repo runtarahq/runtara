@@ -189,7 +189,7 @@ async fn live_running_owner_is_retained_and_cannot_be_recovered_by_a_peer() {
     assert!(running.lease_expires_at.is_some());
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert!(
-        recover_registered(&context.pool, &persistence, &container, true)
+        recover_registered(&context.pool, &persistence, &container)
             .await
             .unwrap()
             .is_none()
@@ -274,7 +274,7 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     );
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert_eq!(
-        recover_registered(&context.pool, &persistence, &container, true)
+        recover_registered(&context.pool, &persistence, &container)
             .await
             .unwrap(),
         Some(RecoveryOutcome::Recovered)
@@ -291,7 +291,7 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
             .is_none()
     );
     assert!(
-        recover_registered(&context.pool, &persistence, &container, true)
+        recover_registered(&context.pool, &persistence, &container)
             .await
             .unwrap()
             .is_none()
@@ -314,7 +314,7 @@ async fn expired_owner_snapshot_cannot_recover_a_replacement_handle() {
     registry.register(&current).await.unwrap();
     let persistence = PostgresPersistence::new(context.pool.clone());
     assert!(
-        recover_registered(&context.pool, &persistence, &old, true)
+        recover_registered(&context.pool, &persistence, &old)
             .await
             .unwrap()
             .is_none()

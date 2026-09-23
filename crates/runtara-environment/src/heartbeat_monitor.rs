@@ -174,7 +174,6 @@ impl HeartbeatMonitor {
                 &self.pool,
                 self.core_persistence.as_ref(),
                 &container,
-                crate::recovery::auto_recover_enabled(),
             )
             .await?;
         }
@@ -337,7 +336,6 @@ impl HeartbeatMonitor {
                     &self.pool,
                     self.core_persistence.as_ref(),
                     &current,
-                    crate::recovery::auto_recover_enabled(),
                 )
                 .await?;
             }
@@ -503,7 +501,6 @@ impl HeartbeatMonitor {
             &self.pool,
             self.core_persistence.as_ref(),
             &instance.instance_id,
-            crate::recovery::auto_recover_enabled(),
         )
         .await;
 
