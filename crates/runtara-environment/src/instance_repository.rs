@@ -281,30 +281,6 @@ impl InstanceRepository {
         Ok(crate::db::count_instances_by_status(&self.pool, tenant_id, statuses, ceiling).await?)
     }
 
-    /// How many of a tenant's instances are parked.
-    ///
-    /// Which statuses count as parked is this crate's knowledge, so it is
-    /// spelled here rather than at the call site: a viewer asking "how many are
-    /// waiting" should not have to know that the answer is `suspended`, and a
-    /// server crate holding that literal is a second spelling of a vocabulary
-    /// it does not own.
-    ///
-    /// Unbounded, unlike [`Self::count_by_status`], because a viewer wants the
-    /// real figure rather than "at least the cap". That used to make it the
-    /// expensive half of the pair — a sequential scan of a table whose dominant
-    /// value is exactly the one being counted. Migration 025 indexes that value
-    /// per tenant, so the answer is an index-only scan and the missing ceiling
-    /// costs a viewer nothing. The query has to spell the status as a literal
-    /// to reach that index; [`crate::db::count_parked_instances`] says why.
-    pub async fn count_parked(&self, tenant_id: &str) -> Result<i64> {
-        Ok(crate::db::count_parked_instances(
-            &self.pool,
-            tenant_id,
-            crate::core_types::status_name(InstanceStatus::Suspended),
-        )
-        .await?)
-    }
-
     /// Record what the process used, and read back the status the guest
     /// reported, in one statement.
     ///

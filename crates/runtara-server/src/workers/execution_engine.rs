@@ -366,11 +366,6 @@ pub struct ExecutionEngine {
     /// across processes/restarts; this prevents a local cached-count race
     /// before the next background runtime refresh observes a launch.
     concurrency_admission: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Monotonic counters for the execution pipeline.
-    ///
-    /// Read by the analytics sampler; written only from the gate below, where
-    /// the cost is one relaxed atomic add per intake.
-    gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
 }
 
 /// How long an in-flight execution count stays usable for the concurrency gate.
@@ -382,13 +377,10 @@ const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
 
 /// One verified compilation result, carried unchanged to `start_instance`.
 ///
-/// The image ID and tracking mode have to come from the same readiness read.
-/// Re-reading the image after the mode was checked can pair a freshly tracked
-/// row with an older artifact during a toggle or recompile.
+/// The image ID and timeout come from the same verified readiness read.
 struct ReadyLaunch {
     image_id: String,
     execution_timeout: Option<ExecutionTimeoutSeconds>,
-    track_events: bool,
 }
 
 /// Admissions still unaccounted for after a fresh count landed.
@@ -411,7 +403,6 @@ impl ExecutionEngine {
         runtime_client: Option<Arc<RuntimeClient>>,
         trigger_stream: Option<Arc<TriggerStreamPublisher>>,
         events: ProductEventSink,
-        gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
     ) -> Self {
         Self {
             pool: pool.clone(),
@@ -424,26 +415,7 @@ impl ExecutionEngine {
             concurrency_reservations: Arc::new(DashMap::new()),
             concurrency_refresh: Arc::new(DashMap::new()),
             concurrency_admission: Arc::new(DashMap::new()),
-            gauges,
         }
-    }
-
-    /// The pipeline counters this engine writes to.
-    pub fn gauges(&self) -> &Arc<crate::workers::pipeline_gauges::PipelineGauges> {
-        &self.gauges
-    }
-
-    /// In-flight executions as the admission gate itself counts them.
-    ///
-    /// The same cached figure the gate decides on, so a viewer sees what the
-    /// gate sees rather than a second opinion taken from a different query at
-    /// a different moment — two numbers that disagree about the same thing are
-    /// worse than one.
-    ///
-    /// Never queries: it reads the cache the gate maintains, so calling it on
-    /// a sampler tick costs nothing and cannot slow intake.
-    pub fn observed_in_flight(&self, tenant_id: &str, ceiling: u64) -> u64 {
-        self.active_execution_count(tenant_id, ceiling)
     }
 
     /// Count the tenant's currently in-flight executions (Running + Pending)
@@ -550,7 +522,6 @@ impl ExecutionEngine {
         let admission_lock = self.admission_lock_for(tenant_id);
         let _admission_guard = admission_lock.lock().await;
 
-        self.gauges.record_offered();
         self.concurrent_execution_decision(tenant_id).await?;
         self.reservations_for(tenant_id)
             .fetch_add(1, Ordering::SeqCst);
@@ -625,6 +596,27 @@ impl ExecutionEngine {
         event: TriggerEvent,
         idempotency_key: String,
     ) -> Result<EnqueuedExecution, ExecutionError> {
+        let telemetry = crate::observability::metrics().map(|metrics| (metrics, Instant::now()));
+        let result = self
+            .enqueue_trigger_event_inner(tenant_id, event, idempotency_key)
+            .await;
+        if let Some((metrics, started)) = telemetry {
+            let outcome = admission_outcome(&result);
+            let attributes = [opentelemetry::KeyValue::new("outcome", outcome)];
+            metrics.admission_requests.add(1, &attributes);
+            metrics
+                .admission_duration
+                .record(started.elapsed().as_secs_f64(), &attributes);
+        }
+        result
+    }
+
+    async fn enqueue_trigger_event_inner(
+        &self,
+        tenant_id: &str,
+        event: TriggerEvent,
+        idempotency_key: String,
+    ) -> Result<EnqueuedExecution, ExecutionError> {
         if let Some(existing) = self
             .outbox
             .find_by_idempotency(tenant_id, &idempotency_key)
@@ -646,7 +638,6 @@ impl ExecutionEngine {
         let cap = match self.try_admit_locally(tenant_id).await {
             Ok(cap) => cap,
             Err(denial) => {
-                self.gauges.record_denied();
                 return Err(ExecutionError::EntitlementDenied(denial));
             }
         };
@@ -668,12 +659,10 @@ impl ExecutionEngine {
                 // subsumes this accepted request. The durable DB reservation
                 // independently protects a restart or a Valkey outage before
                 // relay delivery.
-                self.gauges.record_accepted();
                 Ok(enqueued)
             }
             Err(ExecutionOutboxError::AdmissionFull { limit }) => {
                 self.release_local_reservation(tenant_id);
-                self.gauges.record_denied();
                 let denial = crate::entitlement_error::EntitlementDenial::LimitExceeded {
                     limit: "maxConcurrentExecutions",
                     maximum: limit,
@@ -682,11 +671,8 @@ impl ExecutionEngine {
                 Err(ExecutionError::EntitlementDenied(denial))
             }
             Err(error) => {
-                // The intake response is a refusal, not an accepted request;
-                // retain the pipeline identity while surfacing the real DB or
-                // validation failure to the caller.
+                // Release the optimistic reservation on a failed durable enqueue.
                 self.release_local_reservation(tenant_id);
-                self.gauges.record_denied();
                 Err(map_outbox_error(error))
             }
         }
@@ -1252,7 +1238,6 @@ impl ExecutionEngine {
         let execution_timeout = runtime_client
             .resolve_execution_timeout(ready.execution_timeout)
             .map_err(|error| ExecutionError::ValidationError(error.to_string()))?;
-        let track_events = ready.track_events;
         let image_id = ready.image_id;
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
@@ -1273,10 +1258,7 @@ impl ExecutionEngine {
             )
             .await
         {
-            Ok(start) => {
-                record_new_runtime_start(&self.gauges, track_events, start.deduplicated);
-                start
-            }
+            Ok(start) => start,
             Err(RuntimeError::ImageNotFound(error)) => {
                 tracing::warn!(
                     tenant_id = %event.tenant_id,
@@ -2232,7 +2214,6 @@ impl ExecutionEngine {
         if let CompilationStatus::Ready {
             registered_image_id,
             execution_timeout,
-            track_events,
             ..
         } = status
         {
@@ -2241,7 +2222,6 @@ impl ExecutionEngine {
                 ReadyLaunch {
                     image_id: registered_image_id,
                     execution_timeout,
-                    track_events,
                 },
             ));
         }
@@ -2367,14 +2347,12 @@ impl ExecutionEngine {
         if let CompilationStatus::Ready {
             registered_image_id,
             execution_timeout,
-            track_events,
             ..
         } = status
         {
             return Ok(ReadyLaunch {
                 image_id: registered_image_id,
                 execution_timeout,
-                track_events,
             });
         }
 
@@ -2491,12 +2469,10 @@ impl ExecutionEngine {
             CompilationStatus::Ready {
                 registered_image_id,
                 execution_timeout,
-                track_events,
                 ..
             } => Ok(ReadyLaunch {
                 image_id: registered_image_id,
                 execution_timeout,
-                track_events,
             }),
             // The compilation we waited on recorded why it failed; report that
             // rather than the generic missing-binary message.
@@ -2531,21 +2507,12 @@ fn map_outbox_error(error: ExecutionOutboxError) -> ExecutionError {
     }
 }
 
-/// Record a runtime start only after Environment confirms it launched a new
-/// instance. A deduplicated request reuses an already-accepted launch, so it
-/// must not make a second run or step-capability claim visible in the pipeline.
-fn record_new_runtime_start(
-    gauges: &crate::workers::pipeline_gauges::PipelineGauges,
-    track_events: bool,
-    deduplicated: bool,
-) {
-    if deduplicated {
-        return;
-    }
-
-    gauges.record_started();
-    if track_events {
-        gauges.record_tracked_start();
+fn admission_outcome(result: &Result<EnqueuedExecution, ExecutionError>) -> &'static str {
+    match result {
+        Ok(enqueued) if enqueued.duplicate => "duplicate",
+        Ok(_) => "accepted",
+        Err(ExecutionError::EntitlementDenied(_)) => "rejected",
+        Err(_) => "error",
     }
 }
 
@@ -2559,57 +2526,6 @@ mod tests {
             Some(("workflow-a".to_string(), 7))
         );
         assert_eq!(workflow_info_from_image_name("not-a-workflow"), None);
-    }
-
-    #[test]
-    fn only_a_new_tracked_runtime_start_makes_steps_measurable() {
-        let gauges = crate::workers::pipeline_gauges::PipelineGauges::new();
-
-        // An untracked run is still a real start, but does not make a zero
-        // steps reading meaningful.
-        record_new_runtime_start(&gauges, false, false);
-        assert_eq!(gauges.totals().started, 1);
-        assert_eq!(gauges.totals().tracked_starts, 0);
-
-        // A retry that Environment deduplicates has not launched another run.
-        record_new_runtime_start(&gauges, true, true);
-        assert_eq!(gauges.totals().started, 1);
-        assert_eq!(gauges.totals().tracked_starts, 0);
-
-        record_new_runtime_start(&gauges, true, false);
-        assert_eq!(gauges.totals().started, 2);
-        assert_eq!(gauges.totals().tracked_starts, 1);
-    }
-
-    #[test]
-    fn detached_runtime_launch_records_its_confirmed_start() {
-        // A unit test of `record_new_runtime_start` alone cannot catch a
-        // perfectly good recorder with no production caller. Keep this guard
-        // outside the production source slice so its own assertion cannot
-        // satisfy it.
-        // `include_str!` resolves a relative literal from this module's
-        // directory; unlike `file!()`, it does not prefix that directory a
-        // second time when Cargo invokes the test from another working dir.
-        let source = include_str!("execution_engine.rs");
-        let production = source
-            .split("\n#[cfg(test)]")
-            .next()
-            .expect("source has a production section");
-        let call = "record_new_runtime_start(&self.gauges, track_events, start.deduplicated)";
-
-        assert_eq!(
-            production.matches(call).count(),
-            1,
-            "only the trigger worker's detached path starts Environment directly"
-        );
-
-        let detached_start = production
-            .find("async fn execute_detached_inner")
-            .expect("detached launch path exists");
-        assert!(
-            production[detached_start..].contains(call),
-            "the direct Environment launch must record its confirmed start"
-        );
     }
 
     #[test]
@@ -2684,7 +2600,6 @@ mod tests {
             None,
             None,
             ProductEventSink::new(tx),
-            crate::workers::pipeline_gauges::PipelineGauges::new(),
         );
         let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
@@ -2729,7 +2644,6 @@ mod tests {
             None,
             None,
             ProductEventSink::new(tx),
-            crate::workers::pipeline_gauges::PipelineGauges::new(),
         );
         let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 

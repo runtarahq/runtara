@@ -61,6 +61,7 @@ getrandom = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "testing"] }
 base64 = { workspace = true }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 # Compatibility fixtures must still construct old isolated packages. The

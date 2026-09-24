@@ -501,72 +501,22 @@ pub struct ContainerMetrics {
 /// Cancellation token for stopping execution.
 pub type CancelToken = Arc<AtomicBool>;
 
-/// How much of a runner's concurrency bound is currently spoken for.
-///
-/// `held` answers "is the stage full"; `oldest_held_ms` answers the question a
-/// count cannot, which is whether a full stage is turning work over as fast as
-/// the host allows or holding work that never leaves. Those look identical on a
-/// gauge and call for opposite responses, so the age is the point of this type
-/// rather than a nicety: a runner pinned at its bound with a permit held for
-/// forty minutes is stalled, and the same runner pinned with permits recycling
-/// every few seconds is merely busy.
+/// Cheap process-local run capacity, read from the operational semaphore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerOccupancy {
-    /// Concurrency bound this runner enforces.
+    /// Configured concurrency bound.
     pub limit: u64,
     /// Permits currently held.
-    ///
-    /// Read from the semaphore rather than counted from any bookkeeping map, so
-    /// it stays authoritative even in the window where a permit has been taken
-    /// but its acquisition time is not yet recorded.
     pub held: u64,
-    /// Age of the longest-held permit, if anything is running.
-    pub oldest_held_ms: Option<u64>,
-    /// Instance holding that longest-held permit.
-    pub oldest_instance_id: Option<String>,
-    /// Runs this runner has begun executing, since process start.
-    pub runs_started: u64,
-    /// Runs this runner has finished executing, since process start.
-    ///
-    /// "Finished" means the guest stopped and gave its permit back, which
-    /// includes a run that parked itself to await a wake or a signal. It is
-    /// therefore the throughput of the executing stage, and deliberately not a
-    /// count of instances reaching a terminal status — those differ whenever
-    /// durable workflows are in play, and conflating them would report a
-    /// healthy parking workload as a flood of completions.
-    pub runs_finished: u64,
 }
 
-/// How much of the runner's independent pre-run preparation pool is occupied.
-///
-/// Preparation includes child-owned artifact reads/hashing/compilation,
-/// parent-side linking, and the persisted-input read. It is intentionally
-/// distinct from [`RunnerOccupancy`]: a wedged compiler should be visible and
-/// bounded without making the host look as though guests are executing.
+/// Cheap preparation capacity used by the dispatcher to bound claims.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparationOccupancy {
-    /// Concurrency bound for preparation work.
+    /// Configured preparation bound.
     pub limit: u64,
-    /// Preparation permits currently held.
+    /// Permits currently held.
     pub held: u64,
-    /// Age of the longest-held preparation permit, if any.
-    pub oldest_held_ms: Option<u64>,
-    /// Instance holding that longest-lived preparation permit.
-    pub oldest_instance_id: Option<String>,
-    /// Bound for live and still-reaping killable precompile child processes.
-    ///
-    /// This is intentionally separate from `limit`: a timed-out preparation
-    /// gives its parent permit back immediately, while a child blocked in
-    /// kernel I/O retains this bounded slot until the reaper observes exit.
-    pub precompile_child_limit: Option<u64>,
-    /// Live or reaping child processes consuming that bound.
-    pub precompile_child_held: Option<u64>,
-    /// Age of the oldest live or reaping precompile child.
-    pub precompile_child_oldest_ms: Option<u64>,
-    /// Subset of `precompile_child_held` that timed out and are awaiting the
-    /// detached reaper. A nonzero value is an actionable host-health signal,
-    /// not ordinary preparation throughput.
-    pub precompile_child_retired: Option<u64>,
 }
 
 /// Trait for instance runners.
@@ -690,7 +640,7 @@ pub trait Runner: Send + Sync {
     /// Current occupancy of the independently bounded preparation pool.
     ///
     /// `None` means this runner does not expose a preparation pool. It is not
-    /// treated as idle by the pipeline; callers may use their batch bound as
+    /// interpreted as idle; dispatchers may use their batch bound as
     /// conservative fallback capacity for compatibility runners.
     fn preparation_occupancy(&self) -> Option<PreparationOccupancy> {
         None

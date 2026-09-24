@@ -523,11 +523,8 @@ async fn overlapping_handoffs_keep_separate_physical_handles_and_occupancy() {
     );
     assert!(next_live);
     assert_eq!(occupancy.held, 1);
-    assert_eq!(occupancy.oldest_instance_id.as_deref(), Some(id.as_str()));
-    assert!(occupancy.oldest_held_ms.is_some());
     let finished = h.runner.occupancy().unwrap();
     assert_eq!(finished.held, 0);
-    assert_eq!(finished.oldest_held_ms, None);
 }
 
 /// Durable preparation must read the same canonical input envelope that a

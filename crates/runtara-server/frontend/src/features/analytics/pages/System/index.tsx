@@ -9,9 +9,6 @@ import {
 import { Card } from '@/shared/components/ui/card';
 import { Progress } from '@/shared/components/ui/progress';
 import { useSystemAnalytics } from '../../hooks/useAnalytics';
-import { usePipelineStream } from '../../hooks/usePipelineStream';
-import { PipelineRates } from '../../components/PipelineRates';
-import { PipelineStageRow } from '../../components/PipelineStageRow';
 import { formatBytes } from '../../utils';
 
 export function System() {
@@ -22,12 +19,6 @@ export function System() {
     isLoading: systemLoading,
     refetch: refetchSystem,
   } = useSystemAnalytics();
-
-  const pipeline = usePipelineStream();
-  // Preserve the successful render guard inside the stage-map callback. TypeScript
-  // deliberately does not retain a property narrowing across that closure,
-  // while the snapshot itself stays stable for this render.
-  const pipelineSnapshot = pipeline.snapshot;
 
   const handleRefresh = () => {
     refetchSystem();
@@ -61,62 +52,6 @@ export function System() {
       }
     >
       <div className="space-y-6">
-        {/* Occupancy leads: it is the live thing, and the host description
-            below it is the context for why the bounds are what they are. */}
-        <section aria-label="Execution pipeline">
-          <div className="mb-3 flex items-baseline justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-foreground">
-                Execution pipeline
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                Occupancy against every concurrency limit, sampled each second
-              </p>
-            </div>
-            <span className="text-[11px] tabular-nums text-muted-foreground">
-              {pipeline.connected
-                ? 'live'
-                : pipelineSnapshot
-                  ? 'polling'
-                  : 'connecting…'}
-            </span>
-          </div>
-
-          {pipelineSnapshot ? (
-            <div className="space-y-3">
-              <PipelineRates rates={pipelineSnapshot.rates} />
-              <div className="space-y-1.5">
-                {pipelineSnapshot.stages.map((stage) => (
-                  <PipelineStageRow
-                    key={stage.key}
-                    stage={stage}
-                    history={pipeline.history[stage.key] ?? []}
-                    inflow={
-                      pipelineSnapshot.rates
-                        ? ((
-                            pipelineSnapshot.rates as unknown as Record<
-                              string,
-                              number | null
-                            >
-                          )[stage.inflowKey] ?? null)
-                        : null
-                    }
-                    pipelineActive={(pipelineSnapshot.rates?.offered ?? 0) > 0}
-                    isChokepoint={pipeline.chokepointKey === stage.key}
-                    stuckAfterMs={pipelineSnapshot.stuckAfterMs}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-border/40 bg-card px-4 py-6 text-sm text-muted-foreground">
-              {pipeline.error
-                ? `Pipeline unavailable: ${pipeline.error}`
-                : 'Waiting for the first sample…'}
-            </div>
-          )}
-        </section>
-
         <section aria-label="Host">
           <h2 className="mb-3 text-sm font-semibold text-foreground">Host</h2>
           <div className="grid gap-4 md:grid-cols-3">

@@ -23,6 +23,60 @@ use crate::valkey::stream::{StreamAcker, StreamConsumer};
 use crate::workers::execution_engine::{DetachedExecution, ExecutionEngine, ExecutionError};
 use crate::workers::execution_outbox::{DurableLaunchClaim, ExecutionOutbox};
 
+/// Operational per-worker concurrency pools, observed as a single process total.
+#[derive(Debug)]
+pub struct TriggerPermits {
+    permits: Vec<Arc<tokio::sync::Semaphore>>,
+}
+
+impl TriggerPermits {
+    pub fn new(workers: usize, per_worker_limit: usize) -> Self {
+        let permits: Vec<_> = (0..workers)
+            .map(|_| Arc::new(tokio::sync::Semaphore::new(per_worker_limit)))
+            .collect();
+        if let Some(metrics) = metrics() {
+            observe_trigger_pools(metrics.meter(), &permits, per_worker_limit);
+        }
+        Self { permits }
+    }
+
+    pub fn for_worker(&self, index: usize) -> Option<Arc<tokio::sync::Semaphore>> {
+        self.permits.get(index).cloned()
+    }
+}
+
+fn observe_trigger_pools(
+    meter: &opentelemetry::metrics::Meter,
+    permits: &[Arc<tokio::sync::Semaphore>],
+    per_worker_limit: usize,
+) {
+    for (name, capacity) in [
+        ("runtara.pipeline.pool.usage", false),
+        ("runtara.pipeline.pool.capacity", true),
+    ] {
+        let pools: Vec<_> = permits.iter().map(Arc::downgrade).collect();
+        meter
+            .i64_observable_up_down_counter(name)
+            .with_unit("{permit}")
+            .with_callback(move |observer| {
+                let mut total = 0;
+                let mut active = false;
+                for pool in pools.iter().filter_map(|pool| pool.upgrade()) {
+                    active = true;
+                    total += if capacity {
+                        per_worker_limit
+                    } else {
+                        per_worker_limit.saturating_sub(pool.available_permits())
+                    };
+                }
+                if active {
+                    observer.observe(total as i64, &[KeyValue::new("pool", "trigger")]);
+                }
+            })
+            .build();
+    }
+}
+
 /// Stable terminal reason for a stream entry that predates durable source
 /// admission, or was written by a producer that bypassed it.
 const MISSING_DURABLE_REQUEST_ID: &str = "missing_durable_request_id";
@@ -104,7 +158,6 @@ pub async fn run(
     shutdown: ShutdownSignal,
     event_sink: ProductEventSink,
     event_permits: Arc<tokio::sync::Semaphore>,
-    gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
 ) {
     let worker_id = format!("trigger-worker-{}", Uuid::new_v4());
     let tenant_id = worker_config.tenant_id.clone();
@@ -156,9 +209,7 @@ pub async fn run(
     // count), so it sits behind a mutex held for microseconds while the slow
     // part of each event runs outside it.
     let consumer = Arc::new(tokio::sync::Mutex::new(consumer));
-    // Supplied by the caller rather than built here, so the analytics sampler
-    // can read the same semaphore this worker waits on. Each worker still gets
-    // its own, exactly as before — see `TriggerPermits`.
+    // Each worker owns its operational semaphore; OTEL observes the aggregate.
 
     info!(
         worker_id = %worker_id,
@@ -177,7 +228,6 @@ pub async fn run(
         runtime_client,
         None, // trigger_stream not needed for the trigger worker
         event_sink.clone(),
-        Arc::clone(&gauges),
     ));
     // The worker fences every new stream event against the server-owned
     // deadline before it can ask Environment for a durable launch. This is a
@@ -232,6 +282,9 @@ pub async fn run(
                             .acquire_owned()
                             .await
                             .expect("trigger event semaphore closed");
+                        let _hold =
+                            runtara_environment::pipeline_metrics::PipelineMetrics::global()
+                                .map(|metrics| metrics.hold("trigger"));
                         process_event(
                             &acker,
                             &engine,
@@ -305,6 +358,9 @@ pub async fn run(
                             .acquire_owned()
                             .await
                             .expect("trigger event semaphore closed");
+                        let _hold =
+                            runtara_environment::pipeline_metrics::PipelineMetrics::global()
+                                .map(|metrics| metrics.hold("trigger"));
                         process_event(
                             &acker,
                             &engine,
@@ -422,21 +478,20 @@ async fn process_event(
         retry_suffix
     );
 
-    // Track processing time
-    let process_start = Instant::now();
-    let attributes = [
-        KeyValue::new("tenant_id", trigger_event.tenant_id.clone()),
-        KeyValue::new("workflow_id", trigger_event.workflow_id.clone()),
-        KeyValue::new("trigger_type", trigger_event.trigger_type().to_string()),
-    ];
+    let telemetry = metrics().map(|metrics| (metrics, Instant::now()));
 
     // Process the trigger event
     let process_result =
         process_trigger_event(engine.clone(), outbox, handoff_owner, &trigger_event).await;
 
+    let duration_ms = telemetry
+        .as_ref()
+        .map(|(_, start)| start.elapsed().as_millis() as u64);
+
     // Record metrics
-    let duration = process_start.elapsed().as_secs_f64();
-    if let Some(m) = metrics() {
+    if let Some((m, process_start)) = telemetry {
+        let duration = process_start.elapsed().as_secs_f64();
+        let attributes = [KeyValue::new("trigger_type", trigger_event.trigger_type())];
         m.trigger_events_total.add(1, &attributes);
         // Duration is a histogram: tenant_id/workflow_id would multiply its
         // buckets per workflow and tenant, exploding series count. Keep only
@@ -458,7 +513,10 @@ async fn process_event(
         );
         match &process_result {
             ProcessResult::PermanentFailure(_) => {
-                m.trigger_events_failed.add(1, &attributes);
+                m.trigger_events_failed.add(
+                    1,
+                    &[KeyValue::new("trigger_type", trigger_event.trigger_type())],
+                );
             }
             ProcessResult::NotRunnable(_) => {
                 // Counted under its own status label above, not as a failure -
@@ -510,7 +568,7 @@ async fn process_event(
                 info!(
                     entry_id = %entry_id,
                     instance_id = %trigger_event.instance_id,
-                    duration_ms = (duration * 1000.0) as u64,
+                    duration_ms = duration_ms,
                     "Event processed and acknowledged"
                 );
             }
@@ -524,7 +582,7 @@ async fn process_event(
                 info!(
                     entry_id = %entry_id,
                     instance_id = %trigger_event.instance_id,
-                    duration_ms = (duration * 1000.0) as u64,
+                    duration_ms = duration_ms,
                     "Event start was already accepted; acknowledged replay"
                 );
             }
@@ -536,7 +594,7 @@ async fn process_event(
                 entry_id = %entry_id,
                 instance_id = %trigger_event.instance_id,
                 error = %error_msg,
-                duration_ms = (duration * 1000.0) as u64,
+                duration_ms = duration_ms,
                 "Event processing failed permanently"
             );
             if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
@@ -552,7 +610,7 @@ async fn process_event(
                 entry_id = %entry_id,
                 instance_id = %trigger_event.instance_id,
                 reason = %reason,
-                duration_ms = (duration * 1000.0) as u64,
+                duration_ms = duration_ms,
                 "Workflow cannot run as authored"
             );
             if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
@@ -576,7 +634,10 @@ async fn process_event(
                 );
                 // Record as failed
                 if let Some(m) = metrics() {
-                    m.trigger_events_failed.add(1, &attributes);
+                    m.trigger_events_failed.add(
+                        1,
+                        &[KeyValue::new("trigger_type", trigger_event.trigger_type())],
+                    );
                 }
                 // ACK to remove from PEL
                 if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
