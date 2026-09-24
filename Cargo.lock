@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ai-tools"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -4260,7 +4260,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-azure-blob-storage"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4278,7 +4278,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bedrock"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -4292,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bundle-emit"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "anyhow",
  "runtara-agent-ai-tools",
@@ -4327,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-compression"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4341,7 +4341,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-crypto"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
@@ -4358,7 +4358,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-csv"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "csv",
@@ -4372,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-datetime"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4386,7 +4386,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-encoding"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -4397,7 +4397,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-http"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4413,7 +4413,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-hubspot"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4425,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -4438,7 +4438,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mailgun"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4451,7 +4451,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mcp"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4464,7 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-object-model"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-database-contract",
@@ -4480,7 +4480,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-openai"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -4493,7 +4493,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-quickbooks"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4505,7 +4505,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-s3-storage"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4525,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sharepoint"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4538,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-shopify"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4550,7 +4550,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-slack"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4564,7 +4564,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sqs"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4576,7 +4576,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-stripe"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4588,7 +4588,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-teams"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4601,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-text"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "minijinja",
@@ -4618,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-transform"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4630,7 +4630,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-trusted"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -4642,7 +4642,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-utils"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "rand 0.8.6",
  "runtara-agent-macro",
@@ -4654,11 +4654,11 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-wit"
-version = "8.9.11"
+version = "8.9.12"
 
 [[package]]
 name = "runtara-agent-xlsx"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -4671,7 +4671,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-xml"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "roxmltree",
@@ -4685,7 +4685,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4697,7 +4697,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-ai"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-dsl",
  "runtara-http",
@@ -4709,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-component-host"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4749,7 +4749,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-connections"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -4785,7 +4785,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4800,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-database-contract"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -4808,7 +4808,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "regex",
  "schemars 1.2.1",
@@ -4820,7 +4820,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4852,7 +4852,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-http"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -4863,7 +4863,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-model-core"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "chrono",
  "regex",
@@ -4875,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-store"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "chrono",
  "futures-util",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-report-dsl"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "chrono",
  "minijinja",
@@ -4911,7 +4911,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4933,7 +4933,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk-macros"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4942,7 +4942,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-server"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5021,7 +5021,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-store-postgres"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5037,7 +5037,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-text-parser"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "chrono",
  "regex",
@@ -5047,7 +5047,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-validation-wasm"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-dsl",
  "runtara-workflows",
@@ -5058,7 +5058,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-runtime"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "runtara-sdk",
  "serde_json",
@@ -5067,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "minijinja",
  "runtara-dsl",
@@ -5078,7 +5078,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-wit"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -5088,7 +5088,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "8.9.11"
+version = "8.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
