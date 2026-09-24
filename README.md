@@ -252,6 +252,7 @@ Useful references:
 - Local development stack: `dev/README.md`
 - Install & update from a release bundle: `docs/install.md`
 - Deployment notes: `docs/deployment/`
+- Pipeline metrics and observability: [OTEL monitoring](docs/pipeline-monitoring.md)
 
 ## License
 
