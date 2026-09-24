@@ -242,6 +242,7 @@ pub mod cleanup_worker;
 pub mod db_cleanup_worker;
 pub mod metrics;
 pub mod pipeline_metrics;
+pub mod usage;
 
 /// Background worker for cleaning up unused images.
 pub mod image_cleanup_worker;

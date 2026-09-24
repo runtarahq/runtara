@@ -180,6 +180,10 @@ async fn seed_terminal_instance(
     .await
     .expect("Failed to stamp instance timestamps");
 
+    // Run the production rollup, retaining the fixed epoch fixtures.
+    crate::usage::drain(pool, epoch(-60), 10_000, false)
+        .await
+        .unwrap();
     instance_id
 }
 

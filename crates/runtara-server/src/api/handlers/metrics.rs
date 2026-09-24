@@ -196,8 +196,8 @@ pub async fn get_workflow_stats(
     get,
     path = "/api/runtime/metrics/tenant",
     params(
-        ("startTime" = Option<String>, Query, description = "Start time (ISO 8601), defaults to 24 hours ago"),
-        ("endTime" = Option<String>, Query, description = "End time (ISO 8601), defaults to now"),
+        ("startTime" = Option<String>, Query, description = "Start time (ISO 8601), rounded down to a UTC minute; defaults to 24 hours ago. History is retained for 200 days."),
+        ("endTime" = Option<String>, Query, description = "Exclusive end time (ISO 8601), rounded down to a UTC minute; defaults to now"),
         ("granularity" = Option<String>, Query, description = "Bucket width: 'hourly', 'daily', or a <count><unit> width such as '1m', '6m', '24m', '2h' (default: hourly)")
     ),
     responses(
@@ -235,6 +235,12 @@ pub async fn get_tenant_metrics(
         .start_time
         .unwrap_or_else(|| end_time - Duration::hours(24));
 
+    let start_time = runtara_environment::usage::minute(start_time);
+    let end_time = runtara_environment::usage::minute(end_time);
+    if end_time <= start_time {
+        return bad_request("endTime must be after startTime at minute resolution".into());
+    }
+
     // Parse granularity from query parameter. Omitting it still means hourly,
     // so every existing caller keeps the response it had.
     let granularity = match query.granularity.as_deref() {
@@ -249,9 +255,7 @@ pub async fn get_tenant_metrics(
         },
     };
 
-    // Bound the empty-bucket spine, not the width. A narrow width over a wide
-    // range is the only shape of this request that is expensive, and it is
-    // expensive in the query planner rather than in the rows scanned.
+    // Bound the generated empty-bucket spine as well as the retained input.
     let buckets = granularity.bucket_count(start_time, end_time);
     if buckets > MAX_METRIC_BUCKETS {
         return bad_request(format!(

@@ -1,27 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! OpenTelemetry reporting for workflow executions, and the forensic columns
-//! the runner collects about the process behind one.
-//!
-//! Core assembles the facts and hands them over through
-//! [`InstanceMetricsSink`]; the OTLP vocabulary, the attribute names and the
-//! exporter all live here. Resource usage and stderr are written here too:
-//! peak memory, CPU time, exit status and captured output are the runner's
-//! observations about a process, and Core never reads any of them back to
-//! decide anything.
+//! Workflow Usage instruments, recorded from the same committed facts as the
+//! in-app history. No per-execution telemetry queries or process-global sink.
 
+use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
-use opentelemetry::{KeyValue, global};
-use runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 use sqlx::PgPool;
-use std::sync::OnceLock;
 
 use crate::error::Result;
 use crate::instance_repository::InstanceRepository;
 
-static WORKFLOW_METRICS: OnceLock<WorkflowMetrics> = OnceLock::new();
-
-struct WorkflowMetrics {
+pub(crate) struct WorkflowMetrics {
     invocations_total: Counter<u64>,
     execution_duration: Histogram<f64>,
     memory_peak: Histogram<f64>,
@@ -29,7 +18,7 @@ struct WorkflowMetrics {
 }
 
 impl WorkflowMetrics {
-    fn new(meter: Meter) -> Self {
+    pub(crate) fn new(meter: Meter) -> Self {
         Self {
             invocations_total: meter
                 .u64_counter("runtara.workflow.invocations.total")
@@ -54,65 +43,36 @@ impl WorkflowMetrics {
     }
 }
 
-fn workflow_metrics() -> &'static WorkflowMetrics {
-    WORKFLOW_METRICS.get_or_init(|| WorkflowMetrics::new(global::meter("runtara-environment")))
-}
-
-fn metric_attributes(metric: &InstanceCompletionMetrics) -> Vec<KeyValue> {
-    vec![
-        KeyValue::new("tenant_id", metric.tenant_id.clone()),
-        KeyValue::new("status", crate::core_types::status_name(metric.status)),
-        KeyValue::new(
-            "termination_reason",
-            metric
-                .termination_reason
-                .clone()
-                .unwrap_or_else(|| "none".to_string()),
-        ),
-    ]
-}
-
-fn record_resources(
-    metrics: &WorkflowMetrics,
-    metric: &InstanceCompletionMetrics,
-    attributes: &[KeyValue],
-) {
-    if let Some(memory_peak_bytes) = metric.memory_peak_bytes {
-        metrics
-            .memory_peak
-            .record(memory_peak_bytes as f64, attributes);
-    }
-    if let Some(cpu_usage_usec) = metric.cpu_usage_usec {
-        metrics
-            .cpu_usage
-            .record(cpu_usage_usec as f64 / 1_000_000.0, attributes);
-    }
-}
-
-/// Reports Core's terminal-state facts as OTLP workflow metrics.
-///
-/// Wire it with `PostgresPersistence::with_metrics_sink`. A host that does not
-/// is simply not reporting; Core behaves identically either way.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct OtlpMetricsSink;
-
-impl InstanceMetricsSink for OtlpMetricsSink {
-    fn on_terminal(&self, metric: &InstanceCompletionMetrics) {
-        let metrics = workflow_metrics();
-        let attributes = metric_attributes(metric);
-
-        metrics.invocations_total.add(1, &attributes);
-        if let Some(duration_seconds) = metric.duration_seconds() {
-            metrics
-                .execution_duration
-                .record(duration_seconds, &attributes);
+impl WorkflowMetrics {
+    pub(crate) fn record(&self, fact: &crate::usage::UsageFact) {
+        let attributes = [
+            KeyValue::new("tenant_id", fact.tenant_id.clone()),
+            KeyValue::new("status", fact.status.clone()),
+            KeyValue::new(
+                "termination_reason",
+                fact.termination_reason
+                    .clone()
+                    .unwrap_or_else(|| "none".into()),
+            ),
+        ];
+        if fact.completion {
+            self.invocations_total.add(1, &attributes);
         }
-        record_resources(metrics, metric, &attributes);
+        if let Some(duration) = fact.duration_ms {
+            self.execution_duration
+                .record(duration / 1000.0, &attributes);
+        }
+        if let Some(memory) = fact.memory_bytes {
+            self.memory_peak.record(memory as f64, &attributes);
+        }
+        if let Some(cpu) = fact.cpu_usec {
+            self.cpu_usage.record(cpu as f64 / 1_000_000.0, &attributes);
+        }
     }
 }
 
-/// Record what the process used, report it, and hand back the status the guest
-/// reported.
+/// Persist process resources and return the operational status in one query.
+/// Usage capture is transactional; the aggregation worker handles reporting.
 ///
 /// The persistence half belongs to
 /// [`InstanceRepository`](crate::instance_repository::InstanceRepository); what
@@ -123,21 +83,9 @@ pub async fn record_resources_returning_status(
     memory_peak_bytes: Option<u64>,
     cpu_usage_usec: Option<u64>,
 ) -> Result<Option<(runtara_core::domain::InstanceStatus, Option<String>)>> {
-    let instances = InstanceRepository::new(pool.clone());
-    let observed = instances
+    InstanceRepository::new(pool.clone())
         .record_resources_returning_status(instance_id, memory_peak_bytes, cpu_usage_usec)
-        .await?;
-
-    if observed.is_some()
-        && (memory_peak_bytes.is_some() || cpu_usage_usec.is_some())
-        && let Some(metric) = instances.completion_metrics(instance_id).await?
-    {
-        let metrics = workflow_metrics();
-        let attributes = metric_attributes(&metric);
-        record_resources(metrics, &metric, &attributes);
-    }
-
-    Ok(observed)
+        .await
 }
 
 /// Store raw stderr captured from the runner, for debugging.
@@ -145,4 +93,73 @@ pub async fn record_instance_stderr(pool: &PgPool, instance_id: &str, stderr: &s
     InstanceRepository::new(pool.clone())
         .record_stderr(instance_id, stderr)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
+
+    #[test]
+    fn usage_facts_export_counts_and_independent_resource_observations() {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let metrics = WorkflowMetrics::new(provider.meter("usage-test"));
+        let mut fact = crate::usage::UsageFact {
+            tenant_id: "tenant".into(),
+            status: "completed".into(),
+            termination_reason: None,
+            completion: true,
+            export: true,
+            duration_ms: Some(2500.0),
+            memory_bytes: None,
+            cpu_usec: None,
+        };
+        metrics.record(&fact);
+        fact.completion = false;
+        fact.duration_ms = None;
+        fact.memory_bytes = Some(4096);
+        fact.cpu_usec = Some(500_000);
+        metrics.record(&fact);
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let mut seen = 0;
+        for metric in exported
+            .iter()
+            .flat_map(|r| r.scope_metrics())
+            .flat_map(|s| s.metrics())
+        {
+            seen += 1;
+            match metric.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                    assert_eq!(metric.name(), "runtara.workflow.invocations.total");
+                    assert_eq!(sum.data_points().map(|p| p.value()).sum::<u64>(), 1);
+                }
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => {
+                    let points: Vec<_> = histogram.data_points().collect();
+                    assert_eq!(points.len(), 1);
+                    assert_eq!(points[0].count(), 1);
+                    let expected = match metric.name() {
+                        "runtara.workflow.execution.duration" => 2.5,
+                        "runtara.workflow.memory.peak" => 4096.0,
+                        "runtara.workflow.cpu.usage" => 0.5,
+                        name => panic!("unexpected metric {name}"),
+                    };
+                    assert_eq!(points[0].sum(), expected);
+                    let labels: Vec<_> = points[0].attributes().map(|kv| kv.key.as_str()).collect();
+                    assert_eq!(labels.len(), 3);
+                    assert!(labels.iter().all(|label| {
+                        ["tenant_id", "status", "termination_reason"].contains(label)
+                    }));
+                }
+                data => panic!("unexpected metric type {data:?}"),
+            }
+        }
+        assert_eq!(seen, 4);
+        provider.shutdown().unwrap();
+    }
 }

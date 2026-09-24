@@ -278,58 +278,6 @@ pub struct ListPairedRecordsFilter {
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-/// Execution facts about an instance that reached a terminal state.
-///
-/// A plain data carrier: Core assembles it from its own row and hands it to an
-/// [`InstanceMetricsSink`]. Core does not know what a host does with it — the
-/// OpenTelemetry vocabulary, the exporter and the attribute names all belong to
-/// whoever implements the sink.
-#[derive(Debug, Clone)]
-pub struct InstanceCompletionMetrics {
-    /// Tenant identifier for the invocation.
-    pub tenant_id: String,
-    /// Terminal status: completed, failed, or cancelled.
-    pub status: InstanceStatus,
-    /// Optional terminal reason such as timeout or heartbeat_timeout.
-    pub termination_reason: Option<String>,
-    /// When execution began.
-    pub started_at: Option<DateTime<Utc>>,
-    /// When execution reached a terminal state.
-    pub finished_at: Option<DateTime<Utc>>,
-    /// Peak memory collected by the runner cgroup.
-    pub memory_peak_bytes: Option<u64>,
-    /// CPU usage collected by the runner cgroup.
-    pub cpu_usage_usec: Option<u64>,
-}
-
-impl InstanceCompletionMetrics {
-    /// Wall-clock execution time, when both ends of the interval are known.
-    pub fn duration_seconds(&self) -> Option<f64> {
-        let started_at = self.started_at?;
-        let finished_at = self.finished_at?;
-        finished_at
-            .signed_duration_since(started_at)
-            .to_std()
-            .ok()
-            .map(|d| d.as_secs_f64())
-    }
-}
-
-/// Notified when an instance reaches a terminal state, for a host that reports
-/// on completions.
-///
-/// Exists for the same reason as
-/// [`InstanceEventObserver`](crate::instance_handlers::InstanceEventObserver):
-/// Core cannot depend on the crate that owns the telemetry pipeline, so it
-/// defines the shape and the host implements it. A host that wires no sink
-/// simply reports nothing; Core's behaviour is identical either way.
-///
-/// Called on the completion path, so implementations must be cheap and
-/// non-blocking.
-pub trait InstanceMetricsSink: Send + Sync {
-    /// An instance reached `completed`, `failed`, or `cancelled`.
-    fn on_terminal(&self, metrics: &InstanceCompletionMetrics);
-}
 /// Whether a `complete_instance` call should apply unconditionally or only
 /// when the target row is still in the `running` state.
 ///

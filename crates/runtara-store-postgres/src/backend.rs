@@ -9,135 +9,23 @@ use runtara_core::domain::EventType as CoreEventType;
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 use runtara_core::domain::SignalType as CoreSignalType;
 
-use std::sync::Arc;
-
 use crate::rows::DbResult;
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use ::runtara_core::error::CoreError;
-use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 
 /// PostgreSQL-backed persistence implementation.
 #[derive(Clone)]
 pub struct PostgresPersistence {
     pub(crate) pool: PgPool,
-    metrics_sink: Option<Arc<dyn InstanceMetricsSink>>,
 }
 
 impl PostgresPersistence {
     /// Create a new Postgres-backed persistence implementation.
-    ///
-    /// Reports no completion metrics until a sink is attached with
-    /// [`Self::with_metrics_sink`].
     pub fn new(pool: PgPool) -> Self {
-        Self {
-            pool,
-            metrics_sink: None,
-        }
-    }
-
-    /// Report terminal-state metrics to `sink`.
-    ///
-    /// Core assembles the facts; the host decides what they mean and where
-    /// they go. See [`InstanceMetricsSink`].
-    #[must_use]
-    pub fn with_metrics_sink(mut self, sink: Arc<dyn InstanceMetricsSink>) -> Self {
-        self.metrics_sink = Some(sink);
-        self
-    }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct InstanceMetricRow {
-    tenant_id: String,
-    status: String,
-    termination_reason: Option<String>,
-    started_at: Option<DateTime<Utc>>,
-    finished_at: Option<DateTime<Utc>>,
-    memory_peak_bytes: Option<i64>,
-    cpu_usage_usec: Option<i64>,
-}
-
-impl TryFrom<InstanceMetricRow> for InstanceCompletionMetrics {
-    type Error = sqlx::Error;
-    fn try_from(row: InstanceMetricRow) -> Result<Self, Self::Error> {
-        Ok(Self {
-            tenant_id: row.tenant_id,
-            status: crate::encoding::status_from_str(&row.status)?,
-            termination_reason: row.termination_reason,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
-            cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
-        })
-    }
-}
-
-async fn fetch_instance_status(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"
-        SELECT status::text
-        FROM instances
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await
-}
-
-async fn fetch_instance_metric_row(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<InstanceMetricRow>, sqlx::Error> {
-    sqlx::query_as::<_, InstanceMetricRow>(
-        r#"
-        SELECT
-            tenant_id,
-            status::text AS status,
-            termination_reason::text AS termination_reason,
-            started_at,
-            finished_at,
-            memory_peak_bytes,
-            cpu_usage_usec
-        FROM instances
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await
-}
-
-/// Terminal statuses a completion is reported for.
-fn is_reportable_terminal_status(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled")
-}
-
-/// Read back the terminal row and hand it to the host's sink.
-///
-/// A missing row or a read error is logged and dropped: reporting must never
-/// fail a completion.
-async fn report_completion(sink: &dyn InstanceMetricsSink, pool: &PgPool, instance_id: &str) {
-    match fetch_instance_metric_row(pool, instance_id).await {
-        Ok(Some(row)) => match row.try_into() {
-            Ok(metrics) => sink.on_terminal(&metrics),
-            Err(error) => tracing::warn!(%error, "Invalid completion metric state"),
-        },
-        Ok(None) => tracing::warn!(
-            instance_id = %instance_id,
-            "Skipped completion metric because instance row was not found"
-        ),
-        Err(error) => tracing::warn!(
-            instance_id = %instance_id,
-            error = %error,
-            "Skipped completion metric"
-        ),
+        Self { pool }
     }
 }
 
@@ -476,41 +364,7 @@ impl Persistence for PostgresPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
-        let instance_id = params.instance_id.to_string();
-        let target_status = crate::encoding::status_to_str(params.status);
-        // Only read the previous status when it can change the outcome. It exists
-        // to stop a completion metric being recorded twice, and that recording
-        // is gated on the TARGET status being one we record — so for every
-        // other transition, a park above all, the read was fetched and thrown
-        // away. A launch that parks pays for it once per instance.
-        let records_metric =
-            self.metrics_sink.is_some() && is_reportable_terminal_status(target_status);
-        let previous_was_terminal = if records_metric {
-            match fetch_instance_status(&self.pool, &instance_id).await {
-                Ok(Some(status)) => is_reportable_terminal_status(&status),
-                Ok(None) => false,
-                Err(error) => {
-                    tracing::warn!(
-                        instance_id = %instance_id,
-                        error = %error,
-                        "Could not read previous instance status before OTLP metric recording"
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        let applied = Self::op_complete_instance_unified(&self.pool, params).await?;
-        if applied && records_metric && !previous_was_terminal {
-            // `records_metric` is only true when a sink is wired.
-            if let Some(sink) = &self.metrics_sink {
-                report_completion(sink.as_ref(), &self.pool, &instance_id).await;
-            }
-        }
-
-        Ok(applied)
+        Self::op_complete_instance_unified(&self.pool, params).await
     }
 
     async fn save_checkpoint(
@@ -611,12 +465,6 @@ impl Persistence for PostgresPersistence {
             crate::lifecycle::apply_transition(&mut tx, &ids, effects).await?;
         }
         tx.commit().await.db()?;
-        if let Decision::Applied(effects) = decision
-            && effects.report_completion
-            && let Some(sink) = &self.metrics_sink
-        {
-            report_completion(sink.as_ref(), &self.pool, instance_id).await;
-        }
         Ok(decision)
     }
 
@@ -686,15 +534,6 @@ impl Persistence for PostgresPersistence {
             crate::lifecycle::apply_transition(&mut tx, ids, *effects).await?;
         }
         tx.commit().await.db()?;
-        for (effects, ids) in groups {
-            if effects.report_completion
-                && let Some(sink) = &self.metrics_sink
-            {
-                for id in ids {
-                    report_completion(sink.as_ref(), &self.pool, &id).await;
-                }
-            }
-        }
         Ok(cancelled)
     }
 
@@ -1706,8 +1545,7 @@ mod tests {
     // -------------------------------------------------------------------
     // Unified complete_instance coverage (SYN-395). These drive the
     // `Persistence` trait rather than the `op_*` statics so the trait's own
-    // layer (previous-status read + OTLP recording around
-    // `op_complete_instance_unified`) is exercised too, and so the
+    // delegation to `op_complete_instance_unified` is exercised too, and so the
     // bool/`InstanceNotFound` contract is asserted where callers actually
     // see it.
     //

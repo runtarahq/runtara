@@ -6,6 +6,8 @@ import type { MetricsDataPoint } from './metric-trends';
 function window(empties: number, active: Partial<MetricsDataPoint>[]) {
   const blank: MetricsDataPoint[] = Array.from({ length: empties }, () => ({
     invocation_count: 0,
+    duration_observation_count: 0,
+    memory_observation_count: 0,
     success_count: 0,
     failure_count: 0,
     cancelled_count: 0,
@@ -24,6 +26,8 @@ describe('summarizeMetrics', () => {
       window(720, [
         {
           invocation_count: 89650,
+          duration_observation_count: 89650,
+          memory_observation_count: 89650,
           success_count: 89650,
           avg_duration_seconds: 0.2235,
           avg_memory_bytes: 1245184,
@@ -43,12 +47,16 @@ describe('summarizeMetrics', () => {
       window(0, [
         {
           invocation_count: 900,
+          duration_observation_count: 900,
+          memory_observation_count: 900,
           success_count: 900,
           avg_duration_seconds: 1,
           avg_memory_bytes: 1024 * 1024,
         },
         {
           invocation_count: 100,
+          duration_observation_count: 100,
+          memory_observation_count: 100,
           success_count: 100,
           avg_duration_seconds: 5,
           avg_memory_bytes: 5 * 1024 * 1024,
@@ -57,6 +65,30 @@ describe('summarizeMetrics', () => {
     );
     expect(s.avgDurationSeconds).toBeCloseTo(1.4, 6);
     expect(s.avgMemory).toBeCloseTo(1.4, 6);
+  });
+
+  it('weights partial observations independently of invocation counts', () => {
+    const summary = summarizeMetrics(
+      window(0, [
+        {
+          invocation_count: 100,
+          duration_observation_count: 1,
+          avg_duration_seconds: 10,
+          memory_observation_count: 1,
+          avg_memory_bytes: 10 * 1024 * 1024,
+        },
+        {
+          invocation_count: 10,
+          duration_observation_count: 9,
+          avg_duration_seconds: 2,
+          memory_observation_count: 4,
+          avg_memory_bytes: 5 * 1024 * 1024,
+        },
+      ])
+    );
+    expect(summary.totalExecutions).toBe(110);
+    expect(summary.avgDurationSeconds).toBeCloseTo(2.8);
+    expect(summary.avgMemory).toBeCloseTo(6);
   });
 
   it('reports zero rather than dividing by nothing', () => {
@@ -75,6 +107,8 @@ describe('summarizeMetrics', () => {
       {
         bucket_time: '2026-01-05T00:00:00Z',
         invocation_count: 10,
+        duration_observation_count: 10,
+        memory_observation_count: 10,
         success_count: 8,
         failure_count: 2,
         cancelled_count: 1,

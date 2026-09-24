@@ -1228,7 +1228,7 @@ pub enum MetricsGranularity {
     Daily,
     /// A fixed bucket width in seconds.
     ///
-    /// Always at least one second. Construct through [`FromStr`](std::str::FromStr)
+    /// Always a positive multiple of 60 seconds. Construct through [`FromStr`](std::str::FromStr)
     /// or [`MetricsGranularity::from_seconds`], both of which enforce that; a zero
     /// width would be a division by zero inside the aggregation query.
     Seconds(u32),
@@ -1243,9 +1243,9 @@ pub enum MetricsGranularity {
 pub const MAX_METRIC_BUCKETS: i64 = 1_000;
 
 impl MetricsGranularity {
-    /// Build a width from a second count, rejecting zero.
+    /// Build a whole-minute width for retained Usage history.
     pub fn from_seconds(seconds: u32) -> Option<Self> {
-        (seconds >= 1).then_some(Self::Seconds(seconds))
+        (seconds >= 60 && seconds.is_multiple_of(60)).then_some(Self::Seconds(seconds))
     }
 
     /// Bucket width in seconds. The single source of truth for the SQL.
@@ -1317,7 +1317,7 @@ impl std::str::FromStr for MetricsGranularity {
         count
             .checked_mul(multiplier)
             .and_then(Self::from_seconds)
-            .ok_or_else(|| format!("granularity '{raw}' is not a positive duration"))
+            .ok_or_else(|| format!("granularity '{raw}' must be a positive whole-minute duration"))
     }
 }
 
@@ -1387,6 +1387,17 @@ pub struct TenantMetricsResult {
 /// frontend carried fallbacks for a shape the server never sent.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MetricsBucket {
+    /// Invocations with a valid duration observation.
+    pub duration_observation_count: i64,
+    /// Invocations with a peak-memory observation.
+    pub memory_observation_count: i64,
+    /// Invocations with a CPU-time observation.
+    pub cpu_observation_count: i64,
+    /// Mean CPU time in seconds, excluding missing observations.
+    pub avg_cpu_seconds: Option<f64>,
+    /// Highest CPU time in seconds.
+    pub max_cpu_seconds: Option<f64>,
+
     /// Start time of this bucket (UTC).
     pub bucket_time: DateTime<Utc>,
 
@@ -2293,7 +2304,7 @@ mod tests {
     #[test]
     fn granularity_parses_count_unit_widths() {
         let cases = [
-            ("30s", 30),
+            ("120s", 120),
             ("1m", 60),
             ("6m", 360),
             ("24m", 1_440),
@@ -2314,7 +2325,18 @@ mod tests {
     fn granularity_rejects_nonsense_and_zero() {
         // A zero width would divide by zero inside the aggregation query, so it
         // has to fail at parse time rather than reach the database.
-        for raw in ["", "0m", "0s", "5x", "m", "-1m", "1.5h", "hourlyish"] {
+        for raw in [
+            "",
+            "0m",
+            "0s",
+            "30s",
+            "61s",
+            "5x",
+            "m",
+            "-1m",
+            "1.5h",
+            "hourlyish",
+        ] {
             assert!(raw.parse::<MetricsGranularity>().is_err(), "{raw} parsed");
         }
     }
@@ -2378,8 +2400,8 @@ mod tests {
     fn granularity_from_seconds_rejects_zero() {
         assert_eq!(MetricsGranularity::from_seconds(0), None);
         assert_eq!(
-            MetricsGranularity::from_seconds(1),
-            Some(MetricsGranularity::Seconds(1))
+            MetricsGranularity::from_seconds(60),
+            Some(MetricsGranularity::Seconds(60))
         );
     }
 
