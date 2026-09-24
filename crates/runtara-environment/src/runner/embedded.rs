@@ -19,8 +19,10 @@
 
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
+use crate::pipeline_metrics::{PipelineMetrics, PoolHold};
 use async_trait::async_trait;
 use serde_json::Value;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -226,9 +228,6 @@ pub struct EmbeddedWasmRunner {
     preparation_permits: Arc<tokio::sync::Semaphore>,
     /// The bound `preparation_permits` was built with.
     preparation_limit: usize,
-    /// Acquisition times for preparation permits, surfaced separately from
-    /// live-run occupancy in the pipeline.
-    preparation_slots: PreparationSlotRegistry,
     /// The killable compiler boundary used for durable preparation. It has a
     /// bounded replacement budget separate from the in-process prep permits:
     /// a child stuck in uninterruptible kernel I/O keeps its child slot while
@@ -248,83 +247,22 @@ pub struct EmbeddedWasmRunner {
     /// A `Semaphore` reports what is *available*, never what it started with,
     /// so the total has to be kept alongside it to turn that into occupancy.
     run_limit: usize,
-    /// When each currently-held run permit was taken.
-    ///
-    /// Exists so a full runner can be told apart from a stuck one — see
-    /// [`RunnerOccupancy`]. Bounded by `run_limit` (cores x 4 by default), so
-    /// it needs no eviction policy; entries are removed by [`RunSlot`]'s drop,
-    /// which runs on the success, error and panic paths alike.
-    run_slots: RunSlotRegistry,
-    /// Runs begun since process start.
-    runs_started: Arc<AtomicU64>,
-    /// Runs finished since process start, incremented as each permit returns.
-    runs_finished: Arc<AtomicU64>,
+    metrics: Option<PipelineMetrics>,
     /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
     /// native runtime interface for HostImport-composed artifacts.
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
-/// A run permit holder, keyed by physical execution handle.
-#[derive(Clone)]
-struct RunSlotEntry {
-    instance_id: String,
-    taken_at: Instant,
-}
-
-/// Acquisition times of the run permits currently held, keyed by physical handle.
-type RunSlotRegistry = Arc<Mutex<HashMap<String, RunSlotEntry>>>;
-
-/// A preparation permit holder, keyed by launch generation.
-#[derive(Clone)]
-struct PreparationSlotEntry {
-    instance_id: String,
-    taken_at: Instant,
-}
-
-/// Acquisition times of preparation permits currently held, keyed by launch.
-type PreparationSlotRegistry = Arc<Mutex<HashMap<String, PreparationSlotEntry>>>;
-
-#[derive(Clone)]
-struct PrecompileChildSlotEntry {
-    started_at: Instant,
-    retired: bool,
-}
-
-/// Process-private bookkeeping for live and reaping precompile children.
-///
-/// The semaphore remains authoritative for the held count; this registry
-/// supplies oldest age and the reaping subset for the pipeline so a timeout is
-/// never rendered as an idle preparation pool while an unkillable child still
-/// exists.
-type PrecompileChildRegistry = Arc<Mutex<HashMap<String, PrecompileChildSlotEntry>>>;
-
-/// A held run permit, tied to the moment it was taken.
-///
-/// The permit alone would bound concurrency perfectly well; this wrapper exists
-/// only so that releasing it also retires the acquisition time. Pairing them in
-/// one value is what makes the two impossible to drift apart — there is no path
-/// that returns a permit without also dropping this.
+/// The permit and optional telemetry timer share a lifetime, including unwind.
 struct RunSlot {
-    /// Dropped with the struct; that release is the whole point of the field.
     _permit: tokio::sync::OwnedSemaphorePermit,
-    handle_id: String,
-    registry: RunSlotRegistry,
-    /// Bumped as the permit returns, so the count of finished runs cannot drift
-    /// from the count of released permits.
-    finished: Arc<AtomicU64>,
+    _hold: Option<PoolHold>,
 }
 
-/// A held preparation permit. It is intentionally carried inside
-/// [`EmbeddedPreparedLaunch`] until the child-validated component reaches the
-/// short run-permit handoff. If a preparation outlives its durable lease,
-/// dropping the token cannot make the preparation pool look idle early.
+/// Preparation capacity remains held until the prepared token is consumed.
 struct PreparationSlot {
     _permit: tokio::sync::OwnedSemaphorePermit,
-    /// Includes the durable preparation claim incarnation so a recovered
-    /// compiler cannot overwrite/remove telemetry for a newer same-launch
-    /// attempt that happens to share the dispatcher owner.
-    slot_key: String,
-    registry: PreparationSlotRegistry,
+    _hold: Option<PoolHold>,
 }
 
 /// Everything a verified pre-run phase hands to the short run-permit phase.
@@ -351,18 +289,6 @@ trait ComponentPrecompiler: Send + Sync {
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
     ) -> Result<PreparedWorkflow>;
-
-    fn child_occupancy(&self) -> Option<PrecompileChildOccupancy> {
-        None
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PrecompileChildOccupancy {
-    limit: u64,
-    held: u64,
-    retired: u64,
-    oldest_held_ms: Option<u64>,
 }
 
 /// Production implementation of [`ComponentPrecompiler`].
@@ -373,8 +299,7 @@ struct PrecompileChildOccupancy {
 /// unsafe serialized-component deserialization boundary.
 struct ChildComponentPrecompiler {
     child_permits: Arc<tokio::sync::Semaphore>,
-    child_limit: usize,
-    child_slots: PrecompileChildRegistry,
+    metrics: Option<PipelineMetrics>,
     /// Child processes still being reaped after a preparation deadline.
     /// They hold a child permit until `wait()` completes, preventing a stuck
     /// mount from becoming an unbounded stream of replacement processes.
@@ -389,11 +314,17 @@ impl ChildComponentPrecompiler {
         // forever, while a normal timeout can immediately make forward
         // progress without borrowing a guest run slot.
         let child_limit = max_concurrent_precompile_children(preparation_limit);
+        let child_permits = Arc::new(tokio::sync::Semaphore::new(child_limit));
+        let retired_children = Arc::new(AtomicU64::new(0));
+        let metrics = PipelineMetrics::global().cloned();
+        if let Some(metrics) = &metrics {
+            metrics.observe_pool("precompile", &child_permits, child_limit);
+            metrics.observe_reaping(&retired_children);
+        }
         Self {
-            child_permits: Arc::new(tokio::sync::Semaphore::new(child_limit)),
-            child_limit,
-            child_slots: Arc::new(Mutex::new(HashMap::new())),
-            retired_children: Arc::new(AtomicU64::new(0)),
+            child_permits,
+            retired_children,
+            metrics,
         }
     }
 
@@ -426,8 +357,11 @@ impl ChildComponentPrecompiler {
                     RunnerError::Other("precompile child semaphore closed".to_string())
                 }
             })?;
+        let hold = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.hold("precompile"));
         let nonce = precompile_nonce()?;
-        let child_slot_key = hex_digest(nonce);
         let request =
             PrecompileRequest::for_artifact(nonce, &options.wasm_path).map_err(|error| {
                 RunnerError::StartFailed(format!("build precompile request: {error:#}"))
@@ -447,22 +381,11 @@ impl ChildComponentPrecompiler {
                 program.display()
             ))
         })?;
-        self.child_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                child_slot_key.clone(),
-                PrecompileChildSlotEntry {
-                    started_at: Instant::now(),
-                    retired: false,
-                },
-            );
         let mut child = ManagedPrecompileChild::new(
             child,
             child_permit,
             Arc::clone(&self.retired_children),
-            Arc::clone(&self.child_slots),
-            child_slot_key,
+            hold,
         );
 
         let exchange = async {
@@ -564,26 +487,6 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
             .await;
         Ok(workflow)
     }
-
-    fn child_occupancy(&self) -> Option<PrecompileChildOccupancy> {
-        let held = self
-            .child_limit
-            .saturating_sub(self.child_permits.available_permits());
-        let slots = self
-            .child_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Instant::now();
-        let oldest = slots.values().min_by_key(|entry| entry.started_at);
-        Some(PrecompileChildOccupancy {
-            limit: u64::try_from(self.child_limit).unwrap_or(u64::MAX),
-            held: u64::try_from(held).unwrap_or(u64::MAX),
-            retired: u64::try_from(slots.values().filter(|entry| entry.retired).count())
-                .unwrap_or(u64::MAX),
-            oldest_held_ms: oldest
-                .map(|entry| now.saturating_duration_since(entry.started_at).as_millis() as u64),
-        })
-    }
 }
 
 /// Test-only protocol-compatible precompiler.
@@ -645,8 +548,7 @@ struct ManagedPrecompileChild {
     child: Option<Child>,
     permit: Option<OwnedSemaphorePermit>,
     retired_children: Arc<AtomicU64>,
-    slots: PrecompileChildRegistry,
-    slot_key: String,
+    hold: Option<PoolHold>,
 }
 
 impl ManagedPrecompileChild {
@@ -654,15 +556,13 @@ impl ManagedPrecompileChild {
         child: Child,
         permit: OwnedSemaphorePermit,
         retired_children: Arc<AtomicU64>,
-        slots: PrecompileChildRegistry,
-        slot_key: String,
+        hold: Option<PoolHold>,
     ) -> Self {
         Self {
             child: Some(child),
             permit: Some(permit),
             retired_children,
-            slots,
-            slot_key,
+            hold,
         }
     }
 
@@ -675,14 +575,7 @@ impl ManagedPrecompileChild {
     fn disarm(&mut self) {
         self.child.take();
         self.permit.take();
-        self.remove_slot();
-    }
-
-    fn remove_slot(&self) {
-        self.slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.slot_key);
+        self.hold.take();
     }
 
     fn kill_and_reap(&mut self, reason: &'static str) {
@@ -696,16 +589,7 @@ impl ManagedPrecompileChild {
             warn!(error = %error, "Could not signal timed-out precompile child; reaper will still wait");
         }
         let retired_children = Arc::clone(&self.retired_children);
-        if let Some(slot) = self
-            .slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get_mut(&self.slot_key)
-        {
-            slot.retired = true;
-        }
-        let slots = Arc::clone(&self.slots);
-        let slot_key = self.slot_key.clone();
+        let hold = self.hold.take();
         let retired = retired_children.fetch_add(1, Ordering::SeqCst) + 1;
         warn!(
             retired_precompile_children = retired,
@@ -722,10 +606,7 @@ impl ManagedPrecompileChild {
                 retired_precompile_children = remaining,
                 "Reaped detached precompile child"
             );
-            slots
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&slot_key);
+            drop(hold);
             drop(permit);
         };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -736,7 +617,6 @@ impl ManagedPrecompileChild {
             // a process that is itself exiting.
             drop(reaper);
             self.retired_children.fetch_sub(1, Ordering::SeqCst);
-            self.remove_slot();
         }
     }
 }
@@ -750,80 +630,11 @@ impl Drop for ManagedPrecompileChild {
     }
 }
 
-/// Turn a semaphore reading plus the slot map into an occupancy report.
-///
-/// Split out from [`Runner::occupancy`] so the decisions it makes are testable
-/// without standing up a runner (which needs a live persistence layer): that
-/// `held` is read from the semaphore rather than counted from the map, and that
-/// the reported age belongs to the *oldest* holder rather than any other.
-fn compute_occupancy(
-    limit: usize,
-    available: usize,
-    slots: &HashMap<String, RunSlotEntry>,
-    now: Instant,
-) -> RunnerOccupancy {
-    // Deliberately not `slots.len()`. A permit is taken before its acquisition
-    // time is recorded, so during that window the map under-reports; the
-    // semaphore never does. The map's only job is answering "how old is the
-    // oldest", where a momentarily missing entry costs nothing.
-    let held = limit.saturating_sub(available);
-    let oldest = slots.values().min_by_key(|entry| entry.taken_at);
+/// Operational capacity checks read only the semaphore.
+fn compute_occupancy(limit: usize, available: usize) -> RunnerOccupancy {
     RunnerOccupancy {
         limit: limit as u64,
-        held: held as u64,
-        oldest_held_ms: oldest
-            .map(|entry| now.saturating_duration_since(entry.taken_at).as_millis() as u64),
-        oldest_instance_id: oldest.map(|entry| entry.instance_id.clone()),
-        // Filled in by the caller, which owns the lifetime counters; this
-        // function is about a single instant's occupancy.
-        runs_started: 0,
-        runs_finished: 0,
-    }
-}
-
-fn compute_preparation_occupancy(
-    limit: usize,
-    available: usize,
-    slots: &HashMap<String, PreparationSlotEntry>,
-    now: Instant,
-) -> PreparationOccupancy {
-    let held = limit.saturating_sub(available);
-    let oldest = slots.values().min_by_key(|entry| entry.taken_at);
-    PreparationOccupancy {
-        limit: limit as u64,
-        held: held as u64,
-        oldest_held_ms: oldest
-            .map(|entry| now.saturating_duration_since(entry.taken_at).as_millis() as u64),
-        oldest_instance_id: oldest.map(|entry| entry.instance_id.clone()),
-        precompile_child_limit: None,
-        precompile_child_held: None,
-        precompile_child_oldest_ms: None,
-        precompile_child_retired: None,
-    }
-}
-
-impl Drop for RunSlot {
-    fn drop(&mut self) {
-        // Recover from poisoning rather than propagate it. This runs while the
-        // task may already be unwinding, so panicking here would abort the
-        // process; and a poisoned occupancy map is not a reason to refuse to
-        // give a permit back.
-        let mut slots = self
-            .registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slots.remove(&self.handle_id);
-        self.finished.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl Drop for PreparationSlot {
-    fn drop(&mut self) {
-        let mut slots = self
-            .registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slots.remove(&self.slot_key);
+        held: limit.saturating_sub(available) as u64,
     }
 }
 
@@ -842,20 +653,24 @@ impl EmbeddedWasmRunner {
         warn_if_run_bound_exceeds_memory(run_limit);
         let preparation_limit = max_concurrent_preparations();
         let precompiler = Arc::new(ChildComponentPrecompiler::new(preparation_limit));
+        let preparation_permits = Arc::new(tokio::sync::Semaphore::new(preparation_limit));
+        let run_permits = Arc::new(tokio::sync::Semaphore::new(run_limit));
+        let metrics = PipelineMetrics::global().cloned();
+        if let Some(metrics) = &metrics {
+            metrics.observe_pool("preparation", &preparation_permits, preparation_limit);
+            metrics.observe_pool("run", &run_permits, run_limit);
+        }
         Ok(Self {
             config,
             core_http_url: None,
             scoped_agents: None,
             limits: limits_from_env(),
-            preparation_permits: Arc::new(tokio::sync::Semaphore::new(preparation_limit)),
+            preparation_permits,
             preparation_limit,
-            preparation_slots: Arc::new(Mutex::new(HashMap::new())),
             precompiler,
-            run_permits: Arc::new(tokio::sync::Semaphore::new(run_limit)),
+            run_permits,
             run_limit,
-            run_slots: Arc::new(Mutex::new(HashMap::new())),
-            runs_started: Arc::new(AtomicU64::new(0)),
-            runs_finished: Arc::new(AtomicU64::new(0)),
+            metrics,
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -1051,7 +866,7 @@ impl EmbeddedWasmRunner {
     }
 
     /// Take one independently bounded preparation slot without waiting.
-    fn try_take_preparation_slot(&self, options: &LaunchOptions) -> Result<PreparationSlot> {
+    fn try_take_preparation_slot(&self) -> Result<PreparationSlot> {
         let permit = Arc::clone(&self.preparation_permits)
             .try_acquire_owned()
             .map_err(|error| match error {
@@ -1060,25 +875,12 @@ impl EmbeddedWasmRunner {
                     RunnerError::Other("preparation semaphore closed".to_string())
                 }
             })?;
-        let slot_key = format!(
-            "{}:{}",
-            options.launch_id,
-            options.preparation_attempt.unwrap_or_default()
-        );
-        self.preparation_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                slot_key.clone(),
-                PreparationSlotEntry {
-                    instance_id: options.instance_id.clone(),
-                    taken_at: Instant::now(),
-                },
-            );
         Ok(PreparationSlot {
             _permit: permit,
-            slot_key,
-            registry: Arc::clone(&self.preparation_slots),
+            _hold: self
+                .metrics
+                .as_ref()
+                .map(|metrics| metrics.hold("preparation")),
         })
     }
 
@@ -1093,7 +895,7 @@ impl EmbeddedWasmRunner {
     /// parent would reintroduce an unkillable filesystem operation before a
     /// guest permit.
     async fn prepare_embedded_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
-        let preparation_slot = self.try_take_preparation_slot(options)?;
+        let preparation_slot = self.try_take_preparation_slot()?;
         let workflow = self.precompiler.prepare(&self.executor, options).await?;
         if options.requires_lifecycle_invoke
             && !workflow.is_lifecycle_invoke(self.executor.engine())
@@ -1583,39 +1385,20 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     fn occupancy(&self) -> Option<RunnerOccupancy> {
-        let slots = self
-            .run_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut occupancy = compute_occupancy(
+        Some(compute_occupancy(
             self.run_limit,
             self.run_permits.available_permits(),
-            &slots,
-            Instant::now(),
-        );
-        occupancy.runs_started = self.runs_started.load(Ordering::Relaxed);
-        occupancy.runs_finished = self.runs_finished.load(Ordering::Relaxed);
-        Some(occupancy)
+        ))
     }
 
     fn preparation_occupancy(&self) -> Option<PreparationOccupancy> {
-        let slots = self
-            .preparation_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut occupancy = compute_preparation_occupancy(
-            self.preparation_limit,
-            self.preparation_permits.available_permits(),
-            &slots,
-            Instant::now(),
-        );
-        if let Some(children) = self.precompiler.child_occupancy() {
-            occupancy.precompile_child_limit = Some(children.limit);
-            occupancy.precompile_child_held = Some(children.held);
-            occupancy.precompile_child_oldest_ms = children.oldest_held_ms;
-            occupancy.precompile_child_retired = Some(children.retired);
-        }
-        Some(occupancy)
+        Some(PreparationOccupancy {
+            limit: self.preparation_limit as u64,
+            held: self
+                .preparation_limit
+                .saturating_sub(self.preparation_permits.available_permits())
+                as u64,
+        })
     }
 
     async fn try_prepare_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
@@ -1673,22 +1456,9 @@ impl Runner for EmbeddedWasmRunner {
         // handoff needs a distinct identity so an old Stop, grace timer or
         // monitor can never address a later execution of that launch.
         let handle_id = format!("wasm_{}", uuid::Uuid::new_v4());
-        self.run_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                handle_id.clone(),
-                RunSlotEntry {
-                    instance_id: options.instance_id.clone(),
-                    taken_at: Instant::now(),
-                },
-            );
-        self.runs_started.fetch_add(1, Ordering::Relaxed);
         let run_slot = RunSlot {
             _permit: permit,
-            handle_id: handle_id.clone(),
-            registry: Arc::clone(&self.run_slots),
-            finished: Arc::clone(&self.runs_finished),
+            _hold: self.metrics.as_ref().map(|metrics| metrics.hold("run")),
         };
 
         let env = self.merged_env(options);
@@ -1757,7 +1527,7 @@ impl Runner for EmbeddedWasmRunner {
         let supervisor_owns_lifecycle = start_gate.is_some();
         // The run slot was already claimed without waiting before any per-run
         // allocation. It moves into the task so every completion/error/panic
-        // returns capacity and retires its occupancy timestamp together.
+        // returns capacity and records the optional permit duration together.
         tokio::spawn(async move {
             let _completion = completion;
             if let Some(gate) = start_gate {
@@ -1997,7 +1767,7 @@ impl Runner for EmbeddedWasmRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstanceTask, RunSlot, RunSlotEntry, TaskCompletionGuard, TaskRegistry, compute_occupancy,
+        InstanceTask, RunSlot, TaskCompletionGuard, TaskRegistry, compute_occupancy,
         remove_task_if_current,
     };
     use std::collections::HashMap;
@@ -2106,194 +1876,23 @@ mod tests {
         assert_eq!(tokio::time::Instant::now(), before);
     }
 
-    /// Nothing running must be reported as "nothing running", not as "unknown".
-    ///
-    /// The distinction matters downstream: a consumer renders an absent
-    /// occupancy as "not measured" and a present-but-zero one as idle, and
-    /// collapsing the two invents an idle system that is actually unobserved.
     #[test]
-    fn idle_runner_reports_zero_held_and_no_age() {
-        let occ = compute_occupancy(16, 16, &HashMap::new(), Instant::now());
-        assert_eq!(occ.limit, 16);
-        assert_eq!(occ.held, 0);
-        assert_eq!(occ.oldest_held_ms, None);
-        assert_eq!(occ.oldest_instance_id, None);
+    fn capacity_reading_is_bounded() {
+        assert_eq!(compute_occupancy(16, 16).held, 0);
+        assert_eq!(compute_occupancy(8, 0).held, 8);
+        assert_eq!(compute_occupancy(4, 9).held, 0);
     }
 
-    /// `held` must follow the semaphore, not the bookkeeping map.
-    ///
-    /// A permit is taken before its acquisition time is recorded, so the map
-    /// lags by that window. Were `held` counted from the map, a runner at its
-    /// bound would briefly report headroom it does not have.
-    #[test]
-    fn held_comes_from_the_semaphore_not_the_slot_map() {
-        let now = Instant::now();
-        let mut slots = HashMap::new();
-        slots.insert(
-            "launch-1".to_string(),
-            RunSlotEntry {
-                instance_id: "only-one-recorded".to_string(),
-                taken_at: now,
-            },
-        );
-
-        // Eight permits gone, but only one has been stamped yet.
-        let occ = compute_occupancy(8, 0, &slots, now);
-        assert_eq!(occ.held, 8, "occupancy must not lag behind the semaphore");
-        assert_eq!(
-            occ.oldest_instance_id.as_deref(),
-            Some("only-one-recorded"),
-            "the age still comes from whatever has been recorded"
-        );
-    }
-
-    /// The reported age must belong to the longest-held permit.
-    ///
-    /// This is the signal that separates a runner turning work over from one
-    /// holding work that never leaves, so picking any other holder — the first
-    /// inserted, or whatever the map happens to yield first — would report a
-    /// stalled runner as healthy.
-    #[test]
-    fn age_belongs_to_the_oldest_holder() {
-        let now = Instant::now();
-        let mut slots = HashMap::new();
-        slots.insert(
-            "launch-recent".to_string(),
-            RunSlotEntry {
-                instance_id: "recent".to_string(),
-                taken_at: now - Duration::from_secs(2),
-            },
-        );
-        slots.insert(
-            "launch-ancient".to_string(),
-            RunSlotEntry {
-                instance_id: "ancient".to_string(),
-                taken_at: now - Duration::from_secs(2880),
-            },
-        );
-        slots.insert(
-            "launch-middling".to_string(),
-            RunSlotEntry {
-                instance_id: "middling".to_string(),
-                taken_at: now - Duration::from_secs(45),
-            },
-        );
-
-        let occ = compute_occupancy(8, 5, &slots, now);
-        assert_eq!(occ.held, 3);
-        assert_eq!(occ.oldest_instance_id.as_deref(), Some("ancient"));
-        assert_eq!(
-            occ.oldest_held_ms,
-            Some(2_880_000),
-            "48 minutes held is exactly the case this exists to surface"
-        );
-    }
-
-    /// An over-subscribed reading must clamp rather than wrap.
-    ///
-    /// `held` is `limit - available` on unsigned values; a stale or racing read
-    /// where available exceeds the limit would otherwise underflow into an
-    /// enormous occupancy and paint a healthy runner as catastrophically full.
-    #[test]
-    fn available_above_limit_clamps_to_zero() {
-        let occ = compute_occupancy(4, 9, &HashMap::new(), Instant::now());
-        assert_eq!(occ.held, 0, "must saturate, never wrap");
-    }
-
-    /// Dropping the slot must release the permit *and* retire its timestamp.
-    ///
-    /// The pairing is the invariant: a permit returned without its entry
-    /// removed leaves a timestamp that never ages out, and the runner would
-    /// report a permanently stuck holder that finished long ago.
     #[tokio::test]
-    async fn dropping_a_slot_releases_the_permit_and_forgets_its_age() {
-        let permits = Arc::new(tokio::sync::Semaphore::new(2));
-        let registry: Arc<Mutex<HashMap<String, RunSlotEntry>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        {
-            let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
-            registry.lock().expect("registry").insert(
-                "launch-1".to_string(),
-                RunSlotEntry {
-                    instance_id: "inst-1".to_string(),
-                    taken_at: Instant::now(),
-                },
-            );
-            let _slot = RunSlot {
-                _permit: permit,
-                handle_id: "launch-1".to_string(),
-                registry: Arc::clone(&registry),
-                finished: Arc::clone(&finished),
-            };
-
-            assert_eq!(permits.available_permits(), 1);
-            assert_eq!(registry.lock().expect("registry").len(), 1);
-        }
-
-        assert_eq!(
-            permits.available_permits(),
-            2,
-            "the permit must return on drop"
-        );
-        assert!(
-            registry.lock().expect("registry").is_empty(),
-            "the acquisition time must retire with the permit"
-        );
-        assert_eq!(
-            finished.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "a released permit is a finished run; the two must not drift"
-        );
-    }
-
-    /// A panicking run must not leave a phantom holder behind.
-    ///
-    /// Unwinding is exactly when bookkeeping is most likely to be skipped, and
-    /// a leaked entry here is worse than none: it ages forever and would make
-    /// every later reading report a stall that is not happening.
-    #[tokio::test]
-    async fn a_panicking_run_still_retires_its_slot() {
-        let permits = Arc::new(tokio::sync::Semaphore::new(1));
-        let registry: Arc<Mutex<HashMap<String, RunSlotEntry>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
-        registry.lock().expect("registry").insert(
-            "launch-doomed".to_string(),
-            RunSlotEntry {
-                instance_id: "doomed".to_string(),
-                taken_at: Instant::now(),
-            },
-        );
-        let slot = RunSlot {
-            _permit: permit,
-            handle_id: "launch-doomed".to_string(),
-            registry: Arc::clone(&registry),
-            finished: Arc::clone(&finished),
-        };
-
-        let handle = tokio::spawn(async move {
+    async fn panic_returns_capacity_with_telemetry_disabled() {
+        let (slot, permits) = completion_test_slot("panic");
+        assert_eq!(permits.available_permits(), 0);
+        let task = tokio::spawn(async move {
             let _slot = slot;
-            panic!("the guest blew up");
+            panic!("simulated failure");
         });
-        assert!(handle.await.is_err(), "the task must have panicked");
-
+        assert!(task.await.is_err());
         assert_eq!(permits.available_permits(), 1);
-        assert!(
-            registry
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty(),
-            "drop runs while unwinding, so the entry must still be retired"
-        );
-        assert_eq!(
-            finished.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "a run that panicked still finished, and must be counted as such"
-        );
     }
 
     #[test]
@@ -2331,22 +1930,11 @@ mod tests {
         assert!(Arc::ptr_eq(&current, &replacement));
     }
 
-    fn completion_test_slot(launch: &str) -> (RunSlot, Arc<tokio::sync::Semaphore>) {
+    fn completion_test_slot(_launch: &str) -> (RunSlot, Arc<tokio::sync::Semaphore>) {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let slot = RunSlot {
             _permit: permits.clone().try_acquire_owned().unwrap(),
-            handle_id: launch.into(),
-            registry: Arc::new(Mutex::new(
-                [(
-                    launch.into(),
-                    RunSlotEntry {
-                        instance_id: "test".into(),
-                        taken_at: Instant::now(),
-                    },
-                )]
-                .into(),
-            )),
-            finished: Arc::new(AtomicU64::new(0)),
+            _hold: None,
         };
         (slot, permits)
     }

@@ -448,37 +448,6 @@ pub enum LaunchQueueError {
     },
 }
 
-/// One stage of the durable-launch summary, as stored.
-///
-/// `stage` is a [`LaunchState`] name except for `expired`, which is the queue's
-/// own terminal outcome — `failed` carrying [`LAUNCH_QUEUE_TIMEOUT`] — and is
-/// deliberately distinct from an arbitrary workflow failure.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct LaunchStageCount {
-    /// Stage name: a launch state, or `expired`.
-    pub stage: String,
-    /// Generations in this stage.
-    pub count: i64,
-    /// Age of the oldest generation in the stage, in milliseconds.
-    pub oldest_age_ms: Option<i64>,
-    /// Generations returned to the queue because the runner or the preparation
-    /// pool was full. An actionable current condition, not a process counter.
-    pub capacity_rejections: i64,
-}
-
-/// One workflow's share of a stage.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct LaunchWorkflowCount {
-    /// Stage name, as in [`LaunchStageCount::stage`].
-    pub stage: String,
-    /// Workflow the generation's image belongs to, or `unknown`.
-    pub workflow_id: String,
-    /// Generations for this workflow in this stage.
-    pub count: i64,
-    /// Age of the oldest of them, in milliseconds.
-    pub oldest_age_ms: Option<i64>,
-}
-
 /// PostgreSQL repository for [`Launch`] rows.
 ///
 /// This type does not call a runner.  A future dispatcher owns that side
@@ -487,161 +456,54 @@ pub struct LaunchWorkflowCount {
 #[derive(Clone)]
 pub struct LaunchRepository {
     pool: PgPool,
+    metrics: Option<crate::pipeline_metrics::PipelineMetrics>,
 }
 
 impl LaunchRepository {
     /// Create a repository backed by the Environment/Core shared database.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            metrics: crate::pipeline_metrics::PipelineMetrics::global().cloned(),
+        }
     }
 
-    /// Aggregate the actionable launch stages for a tenant.
-    ///
-    /// Lives here rather than in the server's sampler because every other
-    /// `instance_launches` query does, and the sampler's copy had re-typed the
-    /// state names and three `last_error` constants that this module already
-    /// exports — a second, hand-maintained spelling of a wire contract in
-    /// another crate. The aggregation stays in SQL: these are counts over a
-    /// backlog that can run to thousands of rows, and the whole point of the
-    /// telemetry is to observe exactly that condition.
-    ///
-    /// `expired` is the queue's own terminal outcome — `failed` carrying
-    /// [`LAUNCH_QUEUE_TIMEOUT`] — reported apart from arbitrary failures.
-    pub async fn stage_telemetry(
+    fn committed(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<LaunchStageCount>, LaunchQueueError> {
-        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
-        let reported_states =
-            LaunchState::sql_list(&[LaunchState::ACTIVE, &[LaunchState::Cancelled][..]].concat());
-        let query = format!(
-            r#"
-            WITH relevant AS (
-                SELECT
-                    CASE
-                        WHEN state = 'failed' AND last_error = '{LAUNCH_QUEUE_TIMEOUT}'
-                            THEN 'expired'
-                        ELSE state
-                    END AS stage,
-                    CASE
-                        WHEN state IN ({active_states}) THEN created_at
-                        ELSE updated_at
-                    END AS age_from,
-                    last_error
-                FROM instance_launches
-                WHERE tenant_id = $1
-                  AND (
-                        state IN ({reported_states})
-                        OR (state = 'failed' AND last_error = '{LAUNCH_QUEUE_TIMEOUT}')
-                  )
-            )
-            SELECT
-                stage,
-                COUNT(*)::BIGINT AS count,
-                CASE
-                    WHEN MIN(age_from) IS NULL THEN NULL
-                    ELSE GREATEST(
-                        0::BIGINT,
-                        (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(age_from)) * 1000)::BIGINT
-                    )
-                END AS oldest_age_ms,
-                COUNT(*) FILTER (
-                    WHERE stage = 'queued'
-                      AND last_error IN (
-                          '{RUNNER_CAPACITY_UNAVAILABLE}',
-                          '{PREPARATION_CAPACITY_UNAVAILABLE}'
-                      )
-                )::BIGINT AS capacity_rejections
-            FROM relevant
-            GROUP BY stage
-            "#
-        );
-        Ok(sqlx::query_as::<_, LaunchStageCount>(&query)
-            .bind(tenant_id)
-            .fetch_all(&self.pool)
-            .await?)
+        row: LaunchRow,
+        reason: &'static str,
+        queue_outcome: Option<&'static str>,
+    ) -> Result<Launch, LaunchQueueError> {
+        let was_waiting = row.was_waiting;
+        let launch = Launch::try_from(row)?;
+        if let Some(metrics) = &self.metrics {
+            if reason != "gate_confirmed" {
+                metrics.transition(launch.state, reason);
+            }
+            let queue_outcome =
+                queue_outcome.or_else(|| was_waiting.then_some(launch.state.as_str()));
+            if let Some(outcome) = queue_outcome {
+                metrics.queue_duration(
+                    (launch.updated_at - launch.created_at)
+                        .num_microseconds()
+                        .unwrap_or(i64::MAX) as f64
+                        / 1_000_000.0,
+                    outcome,
+                );
+            }
+        }
+        Ok(launch)
     }
 
-    /// Attribute each stage to the workflows contributing most to it.
-    ///
-    /// Joins `images` for the workflow identity, which is another
-    /// Environment-owned table, so the join stays inside Environment rather
-    /// than being reassembled by a reader in the server. `per_stage` bounds the
-    /// drill-down: attribution is a clue, not a metric label, and a tenant with
-    /// many published workflows must not widen every sample without limit.
-    pub async fn workflow_telemetry(
+    fn committed_batch(
         &self,
-        tenant_id: &str,
-        per_stage: i64,
-    ) -> Result<Vec<LaunchWorkflowCount>, LaunchQueueError> {
-        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
-        let reported_states =
-            LaunchState::sql_list(&[LaunchState::ACTIVE, &[LaunchState::Cancelled][..]].concat());
-        let query = format!(
-            r#"
-            WITH relevant AS (
-                SELECT
-                    launch.image_id,
-                    CASE
-                        WHEN launch.state = 'failed'
-                            AND launch.last_error = '{LAUNCH_QUEUE_TIMEOUT}' THEN 'expired'
-                        ELSE launch.state
-                    END AS stage,
-                    CASE
-                        WHEN launch.state IN ({active_states}) THEN launch.created_at
-                        ELSE launch.updated_at
-                    END AS age_from
-                FROM instance_launches AS launch
-                WHERE launch.tenant_id = $1
-                  AND (
-                        launch.state IN ({reported_states})
-                        OR (
-                            launch.state = 'failed'
-                            AND launch.last_error = '{LAUNCH_QUEUE_TIMEOUT}'
-                        )
-                  )
-            ), grouped AS (
-                SELECT
-                    relevant.stage,
-                    COALESCE(
-                        NULLIF(images.metadata #>> '{{workflow,workflowId}}', ''),
-                        NULLIF(SPLIT_PART(images.name, ':', 1), ''),
-                        'unknown'
-                    ) AS workflow_id,
-                    COUNT(*)::BIGINT AS count,
-                    CASE
-                        WHEN MIN(relevant.age_from) IS NULL THEN NULL
-                        ELSE GREATEST(
-                            0::BIGINT,
-                            (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(relevant.age_from)) * 1000)::BIGINT
-                        )
-                    END AS oldest_age_ms
-                FROM relevant
-                JOIN images ON images.image_id = relevant.image_id
-                GROUP BY relevant.stage, workflow_id
-            ), ranked AS (
-                SELECT
-                    stage,
-                    workflow_id,
-                    count,
-                    oldest_age_ms,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY stage
-                        ORDER BY count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
-                    ) AS rank
-                FROM grouped
-            )
-            SELECT stage, workflow_id, count, oldest_age_ms
-            FROM ranked
-            WHERE rank <= $2
-            ORDER BY stage, count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
-            "#
-        );
-        Ok(sqlx::query_as::<_, LaunchWorkflowCount>(&query)
-            .bind(tenant_id)
-            .bind(per_stage)
-            .fetch_all(&self.pool)
-            .await?)
+        rows: Vec<LaunchRow>,
+        reason: &'static str,
+        queue_outcome: Option<&'static str>,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
+        rows.into_iter()
+            .map(|row| self.committed(row, reason, queue_outcome))
+            .collect()
     }
 
     /// Read one durable generation by its idempotency key.
@@ -802,7 +664,9 @@ impl LaunchRepository {
             .fetch_one(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(InitialLaunchOutcome::Enqueued(launch.try_into()?))
+        Ok(InitialLaunchOutcome::Enqueued(
+            self.committed(launch, "enqueue", None)?,
+        ))
     }
 
     /// Insert a durable row or return its existing idempotent/active winner.
@@ -982,7 +846,9 @@ impl LaunchRepository {
                         .await?;
                 }
                 tx.commit().await?;
-                return Ok(EnqueueOutcome::Enqueued(row.try_into()?));
+                return Ok(EnqueueOutcome::Enqueued(
+                    self.committed(row, "enqueue", None)?,
+                ));
             }
 
             if let Some(existing) = sqlx::query_as::<_, LaunchRow>(&active)
@@ -1066,7 +932,8 @@ impl LaunchRepository {
         let query = format!(
             r#"
             WITH candidates AS (
-                SELECT launch.launch_id, core_instance.status::TEXT AS instance_status
+                SELECT launch.launch_id, core_instance.status::TEXT AS instance_status,
+                    (launch.state IN ('queued', 'preparing', 'leased', 'starting') OR launch.start_gate_deadline_at IS NOT NULL) AS was_waiting
                 FROM instance_launches AS launch
                 JOIN instances AS core_instance
                   ON core_instance.instance_id = launch.instance_id
@@ -1097,15 +964,17 @@ impl LaunchRepository {
                 updated_at = NOW()
             FROM candidates
             WHERE launch.launch_id = candidates.launch_id
-            RETURNING {LAUNCH_RETURNING_COLUMNS}
+            RETURNING {LAUNCH_RETURNING_COLUMNS}, candidates.was_waiting
             "#
         );
-        rows_to_launches(
+        self.committed_batch(
             sqlx::query_as::<_, LaunchRow>(&query)
                 .bind(limit)
                 .bind(instance_id)
                 .fetch_all(&self.pool)
                 .await?,
+            "reconcile",
+            None,
         )
     }
 
@@ -1151,13 +1020,15 @@ impl LaunchRepository {
             RETURNING {LAUNCH_RETURNING_COLUMNS}
             "#
         );
-        rows_to_launches(
+        self.committed_batch(
             sqlx::query_as::<_, LaunchRow>(&query)
                 .bind(lease_owner)
                 .bind(lease_us)
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await?,
+            "claim",
+            None,
         )
     }
 
@@ -1205,13 +1076,15 @@ impl LaunchRepository {
             RETURNING {LAUNCH_RETURNING_COLUMNS}
             "#
         );
-        rows_to_launches(
+        self.committed_batch(
             sqlx::query_as::<_, LaunchRow>(&query)
                 .bind(lease_owner)
                 .bind(lease_us)
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await?,
+            "prepare",
+            None,
         )
     }
 
@@ -1277,7 +1150,7 @@ impl LaunchRepository {
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
-        rows_to_launches(recovered)
+        self.committed_batch(recovered, "preparation_timeout", None)
     }
 
     /// Promote a completed preparation back to a short handoff lease.
@@ -1322,7 +1195,7 @@ impl LaunchRepository {
             .bind(handoff_lease_us)
             .fetch_optional(&self.pool)
             .await?
-            .map(Launch::try_from)
+            .map(|row| self.committed(row, "prepared", None))
             .transpose()
     }
 
@@ -1389,7 +1262,7 @@ impl LaunchRepository {
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
-        rows_to_launches(recovered)
+        self.committed_batch(recovered, "lease_expired", None)
     }
 
     /// Move one still-owned lease into the runner-installation phase.
@@ -1430,7 +1303,7 @@ impl LaunchRepository {
             .bind(attempt_count)
             .fetch_optional(&self.pool)
             .await?
-            .map(Launch::try_from)
+            .map(|row| self.committed(row, "start", None))
             .transpose()
     }
 
@@ -1510,7 +1383,7 @@ impl LaunchRepository {
         }
 
         tx.commit().await?;
-        Ok(Some(running.try_into()?))
+        Ok(Some(self.committed(running, "runner_handoff", None)?))
     }
 
     /// Renew a live execution's existing lease after checking its exact
@@ -1606,7 +1479,7 @@ impl LaunchRepository {
             .bind(attempt_count)
             .fetch_optional(&self.pool)
             .await?
-            .map(Launch::try_from)
+            .map(|row| self.committed(row, "gate_confirmed", Some("started")))
             .transpose()
     }
 
@@ -1703,7 +1576,11 @@ impl LaunchRepository {
         }
 
         tx.commit().await?;
-        Ok(Some(failed.try_into()?))
+        Ok(Some(self.committed(
+            failed,
+            "gate_failed",
+            Some("failed"),
+        )?))
     }
 
     /// Return a dispatcher-owned pre-run launch to the ready queue.
@@ -1750,7 +1627,7 @@ impl LaunchRepository {
             .bind(last_error)
             .fetch_optional(&self.pool)
             .await?
-            .map(Launch::try_from)
+            .map(|row| self.committed(row, requeue_reason(last_error), None))
             .transpose()
     }
 
@@ -1822,7 +1699,11 @@ impl LaunchRepository {
         }
 
         tx.commit().await?;
-        Ok(Some(failed.try_into()?))
+        Ok(Some(self.committed(
+            failed,
+            "preparation_failed",
+            Some("failed"),
+        )?))
     }
 
     /// Atomically release a running generation after its durable instance parks.
@@ -1876,7 +1757,7 @@ impl LaunchRepository {
         }
 
         tx.commit().await?;
-        Ok(Some(suspended.try_into()?))
+        Ok(Some(self.committed(suspended, "park", None)?))
     }
 
     /// Mark an active generation terminal after runner ownership has stopped.
@@ -1895,16 +1776,22 @@ impl LaunchRepository {
         let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let query = format!(
             r#"
-            UPDATE instance_launches
+            WITH previous AS MATERIALIZED (
+                SELECT launch_id,
+                    (state IN ('queued', 'preparing', 'leased', 'starting') OR start_gate_deadline_at IS NOT NULL) AS was_waiting
+                FROM instance_launches WHERE launch_id = $1 FOR UPDATE
+            )
+            UPDATE instance_launches AS launch
             SET state = $2,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 start_gate_deadline_at = NULL,
                 last_error = $3,
                 updated_at = NOW()
-            WHERE launch_id = $1
-              AND state IN ({active_states})
-            RETURNING {LAUNCH_COLUMNS}
+            FROM previous
+            WHERE launch.launch_id = previous.launch_id
+              AND launch.state IN ({active_states})
+            RETURNING {LAUNCH_RETURNING_COLUMNS}, previous.was_waiting
             "#
         );
         sqlx::query_as::<_, LaunchRow>(&query)
@@ -1913,7 +1800,7 @@ impl LaunchRepository {
             .bind(last_error)
             .fetch_optional(&self.pool)
             .await?
-            .map(Launch::try_from)
+            .map(|row| self.committed(row, "terminal", None))
             .transpose()
     }
 
@@ -2028,7 +1915,7 @@ impl LaunchRepository {
         }
 
         tx.commit().await?;
-        rows_to_launches(expired)
+        self.committed_batch(expired, "queue_timeout", Some("expired"))
     }
 
     /// Cancel a queued, leased, or still-unconfirmed gate generation and
@@ -2087,7 +1974,11 @@ impl LaunchRepository {
                 });
             }
             tx.commit().await?;
-            return Ok(CancelOutcome::Cancelled(cancelled.try_into()?));
+            return Ok(CancelOutcome::Cancelled(self.committed(
+                cancelled,
+                "cancel",
+                Some("cancelled"),
+            )?));
         }
 
         let query = format!("SELECT {LAUNCH_COLUMNS} FROM instance_launches WHERE launch_id = $1");
@@ -2110,8 +2001,20 @@ impl LaunchRepository {
     }
 }
 
+/// Map operational errors to a fixed telemetry vocabulary; never export raw text.
+fn requeue_reason(error: Option<&str>) -> &'static str {
+    match error {
+        Some(RUNNER_CAPACITY_UNAVAILABLE) => "run_capacity",
+        Some(PREPARATION_CAPACITY_UNAVAILABLE) => "preparation_capacity",
+        Some(PREPARATION_TIMEOUT) => "preparation_timeout",
+        _ => "retry",
+    }
+}
+
 #[derive(Debug, FromRow)]
 struct LaunchRow {
+    #[sqlx(default)]
+    was_waiting: bool,
     launch_id: String,
     instance_id: String,
     tenant_id: String,
@@ -2240,16 +2143,173 @@ async fn has_active_workflow_launch(
     .await?)
 }
 
-fn rows_to_launches(rows: Vec<LaunchRow>) -> Result<Vec<Launch>, LaunchQueueError> {
-    rows.into_iter().map(Launch::try_from).collect()
-}
-
 fn duration_to_micros(duration: Duration, field: &'static str) -> Result<i64, LaunchQueueError> {
     i64::try_from(duration.as_micros()).map_err(|_| LaunchQueueError::DurationOutOfRange { field })
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn telemetry_counts_only_committed_changes_and_finishes_queue_once() {
+        use opentelemetry::metrics::MeterProvider;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
+        let pool = crate::test_support::pool().await;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let repo = LaunchRepository {
+            pool: pool.clone(),
+            metrics: Some(crate::pipeline_metrics::PipelineMetrics::new(
+                provider.meter("test"),
+            )),
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $1, 'telemetry', '/unused')")
+            .bind(&id).execute(&pool).await.unwrap();
+        let request = InitialLaunchRequest {
+            launch: EnqueueRequest::immediate(
+                &id,
+                &id,
+                &id,
+                &id,
+                LaunchKind::Start,
+                Duration::from_secs(600),
+            ),
+            input: None,
+            env: None,
+            timeout_seconds: None,
+        };
+        assert!(matches!(
+            repo.claim_initial(request.clone()).await.unwrap(),
+            InitialLaunchOutcome::Enqueued(_)
+        ));
+        assert!(matches!(
+            repo.claim_initial(request).await.unwrap(),
+            InitialLaunchOutcome::ExistingLaunch(_)
+        ));
+        // Force the instance update to reject cancellation after the launch UPDATE:
+        // the entire transaction must roll back without incrementing telemetry.
+        sqlx::query("UPDATE instances SET status = 'completed' WHERE instance_id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repo.cancel_before_start(&id).await.is_err());
+        assert_eq!(
+            repo.get(&id).await.unwrap().unwrap().state,
+            LaunchState::Queued
+        );
+        provider.force_flush().unwrap();
+        let count = |name: &str| -> u64 {
+            exporter
+                .get_finished_metrics()
+                .unwrap()
+                .iter()
+                .rev()
+                .flat_map(|r| r.scope_metrics())
+                .flat_map(|s| s.metrics())
+                .find_map(|m| {
+                    if m.name() != name {
+                        None
+                    } else {
+                        match m.data() {
+                            AggregatedMetrics::U64(MetricData::Sum(s)) => {
+                                Some(s.data_points().map(|p| p.value()).sum())
+                            }
+                            AggregatedMetrics::F64(MetricData::Histogram(h)) => {
+                                Some(h.data_points().map(|p| p.count()).sum())
+                            }
+                            _ => None,
+                        }
+                    }
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(count("runtara.launch.transitions"), 1);
+        assert_eq!(count("runtara.launch.queue.duration"), 0);
+        sqlx::query("UPDATE instances SET status = 'pending' WHERE instance_id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.cancel_before_start(&id).await.unwrap();
+        repo.cancel_before_start(&id).await.unwrap(); // replay returns Cancelled, but changed nothing
+        provider.force_flush().unwrap();
+        assert_eq!(count("runtara.launch.transitions"), 2);
+        assert_eq!(count("runtara.launch.queue.duration"), 1);
+
+        // A queued terminal transition (including reconciliation) closes queue time,
+        // while a confirmed running generation does not record it again.
+        for (suffix, reconcile, confirm) in [
+            ("terminal", false, false),
+            ("reconcile", true, false),
+            ("running", false, true),
+        ] {
+            let next = format!("{id}-{suffix}");
+            repo.claim_initial(InitialLaunchRequest {
+                launch: EnqueueRequest::immediate(
+                    &next,
+                    &next,
+                    &id,
+                    &id,
+                    LaunchKind::Start,
+                    Duration::from_secs(600),
+                ),
+                input: None,
+                env: None,
+                timeout_seconds: None,
+            })
+            .await
+            .unwrap();
+            if confirm {
+                sqlx::query("UPDATE instance_launches SET state = 'running', attempt_count = 1, start_gate_deadline_at = NOW() + INTERVAL '1 minute' WHERE launch_id = $1")
+                    .bind(&next).execute(&pool).await.unwrap();
+                assert!(repo.confirm_gate_open(&next, 1).await.unwrap().is_some());
+                assert!(repo.confirm_gate_open(&next, 1).await.unwrap().is_none());
+            }
+            if reconcile {
+                sqlx::query("UPDATE instances SET status = 'failed' WHERE instance_id = $1")
+                    .bind(&next)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    repo.reconcile_released_instance(&next).await.unwrap().len(),
+                    1
+                );
+                assert!(
+                    repo.reconcile_released_instance(&next)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            } else {
+                assert!(
+                    repo.mark_terminal(&next, LaunchState::Failed, Some("private diagnostic"))
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    repo.mark_terminal(&next, LaunchState::Failed, None)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        provider.force_flush().unwrap();
+        assert_eq!(count("runtara.launch.transitions"), 8);
+        assert_eq!(count("runtara.launch.queue.duration"), 4);
+        // Collection remains valid with its database closed: no callbacks query it.
+        pool.close().await;
+        provider.force_flush().unwrap();
+        provider.shutdown().unwrap();
+    }
+
     /// The Rust vocabulary and the database `CHECK` constraint must agree.
     ///
     /// They cannot be generated from one another: a committed migration is

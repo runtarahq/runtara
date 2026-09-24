@@ -135,17 +135,26 @@ fn has_broad_directive_at_warn_or_more_verbose(filter: &str) -> bool {
 /// Global metrics instruments
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
+// Keep providers alive and explicitly flush them during coordinated shutdown.
+static PROVIDERS: OnceLock<TelemetryProviders> = OnceLock::new();
+
+#[derive(Clone)]
+struct TelemetryProviders {
+    traces: SdkTracerProvider,
+    metrics: SdkMeterProvider,
+    logs: SdkLoggerProvider,
+}
+
 /// Application metrics instruments
 pub struct Metrics {
+    /// Source admissions, including replay and failure outcomes.
+    pub admission_requests: Counter<u64>,
+    /// Source admission latency in seconds.
+    pub admission_duration: Histogram<f64>,
     meter: Meter,
 
-    // Worker execution counts, durations and live occupancy are deliberately
-    // absent. History comes from the DB-backed metrics API, which has the real
-    // start and finish timestamps; live occupancy comes from `PipelineGauges`,
-    // which the admission gate already writes on every intake. A third copy
-    // exported from here could only ever be a fourth thing to keep in sync, and
-    // these three sat declared-but-never-written long enough to prove it: they
-    // exported a flat zero, which reads as an answer rather than an absence.
+    // Local pipeline capacity and lifecycle metrics are owned by the runner,
+    // launch repository and trigger workers. Historical Usage is a separate API.
 
     // Compilation metrics
     pub compilations_total: Counter<u64>,
@@ -224,6 +233,17 @@ impl Metrics {
             .f64_histogram("runtara.compilation.direct.duration")
             .with_description("Direct workflow compile attempt duration in seconds")
             .with_unit("s")
+            .build();
+
+        let admission_requests = meter
+            .u64_counter("runtara.admission.requests")
+            .with_description("Source admission results, including idempotent replays")
+            .build();
+        let admission_duration = meter
+            .f64_histogram("runtara.admission.duration")
+            .with_description("Source admission latency")
+            .with_unit("s")
+            .with_boundaries(runtara_environment::pipeline_metrics::duration_boundaries())
             .build();
 
         // Trigger worker metrics
@@ -310,6 +330,8 @@ impl Metrics {
             .build();
 
         Self {
+            admission_requests,
+            admission_duration,
             meter,
             compilations_total,
             compilations_active,
@@ -460,6 +482,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
         .with_attributes([
             KeyValue::new(semconv::resource::SERVICE_VERSION, service_version),
             KeyValue::new(semconv::resource::DEPLOYMENT_ENVIRONMENT_NAME, environment),
+            KeyValue::new("service.instance.id", uuid::Uuid::new_v4().to_string()),
         ])
         .build();
 
@@ -485,10 +508,8 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
         .with_tonic()
         .build()?;
 
-    // Create metrics provider with periodic reader (exports every 60 seconds)
-    let metrics_reader = PeriodicReader::builder(metrics_exporter)
-        .with_interval(Duration::from_secs(60))
-        .build();
+    // The SDK honors OTEL_METRIC_EXPORT_INTERVAL, defaulting to 60 seconds.
+    let metrics_reader = PeriodicReader::builder(metrics_exporter).build();
 
     let meter_provider = SdkMeterProvider::builder()
         .with_reader(metrics_reader)
@@ -496,7 +517,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     // Set global meter provider
-    global::set_meter_provider(meter_provider);
+    global::set_meter_provider(meter_provider.clone());
 
     // Create and initialize global metrics instruments
     let meter = global::meter("runtara-server");
@@ -511,6 +532,12 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
         .with_batch_exporter(log_exporter)
         .with_resource(resource.clone())
         .build();
+
+    let _ = PROVIDERS.set(TelemetryProviders {
+        traces: trace_provider,
+        metrics: meter_provider,
+        logs: logger_provider.clone(),
+    });
 
     // Bridge tracing events to OTLP logs
     let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
@@ -540,11 +567,31 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn shutdown_telemetry() {
-    tracing::info!("Shutting down OpenTelemetry...");
-    // Note: In opentelemetry 0.31, providers are shutdown automatically on drop
-    // or you need to call shutdown on the provider instance directly
-    tracing::info!("OpenTelemetry shutdown complete");
+pub async fn shutdown_telemetry() {
+    let Some(providers) = PROVIDERS.get().cloned() else {
+        return;
+    };
+    // SDK 0.32's metric provider does not forward its timeout to readers.
+    // Bound our wait independently, and never block the async executor on an
+    // exporter that needs that executor to finish an outstanding request.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let timeout = Duration::from_secs(2);
+        let results = [
+            providers.metrics.shutdown_with_timeout(timeout),
+            providers.traces.shutdown_with_timeout(timeout),
+            providers.logs.shutdown_with_timeout(timeout),
+        ];
+        let _ = tx.send(results);
+    });
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(results)) => {
+            for error in results.into_iter().filter_map(Result::err) {
+                tracing::warn!(%error, "OpenTelemetry shutdown did not flush all data");
+            }
+        }
+        _ => tracing::warn!("OpenTelemetry shutdown exceeded five seconds"),
+    }
 }
 
 #[cfg(test)]
@@ -710,7 +757,7 @@ mod tests {
     /// whatever collector was configured, which is worse than exporting nothing:
     /// a dashboard reading "0 executions" looks like an answer, and nobody
     /// double-checks an answer. The same defect then recurred in
-    /// `PipelineGauges::record_step`, which is how it earned a test rather than
+    /// step counters, which is how it earned a test rather than
     /// a note.
     ///
     /// No unit test can catch this from the inside: an instrument with no writer
@@ -727,7 +774,13 @@ mod tests {
         // Field names, straight from the struct that declares them, so adding
         // an instrument enrolls it in this check automatically.
         let fields: Vec<String> = this_file
-            .split("pub struct Metrics {")
+            .split(
+                "pub struct Metrics {
+    /// Source admissions, including replay and failure outcomes.
+    pub admission_requests: Counter<u64>,
+    /// Source admission latency in seconds.
+    pub admission_duration: Histogram<f64>,",
+            )
             .nth(1)
             .expect("Metrics struct")
             .split("\n}")

@@ -457,14 +457,11 @@ export interface AgentStep {
    */
   retryDelay?: number | null;
   /**
-   * Legacy per-step timeout in milliseconds.
-   *
-   * This field remains parseable so saved legacy definitions receive a
-   * structured validation error, but new workflows must not use it: a
-   * running capability invocation cannot be interrupted by the synchronous
-   * component host. Use a capability's documented input (for example,
-   * `timeout_ms`) only when that capability itself owns the timeout. Split,
-   * While, and WaitForSignal have enforced workflow-level step deadlines.
+   * Cooperative guest deadline in milliseconds, including preparation,
+   * retries and durable suspension. Zero prevents invocation; absence leaves
+   * this step without its own deadline. Enclosing deadlines still apply.
+   * Cleanup can extend beyond the budget; uncooperative code may require
+   * emergency whole-workflow abort. External effects are not rolled back.
    * @format int64
    * @min 0
    */
@@ -620,10 +617,9 @@ export interface AiAgentConfig {
    * `maxIterations` (which bounds the *number* of turns). Enforced at the
    * outbound-HTTP layer: the emitter injects it into the LLM invoke and the
    * server proxy honors it, so it bounds the model call rather than
-   * preempting in-guest compute. It does not apply to Agent tools: their
-   * per-step `timeout` field is unsupported because a running tool invoke
-   * cannot be interrupted. A tool capability may instead expose its own
-   * documented timeout input.
+   * preempting in-guest compute. Agent tools use their own cooperative
+   * per-step `timeout` budget. A capability's documented transport timeout
+   * input remains separate from that guest deadline.
    * @format int64
    * @min 0
    */
@@ -2016,12 +2012,10 @@ export interface EmbedWorkflowStep {
    */
   retryDelay?: number | null;
   /**
-   * Legacy per-step timeout in milliseconds.
-   *
-   * This field remains parseable so saved legacy definitions receive a
-   * structured validation error, but new workflows must not use it: an
-   * inline child invocation cannot be interrupted. Split, While, and
-   * WaitForSignal have enforced workflow-level step deadlines.
+   * Cooperative guest deadline for the inline child, in milliseconds,
+   * including retries and durable suspension. Zero prevents child execution;
+   * absence leaves only enclosing deadlines. Cleanup can extend beyond the
+   * budget, and uncooperative code may require whole-workflow abort.
    * @format int64
    * @min 0
    */
@@ -3289,184 +3283,6 @@ export interface PeriodStatsDto {
    * @format int64
    */
   totalRequests: number;
-}
-
-/** Throughput between pipeline stages, per second. */
-export interface PipelineRatesDto {
-  /**
-   * Executions the gate admitted.
-   * @format double
-   */
-  accepted: number;
-  /**
-   * Executions the gate refused with `ENTITLEMENT_LIMIT_EXCEEDED`.
-   * @format double
-   */
-  denied: number;
-  /**
-   * Runs that stopped, including those that parked themselves to await a
-   * wake or a signal.
-   * @format double
-   */
-  finished: number;
-  /**
-   * Executions presented to the admission gate.
-   * @format double
-   */
-  offered: number;
-  /**
-   * Instances handed to the runtime for launch.
-   * @format double
-   */
-  started: number;
-  /**
-   * Workflow steps, or `null` when nothing live could report one.
-   *
-   * `trackEvents` is compile-time, so a workflow built without it runs
-   * perfectly and emits no steps. Rendering that as zero would let a
-   * consumer declare a healthy system stalled.
-   * @format double
-   */
-  steps?: number | null;
-}
-
-/** The pipeline at one instant. */
-export interface PipelineSnapshotDto {
-  /**
-   * When this was sampled.
-   * @format date-time
-   */
-  capturedAt: string;
-  /**
-   * Throughput, or `null` on the first tick after start.
-   *
-   * There is no earlier reading to difference against then, and treating the
-   * baseline as zero would publish the process's whole lifetime of work as
-   * one second's throughput.
-   */
-  rates?: null | PipelineRatesDto;
-  /** Every stage, in pipeline order. */
-  stages: PipelineStageDto[];
-  /**
-   * Server policy for how long a full stage may retain its oldest item
-   * before the UI calls it "not draining".
-   *
-   * The policy travels with the sample so the browser does not silently use
-   * a different hard-coded threshold from the Environment it is observing.
-   * @format int64
-   * @min 0
-   */
-  stuckAfterMs: number;
-  /**
-   * The window the rates were measured over.
-   *
-   * On the wire rather than assumed, so a consumer can tell a normal tick
-   * from one that followed a pause and discard the gap instead of drawing
-   * a spike that never happened.
-   * @format int64
-   * @min 0
-   */
-  windowMs: number;
-}
-
-/** Response envelope for the pipeline endpoint. */
-export interface PipelineSnapshotResponse {
-  /** The snapshot. */
-  data: PipelineSnapshotDto;
-  /** Human-readable status. */
-  message: string;
-  /** Whether the snapshot was produced. */
-  success: boolean;
-}
-
-/** One stage of the pipeline at one instant. */
-export interface PipelineStageDto {
-  /**
-   * Number of queued rows whose most recent dispatcher result was a runner
-   * capacity rejection.
-   *
-   * Present only on the durable launch-queue stage. It is a current
-   * diagnosis count, not an unbounded lifetime metric: rows leave it once
-   * they start, expire, park, or reach a terminal outcome.
-   * @format int64
-   * @min 0
-   */
-  capacityRejections?: number | null;
-  /** Which rate feeds this stage, naming a field of [`PipelineRatesDto`]. */
-  inflowKey: string;
-  /** Stable identifier for an execution-pipeline stage. */
-  key: string;
-  /**
-   * The setting that bounds this stage, shown verbatim so an operator can
-   * act on it without looking it up.
-   */
-  knob?: string | null;
-  /** Human-readable stage name. */
-  label: string;
-  /**
-   * The bound, or `null` for a stage with no ceiling.
-   * @format int64
-   * @min 0
-   */
-  limit?: number | null;
-  /**
-   * Age of the oldest item held here.
-   *
-   * The signal that separates a stage turning work over from one holding
-   * work that never leaves — the two are indistinguishable by occupancy.
-   * @format int64
-   * @min 0
-   */
-  oldestAgeMs?: number | null;
-  /**
-   * Timed-out precompile children still retained by the bounded reaper.
-   *
-   * Present only on the precompile-child stage. It distinguishes ordinary
-   * busy compilation from a child blocked in kernel I/O after its durable
-   * preparation lease elapsed.
-   * @format int64
-   * @min 0
-   */
-  reapingPrecompileChildren?: number | null;
-  /**
-   * Highest-count workflows contributing to this durable launch stage.
-   *
-   * Empty for non-launch stages and when the stage has no rows. The list is
-   * deliberately bounded by the sampler rather than by the HTTP response.
-   */
-  topWorkflows: PipelineWorkflowAttributionDto[];
-  /**
-   * Current occupancy, or `null` when the source could not be read.
-   * @format int64
-   * @min 0
-   */
-  used?: number | null;
-}
-
-/**
- * A bounded contributor attribution for one durable launch stage.
- *
- * The runtime database owns image provenance but not workflow display names,
- * so this intentionally carries the stable workflow identifier. The sampler
- * returns only the highest-count contributors; it must not turn a tenant with
- * many workflows into an unbounded analytics payload or a high-cardinality
- * metric dimension.
- */
-export interface PipelineWorkflowAttributionDto {
-  /**
-   * Number of launch generations attributed to this workflow in the stage.
-   * @format int64
-   * @min 0
-   */
-  count: number;
-  /**
-   * Age of this contributor's oldest relevant launch, in milliseconds.
-   * @format int64
-   * @min 0
-   */
-  oldestAgeMs?: number | null;
-  /** Stable workflow identifier recovered from the image metadata. */
-  workflowId: string;
 }
 
 /** Position coordinates for UI elements */
@@ -5131,7 +4947,7 @@ export interface SplitConfig {
    * per-agent instance pool).
    *
    * When > 1 and the Split body is an eligible single-Agent subgraph (no
-   * breakpoints, no split-level retries/timeout, not a workflow-agent
+   * breakpoints, no split-level retries, not a workflow-agent
    * child), iterations run as CONCURRENT windows: agent calls are launched
    * as component-model-async subtasks and their I/O overlaps. Ineligible
    * shapes keep the strictly sequential execution (advisory W073).
@@ -6504,13 +6320,12 @@ export interface ApiConfig<SecurityDataType = unknown>
   format?: ResponseType;
 }
 
-export enum ContentType {
-  Json = "application/json",
-  JsonApi = "application/vnd.api+json",
-  FormData = "multipart/form-data",
-  UrlEncoded = "application/x-www-form-urlencoded",
-  Text = "text/plain",
-}
+export type ContentType =
+  | "application/json"
+  | "application/vnd.api+json"
+  | "multipart/form-data"
+  | "application/x-www-form-urlencoded"
+  | "text/plain";
 
 export class HttpClient<SecurityDataType = unknown> {
   public instance: AxiosInstance;
@@ -6607,7 +6422,7 @@ export class HttpClient<SecurityDataType = unknown> {
     const responseFormat = format || this.format || undefined;
 
     if (
-      type === ContentType.FormData &&
+      type === "multipart/form-data" &&
       body &&
       body !== null &&
       typeof body === "object"
@@ -6616,7 +6431,7 @@ export class HttpClient<SecurityDataType = unknown> {
     }
 
     if (
-      type === ContentType.Text &&
+      type === "text/plain" &&
       body &&
       body !== null &&
       typeof body !== "string"
@@ -6753,7 +6568,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -6772,37 +6587,6 @@ export class Api<
     ) =>
       this.request<any, void>({
         path: `/api/runtime/agents/${name}/connection-schema`,
-        method: "GET",
-        ...params,
-      }),
-
-    /**
-     * @description Answers from the sampler's last snapshot rather than reading the world, so this costs the same whether one viewer or fifty ask for it and no request can ever cause a database query.
-     *
-     * @tags analytics-controller
-     * @name GetPipelineSnapshotHandler
-     * @summary Current occupancy of every stage of the execution pipeline.
-     * @request GET:/api/runtime/analytics/pipeline
-     */
-    getPipelineSnapshotHandler: (params: RequestParams = {}) =>
-      this.request<PipelineSnapshotResponse, any>({
-        path: `/api/runtime/analytics/pipeline`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Authenticated with the ordinary bearer extractor and no special-casing, because the frontend consumes this with `fetch` rather than `EventSource` — which cannot set headers and would otherwise push the token into a query string, where it would end up in every access log.
-     *
-     * @tags analytics-controller
-     * @name StreamPipelineHandler
-     * @summary Stream pipeline snapshots as they are sampled.
-     * @request GET:/api/runtime/analytics/pipeline/stream
-     */
-    streamPipelineHandler: (params: RequestParams = {}) =>
-      this.request<void, any>({
-        path: `/api/runtime/analytics/pipeline/stream`,
         method: "GET",
         ...params,
       }),
@@ -6856,7 +6640,7 @@ export class Api<
         method: "POST",
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -6923,7 +6707,7 @@ export class Api<
         path: `/api/runtime/connections`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7052,7 +6836,7 @@ export class Api<
         path: `/api/runtime/connections/${id}`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7209,7 +6993,7 @@ export class Api<
         path: `/api/runtime/connections/${id}/resources`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7465,7 +7249,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7526,7 +7310,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7553,7 +7337,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -7579,7 +7363,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7690,7 +7474,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7719,7 +7503,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7748,7 +7532,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7805,7 +7589,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7893,7 +7677,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7968,7 +7752,7 @@ export class Api<
         method: "PUT",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8018,7 +7802,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8044,7 +7828,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8070,7 +7854,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8096,7 +7880,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8142,7 +7926,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/blocks/${blockId}/workflow-actions/${actionId}/execute`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8164,7 +7948,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/edit`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8313,7 +8097,7 @@ export class Api<
         path: `/api/runtime/triggers`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8351,7 +8135,7 @@ export class Api<
         path: `/api/runtime/triggers/${id}`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8424,7 +8208,7 @@ export class Api<
         path: `/api/runtime/workflows/create`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8461,7 +8245,7 @@ export class Api<
         path: `/api/runtime/workflows/folders/rename`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8479,7 +8263,7 @@ export class Api<
         path: `/api/runtime/workflows/graph/validate`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8625,7 +8409,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8646,7 +8430,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat/start`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8667,7 +8451,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/clone`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8713,7 +8497,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8735,7 +8519,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/move`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8773,7 +8557,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/schedule`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8794,7 +8578,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/slug`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8816,7 +8600,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/update`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8943,7 +8727,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/versions/${version}/track-events`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),

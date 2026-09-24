@@ -235,6 +235,9 @@ runtara-dsl = { path = "../runtara-dsl" }
 serde_json = "1.0"
 
 [dev-dependencies]
+opentelemetry-proto = { version = "0.32", features = ["gen-tonic", "with-serde", "metrics", "trace", "logs"] }
+tonic = { version = "0.14", features = ["transport"] }
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "testing"] }
 # The instance HTTP router in `core_runtime` drives runtara-core's handlers, so
 # its tests need core's in-memory Persistence mock.
 runtara-core = { path = "../runtara-core", features = ["test-support"] }
