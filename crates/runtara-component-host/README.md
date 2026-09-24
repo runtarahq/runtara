@@ -69,6 +69,17 @@ The old `runtara:host-io/http@0.1.0` import is removed; rebuild host, agent and
 workflow artifacts together. The separate `runtara:host-io/timers@0.1.0` contract
 is unchanged.
 
+## Trusted signing integration tests
+
+Run `cargo test -p runtara-component-host --features component-integration-tests --test trusted`
+after building the agent components with `scripts/build-agent-components.sh`.
+The provider roundtrip tests require Docker. The MinIO fixture builds its pinned
+source release with the embedded `tests/trusted/minio.Dockerfile`, rather than
+pulling an upstream MinIO image. Its first run needs access to Docker Hub and
+the Go module proxy and takes longer; subsequent runs use Docker's build cache.
+Azurite uses its published container image. Both providers remain real HTTP
+roundtrip tests of the restricted WASM signing exports.
+
 ## Where it slots in
 
 `runtara-server` builds a `ComponentDispatcherService` at boot when `RUNTARA_AGENT_COMPONENTS_DIR` is set, plugs it into `AgentTestingService`, and routes `POST /api/runtime/agents/{name}/capabilities/{cap}/test` through this crate.
