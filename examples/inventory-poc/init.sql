@@ -1,0 +1,10 @@
+CREATE DATABASE runtara_server OWNER runtara;
+CREATE DATABASE runtara_objects OWNER runtara;
+\c runtara_server
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
+\c runtara_objects
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
