@@ -3,9 +3,9 @@
 use super::*;
 use std::collections::HashMap;
 use testcontainers::{
-    GenericImage, ImageExt,
+    GenericBuildableImage, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
+    runners::{AsyncBuilder, AsyncRunner},
 };
 
 const S3_USER: &str = "runtara-test-access";
@@ -105,7 +105,13 @@ async fn roundtrip(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wasm_presigned_urls_work_against_minio() -> anyhow::Result<()> {
-    let container = GenericImage::new("quay.io/minio/minio", "RELEASE.2025-09-07T16-13-09Z")
+    // Upstream registry images can disappear independently of the release.
+    // Build the pinned source; Docker caches it for subsequent test runs.
+    let image = GenericBuildableImage::new("runtara-test-minio", "2025-09-07")
+        .with_dockerfile_string(include_str!("minio.Dockerfile"))
+        .build_image()
+        .await?;
+    let container = image
         .with_exposed_port(9000.tcp())
         .with_env_var("MINIO_ROOT_USER", S3_USER)
         .with_env_var("MINIO_ROOT_PASSWORD", S3_KEY)
