@@ -7,9 +7,10 @@ aggregation, Valkey backlog query, snapshot cache, or browser stream.
 
 The System page retains host information. `/api/runtime/analytics/pipeline` and
 `/api/runtime/analytics/pipeline/stream` have been removed from the API and OpenAPI.
-Historical Usage, operational admission checks, durable execution state, and
-product events retain their existing behavior. This change does not turn OTEL
-into a source of truth for admission, billing, or durable queue depth.
+Historical [Usage](usage-history.md) has its own retained PostgreSQL aggregates
+and exports completion measurements through OTEL. Operational admission checks,
+durable execution state, and product events remain authoritative. OTEL is not
+a source of truth for admission, billing, or durable queue depth.
 
 ## Data path and cost
 

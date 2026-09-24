@@ -42,18 +42,12 @@ export function summarizeMetrics(
   const successRate =
     totalExecutions > 0 ? (totalSuccesses / totalExecutions) * 100 : 0;
 
-  // Weight each bucket by how many executions it represents, and skip the
-  // ones that hold none. A bucket with no executions reports a null average,
-  // and `??` turns that null into `undefined`, which `!== null` accepts - so
-  // every empty bucket used to land in the divisor while adding nothing to
-  // the sum. Over a 30-day window that is ~720 empty hours against one real
-  // one, which understated the figure by about three orders of magnitude.
-  // An unweighted mean of per-bucket means would be wrong too once more than
-  // one bucket has data, since the buckets carry different counts.
+  // Weight by observations, not invocations: cancelled launches may have no
+  // duration and resource reports can arrive after their completion count.
   const durationWeighted = dataPoints.reduce(
     (acc, point) => {
       const value = point.avg_duration_seconds;
-      const count = point.invocation_count ?? 0;
+      const count = point.duration_observation_count ?? 0;
       if (value === null || value === undefined || count <= 0) return acc;
       return { total: acc.total + value * count, count: acc.count + count };
     },
@@ -76,7 +70,7 @@ export function summarizeMetrics(
         point.avg_memory_bytes === undefined || point.avg_memory_bytes === null
           ? null
           : point.avg_memory_bytes / (1024 * 1024);
-      const count = point.invocation_count ?? 0;
+      const count = point.memory_observation_count ?? 0;
       if (mb === null || mb === undefined || count <= 0) return acc;
       return { total: acc.total + mb * count, count: acc.count + count };
     },

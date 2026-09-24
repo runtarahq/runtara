@@ -468,6 +468,13 @@ impl EnvironmentRuntimeConfig {
             },
         );
 
+        let usage_shutdown = Arc::new(Notify::new());
+        let usage = Worker::spawn(
+            "Usage aggregation",
+            usage_shutdown.clone(),
+            crate::usage::run(self.pool.clone(), usage_shutdown),
+        );
+
         info!("EnvironmentRuntime started");
 
         Ok(EnvironmentRuntime {
@@ -475,7 +482,7 @@ impl EnvironmentRuntimeConfig {
             launch_dispatcher: dispatcher,
             // This order is the shutdown join order, which the panic report
             // reads back in the same sequence.
-            workers: vec![cleanup, heartbeat, db_cleanup, image_cleanup],
+            workers: vec![cleanup, heartbeat, db_cleanup, image_cleanup, usage],
             state,
             drain,
             lifecycle_observers,

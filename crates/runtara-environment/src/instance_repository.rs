@@ -28,7 +28,6 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use runtara_core::domain::InstanceStatus;
-use runtara_core::persistence::InstanceCompletionMetrics;
 use sqlx::PgPool;
 
 use crate::error::{Error, Result};
@@ -334,40 +333,6 @@ impl InstanceRepository {
         Ok(())
     }
 
-    /// Everything the OTLP sink reports about a finished run.
-    ///
-    /// Reads rather than writes, but reads the same Environment-owned columns,
-    /// so it lives with them: the resource figures are only meaningful next to
-    /// the status and timestamps they belong to.
-    pub async fn completion_metrics(
-        &self,
-        instance_id: &str,
-    ) -> Result<Option<InstanceCompletionMetrics>> {
-        let row: Option<MetricRow> = sqlx::query_as(
-            "SELECT tenant_id, status::text AS status, \
-                    termination_reason::text AS termination_reason, \
-                    started_at, finished_at, memory_peak_bytes, cpu_usage_usec \
-             FROM instances WHERE instance_id = $1",
-        )
-        .bind(instance_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| Error::Other(format!("completion_metrics: {e}")))?;
-
-        row.map(|row| {
-            Ok(InstanceCompletionMetrics {
-                tenant_id: row.tenant_id,
-                status: runtara_store_postgres::encoding::status_from_str(&row.status)?,
-                termination_reason: row.termination_reason,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
-                cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
-            })
-        })
-        .transpose()
-    }
-
     /// Suspend an instance and schedule an immediate wake so it is relaunched.
     ///
     /// Sets `status='suspended'`, `termination_reason='environment_restart'`
@@ -408,15 +373,4 @@ impl InstanceRepository {
 
         Ok(result.rows_affected() == 1)
     }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct MetricRow {
-    tenant_id: String,
-    status: String,
-    termination_reason: Option<String>,
-    started_at: Option<DateTime<Utc>>,
-    finished_at: Option<DateTime<Utc>>,
-    memory_peak_bytes: Option<i64>,
-    cpu_usage_usec: Option<i64>,
 }

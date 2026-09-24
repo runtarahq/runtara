@@ -75,8 +75,6 @@ pub struct Transition {
     pub event: Option<EventType>,
     /// Acknowledge the locked command in the same operation.
     pub acknowledge: bool,
-    /// Report a newly terminal instance after committing.
-    pub report_completion: bool,
 }
 
 /// Result of evaluating an operation against the current stored state.
@@ -132,7 +130,6 @@ pub fn acknowledge(
         wake_reason: Change::Keep,
         event: None,
         acknowledge: true,
-        report_completion: false,
     };
     match command.kind {
         SignalType::Cancel => {
@@ -140,7 +137,6 @@ pub fn acknowledge(
             effects.finish_now = true;
             effects.wake = Change::Clear;
             effects.wake_reason = Change::Clear;
-            effects.report_completion = !status.is_terminal();
         }
         SignalType::Pause | SignalType::Shutdown => {
             effects.status = Some(InstanceStatus::Suspended);
@@ -225,7 +221,6 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
         },
         event: None,
         acknowledge: false,
-        report_completion: false,
     })
 }
 
@@ -301,7 +296,6 @@ mod tests {
                         Change::Keep,
                         Change::Clear,
                         None,
-                        !terminal,
                     ),
                     SignalType::Pause => (
                         Some(InstanceStatus::Suspended),
@@ -309,7 +303,6 @@ mod tests {
                         Change::Clear,
                         Change::Clear,
                         Some(EventType::Suspended),
-                        false,
                     ),
                     SignalType::Shutdown => (
                         Some(InstanceStatus::Suspended),
@@ -317,7 +310,6 @@ mod tests {
                         Change::Set(SuspensionReason::Shutdown),
                         Change::Set(WakeDeadline::Now),
                         Some(EventType::Suspended),
-                        false,
                     ),
                 };
                 assert_eq!(
@@ -326,8 +318,7 @@ mod tests {
                         effects.finish_now,
                         effects.reason,
                         effects.wake,
-                        effects.event,
-                        effects.report_completion
+                        effects.event
                     ),
                     expected
                 );
@@ -419,7 +410,7 @@ mod tests {
                     };
                     assert_eq!(effects.status, Some(InstanceStatus::Suspended));
                     assert!(effects.finish_now && effects.clear_result);
-                    assert!(!effects.acknowledge && !effects.report_completion);
+                    assert!(!effects.acknowledge);
                     assert_eq!(effects.event, None);
                     assert_eq!(
                         effects.reason,

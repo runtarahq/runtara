@@ -304,6 +304,17 @@ pub async fn count_instances(
 /// Aggregated metrics bucket from database.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MetricsBucketRow {
+    /// Invocations with a valid duration observation.
+    pub duration_observation_count: i64,
+    /// Invocations with a peak-memory observation.
+    pub memory_observation_count: i64,
+    /// Invocations with a CPU-time observation.
+    pub cpu_observation_count: i64,
+    /// Mean CPU time in seconds, excluding missing observations.
+    pub avg_cpu_seconds: Option<f64>,
+    /// Highest CPU time in seconds.
+    pub max_cpu_seconds: Option<f64>,
+
     /// Start of bucket (UTC).
     pub bucket_time: DateTime<Utc>,
     /// Total invocations in bucket.
@@ -326,19 +337,8 @@ pub struct MetricsBucketRow {
     pub max_memory_bytes: Option<i64>,
 }
 
-/// Get aggregated tenant metrics.
-///
-/// Aggregates instance execution metrics into time buckets of
-/// `bucket_seconds`, using aggregate functions for statistics.
-///
-/// Buckets are aligned by flooring the Unix epoch to a multiple of the width
-/// rather than by `date_trunc`. That admits widths `date_trunc` has no unit for -
-/// six minutes, two hours - and it fixes a latent inconsistency along the way:
-/// `date_trunc` on a `timestamptz` truncates in the *session* time zone, which
-/// nothing in this codebase pins, while `bucket_time` was always reported as UTC.
-/// Flooring the epoch is UTC unconditionally.
-///
-/// Returns all buckets in the time range, including empty ones (with zero counts).
+/// Read retained Usage aggregates, including empty UTC-aligned buckets.
+/// Work scales with occupied minutes, independently of execution volume.
 pub async fn get_tenant_metrics(
     pool: &PgPool,
     tenant_id: &str,
@@ -346,14 +346,10 @@ pub async fn get_tenant_metrics(
     end_time: DateTime<Utc>,
     bucket_seconds: u32,
 ) -> Result<Vec<MetricsBucketRow>, sqlx::Error> {
-    // A zero width divides by zero inside the query. Callers are validated at
-    // both the HTTP boundary and in `handle_get_tenant_metrics`, so reaching
-    // here with one is a bug rather than bad input; clamp instead of panicking.
-    let bucket_seconds = f64::from(bucket_seconds.max(1));
+    let start_time = crate::usage::minute(start_time);
+    let end_time = crate::usage::minute(end_time);
+    let bucket_seconds = f64::from(bucket_seconds.max(60));
 
-    // The spine and the aggregate derive their bucket key with the same
-    // expression, so the join keys align by construction. Getting that wrong is
-    // the one way this query fails quietly - every bucket would read as empty.
     let query = r#"
         WITH time_series AS (
             SELECT generate_series(
@@ -364,28 +360,26 @@ pub async fn get_tenant_metrics(
         ),
         metrics AS (
             SELECT
-                to_timestamp(floor(extract(epoch FROM i.finished_at)::float8 / $4::float8) * $4::float8)
+                to_timestamp(floor(extract(epoch FROM u.bucket_time)::float8 / $4::float8) * $4::float8)
                     AS bucket_time,
-                COUNT(*) AS invocation_count,
-                SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) AS success_count,
-                SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failure_count,
-                SUM(CASE WHEN i.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
-                (AVG(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
-                    THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
-                    ELSE NULL END))::FLOAT8 AS avg_duration_ms,
-                (MIN(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
-                    THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
-                    ELSE NULL END))::FLOAT8 AS min_duration_ms,
-                (MAX(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
-                    THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
-                    ELSE NULL END))::FLOAT8 AS max_duration_ms,
-                AVG(i.memory_peak_bytes)::FLOAT8 AS avg_memory_bytes,
-                MAX(i.memory_peak_bytes) AS max_memory_bytes
-            FROM instances i
-            WHERE i.tenant_id = $1
-              AND i.finished_at >= $2
-              AND i.finished_at < $3
-              AND i.status IN ('completed', 'failed', 'cancelled')
+                SUM(u.invocation_count)::BIGINT AS invocation_count,
+                SUM(u.success_count)::BIGINT AS success_count,
+                SUM(u.failure_count)::BIGINT AS failure_count,
+                SUM(u.cancelled_count)::BIGINT AS cancelled_count,
+                SUM(u.duration_count)::BIGINT AS duration_observation_count,
+                SUM(u.memory_count)::BIGINT AS memory_observation_count,
+                SUM(u.cpu_count)::BIGINT AS cpu_observation_count,
+                SUM(u.duration_sum_ms) / NULLIF(SUM(u.duration_count), 0)::FLOAT8 AS avg_duration_ms,
+                MIN(u.duration_min_ms) AS min_duration_ms,
+                MAX(u.duration_max_ms) AS max_duration_ms,
+                (SUM(u.memory_sum_bytes) / NULLIF(SUM(u.memory_count), 0))::FLOAT8 AS avg_memory_bytes,
+                MAX(u.memory_max_bytes) AS max_memory_bytes,
+                (SUM(u.cpu_sum_usec) / NULLIF(SUM(u.cpu_count), 0) / 1000000)::FLOAT8 AS avg_cpu_seconds,
+                MAX(u.cpu_max_usec)::FLOAT8 / 1000000 AS max_cpu_seconds
+            FROM usage_minutes u
+            WHERE u.tenant_id = $1
+              AND u.bucket_time >= $2
+              AND u.bucket_time < $3
             GROUP BY 1
         )
         SELECT
@@ -394,6 +388,11 @@ pub async fn get_tenant_metrics(
             COALESCE(m.success_count, 0) AS success_count,
             COALESCE(m.failure_count, 0) AS failure_count,
             COALESCE(m.cancelled_count, 0) AS cancelled_count,
+            COALESCE(m.duration_observation_count, 0) AS duration_observation_count,
+            COALESCE(m.memory_observation_count, 0) AS memory_observation_count,
+            COALESCE(m.cpu_observation_count, 0) AS cpu_observation_count,
+            m.avg_cpu_seconds,
+            m.max_cpu_seconds,
             m.avg_duration_ms,
             m.min_duration_ms,
             m.max_duration_ms,

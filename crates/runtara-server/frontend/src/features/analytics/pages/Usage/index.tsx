@@ -98,7 +98,7 @@ function compactMemory(mb: number): string {
  *
  * The map wants every bucket; the charts want a readable number of bars. At 421
  * buckets a bar is under two pixels wide, which is a texture rather than a
- * chart. Memory is averaged weighted by executions - an unweighted mean would
+ * chart. Memory is averaged weighted by observations - an unweighted mean would
  * let a quiet interval count as much as a busy one.
  */
 function toSeries(buckets: MetricsBucket[], period: DateRangeOption) {
@@ -116,13 +116,18 @@ function toSeries(buckets: MetricsBucket[], period: DateRangeOption) {
       : '';
     const runs = chunk.reduce((sum, b) => sum + (b.invocation_count ?? 0), 0);
     const memBytes = chunk.reduce(
-      (sum, b) => sum + (b.avg_memory_bytes ?? 0) * (b.invocation_count ?? 0),
+      (sum, b) =>
+        sum + (b.avg_memory_bytes ?? 0) * (b.memory_observation_count ?? 0),
+      0
+    );
+    const samples = chunk.reduce(
+      (sum, b) => sum + (b.memory_observation_count ?? 0),
       0
     );
     executions.push({ label, value: runs });
     memory.push({
       label,
-      value: runs > 0 ? memBytes / runs / (1024 * 1024) : 0,
+      value: samples > 0 ? memBytes / samples / (1024 * 1024) : 0,
     });
   }
   return { executions, memory };

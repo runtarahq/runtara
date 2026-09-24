@@ -711,10 +711,12 @@ impl EnvironmentClient {
 
         // Same defaults the HTTP layer applied: a day ending now.
         let now = Utc::now();
-        let end_time = options.end_time.unwrap_or(now);
-        let start_time = options
-            .start_time
-            .unwrap_or(end_time - chrono::Duration::hours(24));
+        let end_time = runtara_environment::usage::minute(options.end_time.unwrap_or(now));
+        let start_time = runtara_environment::usage::minute(
+            options
+                .start_time
+                .unwrap_or(end_time - chrono::Duration::hours(24)),
+        );
         let granularity = options.granularity.unwrap_or(MetricsGranularity::Hourly);
 
         let buckets = handlers::handle_get_tenant_metrics(
@@ -736,6 +738,11 @@ impl EnvironmentClient {
             buckets: buckets
                 .into_iter()
                 .map(|b| MetricsBucket {
+                    duration_observation_count: b.duration_observation_count,
+                    memory_observation_count: b.memory_observation_count,
+                    cpu_observation_count: b.cpu_observation_count,
+                    avg_cpu_seconds: b.avg_cpu_seconds,
+                    max_cpu_seconds: b.max_cpu_seconds,
                     bucket_time: b.bucket_time,
                     invocation_count: b.invocation_count,
                     success_count: b.success_count,

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise real admission, launch, runner and step instrumentation over OTLP."""
 import json
+import datetime
+import math
 import os
 from pathlib import Path
 import signal
@@ -146,6 +148,7 @@ def execute(workflow_id):
     uuid.UUID(instance)
     wait_for(lambda: sql(f"{TAG}_runtime", f"SELECT status FROM instances WHERE instance_id = '{instance}'") == "completed",
              "workflow completion", 120)
+    return instance
 
 
 def metric_rows():
@@ -178,6 +181,51 @@ def positive(name):
     return any(float(p.get("asInt", p.get("asDouble", p.get("count", 0)))) > 0 for p in points(name))
 
 
+def usage():
+    # Explicit end covers the current minute; default UI reads complete minutes.
+    end = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1)
+    start = end - datetime.timedelta(hours=1)
+    from urllib.parse import urlencode
+    result = http("/metrics/tenant?" + urlencode({"startTime": start.isoformat(), "endTime": end.isoformat(), "granularity": "1m"}))
+    assert result["success"]
+    buckets = result["data"]["metrics"]
+    return {
+        "invocations": sum(b["invocation_count"] for b in buckets),
+        "duration_count": sum(b["duration_observation_count"] for b in buckets),
+        "duration_sum": sum((b["avg_duration_seconds"] or 0) * b["duration_observation_count"] for b in buckets),
+        "memory_count": sum(b["memory_observation_count"] for b in buckets),
+        "memory_sum": sum((b["avg_memory_bytes"] or 0) * b["memory_observation_count"] for b in buckets),
+        "cpu_count": sum(b["cpu_observation_count"] for b in buckets),
+        "cpu_sum": sum((b["avg_cpu_seconds"] or 0) * b["cpu_observation_count"] for b in buckets),
+    }
+
+
+def latest_points(name):
+    for metric in reversed(metric_rows()):
+        if metric["name"] == name:
+            for kind in ("sum", "histogram"):
+                if kind in metric:
+                    return metric[kind].get("dataPoints", [])
+    return []
+
+
+def verify_usage_export(expected):
+    wait_for(lambda: usage()["invocations"] == expected, "retained Usage counts")
+    wait_for(lambda: sum(int(p["asInt"]) for p in latest_points("runtara.workflow.invocations.total")) == expected,
+             "Usage OTEL invocation parity")
+    for field, name in [("duration", "runtara.workflow.execution.duration"),
+                        ("memory", "runtara.workflow.memory.peak"), ("cpu", "runtara.workflow.cpu.usage")]:
+        wait_for(lambda: sum(int(p["count"]) for p in latest_points(name)) == usage()[field + "_count"],
+                 f"Usage {field} observation parity")
+        data = usage()
+        observed = sum(float(p["sum"]) for p in latest_points(name))
+        # The API preserves its integer-byte mean; rounding can lose <1 byte per observation.
+        tolerance = data["memory_count"] if field == "memory" else 1e-6
+        assert math.isclose(observed, data[field + "_sum"], abs_tol=tolerance), (field, observed, data)
+        for point in latest_points(name):
+            assert set(attrs(point)) == {"tenant_id", "status", "termination_reason"}
+
+
 def main():
     print(f"Test artifacts: {ARTIFACTS}", flush=True)
     for suffix in ("server", "runtime"):
@@ -201,7 +249,14 @@ def main():
     wait_for(lambda: positive("runtara.runner.runs"), "physical runner metrics")
     assert not positive("runtara.workflow.steps.started"), "Untracked workflows must not fabricate step progress"
     tracked = workflow(True)
-    execute(tracked)
+    tracked_instance = execute(tracked)
+    # Exercise late, duplicate resource reports as well as actual runner observations.
+    for _ in range(2):
+        sql(f"{TAG}_runtime", f"UPDATE instances SET memory_peak_bytes = coalesce(memory_peak_bytes, 4096), cpu_usage_usec = coalesce(cpu_usage_usec, 500000) WHERE instance_id = '{tracked_instance}'")
+    verify_usage_export(2)
+    sql(f"{TAG}_runtime", "DELETE FROM instances WHERE status IN ('completed', 'failed', 'cancelled')")
+    assert usage()["invocations"] == 2, "Usage must survive raw instance cleanup"
+    print("PASS: live Usage and OTLP counts/resources agree and survive raw cleanup", flush=True)
     required = ["runtara.admission.requests", "runtara.admission.duration", "runtara.trigger.events.total",
                 "runtara.trigger.processing.duration", "runtara.launch.transitions", "runtara.launch.queue.duration",
                 "runtara.pipeline.pool.hold.duration", "runtara.workflow.steps.started"]
@@ -231,11 +286,12 @@ def main():
     collector = receiver()  # truncates capture
     app = server(disabled=True)
     execute(tracked)
+    wait_for(lambda: usage()["invocations"] == 4, "Usage history with OTEL disabled")
     time.sleep(1.5)
     assert not metric_rows(), "Disabled telemetry must not export"
     stop(app)
     stop(collector)
-    print("PASS: disabled telemetry still executes workflows and exports no metrics", flush=True)
+    print("PASS: disabled telemetry preserves Usage, executes workflows and exports no metrics", flush=True)
 
 
 if __name__ == "__main__":

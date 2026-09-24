@@ -3038,6 +3038,11 @@ export interface MemoryInfo {
  */
 export interface MetricsBucket {
   /**
+   * Mean CPU time in seconds, excluding missing observations.
+   * @format double
+   */
+  avg_cpu_seconds?: number | null;
+  /**
    * Average execution duration in seconds.
    * @format double
    */
@@ -3058,6 +3063,16 @@ export interface MetricsBucket {
    */
   cancelled_count: number;
   /**
+   * Invocations with a CPU-time observation.
+   * @format int64
+   */
+  cpu_observation_count: number;
+  /**
+   * Invocations with a valid duration observation.
+   * @format int64
+   */
+  duration_observation_count: number;
+  /**
    * Number of failures.
    * @format int64
    */
@@ -3068,6 +3083,11 @@ export interface MetricsBucket {
    */
   invocation_count: number;
   /**
+   * Highest CPU time in seconds.
+   * @format double
+   */
+  max_cpu_seconds?: number | null;
+  /**
    * Maximum execution duration in seconds.
    * @format double
    */
@@ -3077,6 +3097,11 @@ export interface MetricsBucket {
    * @format int64
    */
   max_memory_bytes?: number | null;
+  /**
+   * Invocations with a peak-memory observation.
+   * @format int64
+   */
+  memory_observation_count: number;
   /**
    * Minimum execution duration in seconds.
    * @format double
@@ -7149,9 +7174,9 @@ export class Api<
      */
     getTenantMetrics: (
       query?: {
-        /** Start time (ISO 8601), defaults to 24 hours ago */
+        /** Start time (ISO 8601), rounded down to a UTC minute; defaults to 24 hours ago. History is retained for 200 days. */
         startTime?: string;
-        /** End time (ISO 8601), defaults to now */
+        /** Exclusive end time (ISO 8601), rounded down to a UTC minute; defaults to now */
         endTime?: string;
         /** Bucket width: 'hourly', 'daily', or a <count><unit> width such as '1m', '6m', '24m', '2h' (default: hourly) */
         granularity?: string;

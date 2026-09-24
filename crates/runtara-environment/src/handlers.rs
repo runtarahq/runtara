@@ -2351,9 +2351,20 @@ fn bucket_count(
 /// One bucket of tenant execution metrics.
 #[derive(Debug)]
 pub struct MetricsBucket {
+    /// Invocations with a valid duration observation.
+    pub duration_observation_count: i64,
+    /// Invocations with a peak-memory observation.
+    pub memory_observation_count: i64,
+    /// Invocations with a CPU-time observation.
+    pub cpu_observation_count: i64,
+    /// Mean CPU time in seconds, excluding missing observations.
+    pub avg_cpu_seconds: Option<f64>,
+    /// Highest CPU time in seconds.
+    pub max_cpu_seconds: Option<f64>,
+
     /// Bucket start.
     pub bucket_time: DateTime<Utc>,
-    /// Invocations started in the bucket.
+    /// Invocations reaching their first terminal state in the bucket.
     pub invocation_count: i64,
     /// Invocations that completed successfully.
     pub success_count: i64,
@@ -2394,9 +2405,14 @@ pub async fn handle_get_tenant_metrics(
     // library and that boundary is not its only door. A zero width divides by
     // zero in the query, and an unbounded bucket count turns the empty-bucket
     // spine into the dominant cost of the whole aggregation.
-    if options.bucket_seconds == 0 {
+    if options.bucket_seconds < 60 || !options.bucket_seconds.is_multiple_of(60) {
         return Err(crate::error::Error::InvalidRequest(
-            "bucket_seconds must be at least 1".to_string(),
+            "bucket_seconds must be a multiple of 60 (minute-resolution Usage history)".to_string(),
+        ));
+    }
+    if options.end_time <= options.start_time {
+        return Err(crate::error::Error::InvalidRequest(
+            "end_time must be after start_time".into(),
         ));
     }
     let buckets = bucket_count(options.bucket_seconds, options.start_time, options.end_time);
@@ -2421,6 +2437,11 @@ pub async fn handle_get_tenant_metrics(
         .map(|row| {
             let terminal_count = row.success_count + row.failure_count + row.cancelled_count;
             MetricsBucket {
+                duration_observation_count: row.duration_observation_count,
+                memory_observation_count: row.memory_observation_count,
+                cpu_observation_count: row.cpu_observation_count,
+                avg_cpu_seconds: row.avg_cpu_seconds,
+                max_cpu_seconds: row.max_cpu_seconds,
                 bucket_time: row.bucket_time,
                 invocation_count: row.invocation_count,
                 success_count: row.success_count,
