@@ -46,6 +46,23 @@ pub use runtara_workflow_wit::RUNTIME_INTERFACE_NAME;
 /// byte-identical persistence behavior.
 pub const DURABLE_SLEEP_CHECKPOINT_ID: &str = "__direct_workflow_runtime_durable_sleep";
 
+/// WIT mirror of the authoritative managed-input state.
+#[derive(
+    Debug, Clone, PartialEq, Eq, wasmtime::component::ComponentType, wasmtime::component::Lower,
+)]
+#[component(variant)]
+pub enum RuntimeInputState {
+    /// Awaiting input before the persistence deadline.
+    #[component(name = "open")]
+    Open,
+    /// Immutable accepted response, retained for replay.
+    #[component(name = "accepted")]
+    Accepted(Vec<u8>),
+    /// Closed without a response; value is a machine-readable reason.
+    #[component(name = "closed")]
+    Closed(String),
+}
+
 /// WIT mirror of `runtime.signal-info`.
 ///
 /// Field order and kebab names must match the WIT record exactly — wasmtime
@@ -116,8 +133,9 @@ pub struct RuntimeCheckpointResult {
 ///   checkpoint, then sleep the FULL duration in-process (no resume-remaining
 ///   math — parity with today's guest-visible behavior; the suspend/re-invoke
 ///   model arrives in a later phase).
-/// - Errors are returned as guest-visible `Err(String)` (the WIT `result`'s
-///   err arm), not traps; a trap is reserved for host misconfiguration.
+/// - Ordinary errors are returned as guest-visible `Err(String)` (the WIT
+///   `result`'s err arm). Host misconfiguration and unconfirmed managed-input
+///   abandonment trap: the guest must not recover past a failed mandatory close.
 ///
 /// Scoped child hosts capture terminal callbacks locally and report lifecycle
 /// receipts to a root-owned coordinator instead of applying root transitions.
@@ -153,6 +171,24 @@ pub trait RuntimeHost: Send + Sync {
     async fn check_signals(&self) -> Result<bool, String>;
     /// Poll a custom signal scoped to `checkpoint_id`.
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String>;
+    /// Register a managed wait under this host's immutable execution authority.
+    async fn register_input(
+        &self,
+        _descriptor: Vec<u8>,
+        _deadline_ms: Option<u64>,
+    ) -> Result<(), String> {
+        Err("runtime does not support managed inputs".into())
+    }
+    /// Authoritative response read and deadline arbitration.
+    async fn poll_input(&self, _signal_id: String) -> Result<RuntimeInputState, String> {
+        Err("runtime does not support managed inputs".into())
+    }
+    /// Abandon a wait under this host's authority; accepted responses are retained.
+    /// The native import traps on failure so guest error handling cannot continue
+    /// with an orphaned request. Supervision must settle the failed execution.
+    async fn close_input(&self, _signal_id: String) -> Result<RuntimeInputState, String> {
+        Err("runtime does not support managed inputs".into())
+    }
     /// Read-only checkpoint lookup.
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String>;
     /// Combined save/load checkpoint (see core `handle_checkpoint`).
@@ -355,6 +391,34 @@ fn add_runtime_version_to_linker(
         |mut store: StoreContextMut<'_, WorkflowState>, (checkpoint_id,): (String,)| {
             let host = require_host(&mut store);
             Box::new(async move { Ok((host?.poll_custom_signal(checkpoint_id).await,)) })
+        },
+    )?;
+
+    inst.func_wrap_async(
+        "register-input",
+        |mut store: StoreContextMut<'_, WorkflowState>,
+         (descriptor, deadline): (Vec<u8>, Option<u64>)| {
+            let host = require_host(&mut store);
+            Box::new(async move { Ok((host?.register_input(descriptor, deadline).await,)) })
+        },
+    )?;
+    inst.func_wrap_async(
+        "poll-input",
+        |mut store: StoreContextMut<'_, WorkflowState>, (signal_id,): (String,)| {
+            let host = require_host(&mut store);
+            Box::new(async move { Ok((host?.poll_input(signal_id).await,)) })
+        },
+    )?;
+    inst.func_wrap_async(
+        "close-input",
+        |mut store: StoreContextMut<'_, WorkflowState>, (signal_id,): (String,)| {
+            let host = require_host(&mut store);
+            Box::new(async move {
+                let state = host?.close_input(signal_id).await.map_err(|_| {
+                    wasmtime::format_err!("managed input abandonment could not be confirmed")
+                })?;
+                Ok((Ok::<RuntimeInputState, String>(state),))
+            })
         },
     )?;
 

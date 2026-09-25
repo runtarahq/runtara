@@ -137,3 +137,7 @@ required-features = ["scoped-workflow-integration-tests"]
 [[test]]
 name = "cooperative_stop_test"
 required-features = ["scoped-workflow-integration-tests"]
+
+[[test]]
+name = "managed_inputs"
+required-features = ["scoped-workflow-integration-tests"]

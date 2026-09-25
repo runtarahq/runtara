@@ -1,9 +1,11 @@
 //! Actual composed Agent deadlines through public compilation and composition.
 use super::*;
+#[path = "../../../tests/support/managed_inputs.rs"]
+mod managed_inputs;
 #[path = "../../../../runtara-component-host/tests/common/outbound.rs"]
 mod outbound_fixture;
 use runtara_component_host::runtime_host::{
-    RuntimeCheckpointResult, RuntimeHost, RuntimeSignalInfo,
+    RuntimeCheckpointResult, RuntimeHost, RuntimeInputState, RuntimeSignalInfo,
 };
 use runtara_component_host::{InvokeExit, WorkflowExecutor, WorkflowRunSpec};
 use serde_json::{Value, json};
@@ -60,7 +62,7 @@ struct Host {
     checkpoint_signal_remaining: AtomicUsize,
     blocked_checkpoint: Mutex<Option<(String, usize)>>,
     checkpoint_blocked: AtomicBool,
-    custom_signals: Mutex<HashMap<String, Vec<u8>>>,
+    managed_inputs: managed_inputs::ManagedInputs,
     debug_enabled: AtomicBool,
     breakpoint_pause_calls: AtomicUsize,
     breakpoint_pause_error: Mutex<Option<String>>,
@@ -69,18 +71,18 @@ struct Host {
     late_return_cancel_on_start: AtomicBool,
     late_return_starts: AtomicUsize,
     late_return_cleanups: AtomicUsize,
-    /// How many times a custom-signal poll has run, which for a waiting child
+    /// How many times a managed-input poll has run, which for a waiting child
     /// counts how often the parent actually invoked it.
-    custom_signal_polls: AtomicUsize,
-    /// Report a lifecycle suspend once this many custom-signal polls have
+    input_polls: AtomicUsize,
+    /// Report a lifecycle suspend once this many managed-input polls have
     /// happened. `usize::MAX` never suspends.
-    suspend_after_custom_poll: AtomicUsize,
-    /// Report a root cancel once this many custom-signal polls have happened.
-    cancel_after_custom_poll: AtomicUsize,
-    /// Every custom-signal route polled, in order. A nested wait's route
+    suspend_after_input_poll: AtomicUsize,
+    /// Report a root cancel once this many managed-input polls have happened.
+    cancel_after_input_poll: AtomicUsize,
+    /// Every managed-input address polled, in order. A nested wait's route
     /// encodes its whole call path, so this also shows that replay rebuilds
     /// the same route after a park.
-    custom_signal_keys: Mutex<Vec<String>>,
+    input_keys: Mutex<Vec<String>>,
 }
 impl Host {
     fn new() -> Self {
@@ -104,7 +106,7 @@ impl Host {
             checkpoint_signal_remaining: AtomicUsize::new(usize::MAX),
             blocked_checkpoint: Mutex::new(None),
             checkpoint_blocked: AtomicBool::new(false),
-            custom_signals: Mutex::new(HashMap::new()),
+            managed_inputs: managed_inputs::ManagedInputs::new("agent-deadline"),
             debug_enabled: AtomicBool::new(false),
             breakpoint_pause_calls: AtomicUsize::new(0),
             breakpoint_pause_error: Mutex::new(Some("unexpected breakpoint".into())),
@@ -113,10 +115,10 @@ impl Host {
             late_return_cancel_on_start: AtomicBool::new(false),
             late_return_starts: AtomicUsize::new(0),
             late_return_cleanups: AtomicUsize::new(0),
-            custom_signal_polls: AtomicUsize::new(0),
-            suspend_after_custom_poll: AtomicUsize::new(usize::MAX),
-            cancel_after_custom_poll: AtomicUsize::new(usize::MAX),
-            custom_signal_keys: Mutex::new(Vec::new()),
+            input_polls: AtomicUsize::new(0),
+            suspend_after_input_poll: AtomicUsize::new(usize::MAX),
+            cancel_after_input_poll: AtomicUsize::new(usize::MAX),
+            input_keys: Mutex::new(Vec::new()),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -210,8 +212,8 @@ impl RuntimeHost for Host {
     }
     async fn poll_signal(&self) -> Result<Option<RuntimeSignalInfo>, String> {
         Ok((self.cancel.load(Ordering::SeqCst)
-            || self.custom_signal_polls.load(Ordering::SeqCst)
-                >= self.cancel_after_custom_poll.load(Ordering::SeqCst))
+            || self.input_polls.load(Ordering::SeqCst)
+                >= self.cancel_after_input_poll.load(Ordering::SeqCst))
         .then(|| RuntimeSignalInfo {
             signal_type: "cancel".into(),
             command_id: "root-cancel".into(),
@@ -223,13 +225,26 @@ impl RuntimeHost for Host {
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
-        Ok(self.custom_signal_polls.load(Ordering::SeqCst)
-            >= self.suspend_after_custom_poll.load(Ordering::SeqCst))
+        Ok(self.input_polls.load(Ordering::SeqCst)
+            >= self.suspend_after_input_poll.load(Ordering::SeqCst))
     }
-    async fn poll_custom_signal(&self, key: String) -> Result<Option<Vec<u8>>, String> {
-        self.custom_signal_polls.fetch_add(1, Ordering::SeqCst);
-        self.custom_signal_keys.lock().unwrap().push(key.clone());
-        Ok(self.custom_signals.lock().unwrap().get(&key).cloned())
+    async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+        Err("compiled waits must use managed input polling".into())
+    }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        self.managed_inputs.register(descriptor, deadline).await
+    }
+    async fn poll_input(&self, key: String) -> Result<RuntimeInputState, String> {
+        self.input_polls.fetch_add(1, Ordering::SeqCst);
+        self.input_keys.lock().unwrap().push(key.clone());
+        self.managed_inputs.poll(&key).await
+    }
+    async fn close_input(&self, key: String) -> Result<RuntimeInputState, String> {
+        self.managed_inputs.close(&key).await
     }
     async fn get_checkpoint(&self, key: String) -> Result<Option<Vec<u8>>, String> {
         if self.checkpoint_error(&key, false) {

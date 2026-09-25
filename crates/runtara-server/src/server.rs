@@ -76,6 +76,17 @@ use runtime_client::RuntimeClient;
         api::handlers::workflows::list_folders_handler,
         api::handlers::workflows::rename_folder_handler,
         api::handlers::step_events::get_step_events,
+        api::handlers::step_events::get_pending_input,
+        api::handlers::sessions::session_pending_input,
+        api::handlers::sessions::submit_event,
+        api::handlers::sessions::list_session_deliveries,
+        api::handlers::sessions::get_session_delivery,
+        api::handlers::sessions::resolve_session_delivery,
+        api::handlers::step_events::submit_signal,
+        api::handlers::step_events::list_workflow_open_actions,
+        api::handlers::step_events::list_workflow_instance_open_actions,
+        api::handlers::step_events::submit_workflow_action,
+        api::handlers::reports::submit_report_workflow_action,
         api::handlers::step_summaries::get_step_summaries,
         // Agent endpoints
         api::handlers::operators::list_agents_handler,
@@ -168,6 +179,11 @@ use runtime_client::RuntimeClient;
         schemas(
             // Common DTOs
             api::dto::common::ErrorResponse,
+            api::services::workflow_runtime::WorkflowRuntimeAction,
+            api::services::workflow_runtime::WorkflowRuntimeActionPage,
+            api::services::workflow_runtime::WorkflowActionReceipt,
+            api::services::workflow_runtime::SubmitWorkflowActionRequest,
+            api::services::workflow_runtime::InputSubmissionErrorResponse,
             // API Key DTOs
             api::handlers::api_keys::ApiKey,
             api::handlers::api_keys::CreateApiKeyRequest,
@@ -1649,6 +1665,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
+    if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
+        let engine = execution_engine.clone();
+        let shutdown = shutdown_signal.clone();
+        shutdown_coordinator.spawn_intake(async move {
+            workers::session_delivery_worker::run(connection, client, engine, shutdown).await;
+        });
+    }
 
     // Cron does not publish to Valkey directly. Its durable enqueue remains
     // available during an outage, and the relay delivers it when connectivity
@@ -1821,6 +1844,18 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/sessions/{sessionId}/events",
             post(api::handlers::sessions::submit_event)
                 .get(api::handlers::sessions::session_event_stream),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries",
+            get(api::handlers::sessions::list_session_deliveries),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
+            get(api::handlers::sessions::get_session_delivery),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
+            post(api::handlers::sessions::resolve_session_delivery),
         )
         .route(
             "/api/runtime/sessions/{sessionId}/pending-input",

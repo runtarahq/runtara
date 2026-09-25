@@ -37,8 +37,11 @@ export type ChatStatus =
   'idle' | 'streaming' | 'waiting_for_input' | 'done' | 'error';
 
 export interface WaitingForInputData {
+  /** Original target, retained when a session advances after a lost acknowledgement. */
+  instanceId?: string;
+  requestId: string;
   signalId: string;
   message?: string;
-  responseSchema?: Record<string, unknown>;
-  toolName?: string;
+  responseSchema?: Record<string, unknown> | null;
+  toolName?: string | null;
 }

@@ -38,6 +38,25 @@ pub struct EmbeddedBackend {
 }
 
 impl EmbeddedBackend {
+    fn input_authority(&self) -> runtara_core::persistence::inputs::InputAuthority {
+        runtara_core::persistence::inputs::InputAuthority::Root {
+            tenant_id: self.tenant_id.clone(),
+            instance_id: self.instance_id.clone(),
+        }
+    }
+    fn input_state(
+        state: runtara_core::persistence::inputs::InputState,
+    ) -> crate::types::InputState {
+        use runtara_core::persistence::inputs::InputState;
+        match state {
+            InputState::Open => crate::types::InputState::Open,
+            InputState::Accepted { receipt } => crate::types::InputState::Accepted(receipt.payload),
+            InputState::Closed { reason, .. } => {
+                crate::types::InputState::Closed(reason.as_str().into())
+            }
+        }
+    }
+
     /// Create a new embedded backend.
     ///
     /// # Arguments
@@ -413,6 +432,47 @@ impl SdkBackend for EmbeddedBackend {
                 error: None,
             }),
         }
+    }
+
+    fn register_input(&self, descriptor: &[u8], deadline_ms: Option<u64>) -> Result<()> {
+        use runtara_core::persistence::inputs::InputRequestSpec;
+        let spec = InputRequestSpec::from_descriptor(descriptor, deadline_ms)
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+        let inputs = self.persistence.input_requests().ok_or_else(|| {
+            SdkError::Internal("persistence does not support managed inputs".into())
+        })?;
+        self.rt
+            .block_on(inputs.register_input(&self.input_authority(), &spec))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+        Ok(())
+    }
+    fn poll_input(&self, signal_id: &str) -> Result<crate::types::InputState> {
+        let inputs = self.persistence.input_requests().ok_or_else(|| {
+            SdkError::Internal("persistence does not support managed inputs".into())
+        })?;
+        let record = self
+            .rt
+            .block_on(inputs.poll_input(
+                &self.input_authority(),
+                &runtara_core::persistence::inputs::request_id(signal_id),
+            ))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+        Ok(Self::input_state(record.state))
+    }
+    fn close_input(&self, signal_id: &str) -> Result<crate::types::InputState> {
+        use runtara_core::persistence::inputs::{InputClosure, request_id};
+        let inputs = self.persistence.input_requests().ok_or_else(|| {
+            SdkError::Internal("persistence does not support managed inputs".into())
+        })?;
+        let record = self
+            .rt
+            .block_on(inputs.close_input(
+                &self.input_authority(),
+                &request_id(signal_id),
+                InputClosure::Abandoned,
+            ))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+        Ok(Self::input_state(record.state))
     }
 
     fn poll_signals(

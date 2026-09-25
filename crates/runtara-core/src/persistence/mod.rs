@@ -16,6 +16,9 @@ pub mod vocabulary;
 /// Atomic optional ownership for isolated invocation persistence.
 pub mod invocations;
 
+/// Authoritative external input requests and immutable acceptance receipts.
+pub mod inputs;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -453,6 +456,11 @@ impl<'a> CompleteInstanceParams<'a> {
 /// Persistence interface used by core handlers.
 #[async_trait]
 pub trait Persistence: Send + Sync {
+    /// Atomic managed input capability. Callers must fail closed if unavailable.
+    fn input_requests(&self) -> Option<&dyn inputs::InputRequests> {
+        None
+    }
+
     /// Optional atomic invocation fencing. Callers requiring durable fences must
     /// reject absence rather than use check-then-write persistence. Legacy calls
     /// are unchanged.
@@ -780,6 +788,24 @@ pub trait Persistence: Send + Sync {
         request: crate::lifecycle::ParkRequest,
     ) -> Result<crate::lifecycle::Decision, CoreError>;
 
+    /// Park with the exact signal identities that can resume this execution.
+    /// Managed-input backends must atomically persist this association and
+    /// schedule a wake for a response accepted before the park.
+    async fn park_instance_on_signals(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+        _signals: &[String],
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        if self.input_requests().is_some() {
+            return Err(CoreError::PersistenceError {
+                operation: "park_instance_on_signals".into(),
+                details: "managed input parking is not implemented".into(),
+            });
+        }
+        self.park_instance(instance_id, request).await
+    }
+
     /// Atomically cancel suspended instances with pending cancel commands, clear
     /// their wake deadlines, and acknowledge those exact commands. Returns only
     /// newly cancelled instances. Active runs and terminal instances are untouched.
@@ -954,6 +980,31 @@ pub trait Persistence: Send + Sync {
         deadline: DateTime<Utc>,
         reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError>;
+
+    /// Wake an unmanaged signal waiter under the same lock as lifecycle changes.
+    /// Preserve a scheduler claim already handed off for the current park.
+    async fn schedule_signal_wake(&self, _instance_id: &str) -> Result<bool, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "schedule_signal_wake".into(),
+            details: "conditional signal wake is not implemented".into(),
+        })
+    }
+
+    /// Return a claimed wake to the scheduler only if this exact lease is still
+    /// current. A pause, terminal transition, enqueue or newer claim wins over
+    /// a late failed-launch/drain retry.
+    async fn reschedule_claimed_wake(
+        &self,
+        _instance_id: &str,
+        _claimed_until: DateTime<Utc>,
+        _retry_at: DateTime<Utc>,
+        _reason: crate::domain::WakeReason,
+    ) -> Result<bool, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "reschedule_claimed_wake".into(),
+            details: "conditional wake retry is not implemented".into(),
+        })
+    }
 
     /// Clear the sleep_until timestamp for an instance.
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;

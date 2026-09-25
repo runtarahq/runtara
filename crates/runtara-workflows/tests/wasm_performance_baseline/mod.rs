@@ -123,8 +123,9 @@ pub(super) fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<C
         connection_metadata_requests: Mutex::new(Vec::new()),
         sql_responses: Mutex::new(Vec::new()),
         sql_requests: Mutex::new(Vec::new()),
-        custom_signals: Mutex::new(Vec::new()),
-        custom_signal_polls: Mutex::new(0),
+        managed_inputs: Default::default(),
+        input_responses: Mutex::new(Vec::new()),
+        accepted_input_polls: Mutex::new(0),
     };
     (
         Arc::new(CapturingRuntimeHost {

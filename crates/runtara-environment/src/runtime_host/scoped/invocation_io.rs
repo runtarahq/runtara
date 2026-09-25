@@ -135,15 +135,11 @@ impl TaskLifecycle for InvocationIo {
             self.persistence
                 .invocation_fences()
                 .unwrap()
-                .begin_invocation_attempt(
-                    &self.fence.lease,
-                    &self.fence.path,
-                    &self.fence.start_id,
-                ),
+                .inspect_invocation_attempt(&self.fence),
         )
         .await;
         match result {
-            Ok(Ok(attempt)) if attempt.fence == self.fence => match attempt.state {
+            Ok(Ok(state)) => match state {
                 AttemptState::Active => Ok(None),
                 AttemptState::Cancelled => Ok(Some(InvokeExit::Cancelled)),
                 AttemptState::Settled => {
@@ -160,25 +156,37 @@ impl TaskLifecycle for InvocationIo {
     async fn settle(
         &self,
         outcome: Result<InvokeExit, TaskError>,
-        _: TaskCancellation,
+        cancel: TaskCancellation,
     ) -> Result<InvokeExit, TaskError> {
         if let Ok(outcome) = outcome
             && !self.failed()
         {
-            let result = tokio::time::timeout(
-                self.control_timeout,
-                self.persistence
-                    .invocation_fences()
-                    .unwrap()
-                    .settle_invocation_attempt(&self.fence, None),
-            )
-            .await;
-            if let Ok(Ok(settlement)) = result {
-                return Ok(if settlement.state == AttemptState::Cancelled {
-                    InvokeExit::Cancelled
-                } else {
-                    outcome
-                });
+            let fences = self.persistence.invocation_fences().unwrap();
+            let preserve = matches!(&outcome, InvokeExit::Suspended(_))
+                || (matches!(&outcome, InvokeExit::Cancelled) && cancel.is_resumable_teardown());
+            let transition = async {
+                match &outcome {
+                    // A durable park keeps its logical owner across lease
+                    // release/replay. Inspect also observes concurrent cancel.
+                    _ if preserve => fences.inspect_invocation_attempt(&self.fence).await,
+                    InvokeExit::Cancelled => fences.cancel_invocation_attempt(&self.fence).await,
+                    _ => fences
+                        .settle_invocation_attempt(&self.fence, None)
+                        .await
+                        .map(|settlement| settlement.state),
+                }
+            };
+            match tokio::time::timeout(self.control_timeout, transition).await {
+                Ok(Ok(AttemptState::Cancelled)) => return Ok(InvokeExit::Cancelled),
+                Ok(Ok(AttemptState::Active)) if preserve => {
+                    return Ok(outcome);
+                }
+                Ok(Ok(AttemptState::Settled))
+                    if !matches!(outcome, InvokeExit::Suspended(_) | InvokeExit::Cancelled) =>
+                {
+                    return Ok(outcome);
+                }
+                _ => {}
             }
         }
         self.failed.store(true, Ordering::Release);

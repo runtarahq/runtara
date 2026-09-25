@@ -207,6 +207,19 @@ impl InstanceRepository {
         )
     }
 
+    /// All tenant-owned instance associations for an exact workflow-name prefix.
+    /// Managed input discovery pages requests after this filter, not executions.
+    pub async fn ids_for_image_name_prefix(
+        &self,
+        tenant: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT i.instance_id FROM instances i JOIN instance_images ii USING(instance_id) JOIN images img USING(image_id) WHERE i.tenant_id=$1 AND img.name LIKE $2 ORDER BY i.instance_id COLLATE \"C\"",
+        ).bind(tenant).bind(format!("{}%", crate::db::escape_like_literal(prefix)))
+            .fetch_all(&self.pool).await?)
+    }
+
     /// Everything the server reports about one instance. `None` if there is no
     /// such row.
     pub async fn detail(&self, instance_id: &str) -> Result<Option<InstanceDetail>> {

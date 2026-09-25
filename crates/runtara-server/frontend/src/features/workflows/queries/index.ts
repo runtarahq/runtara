@@ -1,3 +1,5 @@
+import type { InputSubmission } from '../utils/input-submission';
+import { InputSubmissionError } from '../utils/input-submission';
 import {
   AgentInfo,
   ApiResponseWorkflowDto,
@@ -920,26 +922,20 @@ export async function deleteFolder(token: string, folderPath: string) {
 
 // --- WaitForSignal: Pending Input & Signal Delivery ---
 
-export interface PendingInput {
-  signalId: string;
-  toolName: string;
-  message: string;
-  responseSchema: Record<string, any>;
-  aiAgentStepId: string;
-  iteration: number;
-  callNumber: number;
-  requestedAt: string;
-}
+export type PendingInput =
+  import('@/generated/RuntaraRuntimeApi').PendingInputResponse;
 
 export async function getPendingInput(
   token: string,
   workflowId: string,
-  instanceId: string
-) {
+  instanceId: string,
+  signal?: AbortSignal
+): Promise<PendingInput[]> {
   const url = `${getRuntimeBaseUrl()}/workflows/${encodeURIComponent(workflowId)}/instances/${encodeURIComponent(instanceId)}/pending-input`;
 
   const response = await fetch(url, {
     method: 'GET',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
@@ -952,13 +948,16 @@ export async function getPendingInput(
 
   const json = await response.json();
   // API returns { success, data: { pendingInputs: [...], count } }
-  return json?.data?.pendingInputs ?? [];
+  if (!json.success || !Array.isArray(json.data?.pendingInputs)) {
+    throw new Error('Invalid pending input response');
+  }
+  return json.data.pendingInputs;
 }
 
 export async function deliverSignal(
   token: string,
   instanceId: string,
-  body: { signalId: string; payload: Record<string, any> }
+  body: InputSubmission
 ) {
   const url = `${getRuntimeBaseUrl()}/signals/${encodeURIComponent(instanceId)}`;
 
@@ -968,15 +967,22 @@ export async function deliverSignal(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({
-      checkpointId: body.signalId,
-      payload: body.payload,
-    }),
+    body: JSON.stringify(body),
   });
 
+  const result = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(`Failed to deliver signal: ${response.statusText}`);
+    throw new InputSubmissionError(
+      result?.message ??
+        'Response could not be confirmed. Retry the same response.',
+      result?.code,
+      response.status
+    );
   }
-
-  return response.json();
+  if (!result?.data?.receiptId || result.data.requestId !== body.requestId) {
+    throw new InputSubmissionError(
+      'Response could not be confirmed. Retry the same response.'
+    );
+  }
+  return result.data;
 }

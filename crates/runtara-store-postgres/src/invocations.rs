@@ -102,7 +102,7 @@ async fn load_lease(db: &mut PgConnection, instance: &str) -> FenceResult<Option
         .await
         .map_err(storage)
 }
-async fn check_lease(
+pub(crate) async fn check_lease(
     db: &mut PgConnection,
     token: &InvocationLease,
     active: bool,
@@ -126,7 +126,10 @@ async fn latest(
     row.map(|r| r.record(&lease.tenant_id, &lease.instance_id))
         .transpose()
 }
-async fn check_attempt(db: &mut PgConnection, token: &AttemptFence) -> FenceResult<AttemptState> {
+pub(crate) async fn check_attempt(
+    db: &mut PgConnection,
+    token: &AttemptFence,
+) -> FenceResult<AttemptState> {
     let current = latest(db, &token.lease, &token.path)
         .await?
         .ok_or_else(|| denied(FenceRejection::AttemptMismatch))?;
@@ -250,11 +253,32 @@ impl InvocationFences for PostgresPersistence {
             .map_err(storage)?;
         tx.commit().await.map_err(storage)
     }
+    async fn inspect_invocation_attempt(&self, fence: &AttemptFence) -> FenceResult<AttemptState> {
+        let mut tx = self
+            .invocation_transaction(&fence.lease.tenant_id, &fence.lease.instance_id, true)
+            .await?;
+        check_lease(&mut tx, &fence.lease, true).await?;
+        let state = check_attempt(&mut tx, fence).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(state)
+    }
+
     async fn begin_invocation_attempt(
         &self,
         token: &InvocationLease,
         path: &str,
         start_id: &str,
+    ) -> FenceResult<InvocationAttempt> {
+        self.begin_invocation_attempt_with_parent(token, path, start_id, None)
+            .await
+    }
+
+    async fn begin_invocation_attempt_with_parent(
+        &self,
+        token: &InvocationLease,
+        path: &str,
+        start_id: &str,
+        parent: Option<&AttemptFence>,
     ) -> FenceResult<InvocationAttempt> {
         validate_identity(path)?;
         validate_identity(start_id)?;
@@ -262,6 +286,25 @@ impl InvocationFences for PostgresPersistence {
             .invocation_transaction(&token.tenant_id, &token.instance_id, true)
             .await?;
         check_lease(&mut tx, token, true).await?;
+        if let Some(parent) = parent {
+            if parent.lease != *token || parent.path == path {
+                return Err(denied(FenceRejection::AttemptMismatch));
+            }
+            match check_attempt(&mut tx, parent).await? {
+                AttemptState::Active => {}
+                AttemptState::Cancelled => return Err(denied(FenceRejection::Cancelled)),
+                AttemptState::Settled => return Err(denied(FenceRejection::Settled)),
+            }
+        }
+        let parent_path = parent.map(|fence| fence.path.as_str());
+        let previous_parent: Option<Option<String>> = sqlx::query_scalar("SELECT parent_path FROM invocation_attempts WHERE instance_id=$1 AND invocation_path=$2 ORDER BY generation DESC LIMIT 1")
+            .bind(&token.instance_id).bind(path).fetch_optional(&mut *tx).await.map_err(storage)?;
+        if previous_parent
+            .as_ref()
+            .is_some_and(|existing| existing.as_deref() != parent_path)
+        {
+            return Err(denied(FenceRejection::AttemptMismatch));
+        }
         let previous: Option<AttemptRow> = sqlx::query_as("SELECT owner,lease_epoch,invocation_path,generation,start_id,state FROM invocation_attempts WHERE instance_id=$1 AND lease_epoch=$2 AND start_id=$3")
             .bind(&token.instance_id).bind(token.epoch).bind(start_id).fetch_optional(&mut *tx).await.map_err(storage)?;
         if let Some(previous) = previous {
@@ -291,8 +334,8 @@ impl InvocationFences for PostgresPersistence {
         let generation = generation
             .checked_add(1)
             .ok_or_else(|| denied(FenceRejection::InvalidIdentity))?;
-        sqlx::query("INSERT INTO invocation_attempts (instance_id,generation,lease_epoch,owner,invocation_path,start_id,state) VALUES ($1,$2,$3,$4,$5,$6,'active')")
-            .bind(&token.instance_id).bind(generation).bind(token.epoch).bind(&token.owner).bind(path).bind(start_id).execute(&mut *tx).await.map_err(storage)?;
+        sqlx::query("INSERT INTO invocation_attempts (instance_id,generation,lease_epoch,owner,invocation_path,start_id,state,parent_path) VALUES ($1,$2,$3,$4,$5,$6,'active',$7)")
+            .bind(&token.instance_id).bind(generation).bind(token.epoch).bind(&token.owner).bind(path).bind(start_id).bind(parent_path).execute(&mut *tx).await.map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         Ok(InvocationAttempt {
             fence: AttemptFence {
@@ -311,6 +354,14 @@ impl InvocationFences for PostgresPersistence {
         let mut state = check_attempt(&mut tx, token).await?;
         if state == AttemptState::Active {
             sqlx::query("UPDATE invocation_attempts SET state='cancelled' WHERE instance_id=$1 AND generation=$2").bind(&token.lease.instance_id).bind(token.generation).execute(&mut *tx).await.map_err(storage)?;
+            crate::inputs::close_invocation(
+                &mut tx,
+                &token.lease.instance_id,
+                &token.path,
+                runtara_core::persistence::inputs::InputClosure::InvocationCancelled,
+            )
+            .await
+            .map_err(storage)?;
             state = AttemptState::Cancelled;
         }
         tx.commit().await.map_err(storage)?;
@@ -335,6 +386,14 @@ impl InvocationFences for PostgresPersistence {
                 committed = Some(checkpoint(&mut tx, token, write).await?);
             }
             sqlx::query("UPDATE invocation_attempts SET state='settled' WHERE instance_id=$1 AND generation=$2").bind(&token.lease.instance_id).bind(token.generation).execute(&mut *tx).await.map_err(storage)?;
+            crate::inputs::close_invocation(
+                &mut tx,
+                &token.lease.instance_id,
+                &token.path,
+                runtara_core::persistence::inputs::InputClosure::InvocationSettled,
+            )
+            .await
+            .map_err(storage)?;
             state = AttemptState::Settled;
         }
         tx.commit().await.map_err(storage)?;

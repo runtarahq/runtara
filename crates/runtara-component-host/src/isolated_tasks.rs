@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
@@ -18,11 +18,35 @@ use wasmtime::Engine;
 
 use crate::InvokeExit;
 
+type CleanupFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
+
+/// Whether owner teardown abandons descendants or preserves their logical work.
+/// This is host policy, never a guest-controlled cancellation argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeardownDisposition {
+    Terminal,
+    Resumable,
+}
+
 /// Owned descendant teardown. Construct before starting the parent task, and
 /// only start descendants inside that task's execution future. This must finish
 /// after all descendant execution resources have been destroyed; no guest result
 /// is published when cleanup fails or panics.
-pub type TaskCleanup = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
+pub struct TaskCleanup(Box<dyn FnOnce(TeardownDisposition) -> CleanupFuture + Send>);
+
+impl TaskCleanup {
+    pub fn new(future: impl Future<Output = Result<(), TaskError>> + Send + 'static) -> Self {
+        Self::with_disposition(move |_| future)
+    }
+
+    pub fn with_disposition<F, Fut>(cleanup: F) -> Self
+    where
+        F: FnOnce(TeardownDisposition) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
+    {
+        Self(Box::new(move |disposition| Box::pin(cleanup(disposition))))
+    }
+}
 
 /// Optional host-only durable admission and outcome arbitration. The guest still
 /// chooses graph successors and retries. Ordinary tasks install no lifecycle.
@@ -91,13 +115,26 @@ enum Phase {
 struct Control {
     phase: Mutex<Phase>,
     requested: AtomicBool,
+    stop: AtomicU8,
+    disposition_ready: Notify,
     wake: Notify,
     engine: Arc<Engine>,
 }
 
+const OWNER_PENDING: u8 = 1;
+const OWNER_RESUMABLE: u8 = 2;
+const OWNER_TERMINAL: u8 = 4;
+const LOCAL_CANCEL: u8 = 8;
+
 impl Control {
-    fn cancel(&self) -> CancelResult {
+    fn cancel(&self, reason: u8) -> CancelResult {
         let mut phase = self.phase.lock().unwrap();
+        if *phase != Phase::Terminal {
+            // Explicit cancellation is sticky, including when it arrives after
+            // an owner has requested resumable teardown.
+            self.stop.fetch_or(reason, Ordering::AcqRel);
+            self.disposition_ready.notify_one();
+        }
         match *phase {
             Phase::Terminal => CancelResult::AlreadyTerminal,
             Phase::Stopping => CancelResult::AlreadyRequested,
@@ -122,6 +159,28 @@ pub struct TaskCancellation(Arc<Control>);
 impl TaskCancellation {
     pub fn is_requested(&self) -> bool {
         self.0.requested.load(Ordering::Acquire)
+    }
+
+    pub fn is_explicitly_cancelled(&self) -> bool {
+        self.0.stop.load(Ordering::Acquire) & LOCAL_CANCEL != 0
+    }
+
+    /// Physical owner teardown may stop a Store without cancelling its durable
+    /// logical attempt. Explicit local cancellation always takes precedence.
+    pub fn is_resumable_teardown(&self) -> bool {
+        self.0.stop.load(Ordering::Acquire) & (OWNER_RESUMABLE | OWNER_TERMINAL | LOCAL_CANCEL)
+            == OWNER_RESUMABLE
+    }
+
+    async fn await_owner_disposition(&self) {
+        loop {
+            let notified = self.0.disposition_ready.notified();
+            let stop = self.0.stop.load(Ordering::Acquire);
+            if stop & OWNER_PENDING == 0 || stop & !OWNER_PENDING != 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -322,6 +381,8 @@ impl IsolatedTasks {
         let control = Arc::new(Control {
             phase: Mutex::new(Phase::Running),
             requested: AtomicBool::new(false),
+            stop: AtomicU8::new(0),
+            disposition_ready: Notify::new(),
             wake: Notify::new(),
             engine: self.engine.clone(),
         });
@@ -377,8 +438,28 @@ impl IsolatedTasks {
                     })
                 }
             });
+            let token = TaskCancellation(finish_control.clone());
+            // Store Drop can precede the root's returned outcome. Stop physical
+            // execution immediately, but wait for the owner before deciding
+            // whether descendant teardown abandons durable work.
+            token.await_owner_disposition().await;
+            if token.is_requested() && candidate.is_ok() {
+                candidate = Ok(InvokeExit::Cancelled);
+            }
+            let disposition = match &candidate {
+                Ok(InvokeExit::Suspended(_)) => TeardownDisposition::Resumable,
+                Ok(InvokeExit::Cancelled) if token.is_resumable_teardown() => {
+                    TeardownDisposition::Resumable
+                }
+                _ => TeardownDisposition::Terminal,
+            };
             if let Some(cleanup) = cleanup
-                && !matches!(cleanup_runtime.spawn(cleanup).await, Ok(Ok(())))
+                && !matches!(
+                    cleanup_runtime
+                        .spawn(async move { (cleanup.0)(disposition).await })
+                        .await,
+                    Ok(Ok(()))
+                )
             {
                 candidate = Err(TaskError::WorkerLost);
             }
@@ -454,7 +535,13 @@ impl IsolatedTasks {
     }
 
     pub fn cancel(&self, id: TaskId) -> Result<CancelResult, TaskError> {
-        Ok(self.task(id)?.control.cancel())
+        Ok(self.task(id)?.control.cancel(LOCAL_CANCEL))
+    }
+
+    /// Automatic Store destruction stops work without guessing the owner's
+    /// lifecycle. The embedding must subsequently await `shutdown_with`.
+    pub(crate) fn owner_dropped(&self, id: TaskId) -> Result<CancelResult, TaskError> {
+        Ok(self.task(id)?.control.cancel(OWNER_PENDING))
     }
 
     pub async fn join(&self, id: TaskId) -> Result<Arc<TaskResult>, TaskError> {
@@ -469,7 +556,7 @@ impl IsolatedTasks {
         }
         let task = self.state.lock().unwrap().tasks.get(&id.sequence).cloned();
         if let Some(task) = task {
-            task.control.cancel();
+            task.control.cancel(LOCAL_CANCEL);
             task.reap().await?;
             self.state.lock().unwrap().tasks.remove(&id.sequence);
         }
@@ -477,6 +564,10 @@ impl IsolatedTasks {
     }
 
     pub async fn shutdown(&self) -> Result<(), TaskError> {
+        self.shutdown_with(TeardownDisposition::Terminal).await
+    }
+
+    pub async fn shutdown_with(&self, disposition: TeardownDisposition) -> Result<(), TaskError> {
         let _shutdown = self.shutdown_lock.lock().await;
         let tasks = {
             let mut state = self.state.lock().unwrap();
@@ -484,7 +575,10 @@ impl IsolatedTasks {
             state.tasks.values().cloned().collect::<Vec<_>>()
         };
         for task in &tasks {
-            task.control.cancel();
+            task.control.cancel(match disposition {
+                TeardownDisposition::Terminal => OWNER_TERMINAL,
+                TeardownDisposition::Resumable => OWNER_RESUMABLE,
+            });
         }
         let mut failed = false;
         for task in &tasks {
@@ -513,7 +607,7 @@ impl Drop for IsolatedTasks {
         // Last-resort cancellation. Root runners must await shutdown for a
         // teardown guarantee; Rust Drop cannot await asynchronous Store cleanup.
         for task in self.state.get_mut().unwrap().tasks.values() {
-            task.control.cancel();
+            task.control.cancel(OWNER_TERMINAL);
         }
     }
 }

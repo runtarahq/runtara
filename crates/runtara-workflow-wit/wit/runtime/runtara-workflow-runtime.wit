@@ -62,6 +62,26 @@ interface runtime {
         checkpoint-id: string,
     ) -> result<option<list<u8>>, string>;
 
+    /// Durable managed-input state, independent of debug telemetry.
+    variant input-state {
+        open,
+        accepted(list<u8>),
+        closed(string),
+    }
+
+    /// Register the immutable wait descriptor (JSON), with its original deadline.
+    /// Tenant and invocation authority come from the host, never the descriptor.
+    register-input: func(
+        descriptor: list<u8>,
+        deadline-ms: option<u64>,
+    ) -> result<_, string>;
+
+    /// Read accepted bytes or expire an unanswered wait using persistence time.
+    poll-input: func(signal-id: string) -> result<input-state, string>;
+
+    /// Abandon this wait without replacing a response that already won.
+    close-input: func(signal-id: string) -> result<input-state, string>;
+
     now-ms: func() -> result<u64, string>;
 
     durable-sleep: func(ms: u64) -> result<_, string>;

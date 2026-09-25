@@ -32,8 +32,8 @@ pub struct GetSignalSchemaParams {
     pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
-    #[schemars(description = "Signal ID to get the response schema for")]
-    pub signal_id: String,
+    #[schemars(description = "Opaque request ID to get the response schema for")]
+    pub request_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -41,10 +41,12 @@ pub struct GetSignalSchemaParams {
 pub struct SubmitSignalResponseParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
+    #[schemars(description = "Opaque requestId returned by list_pending_signals")]
+    pub request_id: String,
     #[schemars(
-        description = "Signal ID from the pending input request (returned by list_pending_signals)"
+        description = "Caller-generated operation ID. Reuse the same ID, request and payload after an uncertain acknowledgement."
     )]
-    pub signal_id: String,
+    pub operation_id: String,
     #[schemars(
         description = "Response payload as JSON. Should conform to the response_schema from the pending input."
     )]
@@ -55,10 +57,12 @@ pub struct SubmitSignalResponseParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitActionResponseParams {
-    #[schemars(
-        description = "Action ID from a workflow_runtime action row. Canonical IDs may contain '/', '::', and step suffixes."
-    )]
+    #[schemars(description = "Opaque requestId/actionId from a managed workflow action row.")]
     pub action_id: String,
+    #[schemars(
+        description = "Caller-generated operation ID. Reuse with the identical target and payload after a timeout or uncertain acknowledgement."
+    )]
+    pub operation_id: String,
     #[schemars(
         description = "Response payload as JSON. Validated against the action input schema."
     )]
@@ -69,7 +73,7 @@ pub struct SubmitActionResponseParams {
     )]
     pub workflow_id: Option<String>,
     #[schemars(
-        description = "Execution instance UUID for direct workflow action submission. Provide with workflow_id, or omit when using report_id + block_id."
+        description = "Execution instance UUID from the action row. Required for both direct and report-scoped submissions."
     )]
     pub instance_id: Option<String>,
     #[schemars(
@@ -92,7 +96,7 @@ pub struct SubmitActionResponseParams {
 
 // ===== Tool Implementations =====
 
-/// List pending signals (WaitForSignal / human-in-the-loop requests) for a running execution.
+/// List pending signals (WaitForSignal / human-in-the-loop requests) for an eligible running or suspended execution.
 pub async fn list_pending_signals(
     server: &SmoMcpServer,
     params: ListPendingSignalsParams,
@@ -117,7 +121,7 @@ pub async fn get_signal_schema(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
-    validate_identifier_param("signal_id", &params.signal_id)?;
+    validate_identifier_param("request_id", &params.request_id)?;
     let result = api_get(
         server,
         &format!(
@@ -134,7 +138,7 @@ pub async fn get_signal_schema(
         .and_then(|inputs| {
             inputs
                 .iter()
-                .find(|i| i.get("signalId").and_then(|v| v.as_str()) == Some(&params.signal_id))
+                .find(|i| i.get("requestId").and_then(|v| v.as_str()) == Some(&params.request_id))
         })
         .cloned();
 
@@ -142,7 +146,7 @@ pub async fn get_signal_schema(
         Some(signal) => json_result(serde_json::json!({
             "success": true,
             "data": {
-                "signalId": params.signal_id,
+                "requestId": params.request_id,
                 "message": signal.get("message"),
                 "responseSchema": signal.get("responseSchema"),
                 "toolName": signal.get("toolName"),
@@ -150,23 +154,24 @@ pub async fn get_signal_schema(
         })),
         None => json_result(serde_json::json!({
             "success": false,
-            "message": format!("No pending signal found with ID '{}'", params.signal_id),
+            "message": format!("No pending request found with ID '{}'", params.request_id),
         })),
     }
 }
 
-/// Submit a response to a pending signal, resuming the waiting execution.
+/// Accept a managed response or replay its receipt. Explicit pauses are preserved.
 pub async fn submit_signal_response(
     server: &SmoMcpServer,
     params: SubmitSignalResponseParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("instance_id", &params.instance_id)?;
-    validate_identifier_param("signal_id", &params.signal_id)?;
+    validate_identifier_param("request_id", &params.request_id)?;
     // Recover a client-stringified payload object so the waiting step receives an
     // object, not a JSON string.
     let payload = normalize_json_arg(params.payload, "payload")?;
     let body = serde_json::json!({
-        "signalId": params.signal_id,
+        "requestId": params.request_id,
+        "operationId": params.operation_id,
         "payload": payload,
     });
     let result = api_post(
@@ -212,12 +217,13 @@ pub async fn submit_action_response(
                     instance_id,
                     encode_path_param(&params.action_id)
                 ),
-                Some(serde_json::json!({ "payload": payload })),
+                Some(serde_json::json!({ "requestId": params.action_id, "operationId": params.operation_id, "payload": payload })),
             )
             .await?;
             json_result(result)
         }
-        (None, None, Some(report_id), Some(block_id)) => {
+        (None, Some(instance_id), Some(report_id), Some(block_id)) => {
+            validate_path_param("instance_id", &instance_id)?;
             validate_path_param("report_id", &report_id)?;
             validate_path_param("block_id", &block_id)?;
 
@@ -240,6 +246,9 @@ pub async fn submit_action_response(
                     encode_path_param(&params.action_id)
                 ),
                 Some(serde_json::json!({
+                    "instanceId": instance_id,
+                    "requestId": params.action_id,
+                    "operationId": params.operation_id,
                     "payload": payload,
                     "filters": filters,
                     "blockFilters": block_filters,
@@ -249,8 +258,38 @@ pub async fn submit_action_response(
             json_result(result)
         }
         _ => Err(rmcp::ErrorData::invalid_params(
-            "Provide exactly one action context: workflow_id + instance_id, or report_id + block_id.",
+            "Provide instance_id and exactly one action context: workflow_id, or report_id + block_id.",
             None,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn managed_signal_parameters_require_request_and_operation_identity() {
+        let valid = json!({"instance_id":"instance", "request_id":"request", "operation_id":"operation", "payload":{"answer":true}});
+        let parsed: SubmitSignalResponseParams = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(parsed.request_id, "request");
+        assert_eq!(parsed.operation_id, "operation");
+        for field in ["request_id", "operation_id"] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<SubmitSignalResponseParams>(missing).is_err());
+        }
+        assert!(
+            serde_json::from_value::<SubmitSignalResponseParams>(
+                json!({"instance_id":"instance","signal_id":"legacy","payload":{}})
+            )
+            .is_err()
+        );
+        let schema =
+            serde_json::to_value(schemars::schema_for!(SubmitSignalResponseParams)).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("operation_id")));
+        assert!(required.contains(&json!("request_id")));
     }
 }

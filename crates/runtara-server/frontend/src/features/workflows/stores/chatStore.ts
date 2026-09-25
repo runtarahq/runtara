@@ -17,6 +17,8 @@ interface ChatStoreState {
   messages: ChatMessage[];
   status: ChatStatus;
   waitingForInput: WaitingForInputData | null;
+  pendingInputs: WaitingForInputData[];
+  pendingInputError: string | null;
   error: string | null;
 
   // Stream management (not serialized by immer — stored as plain ref)
@@ -38,6 +40,8 @@ interface ChatStoreState {
   setStatus: (status: ChatStatus) => void;
   setInstanceId: (instanceId: string) => void;
   setSessionId: (token: string | null) => void;
+  setPendingInputs: (data: WaitingForInputData[]) => void;
+  setPendingInputError: (error: string | null) => void;
   setWaitingForInput: (data: WaitingForInputData | null) => void;
   setError: (error: string | null) => void;
   setAbortController: (controller: AbortController | null) => void;
@@ -62,6 +66,8 @@ export const useChatStore = create<ChatStoreState>()(
       messages: [],
       status: 'idle' as ChatStatus,
       waitingForInput: null,
+      pendingInputs: [],
+      pendingInputError: null,
       error: null,
       abortController: null,
 
@@ -75,6 +81,8 @@ export const useChatStore = create<ChatStoreState>()(
           state.messages = [];
           state.status = 'idle';
           state.waitingForInput = null;
+          state.pendingInputs = [];
+          state.pendingInputError = null;
           state.error = null;
           state.abortController = null;
         });
@@ -89,6 +97,8 @@ export const useChatStore = create<ChatStoreState>()(
           state.messages = [];
           state.status = 'idle';
           state.waitingForInput = null;
+          state.pendingInputs = [];
+          state.pendingInputError = null;
           state.error = null;
           state.abortController = null;
         });
@@ -173,13 +183,53 @@ export const useChatStore = create<ChatStoreState>()(
 
       setInstanceId: (instanceId) => {
         set((state) => {
+          if (state.instanceId !== instanceId) {
+            state.pendingInputs = [];
+            state.waitingForInput = null;
+            state.pendingInputError = null;
+          }
           state.instanceId = instanceId;
         });
       },
 
       setSessionId: (token) => {
         set((state) => {
+          if (state.sessionId !== token) {
+            state.pendingInputs = [];
+            state.waitingForInput = null;
+            state.pendingInputError = null;
+          }
           state.sessionId = token;
+        });
+      },
+
+      setPendingInputs: (data) => {
+        set((state) => {
+          // Request metadata is immutable. Keep existing objects/form drafts on refresh.
+          state.pendingInputs = data.map(
+            (request) =>
+              state.pendingInputs.find(
+                (existing) =>
+                  existing.requestId === request.requestId &&
+                  existing.instanceId === request.instanceId
+              ) ?? request
+          );
+          state.waitingForInput =
+            state.pendingInputs.find(
+              (request) =>
+                request.requestId === state.waitingForInput?.requestId &&
+                request.instanceId === state.waitingForInput?.instanceId
+            ) ??
+            (state.pendingInputs.length === 1 ? state.pendingInputs[0] : null);
+          state.pendingInputError = null;
+          if (data.length > 0) state.status = 'waiting_for_input';
+          else if (state.status === 'waiting_for_input') state.status = 'idle';
+        });
+      },
+
+      setPendingInputError: (error) => {
+        set((state) => {
+          state.pendingInputError = error;
         });
       },
 
@@ -218,6 +268,8 @@ export const useChatStore = create<ChatStoreState>()(
           state.messages = [];
           state.status = 'idle';
           state.waitingForInput = null;
+          state.pendingInputs = [];
+          state.pendingInputError = null;
           state.error = null;
           state.abortController = null;
         });

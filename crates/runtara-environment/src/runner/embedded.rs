@@ -1135,6 +1135,7 @@ fn limits_from(vars: &dyn Vars) -> WorkflowLimits {
 /// `termination_reason` stamped on an on-signal park — the discriminator the
 /// custom-signal waker requires before relaunching a suspended row. A suspend
 /// from a pause/breakpoint ack carries no marker and is never signal-woken.
+#[cfg(all(test, feature = "db-integration-tests"))]
 pub(crate) const WAITING_SIGNAL_TERMINATION: &str = "waiting_signal";
 
 /// The earliest timed wake deadline (ms since epoch) across a suspend's wake
@@ -1203,24 +1204,20 @@ async fn wake_if_signal_already_arrived(
             .get_custom_signal(instance_id, checkpoint_id)
             .await
         {
-            Ok(Some(_)) => {
-                if let Err(e) = persistence
-                    .schedule_wake(
+            Ok(Some(_)) => match persistence.schedule_signal_wake(instance_id).await {
+                Ok(true) => {
+                    info!(
                         instance_id,
-                        chrono::Utc::now(),
-                        runtara_core::domain::WakeReason::CustomSignal,
-                    )
-                    .await
-                {
-                    warn!(instance_id, error = %e, "Failed to self-wake after a signal raced the park");
+                        checkpoint_id, "Signal arrived while parking; scheduled wake"
+                    );
+                    return true;
+                }
+                Ok(false) => return false,
+                Err(error) => {
+                    warn!(instance_id, %error, "Failed to self-wake after a signal raced the park");
                     return false;
                 }
-                info!(
-                    instance_id,
-                    checkpoint_id, "Signal arrived while parking; woke the instance immediately"
-                );
-                return true;
-            }
+            },
             Ok(None) => {}
             Err(e) => {
                 warn!(instance_id, error = %e, "Could not re-check for a signal that raced the park")
@@ -1343,7 +1340,14 @@ async fn park_invoke_suspend(
         },
         deadline,
     };
-    match persistence.park_instance(instance_id, request).await {
+    let signals: Vec<_> = on_signal_checkpoint_ids(wakes)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    match persistence
+        .park_instance_on_signals(instance_id, request, &signals)
+        .await
+    {
         Ok(Decision::Applied(_)) => {}
         Ok(_) => {
             warn!(
@@ -1515,6 +1519,7 @@ impl Runner for EmbeddedWasmRunner {
         let task_for_run = Arc::clone(&task);
         let instance_id = options.instance_id.clone();
         let launch_id = options.launch_id.clone();
+        let invocation_owner = handle_id.clone();
         let start_gate = options.start_gate.clone();
         let start_confirmation = start_gate.as_ref().map(|gate| {
             Arc::new(GateWorkflowStartConfirmation { gate: gate.clone() })
@@ -1581,6 +1586,8 @@ impl Runner for EmbeddedWasmRunner {
                         start_confirmation.clone(),
                         authority,
                         scoped_config.as_ref().expect("admitted scoped policy"),
+                        persistence.clone(),
+                        &invocation_owner,
                     )
                     .await
                 } else {

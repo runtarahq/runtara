@@ -289,6 +289,14 @@ interface json {
         timeout-ms: u64,
     ) -> result<list<u8>, string>;
 
+    // Managed closure is authoritative, including for waits without a timeout.
+    wait-closed-error: func(
+        step-id: string,
+        signal-id: string,
+        reason: string,
+        timeout-ms: option<u64>,
+    ) -> result<list<u8>, string>;
+
     wait-on-wait-variables: func(
         step-id: string,
         instance-id: string,

@@ -869,10 +869,10 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
             "early resume restores the same decision"
         );
     }
-    host.custom_signals
-        .lock()
-        .unwrap()
-        .insert(wait_key.unwrap(), br#"{"approved":true}"#.to_vec());
+    host.managed_inputs
+        .respond(&wait_key.unwrap(), &json!({"approved":true}))
+        .await
+        .unwrap();
     let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {

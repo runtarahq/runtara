@@ -259,6 +259,15 @@ impl WakeScheduler {
             );
         }
 
+        if let Some(inputs) = self.persistence.input_requests() {
+            inputs
+                .reconcile_input_wakes(self.config.batch_size.clamp(0, u32::MAX as i64) as u32)
+                .await
+                .map_err(|error| {
+                    crate::error::Error::Other(format!("Input wake recovery failed: {error}"))
+                })?;
+        }
+
         // Claims as it selects: back-to-back polls would otherwise keep
         // re-selecting rows whose per-instance claim had not landed yet.
         // Every record returned is already owned by this caller.
@@ -311,8 +320,9 @@ impl WakeScheduler {
                     );
                     if let Err(e) = scheduler
                         .persistence
-                        .schedule_wake(
+                        .reschedule_claimed_wake(
                             &instance.instance_id,
+                            instance.sleep_until.expect("batch claim has a lease"),
                             chrono::Utc::now(),
                             instance
                                 .wake_reason
@@ -393,8 +403,9 @@ impl WakeScheduler {
         if result.is_err()
             && let Err(restore_err) = self
                 .persistence
-                .schedule_wake(
+                .reschedule_claimed_wake(
                     &instance.instance_id,
+                    instance.sleep_until.expect("batch claim has a lease"),
                     self.retry_deadline(),
                     instance
                         .wake_reason
@@ -518,8 +529,9 @@ impl WakeScheduler {
                 // healthy suspended instance into a failure or silently
                 // discarding its due wake.
                 self.persistence
-                    .schedule_wake(
+                    .reschedule_claimed_wake(
                         &instance.instance_id,
+                        instance.sleep_until.expect("batch claim has a lease"),
                         self.retry_deadline(),
                         instance
                             .wake_reason
@@ -530,6 +542,10 @@ impl WakeScheduler {
                     instance_id = %instance.instance_id,
                     "Deferring wake while single-instance workflow has active work"
                 );
+                Ok(())
+            }
+            Err(LaunchQueueError::ObsoleteWake { .. }) => {
+                debug!(instance_id = %instance.instance_id, "Wake invalidated before enqueue");
                 Ok(())
             }
             Err(LaunchQueueError::InvalidLaunchTarget { .. }) => {

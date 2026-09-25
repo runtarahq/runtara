@@ -699,6 +699,30 @@ impl SdkBackend for HttpBackend {
         self.get_instance_status(&self.instance_id)
     }
 
+    fn register_input(&self, descriptor: &[u8], deadline_ms: Option<u64>) -> Result<()> {
+        let descriptor: serde_json::Value =
+            serde_json::from_slice(descriptor).map_err(|e| SdkError::Internal(e.to_string()))?;
+        let _: SuccessResp = self.post(
+            &self.url("inputs/register"),
+            &serde_json::json!({
+                "descriptor": descriptor, "deadline_ms": deadline_ms, "tenant_id": self.tenant_id,
+            }),
+        )?;
+        Ok(())
+    }
+    fn poll_input(&self, signal_id: &str) -> Result<crate::types::InputState> {
+        self.post(
+            &self.url("inputs/poll"),
+            &serde_json::json!({"signal_id": signal_id, "tenant_id": self.tenant_id}),
+        )
+    }
+    fn close_input(&self, signal_id: &str) -> Result<crate::types::InputState> {
+        self.post(
+            &self.url("inputs/close"),
+            &serde_json::json!({"signal_id": signal_id, "tenant_id": self.tenant_id}),
+        )
+    }
+
     fn poll_signals(
         &self,
         checkpoint_id: Option<&str>,

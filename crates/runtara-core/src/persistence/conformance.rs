@@ -2338,3 +2338,6 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
         assert!(backend.get_instance(&id).await.unwrap().is_none());
     }
 }
+
+/// Authoritative managed-input lifecycle and acceptance conformance.
+pub mod inputs;

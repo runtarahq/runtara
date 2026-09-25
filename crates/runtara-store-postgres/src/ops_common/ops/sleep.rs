@@ -97,14 +97,20 @@ macro_rules! impl_sleep_ops {
                        AND {lhs} <= {rhs} \
                        AND status = 'suspended'"
                 );
+                let mut tx = pool.begin().await.db()?;
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "claim_sleeping_instance".into(),
                         details: e.to_string(),
                     })?;
+                if result.rows_affected() == 1 {
+                    ::sqlx::query("UPDATE instance_input_parks SET wake_scheduled=true WHERE instance_id=$1")
+                        .bind(instance_id).execute(&mut *tx).await.db()?;
+                }
+                tx.commit().await.db()?;
                 Ok(result.rows_affected() == 1)
             }
 
@@ -199,11 +205,18 @@ macro_rules! impl_sleep_ops {
                                {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
                                created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason"
                 );
+                let mut tx = pool.begin().await.db()?;
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)
                     .bind(retry_at)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *tx)
                     .await.db()?;
+                // Root locks from the claim precede park locks. An acceptance
+                // after this claim must retain its lease/retry deadline.
+                let ids: Vec<_> = records.iter().map(|r| &r.0.instance_id).collect();
+                ::sqlx::query("UPDATE instance_input_parks SET wake_scheduled=true WHERE instance_id=ANY($1)")
+                    .bind(&ids).execute(&mut *tx).await.db()?;
+                tx.commit().await.db()?;
                 Ok(records.into_iter().map(|r| r.0).collect())
             }
         }

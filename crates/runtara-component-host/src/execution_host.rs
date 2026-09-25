@@ -16,7 +16,7 @@ use crate::{
     InvokeExit,
     isolated_tasks::{
         CancelResult, IsolatedTasks, TaskCancellation, TaskCleanup, TaskError, TaskId,
-        TaskLifecycle,
+        TaskLifecycle, TeardownDisposition,
     },
 };
 
@@ -223,12 +223,26 @@ impl ExecutionContext {
     /// Move an owned child scope into its parent's task supervisor. This future
     /// must be kept outside the guest execution future so cancellation runs it.
     pub fn into_cleanup(self: Arc<Self>) -> TaskCleanup {
-        Box::pin(async move { self.shutdown().await.map_err(|_| TaskError::WorkerLost) })
+        TaskCleanup::with_disposition(move |disposition| async move {
+            self.shutdown_with(disposition)
+                .await
+                .map_err(|_| TaskError::WorkerLost)
+        })
     }
 
     pub async fn shutdown(&self) -> Result<(), ExecutionError> {
+        self.shutdown_with(TeardownDisposition::Terminal).await
+    }
+
+    pub async fn shutdown_with(
+        &self,
+        disposition: TeardownDisposition,
+    ) -> Result<(), ExecutionError> {
         self.handles.close();
-        self.tasks.shutdown().await.map_err(Into::into)
+        self.tasks
+            .shutdown_with(disposition)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -250,8 +264,9 @@ pub struct TaskHandle {
 
 impl Drop for TaskHandle {
     fn drop(&mut self) {
-        // Also runs if the parent traps without calling resource.drop.
-        let _ = self.owner.tasks.cancel(self.id);
+        // Automatic Store destruction has no lifecycle outcome yet. Explicit
+        // guest drop/release records local cancellation before reaching here.
+        let _ = self.owner.tasks.owner_dropped(self.id);
     }
 }
 
@@ -283,6 +298,10 @@ pub fn add_execution_to_linker<T: ExecutionView>(linker: &mut Linker<T>) -> anyh
                 let (owner, id) = task(store.data_mut(), &handle)?;
                 let resource = store.data_mut().execution_table().delete(handle)?;
                 // Cancel first, even if the destructor future is interrupted.
+                match owner.tasks.cancel(id) {
+                    Ok(_) | Err(TaskError::UnknownTask) => {}
+                    Err(error) => return Err(error.into()),
+                }
                 drop(resource);
                 owner.tasks.release(id).await?;
                 Ok(())

@@ -273,6 +273,7 @@ macro_rules! impl_instance_ops {
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::ops_common::error::not_found_if_empty;
                 use crate::dialect::{Dialect, EnumKind};
+                let mut tx = pool.begin().await.db()?;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);
@@ -288,7 +289,7 @@ macro_rules! impl_instance_ops {
                         .bind(instance_id)
                         .bind(crate::encoding::status_to_str(status))
                         .bind(ts)
-                        .execute(pool)
+                        .execute(&mut *tx)
                         .await
                         .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                             operation: "update_instance_status".into(),
@@ -303,14 +304,19 @@ macro_rules! impl_instance_ops {
                     ::sqlx::query(&sql)
                         .bind(instance_id)
                         .bind(crate::encoding::status_to_str(status))
-                        .execute(pool)
+                        .execute(&mut *tx)
                         .await
                         .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                             operation: "update_instance_status".into(),
                             details: e.to_string(),
                         })?
                 };
-                not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
+                not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)?;
+                if status.is_terminal() {
+                    crate::inputs::close_roots(&mut tx, &[instance_id.to_string()]).await.db()?;
+                }
+                tx.commit().await.db()?;
+                Ok(())
             }
 
             /// UPDATE the instance's `checkpoint_id`. Errors with
@@ -363,6 +369,7 @@ macro_rules! impl_instance_ops {
                 use ::runtara_core::persistence::CompleteInstanceGuard;
                 use crate::ops_common::error::{RowsAffected, not_found_if_empty};
                 use crate::dialect::{Dialect, EnumKind};
+                let mut tx = pool.begin().await.db()?;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);
@@ -402,12 +409,16 @@ macro_rules! impl_instance_ops {
                     .bind(params.error)
                     .bind(params.stderr)
                     .bind(params.checkpoint_id)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "complete_instance".into(),
                         details: e.to_string(),
                     })?;
+                if result.rows_affected_generic() > 0 && params.status.is_terminal() {
+                    crate::inputs::close_roots(&mut tx, &[params.instance_id.to_string()]).await.db()?;
+                }
+                tx.commit().await.db()?;
                 match params.guard {
                     CompleteInstanceGuard::OnlyRunning => Ok(result.rows_affected_generic() > 0),
                     CompleteInstanceGuard::Any => {

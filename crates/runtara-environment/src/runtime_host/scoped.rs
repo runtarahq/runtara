@@ -227,7 +227,7 @@ impl ScopedRuntimeOwner {
                     || observed
                         .breakpoints
                         .iter()
-                        .any(|token| !token.is_requested()),
+                        .any(|token| !token.is_explicitly_cancelled()),
             )
         };
         let mut applied = AppliedRootEffects::default();
@@ -454,6 +454,75 @@ impl RuntimeHost for ScopedRuntimeHost {
         } else {
             result
         }
+    }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        use runtara_core::persistence::inputs::{InputAuthority, InputRequestSpec};
+        let spec = InputRequestSpec::from_descriptor(&descriptor, deadline)
+            .map_err(PersistenceRuntimeHost::err)?;
+        self.key(&spec.signal_id)?;
+        let io = self
+            .io
+            .as_ref()
+            .ok_or("managed child input requires durable invocation authority")?;
+        let owner = InputAuthority::Invocation(io.fence().clone());
+        io.read_result(
+            self.owner
+                .root
+                .inputs()?
+                .register_input(&owner, &spec)
+                .await,
+        )?;
+        Ok(())
+    }
+    async fn poll_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        use runtara_core::persistence::inputs::{InputAuthority, request_id};
+        self.key(&signal)?;
+        let io = self
+            .io
+            .as_ref()
+            .ok_or("managed child input requires durable invocation authority")?;
+        let owner = InputAuthority::Invocation(io.fence().clone());
+        let request = io.read_result(
+            self.owner
+                .root
+                .inputs()?
+                .poll_input(&owner, &request_id(&signal))
+                .await,
+        )?;
+        if request.spec.signal_id != signal {
+            return Err("input signal identity mismatch".into());
+        }
+        Ok(super::inputs::state(request.state))
+    }
+    async fn close_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        use runtara_core::persistence::inputs::{InputAuthority, InputClosure, request_id};
+        self.key(&signal)?;
+        let io = self
+            .io
+            .as_ref()
+            .ok_or("managed child input requires durable invocation authority")?;
+        let owner = InputAuthority::Invocation(io.fence().clone());
+        let request = io.read_result(
+            self.owner
+                .root
+                .inputs()?
+                .close_input(&owner, &request_id(&signal), InputClosure::Abandoned)
+                .await,
+        )?;
+        if request.spec.signal_id != signal {
+            return Err("input signal identity mismatch".into());
+        }
+        Ok(super::inputs::state(request.state))
     }
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.key(&checkpoint_id)?;

@@ -14,12 +14,16 @@ use crate::api::dto::triggers::TriggerType;
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, parse_debug_event};
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::session_queue;
+use crate::api::services::session_queue::managed::{self, InputTarget, QueueScope};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 use runtara_connections::ConnectionsFacade;
 
 use super::channel::{Channel, TelegramChannel};
 use super::collector;
+
+mod inputs;
+use inputs::{InputProgress, ManagedChannelInputs};
 
 /// A normalized inbound message from any channel.
 #[derive(Debug, Clone)]
@@ -412,7 +416,7 @@ impl ChannelRouter {
 }
 
 // ===========================================================================
-// Session loop (unchanged logic, now connection-driven)
+// Session loop: diagnostic history and authoritative input state are separate
 // ===========================================================================
 
 #[allow(clippy::too_many_arguments)]
@@ -499,6 +503,13 @@ async fn session_loop(
     )
     .await;
 
+    let mut managed_inputs = ManagedChannelInputs {
+        client: client.clone(),
+        conn: valkey.clone(),
+        scope: QueueScope::new(org_id, &session_id)?,
+        prompted: Default::default(),
+    };
+
     info!(
         conv_id = %conv_id,
         session_id = %session_id,
@@ -513,25 +524,11 @@ async fn session_loop(
     let max_duration = Duration::from_secs(600);
     let start_time = std::time::Instant::now();
     let mut session_ended = false;
-    // The pending signal payload for the current instance. For the first
-    // instance this is built from initial_message. For subsequent instances
-    // (started via idle phase), it is built from the queued message.
-    let mut pending_signal_payload: Value = json!({
-        "message": &initial_message.text,
-        "attachments": &attachments_json,
-        "sourceConnectionId": source_connection_id,
-        "originalMessage": &initial_message.original_message,
-    });
-    if let Some(target) = &initial_message.target {
-        pending_signal_payload["target"] = target.clone();
-    }
-
     while !session_ended && start_time.elapsed() < max_duration {
         // === INSTANCE LOOP ===
         let mut event_offset: u32 = 0;
         let mut instance_done = false;
-        let mut waiting_for_input = false;
-        let mut first_signal_handled = false;
+        let mut last_input_notice: Option<&str> = None;
         // Whether THIS session owns the instance it is polling. Decided once, on
         // the first poll that carries the instance's persisted input, by
         // comparing its `data.sessionId` to ours (see `classify_ownership`).
@@ -567,6 +564,18 @@ async fn session_loop(
 
                     match info_result {
                         Ok(info) if info.status.is_terminal() => {
+                            // Replies received during this execution remain responses.
+                            // They must not fall through to idle startup handling.
+                            if !foreign {
+                                match managed_inputs.finish_instance(&instance_id).await {
+                                    Ok(true) => {},
+                                    Ok(false) => continue,
+                                    Err(error) => {
+                                        warn!(error = %error, "Unable to retain terminal-session replies");
+                                        continue;
+                                    }
+                                }
+                            }
                             // A foreign-owned instance was already flushed by its
                             // owning session; re-flushing from offset 0 would
                             // re-send the entire reply transcript. Suppress both
@@ -576,7 +585,7 @@ async fn session_loop(
                             if !foreign {
                                 flush_events(
                                     &client, &channel, &conv_id, &instance_id,
-                                    &mut event_offset, &mut user_rx,
+                                    &mut event_offset,
                                 ).await;
 
                                 if let crate::runtime_types::InstanceStatus::Failed = info.status {
@@ -618,75 +627,24 @@ async fn session_loop(
                     if let Ok(result) = client.list_events(&instance_id, Some(options)).await {
                         for event in result.events {
                             if let Some(payload) = &event.payload {
-                                let subtype = event.subtype.as_deref();
-
-                                if subtype == Some("external_input_requested") {
-                                    let has_complex_schema = payload.get("response_schema")
-                                        .map(|v| !v.is_null() && !is_simple_schema(v))
-                                        .unwrap_or(false);
-
-                                    if has_complex_schema {
-                                        waiting_for_input = true;
-                                        dispatch_event(
-                                            subtype, payload, &channel, &conv_id,
-                                            &instance_id, &mut user_rx, &client,
-                                        ).await;
-                                    } else {
-                                        let signal_id = payload.get("signal_id")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-
-                                        match session_queue::pop_event(&mut valkey, org_id, &session_id).await {
-                                            Ok(Some(queued)) => {
-                                                let bytes = serde_json::to_vec(&queued).unwrap_or_default();
-                                                if client.send_custom_signal(&instance_id, &signal_id, Some(&bytes)).await.is_ok() {
-                                                    waiting_for_input = false;
-                                                } else {
-                                                    waiting_for_input = true;
-                                                    dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
-                                                }
-                                            }
-                                            _ if !first_signal_handled => {
-                                                // First WaitForSignal (no schema) with empty queue:
-                                                // use the pending signal payload (set from initial_message
-                                                // or from the idle-phase queued message for subsequent instances).
-                                                debug!(
-                                                    instance_id = %instance_id,
-                                                    signal_id = %signal_id,
-                                                    "Delivering pending message via signal (first WaitForSignal, empty queue)"
-                                                );
-                                                first_signal_handled = true;
-                                                let bytes = serde_json::to_vec(&pending_signal_payload).unwrap_or_default();
-                                                if client.send_custom_signal(&instance_id, &signal_id, Some(&bytes)).await.is_ok() {
-                                                    waiting_for_input = false;
-                                                } else {
-                                                    waiting_for_input = true;
-                                                    dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
-                                                }
-                                            }
-                                            _ => {
-                                                waiting_for_input = true;
-                                                dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    dispatch_event(subtype, payload, &channel, &conv_id, &instance_id, &mut user_rx, &client).await;
-                                }
+                                dispatch_event(event.subtype.as_deref(), payload, &channel, &conv_id).await;
                             }
                             event_offset += 1;
                         }
-
-                        if waiting_for_input
-                            && let Ok(Some(queued)) = session_queue::pop_event(&mut valkey, org_id, &session_id).await
-                            && let Some(sig) = find_pending_signal_id(&client, &instance_id).await
-                        {
-                            let bytes = serde_json::to_vec(&queued).unwrap_or_default();
-                            if client.send_custom_signal(&instance_id, &sig, Some(&bytes)).await.is_ok() {
-                                waiting_for_input = false;
-                            }
+                    }
+                    // Input discovery is mandatory even with no debug events or
+                    // when event history retrieval fails.
+                    let notice = match managed_inputs.poll(&instance_id, &channel, &conv_id, &mut user_rx).await {
+                        Ok(InputProgress::Ambiguous) => Some("Several inputs are waiting. Choose the intended input in the workflow view; your queued reply has been retained."),
+                        Ok(_) => None,
+                        Err(error) => {
+                            warn!(error = %error, "Channel input processing unavailable or collection ended");
+                            Some("Unable to confirm input delivery. Check the workflow before sending another reply.")
                         }
+                    };
+                    if notice != last_input_notice {
+                        if let Some(message) = notice { let _ = channel.send_text(&conv_id, message).await; }
+                        last_input_notice = notice;
                     }
                 }
 
@@ -705,7 +663,7 @@ async fn session_loop(
                     if let Some(target) = &inbound.target {
                         event["target"] = target.clone();
                     }
-                    if let Err(e) = session_queue::push_event(&mut valkey, org_id, &session_id, &event).await {
+                    if let Err(e) = session_queue::push_event(&mut valkey, org_id, &session_id, Some(&instance_id), &event).await {
                         warn!(error = %e, "Failed to push user message to queue");
                     }
                 }
@@ -729,13 +687,31 @@ async fn session_loop(
 
                 tokio::select! {
                     _ = sleep(idle_poll_interval) => {
+                        match managed::has_unresolved(&mut valkey, &managed_inputs.scope).await {
+                            Ok(false) => {},
+                            Ok(true) => {
+                                if last_input_notice != Some("pending_response") {
+                                    let _ = channel.send_text(&conv_id, "A previous reply still needs delivery or resolution. Resolve it in the workflow view before starting another run.").await;
+                                    last_input_notice = Some("pending_response");
+                                }
+                                continue;
+                            }
+                            Err(error) => {
+                                warn!(error = %error, "Unable to verify outstanding channel replies");
+                                continue;
+                            }
+                        }
                         if let Ok(true) = session_queue::has_events(&mut valkey, org_id, &session_id).await {
-                            // Pop the message from the queue so it's not re-processed.
-                            // The message content will be delivered to the new instance
-                            // via the queue-drain bridge if it has WaitForSignal.
-                            // For workflows without WaitForSignal, the message was already
-                            // handled by the webhook handler.
-                            let queued_msg = session_queue::pop_event(&mut valkey, org_id, &session_id).await.ok().flatten();
+                            // Only a fresh idle message can start a run. A reply
+                            // from an earlier execution cannot be consumed here.
+                            let queued_msg = match session_queue::take_startup_event(&mut valkey, org_id, &session_id).await {
+                                Ok(Some(message)) => Some(message),
+                                Ok(None) => continue,
+                                Err(error) => {
+                                    warn!(error = %error, "Channel startup buffer unavailable");
+                                    continue;
+                                }
+                            };
                             let user_message = queued_msg.as_ref()
                                 .and_then(|m| m.get("message"))
                                 .and_then(|m| m.as_str())
@@ -780,11 +756,6 @@ async fn session_loop(
                                     let _ = session_queue::set_session_meta(
                                         &mut valkey, org_id, &session_id, &instance_id, workflow_id,
                                     ).await;
-                                    // Update pending signal payload for the new instance
-                                    // so the WaitForSignal handler delivers this message.
-                                    if let Some(msg) = queued_msg {
-                                        pending_signal_payload = msg;
-                                    }
                                     info!(instance_id = %instance_id, "New instance for channel session");
                                     sleep(Duration::from_millis(500)).await;
                                     break;
@@ -813,7 +784,7 @@ async fn session_loop(
                         if let Some(target) = &inbound.target {
                             event["target"] = target.clone();
                         }
-                        let _ = session_queue::push_event(&mut valkey, org_id, &session_id, &event).await;
+                        let _ = session_queue::push_event(&mut valkey, org_id, &session_id, None, &event).await;
                     }
                 }
             }
@@ -833,7 +804,6 @@ async fn flush_events(
     conv_id: &str,
     instance_id: &str,
     event_offset: &mut u32,
-    user_rx: &mut mpsc::Receiver<InboundMessage>,
 ) {
     let options = ListEventsOptions {
         event_type: Some("custom".to_string()),
@@ -846,16 +816,7 @@ async fn flush_events(
     if let Ok(result) = client.list_events(instance_id, Some(options)).await {
         for event in result.events {
             if let Some(payload) = &event.payload {
-                dispatch_event(
-                    event.subtype.as_deref(),
-                    payload,
-                    channel,
-                    conv_id,
-                    instance_id,
-                    user_rx,
-                    client,
-                )
-                .await;
+                dispatch_event(event.subtype.as_deref(), payload, channel, conv_id).await;
             }
             *event_offset += 1;
         }
@@ -867,9 +828,6 @@ async fn dispatch_event(
     payload: &Value,
     channel: &Arc<dyn Channel>,
     conv_id: &str,
-    instance_id: &str,
-    user_rx: &mut mpsc::Receiver<InboundMessage>,
-    client: &Arc<RuntimeClient>,
 ) {
     let chat_events = parse_debug_event(subtype, payload);
 
@@ -881,56 +839,8 @@ async fn dispatch_event(
                 }
             }
 
-            ChatEvent::WaitingForInput {
-                signal_id,
-                message,
-                response_schema,
-                ..
-            } => {
-                let needs_prompting = response_schema
-                    .as_ref()
-                    .map(|s| !s.is_null() && !is_simple_schema(s))
-                    .unwrap_or(false);
-
-                // Only send the prompt message for structured schemas.
-                // For simple/null schemas, the user's message is auto-delivered
-                // from the queue — no need to prompt.
-                if needs_prompting && let Err(e) = channel.send_text(conv_id, message).await {
-                    warn!(conv_id = %conv_id, error = %e, "Failed to send input prompt");
-                }
-
-                if let Some(schema) = response_schema
-                    && !schema.is_null()
-                    && !is_simple_schema(schema)
-                {
-                    match collector::collect_fields(schema, channel.as_ref(), conv_id, user_rx)
-                        .await
-                    {
-                        Ok(payload) => {
-                            if let Err(e) = client
-                                .send_custom_signal(
-                                    instance_id,
-                                    signal_id,
-                                    Some(&serde_json::to_vec(&payload).unwrap_or_default()),
-                                )
-                                .await
-                            {
-                                warn!(error = %e, "Failed to submit signal");
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Field collection failed");
-                            let _ = client
-                                .send_custom_signal(
-                                    instance_id,
-                                    signal_id,
-                                    Some(&serde_json::to_vec(&json!({})).unwrap_or_default()),
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
+            // Historical input events describe the transcript, never an action.
+            ChatEvent::WaitingForInput { .. } => {}
 
             ChatEvent::Error { message } => {
                 warn!(conv_id = %conv_id, error = %message, "Workflow error");
@@ -947,23 +857,6 @@ async fn dispatch_event(
             }
         }
     }
-}
-
-async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) -> Option<String> {
-    let options = ListEventsOptions::new()
-        .with_limit(10)
-        .with_event_type("custom")
-        .with_subtype("external_input_requested")
-        .with_sort_order(crate::runtime_types::EventSortOrder::Desc);
-
-    let result = client.list_events(instance_id, Some(options)).await.ok()?;
-    result
-        .events
-        .first()
-        .and_then(|ev| ev.payload.as_ref())
-        .and_then(|p| p.get("signal_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }
 
 fn is_simple_schema(schema: &Value) -> bool {
@@ -1056,3 +949,6 @@ mod tests {
         assert!(classify_ownership(None, SID));
     }
 }
+
+#[cfg(all(test, feature = "valkey-integration-tests"))]
+mod input_tests;

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, KeyboardEvent } from 'react';
+import { useState, useEffect, useCallback, useRef, KeyboardEvent } from 'react';
 import { Send } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { Textarea } from '@/shared/components/ui/textarea.tsx';
@@ -10,12 +10,17 @@ import { ChatFormInput } from './ChatFormInput';
 import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ChatInputProps {
-  onSend: (message: string) => void;
-  onSignalResponse?: (response: string) => void;
+  onSend: (message: string) => Promise<boolean>;
+  onSignalResponse?: (response: string) => Promise<boolean>;
   status: ChatStatus;
   waitingForInput: WaitingForInputData | null;
-  instanceId?: string | null;
-  token?: string;
+  pendingInputs: WaitingForInputData[];
+  onSelectInput: (input: WaitingForInputData | null) => void;
+  onSubmitInput: (
+    requestId: string,
+    payload: Record<string, unknown>,
+    instanceId?: string
+  ) => Promise<boolean>;
 }
 
 export function ChatInput({
@@ -23,13 +28,21 @@ export function ChatInput({
   onSignalResponse,
   status,
   waitingForInput,
-  instanceId,
-  token,
+  pendingInputs,
+  onSelectInput,
+  onSubmitInput,
 }: ChatInputProps) {
   const [value, setValue] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const sendingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const isDisabled = status === 'streaming';
+  useEffect(() => {
+    // A stale reply must not become a draft response to the next request.
+    setValue('');
+  }, [waitingForInput?.requestId, waitingForInput?.instanceId]);
+
+  const isDisabled = (status === 'streaming' && !waitingForInput) || isSending;
   const isDone = status === 'done';
   const isWaiting = status === 'waiting_for_input';
   const canSend = value.trim().length > 0 && !isDisabled;
@@ -58,21 +71,22 @@ export function ChatInput({
       : undefined;
   })();
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const trimmed = value.trim();
-    if (!trimmed) return;
-
-    if (isWaiting && onSignalResponse) {
-      onSignalResponse(trimmed);
-    } else {
-      onSend(trimmed);
-    }
-
-    setValue('');
-
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+    if (!trimmed || sendingRef.current) return;
+    sendingRef.current = true;
+    setIsSending(true);
+    try {
+      const accepted = await (isWaiting && onSignalResponse
+        ? onSignalResponse(trimmed)
+        : onSend(trimmed));
+      if (accepted) {
+        setValue('');
+        if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      }
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
     }
   }, [value, isWaiting, onSend, onSignalResponse]);
 
@@ -99,25 +113,47 @@ export function ChatInput({
     []
   );
 
-  // Render structured form when waiting for non-simple schema input
-  if (
-    isWaiting &&
-    !isSimpleMessageSchema &&
-    waitingForInput &&
-    instanceId &&
-    token
-  ) {
+  if (pendingInputs.length > 1 && !waitingForInput) {
     return (
-      <ChatFormInput
-        waitingForInput={waitingForInput}
-        instanceId={instanceId}
-        token={token}
-      />
+      <div className="space-y-2 border-t p-4">
+        <p className="text-sm">Choose which request to answer</p>
+        {pendingInputs.map((input) => (
+          <Button
+            key={JSON.stringify([input.instanceId, input.requestId])}
+            variant="secondary"
+            onClick={() => onSelectInput(input)}
+          >
+            {input.message || input.toolName || input.requestId}
+          </Button>
+        ))}
+      </div>
+    );
+  }
+  const chooser =
+    pendingInputs.length > 1 ? (
+      <Button variant="secondary" onClick={() => onSelectInput(null)}>
+        Choose another request
+      </Button>
+    ) : null;
+  if (isWaiting && !isSimpleMessageSchema && waitingForInput) {
+    return (
+      <div>
+        {chooser}
+        <ChatFormInput
+          key={JSON.stringify([
+            waitingForInput.instanceId,
+            waitingForInput.requestId,
+          ])}
+          waitingForInput={waitingForInput}
+          onSubmit={onSubmitInput}
+        />
+      </div>
     );
   }
 
   return (
     <div className="border-t bg-background px-4 py-3">
+      {chooser}
       {isWaiting &&
         !isSimpleMessageSchema &&
         (waitingForInput?.message || schemaFieldDescription) && (

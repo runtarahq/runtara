@@ -12,6 +12,7 @@
 //! A single mutex covers the whole store, which is what makes the claim and
 //! guard operations atomic.
 
+mod inputs;
 mod invocations;
 
 use crate::domain::InstanceStatus as CoreInstanceStatus;
@@ -34,8 +35,11 @@ use crate::persistence::{
 
 #[derive(Default)]
 struct Store {
+    input_requests: HashMap<(String, String), crate::persistence::inputs::InputRequest>,
+    input_parks: HashMap<String, inputs::InputPark>,
     invocation_leases: HashMap<String, (crate::persistence::invocations::InvocationLease, bool)>,
     invocation_attempts: Vec<crate::persistence::invocations::InvocationAttempt>,
+    invocation_parents: HashMap<(String, String), Option<String>>,
     instances: HashMap<String, InstanceRecord>,
     /// Ordered by insertion; `(instance_id, checkpoint_id)` is unique.
     checkpoints: Vec<CheckpointRecord>,
@@ -50,6 +54,14 @@ struct Store {
 }
 
 impl Store {
+    fn revoke_inactive_execution(&mut self, instance_id: &str) {
+        if self.instances[instance_id].status != CoreInstanceStatus::Running
+            && let Some((_, active)) = self.invocation_leases.get_mut(instance_id)
+        {
+            *active = false;
+        }
+    }
+
     fn next_id(&mut self) -> i64 {
         self.next_id += 1;
         self.next_id
@@ -97,6 +109,11 @@ impl Store {
             Change::Clear => instance.wake_reason = None,
             Change::Set(reason) => instance.wake_reason = Some(reason),
         }
+        if !matches!(effects.reason, Change::Keep)
+            || effects.status.is_some_and(CoreInstanceStatus::is_terminal)
+        {
+            self.input_parks.remove(instance_id);
+        }
         if let Some(event_type) = effects.event {
             let id = self.next_id();
             self.events.push(EventRecord {
@@ -108,6 +125,10 @@ impl Store {
                 created_at: now,
                 subtype: None,
             });
+        }
+        self.revoke_inactive_execution(instance_id);
+        if self.instances[instance_id].status.is_terminal() {
+            inputs::close_root(self, instance_id, now);
         }
         if effects.acknowledge {
             self.signals
@@ -153,6 +174,10 @@ fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
 
 #[async_trait]
 impl Persistence for InMemoryPersistence {
+    fn input_requests(&self) -> Option<&dyn crate::persistence::inputs::InputRequests> {
+        Some(self)
+    }
+
     fn invocation_fences(&self) -> Option<&dyn crate::persistence::invocations::InvocationFences> {
         Some(self)
     }
@@ -244,6 +269,10 @@ impl Persistence for InMemoryPersistence {
             inst.finished_at = None;
             inst.termination_reason = None;
         }
+        store.revoke_inactive_execution(instance_id);
+        if status.is_terminal() {
+            inputs::close_root(&mut store, instance_id, Utc::now());
+        }
         Ok(())
     }
 
@@ -294,6 +323,10 @@ impl Persistence for InMemoryPersistence {
         }
         if stamps_finished_at(params.status) {
             inst.finished_at = Some(Utc::now());
+        }
+        store.revoke_inactive_execution(params.instance_id);
+        if params.status.is_terminal() {
+            inputs::close_root(&mut store, params.instance_id, Utc::now());
         }
         Ok(true)
     }
@@ -480,10 +513,31 @@ impl Persistence for InMemoryPersistence {
         instance_id: &str,
         request: crate::lifecycle::ParkRequest,
     ) -> Result<Decision, CoreError> {
+        self.park_instance_on_signals(instance_id, request, &[])
+            .await
+    }
+
+    async fn park_instance_on_signals(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+        signals: &[String],
+    ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
         let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
         if let Decision::Applied(effects) = decision {
-            store.apply_transition(instance_id, effects, Utc::now())?;
+            let now = Utc::now();
+            store.apply_transition(instance_id, effects, now)?;
+            if request.reason == lifecycle::ParkReason::Signal && !signals.is_empty() {
+                store.input_parks.insert(
+                    instance_id.into(),
+                    inputs::InputPark {
+                        signals: signals.to_vec(),
+                        wake_scheduled: false,
+                    },
+                );
+                inputs::schedule_accepted(&mut store, instance_id, now, true);
+            }
         }
         Ok(decision)
     }
@@ -537,6 +591,17 @@ impl Persistence for InMemoryPersistence {
     ) -> Result<String, CoreError> {
         let mut store = self.store.lock().unwrap();
         store.instance_mut(instance_id)?;
+        if store
+            .input_requests
+            .values()
+            .any(|r| r.instance_id == instance_id && r.spec.signal_id == checkpoint_id)
+        {
+            return Err(CoreError::SignalDeliveryFailed {
+                instance_id: instance_id.into(),
+                signal_type: "custom".into(),
+                reason: "managed input addresses require validated acceptance".into(),
+            });
+        }
         let signal_id = uuid::Uuid::new_v4().to_string();
         store.custom_signals.insert(
             (instance_id.to_string(), checkpoint_id.to_string()),
@@ -645,6 +710,47 @@ impl Persistence for InMemoryPersistence {
         Ok(())
     }
 
+    async fn schedule_signal_wake(&self, instance_id: &str) -> Result<bool, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let root = store.instance_mut(instance_id)?;
+        if root.status != CoreInstanceStatus::Suspended
+            || root.termination_reason.as_deref() != Some("waiting_signal")
+            || store
+                .input_parks
+                .get(instance_id)
+                .is_some_and(|p| p.wake_scheduled)
+        {
+            return Ok(false);
+        }
+        let root = store.instance_mut(instance_id)?;
+        let now = Utc::now();
+        root.sleep_until = Some(root.sleep_until.map_or(now, |deadline| deadline.min(now)));
+        root.wake_reason = Some(crate::domain::WakeReason::CustomSignal);
+        if let Some(park) = store.input_parks.get_mut(instance_id) {
+            park.wake_scheduled = true;
+        }
+        Ok(true)
+    }
+
+    async fn reschedule_claimed_wake(
+        &self,
+        instance_id: &str,
+        claimed_until: DateTime<Utc>,
+        retry_at: DateTime<Utc>,
+        reason: crate::domain::WakeReason,
+    ) -> Result<bool, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let instance = store.instance_mut(instance_id)?;
+        if instance.status != CoreInstanceStatus::Suspended
+            || instance.sleep_until != Some(claimed_until)
+        {
+            return Ok(false);
+        }
+        instance.sleep_until = Some(retry_at);
+        instance.wake_reason = Some(reason);
+        Ok(true)
+    }
+
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         store.instance_mut(instance_id)?.sleep_until = None;
@@ -666,6 +772,9 @@ impl Persistence for InMemoryPersistence {
             return Ok(false);
         }
         instance.sleep_until = None;
+        if let Some(park) = store.input_parks.get_mut(instance_id) {
+            park.wake_scheduled = true;
+        }
         Ok(true)
     }
 
@@ -774,8 +883,13 @@ impl Persistence for InMemoryPersistence {
             store.checkpoints.retain(|c| &c.instance_id != id);
             store.events.retain(|e| &e.instance_id != id);
             store.signals.remove(id);
+            store.input_parks.remove(id);
             store.custom_signals.retain(|(inst, _), _| inst != id);
+            store.input_requests.retain(|(inst, _), _| inst != id);
             store.invocation_leases.remove(id);
+            store
+                .invocation_parents
+                .retain(|(instance, _), _| instance != id);
             store
                 .invocation_attempts
                 .retain(|a| &a.fence.lease.instance_id != id);
@@ -864,6 +978,9 @@ impl Persistence for InMemoryPersistence {
             // Cloned after the stamp, so the record carries the lease it was
             // claimed under rather than the deadline it was selected on.
             claimed.push(instance.clone());
+            if let Some(park) = store.input_parks.get_mut(&instance_id) {
+                park.wake_scheduled = true;
+            }
         }
         Ok(claimed)
     }

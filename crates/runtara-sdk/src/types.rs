@@ -2,6 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! High-level types for the SDK.
 
+/// Authoritative managed wait state, shared with the internal instance protocol.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
+pub enum InputState {
+    /// Awaiting a response before the persistence deadline.
+    Open,
+    /// Retained immutable accepted bytes.
+    Accepted(Vec<u8>),
+    /// A machine-readable closure reason.
+    Closed(String),
+}
+
 /// Instance status as returned by status queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceStatus {

@@ -603,6 +603,21 @@ mod component {
             })
         }
 
+        fn wait_closed_error(
+            step_id: String,
+            signal_id: String,
+            reason: String,
+            timeout_ms: Option<u64>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_closed_error(&step_id, &signal_id, &reason, timeout_ms)
+            })
+        }
+
         fn wait_on_wait_variables(
             step_id: String,
             instance_id: String,

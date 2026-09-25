@@ -123,6 +123,25 @@ impl RuntimeHost for DeferredTerminal {
     async fn check_signals(&self) -> Result<bool, String> {
         self.inner.check_signals().await
     }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        self.inner.register_input(descriptor, deadline).await
+    }
+    async fn poll_input(
+        &self,
+        signal_id: String,
+    ) -> Result<crate::runtime_host::RuntimeInputState, String> {
+        self.inner.poll_input(signal_id).await
+    }
+    async fn close_input(
+        &self,
+        signal_id: String,
+    ) -> Result<crate::runtime_host::RuntimeInputState, String> {
+        self.inner.close_input(signal_id).await
+    }
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.inner.poll_custom_signal(checkpoint_id).await
     }

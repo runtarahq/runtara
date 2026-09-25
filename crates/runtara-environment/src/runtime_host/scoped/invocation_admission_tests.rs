@@ -69,7 +69,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn initial_admission_supplies_fenced_io_and_settles_native_cancel_without_tombstone() {
+async fn initial_admission_supplies_fenced_io_and_records_native_cancel_tombstone() {
     for cancel in [false, true] {
         let fx = Fixture::new(Duration::from_secs(3)).await;
         assert!(fx.admission.io().is_err());
@@ -110,9 +110,32 @@ async fn initial_admission_supplies_fenced_io_and_settles_native_cancel_without_
             matches!(result.outcome(), InvokeExit::Completed(bytes) if bytes == b"result")
         });
         let stored = fx.admission.begin().await.unwrap();
-        assert_eq!(stored.state, AttemptState::Settled);
+        assert_eq!(
+            stored.state,
+            if cancel {
+                AttemptState::Cancelled
+            } else {
+                AttemptState::Settled
+            }
+        );
         assert_eq!(&stored.fence, fx.admission.io().unwrap().fence());
         assert_eq!(fx.count().await, 1);
+        if cancel {
+            let replay = fx
+                .admission
+                .persistence
+                .invocation_fences()
+                .unwrap()
+                .begin_invocation_attempt(&fx.admission.lease, "parent/child", "replay")
+                .await
+                .unwrap();
+            assert_eq!(replay.state, AttemptState::Cancelled);
+            assert_eq!(
+                fx.count().await,
+                1,
+                "explicit cancellation cannot reopen the child"
+            );
+        }
         assert!(
             fx.admission
                 .io()
@@ -210,14 +233,9 @@ async fn initial_admission_recovers_dropped_reply_and_fences_failure_or_panic() 
         if interrupted {
             assert!(matches!(result.unwrap().outcome(), InvokeExit::Cancelled));
             let stored = fx.admission.begin().await.unwrap();
-            assert_eq!(
-                stored.state,
-                if mode == "cancelled" {
-                    AttemptState::Cancelled
-                } else {
-                    AttemptState::Settled
-                }
-            );
+            // Both paths explicitly cancel the task; losing the admission
+            // reply must not weaken cancellation into ordinary settlement.
+            assert_eq!(stored.state, AttemptState::Cancelled);
             assert_eq!(stored.fence.start_id, fx.admission.start_id);
         } else {
             assert!(matches!(result, Err(TaskError::WorkerLost)));

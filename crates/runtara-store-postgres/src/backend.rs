@@ -387,6 +387,17 @@ async fn put_custom_signal(
     checkpoint_id: &str,
     payload: &[u8],
 ) -> Result<String, CoreError> {
+    let mut tx = pool.begin().await.db()?;
+    crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+    let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instance_input_requests WHERE instance_id=$1 AND signal_id=$2)")
+        .bind(instance_id).bind(checkpoint_id).fetch_one(&mut *tx).await.db()?;
+    if managed {
+        return Err(CoreError::SignalDeliveryFailed {
+            instance_id: instance_id.into(),
+            signal_type: "custom".into(),
+            reason: "managed input addresses require validated acceptance".into(),
+        });
+    }
     let payload_opt = if payload.is_empty() {
         None
     } else {
@@ -406,10 +417,11 @@ async fn put_custom_signal(
     .bind(instance_id)
     .bind(checkpoint_id)
     .bind(payload_opt)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .db()?;
 
+    tx.commit().await.db()?;
     Ok(signal_id)
 }
 
@@ -425,6 +437,10 @@ async fn put_custom_signal(
 
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
+    fn input_requests(&self) -> Option<&dyn runtara_core::persistence::inputs::InputRequests> {
+        Some(self)
+    }
+
     fn invocation_fences(
         &self,
     ) -> Option<&dyn runtara_core::persistence::invocations::InvocationFences> {
@@ -626,11 +642,35 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         request: runtara_core::lifecycle::ParkRequest,
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+        self.park_instance_on_signals(instance_id, request, &[])
+            .await
+    }
+
+    async fn park_instance_on_signals(
+        &self,
+        instance_id: &str,
+        request: runtara_core::lifecycle::ParkRequest,
+        signals: &[String],
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
         let decision = runtara_core::lifecycle::park(status, request);
         if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
             crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
+            if request.reason == runtara_core::lifecycle::ParkReason::Signal && !signals.is_empty()
+            {
+                sqlx::query(
+                    "INSERT INTO instance_input_parks (instance_id, signal_ids) VALUES ($1,$2)",
+                )
+                .bind(instance_id)
+                .bind(signals)
+                .execute(&mut *tx)
+                .await
+                .db()?;
+                crate::inputs::schedule_accepted(&mut tx, instance_id, true)
+                    .await
+                    .db()?;
+            }
         }
         tx.commit().await.db()?;
         Ok(decision)
@@ -758,6 +798,34 @@ impl Persistence for PostgresPersistence {
         reason: runtara_core::domain::WakeReason,
     ) -> Result<(), CoreError> {
         Self::op_set_instance_sleep(&self.pool, instance_id, deadline, reason).await
+    }
+
+    async fn schedule_signal_wake(&self, instance_id: &str) -> Result<bool, CoreError> {
+        let mut tx = self.pool.begin().await.db()?;
+        crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let changed = sqlx::query("UPDATE instances SET sleep_until=LEAST(sleep_until, clock_timestamp()), wake_reason='custom_signal' WHERE instance_id=$1 AND status='suspended' AND termination_reason='waiting_signal' AND NOT EXISTS (SELECT 1 FROM instance_input_parks p WHERE p.instance_id=$1 AND p.wake_scheduled)")
+            .bind(instance_id).execute(&mut *tx).await.db()?.rows_affected() == 1;
+        if changed {
+            sqlx::query("UPDATE instance_input_parks SET wake_scheduled=true WHERE instance_id=$1")
+                .bind(instance_id)
+                .execute(&mut *tx)
+                .await
+                .db()?;
+        }
+        tx.commit().await.db()?;
+        Ok(changed)
+    }
+
+    async fn reschedule_claimed_wake(
+        &self,
+        instance_id: &str,
+        claimed_until: DateTime<Utc>,
+        retry_at: DateTime<Utc>,
+        reason: runtara_core::domain::WakeReason,
+    ) -> Result<bool, CoreError> {
+        Ok(sqlx::query("UPDATE instances SET sleep_until=$3, wake_reason=$4 WHERE instance_id=$1 AND status='suspended' AND sleep_until=$2")
+            .bind(instance_id).bind(claimed_until).bind(retry_at).bind(crate::encoding::wake_reason_to_str(reason))
+            .execute(&self.pool).await.db()?.rows_affected() == 1)
     }
 
     async fn mark_instance_running(

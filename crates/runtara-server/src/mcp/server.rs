@@ -1006,7 +1006,7 @@ impl SmoMcpServer {
     // ===== Signal / Human-in-the-Loop Tools =====
 
     #[tool(
-        description = "List pending signals (WaitForSignal / human-in-the-loop requests) for a running execution. Returns signal IDs, messages, and response schemas for each pending input."
+        description = "List pending signals (WaitForSignal / human-in-the-loop requests) for an eligible running or suspended execution. Returns opaque request IDs, messages, and response schemas for each pending input."
     )]
     async fn list_pending_signals(
         &self,
@@ -1016,7 +1016,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Get the response schema for a specific pending signal. Shows what fields and types are expected in the response payload."
+        description = "Get the response schema for a specific pending request by request_id. Shows what fields and types are expected in the response payload."
     )]
     async fn get_signal_schema(
         &self,
@@ -1026,7 +1026,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Submit a response to a pending signal, resuming the waiting execution. The payload should conform to the response_schema from the pending input."
+        description = "Accept a response using request_id and a caller-generated operation_id. Reuse both IDs and the same payload on uncertain retries. Returns an acceptance receipt; explicit pauses are not resumed. The payload must match the pending input schema."
     )]
     async fn submit_signal_response(
         &self,
@@ -1036,7 +1036,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Submit a response to an open workflow action. Use workflow_id + instance_id for direct workflow actions, or report_id + block_id to submit through a report actions block. Accepts canonical action IDs containing '/', '::', and step suffixes."
+        description = "Submit a response to an open workflow action. Use instance_id with workflow_id for direct actions, or with report_id + block_id for report actions. Supply the opaque request ID as action_id and reuse operation_id on uncertain retries."
     )]
     async fn submit_action_response(
         &self,

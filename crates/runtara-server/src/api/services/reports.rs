@@ -20,7 +20,7 @@ use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::object_model::{
     InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
 };
-use crate::api::services::workflow_runtime::{WorkflowRuntimeError, submit_workflow_action};
+use crate::api::services::workflow_runtime::{WorkflowActionReceipt, WorkflowRuntimeError};
 use crate::auth::{AuthContext, AuthMethod};
 use crate::runtime_client::{RuntimeClient, RuntimeError, TerminalOutcome};
 use crate::workers::execution_engine::ExecutionError;
@@ -49,6 +49,8 @@ pub(crate) const MAX_BROADCAST_JOIN_DIM_ROWS: i64 = 50_000;
 
 #[derive(Debug, Error)]
 pub enum ReportServiceError {
+    #[error(transparent)]
+    WorkflowRuntime(WorkflowRuntimeError),
     #[error("Report not found")]
     NotFound,
     #[error("{0}")]
@@ -103,15 +105,7 @@ impl From<runtara_connections::service::rate_limits::ServiceError> for ReportSer
 
 impl From<WorkflowRuntimeError> for ReportServiceError {
     fn from(error: WorkflowRuntimeError) -> Self {
-        match error {
-            WorkflowRuntimeError::InvalidRequest(message)
-            | WorkflowRuntimeError::NotFound(message) => ReportServiceError::Validation(message),
-            WorkflowRuntimeError::Conflict(message) => ReportServiceError::Conflict(message),
-            WorkflowRuntimeError::RuntimeUnavailable => ReportServiceError::Validation(
-                "Workflow runtime report sources require a configured runtime client".to_string(),
-            ),
-            WorkflowRuntimeError::Runtime(message) => ReportServiceError::Database(message),
-        }
+        Self::WorkflowRuntime(error)
     }
 }
 
@@ -1034,6 +1028,9 @@ impl ReportService {
         request: SubmitReportWorkflowActionRequest,
         auth_context: &AuthContext,
     ) -> Result<Value, ReportServiceError> {
+        if auth_context.org_id != tenant_id {
+            return Err(ReportServiceError::NotFound);
+        }
         let report = self.get_report(tenant_id, id_or_slug).await?;
         let block = report
             .definition
@@ -1058,6 +1055,17 @@ impl ReportService {
             )));
         }
 
+        let context = runtara_core::persistence::inputs::InputAcceptanceContext::new(
+            "report_action",
+            &auth_context.user_id,
+            &json!({
+                "report_id": report.id, "block_id": block_id,
+                "auth_method": auth_context.auth_method.as_str(),
+                "filters": request.filters, "block_filters": request.block_filters,
+            }),
+            &request.payload,
+        )
+        .map_err(WorkflowRuntimeError::from)?;
         let resolved_filters = resolve_filters(&report.definition, &request.filters);
         let block_request = ReportBlockDataRequest {
             id: block_id.to_string(),
@@ -1072,42 +1080,66 @@ impl ReportService {
             &resolved_filters,
             Some(&block_request),
         )?;
-        let actions = self
+        if request.request_id != action_id {
+            return Err(WorkflowRuntimeError::Managed(
+                runtara_core::persistence::inputs::InputError::InvalidRequest,
+            )
+            .into());
+        }
+        let action = self
             .providers
             .workflow_runtime()
-            .actions_for_block_context(tenant_id, block, condition.as_ref())
+            .retained_action_for_block_context(
+                tenant_id,
+                block,
+                condition.as_ref(),
+                &request.instance_id,
+                &request.request_id,
+            )
             .await?;
-        let action = actions
-            .into_iter()
-            .find(|action| action.action_id == action_id || action.signal_id == action_id)
-            .ok_or_else(|| {
-                ReportServiceError::Conflict(format!(
-                    "Action '{}' is no longer open for report block '{}'",
-                    action_id, block.id
-                ))
-            })?;
 
-        let payload = merge_report_action_payload(&request.payload, block, auth_context)?;
-        let submitted = submit_workflow_action(
-            self.require_execution_engine()?,
-            self.require_runtime_client()?,
-            tenant_id,
-            &action.workflow_id,
-            &action.instance_id,
-            &action.action_id,
-            &payload,
-        )
-        .await
-        .map_err(ReportServiceError::from)?;
-
-        Ok(json!({
-            "success": true,
-            "workflowId": submitted.workflow_id,
-            "instanceId": submitted.instance_id,
-            "actionId": submitted.action_id,
-            "signalId": submitted.signal_id,
-            "status": "submitted",
-        }))
+        // Current report/block/target authorization above precedes every replay.
+        // Scope uses the immutable report ID, so changing its slug is harmless.
+        let client = self.require_runtime_client()?;
+        let replay = || {
+            client.replay_contextual_input_response(
+                tenant_id,
+                &action.instance_id,
+                &action.request_id,
+                &request.operation_id,
+                &context,
+            )
+        };
+        let serialize_receipt = |receipt| {
+            serde_json::to_value(WorkflowActionReceipt::from(receipt))
+                .expect("receipt serialization")
+        };
+        if let Some(receipt) = replay().await.map_err(WorkflowRuntimeError::from)? {
+            return Ok(serialize_receipt(receipt));
+        }
+        let payload = match merge_report_action_payload(&request.payload, block, auth_context) {
+            Ok(payload) => payload,
+            Err(error) => {
+                // A matching concurrent acceptance may have committed while
+                // preparing the payload. Its receipt still takes precedence.
+                return match replay().await.map_err(WorkflowRuntimeError::from)? {
+                    Some(receipt) => Ok(serialize_receipt(receipt)),
+                    None => Err(error),
+                };
+            }
+        };
+        let receipt = client
+            .submit_contextual_input_response(
+                tenant_id,
+                &action.instance_id,
+                &action.request_id,
+                &request.operation_id,
+                &payload,
+                &context,
+            )
+            .await
+            .map_err(WorkflowRuntimeError::from)?;
+        Ok(serialize_receipt(receipt))
     }
 
     pub async fn get_filter_options(

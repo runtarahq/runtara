@@ -11,7 +11,7 @@ import { ActionForm } from '@/features/workflows/components/ActionForm';
 
 interface HumanInputCardProps {
   pendingInput: PendingInput;
-  onSubmit: (signalId: string, payload: Record<string, any>) => void;
+  onSubmit: (requestId: string, payload: Record<string, any>) => void;
   isSubmitting: boolean;
 }
 
@@ -44,10 +44,10 @@ export function HumanInputCard({
         )}
 
         <ActionForm
-          key={pendingInput.signalId}
-          inputSchema={pendingInput.responseSchema}
+          key={pendingInput.requestId}
+          inputSchema={pendingInput.responseSchema ?? undefined}
           disabled={isSubmitting}
-          onSubmit={(payload) => onSubmit(pendingInput.signalId, payload)}
+          onSubmit={(payload) => onSubmit(pendingInput.requestId, payload)}
         />
       </CardContent>
     </Card>

@@ -32,6 +32,9 @@ pub const DEFAULT_STEP_TIMEOUT_MS: u64 = 180_000;
 // Include the schema types
 include!("schema_types.rs");
 
+/// Shared workflow and external-input payload validation.
+pub mod input_validation;
+
 /// Execution label validation.
 pub mod run_label;
 

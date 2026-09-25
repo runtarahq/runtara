@@ -10,11 +10,9 @@
 
 use crate::runtime_types::{InstanceInfo, InstanceStatus as RuntaraInstanceStatus};
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use serde_json::Value;
 
 use crate::api::dto::workflows::{InstanceInputs, WorkflowInstanceDto};
-use crate::api::services::pending_inputs::has_open_inputs;
 use crate::runtime_client::RuntimeClient;
 use crate::types::ExecutionStatus;
 
@@ -97,54 +95,27 @@ fn duration_seconds(
     (ms >= 0).then(|| ms as f64 / 1000.0)
 }
 
-/// Enrich running instances with `has_pending_input` by checking for
-/// unresolved `external_input_requested` events.
-///
-/// Only queries events for running instances. The request/resolution pairing is
-/// shared with the per-instance pending-input and action endpoints (see
-/// `api::services::pending_inputs`) so the list and the detail views cannot
-/// disagree about the same run.
-///
-/// Each lookup is a round trip to the environment service, so they run
-/// concurrently rather than one row at a time — a page holds up to 100
-/// instances and the executions views poll it on a 10s interval, which would
-/// otherwise make list latency scale with how busy the tenant is.
-pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client: &RuntimeClient) {
-    // Bounded rather than unbounded: the executions views poll this endpoint
-    // per open tab and per tenant, so a full page fanning out at once would
-    // turn one slow list into a burst against the environment service.
-    const MAX_CONCURRENT_LOOKUPS: usize = 8;
-
-    // `iter_mut` hands each future a disjoint borrow of its own row, so results
-    // are written back in place and completion order does not matter. The
-    // futures are built in an explicit loop (concrete lifetimes, no closure
-    // HRTB) as elsewhere in this codebase, since a `map` closure yielding a
-    // future that borrows its argument mutably does not infer.
-    let mut lookups = Vec::new();
-    for instance in instances.iter_mut() {
-        if instance.status != ExecutionStatus::Running {
-            continue;
-        }
-
-        lookups.push(async move {
-            match has_open_inputs(client, &instance.id).await {
-                Ok(has_open) => instance.has_pending_input = has_open,
-                // The flag stays false, so the indicator is hidden rather than
-                // wrongly shown for every running row during a runtime hiccup —
-                // but the hiccup itself must not pass silently.
-                Err(error) => tracing::warn!(
-                    instance_id = %instance.id,
-                    error = %error,
-                    "Failed to resolve pending input state; reporting none"
-                ),
-            }
-        });
+/// Enrich authorized execution rows from one authoritative request snapshot.
+/// Suspended and paused waits remain eligible. Failure propagates to the
+/// enclosing response instead of presenting unknown state as no pending input.
+pub async fn enrich_pending_input(
+    instances: &mut [WorkflowInstanceDto],
+    client: &RuntimeClient,
+    tenant_id: &str,
+) -> runtara_core::persistence::inputs::InputResult<()> {
+    let ids: Vec<_> = instances
+        .iter()
+        .map(|instance| instance.id.clone())
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
     }
-
-    futures::stream::iter(lookups)
-        .buffer_unordered(MAX_CONCURRENT_LOOKUPS)
-        .for_each(|()| std::future::ready(()))
-        .await;
+    let pending = client.instances_with_open_inputs(tenant_id, &ids).await?;
+    // Apply only after the entire lookup succeeded; never leave partial flags.
+    for instance in instances {
+        instance.has_pending_input = pending.contains(&instance.id);
+    }
+    Ok(())
 }
 
 /// Convert Runtara `InstanceSummary` to `WorkflowInstanceDto` with workflow
@@ -390,6 +361,117 @@ pub fn parse_image_id(image_id: &str) -> (String, i32) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn input_flag_row(id: &str) -> WorkflowInstanceDto {
+        serde_json::from_value(json!({
+            "id": id, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+            "status": "suspended", "workflowId": "workflow", "usedVersion": 1, "inputs": {}
+        }))
+        .unwrap()
+    }
+
+    fn input_flag_client(
+        persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+    ) -> RuntimeClient {
+        use runtara_environment::{handlers::EnvironmentHandlerState, runner::MockRunner};
+        use std::sync::Arc;
+        let unused_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        RuntimeClient::new(
+            Arc::new(EnvironmentHandlerState::new(
+                unused_pool,
+                persistence,
+                Arc::new(MockRunner::new()),
+                std::env::temp_dir(),
+            )),
+            crate::runtime_client::RuntimeClientConfig::new(Default::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn pending_input_flags_include_suspended_waits_and_remove_accepted_requests() {
+        use runtara_core::{
+            domain::InstanceStatus,
+            persistence::{Persistence, inputs::*, memory::InMemoryPersistence},
+        };
+        let persistence = std::sync::Arc::new(InMemoryPersistence::new());
+        persistence
+            .register_instance("waiting", "tenant")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status("waiting", InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let spec = InputRequestSpec {
+            signal_id: "wait".into(),
+            response_schema: None,
+            metadata: json!({}),
+            deadline: None,
+        };
+        let inputs = persistence.input_requests().unwrap();
+        inputs
+            .register_input(
+                &InputAuthority::Root {
+                    tenant_id: "tenant".into(),
+                    instance_id: "waiting".into(),
+                },
+                &spec,
+            )
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status("waiting", InstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        let client = input_flag_client(persistence.clone());
+        let mut rows = vec![input_flag_row("waiting")];
+        enrich_pending_input(&mut rows, &client, "tenant")
+            .await
+            .unwrap();
+        assert!(rows[0].has_pending_input);
+        submit_input(
+            inputs,
+            "tenant",
+            "waiting",
+            &spec.request_id(),
+            "reply",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        enrich_pending_input(&mut rows, &client, "tenant")
+            .await
+            .unwrap();
+        assert!(!rows[0].has_pending_input);
+        assert!(
+            enrich_pending_input(&mut rows, &client, "foreign")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_input_flags_propagate_storage_failure_without_mutating_rows() {
+        let unavailable_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        // A closed, never-connected fixture pool deterministically fails IO.
+        unavailable_pool.close().await;
+        let client = input_flag_client(std::sync::Arc::new(
+            runtara_store_postgres::PostgresPersistence::new(unavailable_pool),
+        ));
+        let mut rows = vec![input_flag_row("waiting"), input_flag_row("other")];
+        rows[0].has_pending_input = true;
+        let result = enrich_pending_input(&mut rows, &client, "tenant").await;
+        assert!(matches!(
+            result,
+            Err(runtara_core::persistence::inputs::InputError::Storage(_))
+        ));
+        assert!(rows[0].has_pending_input);
+        assert!(!rows[1].has_pending_input);
+    }
 
     #[test]
     fn elide_large_strings_collapses_big_strings_and_keeps_small_ones() {

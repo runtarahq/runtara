@@ -86,6 +86,160 @@ impl std::fmt::Debug for EnvironmentClient {
 }
 
 impl EnvironmentClient {
+    /// Resolve all workflow associations before paging actionable requests.
+    pub async fn workflow_input_instances(
+        &self,
+        tenant: &str,
+        workflow: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
+        self.instances()
+            .ids_for_image_name_prefix(tenant, &format!("{workflow}:"))
+            .await
+            .map_err(|error| {
+                runtara_core::persistence::inputs::InputError::Storage(error.to_string())
+            })
+    }
+
+    /// Authoritative batched flags, including suspended/explicitly paused waits.
+    pub async fn instances_with_open_inputs(
+        &self,
+        tenant: &str,
+        instances: &[String],
+    ) -> runtara_core::persistence::inputs::InputResult<std::collections::BTreeSet<String>> {
+        self.state
+            .persistence
+            .input_requests()
+            .ok_or_else(|| {
+                runtara_core::persistence::inputs::InputError::Storage(
+                    "managed inputs unavailable".into(),
+                )
+            })?
+            .instances_with_open_inputs(tenant, instances)
+            .await
+    }
+
+    /// Authoritative tenant-scoped discovery, paginated over requests.
+    pub async fn list_input_requests(
+        &self,
+        tenant: &str,
+        instances: &[String],
+        offset: u64,
+        limit: u32,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputRequestPage,
+    > {
+        self.state
+            .persistence
+            .input_requests()
+            .ok_or_else(|| {
+                runtara_core::persistence::inputs::InputError::Storage(
+                    "managed inputs unavailable".into(),
+                )
+            })?
+            .list_inputs(tenant, instances, offset, limit)
+            .await
+    }
+
+    /// Read retained request metadata, including accepted/closed requests.
+    pub async fn get_input_request(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputRequest,
+    > {
+        self.state
+            .persistence
+            .input_requests()
+            .ok_or_else(|| {
+                runtara_core::persistence::inputs::InputError::Storage(
+                    "managed inputs unavailable".into(),
+                )
+            })?
+            .get_input(tenant, instance, request)
+            .await
+    }
+
+    /// Validate and accept an external input with durable operation replay.
+    pub async fn submit_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &serde_json::Value,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
+            runtara_core::persistence::inputs::InputError::Storage(
+                "managed inputs unavailable".into(),
+            )
+        })?;
+        runtara_core::persistence::inputs::submit_input(
+            inputs, tenant, instance, request, operation, payload,
+        )
+        .await
+    }
+
+    /// Replay a trusted adapter's original caller intent after current authorization.
+    pub(crate) async fn replay_contextual_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        Option<runtara_core::persistence::inputs::InputReceipt>,
+    > {
+        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
+            runtara_core::persistence::inputs::InputError::Storage(
+                "managed inputs unavailable".into(),
+            )
+        })?;
+        inputs
+            .replay_input(
+                tenant,
+                instance,
+                request,
+                operation,
+                runtara_core::persistence::inputs::InputReplayIdentity::Context(context.as_bytes()),
+            )
+            .await
+    }
+
+    /// Commit trusted retry context with the validated effective response.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn submit_contextual_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &serde_json::Value,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
+            runtara_core::persistence::inputs::InputError::Storage(
+                "managed inputs unavailable".into(),
+            )
+        })?;
+        runtara_core::persistence::inputs::submit_input_with_context(
+            inputs,
+            tenant,
+            instance,
+            request,
+            operation,
+            payload,
+            Some(context),
+        )
+        .await
+    }
+
     /// Wrap the running environment's shared handler state.
     pub fn new(state: Arc<EnvironmentHandlerState>) -> Self {
         Self { state }

@@ -3,6 +3,7 @@ use super::*;
 use tokio::sync::Notify;
 #[path = "deferred_terminal.rs"]
 mod deferred_terminal;
+use crate::isolated_tasks::TeardownDisposition;
 use deferred_terminal::DeferredTerminal;
 use wasmtime::component::InstancePre;
 
@@ -22,6 +23,16 @@ pub enum RootLifecycleDecision {
 /// Persistent fences remain the embedding's responsibility.
 #[async_trait]
 pub trait RootExecutionCoordinator: Send + Sync {
+    /// Select physical teardown policy after the root Store is gone and before
+    /// descendants settle. Native pause/breakpoint receipts may preserve work
+    /// even when the guest returned a cancellation-shaped outcome.
+    fn teardown_disposition(&self, outcome: &InvokeExit) -> Result<TeardownDisposition, String> {
+        Ok(if matches!(outcome, InvokeExit::Suspended(_)) {
+            TeardownDisposition::Resumable
+        } else {
+            TeardownDisposition::Terminal
+        })
+    }
     /// Fence new calls without IO. A false value forbids lifecycle publication.
     fn close(&self, cleanup_succeeded: bool) -> Result<(), String>;
     /// Apply root control receipts, never graph scheduling or child recovery.
@@ -132,7 +143,33 @@ impl WorkflowExecutor {
             // A panic in cleanup must also become a root host failure. It must
             // never expose the successful guest result retained above.
             let mut cleanup_succeeded = true;
-            match tokio::spawn(async move { execution.shutdown().await }).await {
+            let disposition = if abandoned.load(Ordering::Acquire)
+                || root_cancel
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                || overall_started.elapsed() >= timeout
+                || matches!(
+                    &result.exit,
+                    InvokeExit::Trapped { .. } | InvokeExit::Timeout | InvokeExit::CleanupAborted
+                ) {
+                TeardownDisposition::Terminal
+            } else if let Some(coordinator) = coordinator.as_ref() {
+                match coordinator.teardown_disposition(&result.exit) {
+                    Ok(disposition) => disposition,
+                    Err(reason) => {
+                        cleanup_succeeded = false;
+                        result.exit = InvokeExit::Trapped {
+                            reason: format!("root teardown coordination failed: {reason}"),
+                        };
+                        TeardownDisposition::Terminal
+                    }
+                }
+            } else if matches!(&result.exit, InvokeExit::Suspended(_)) {
+                TeardownDisposition::Resumable
+            } else {
+                TeardownDisposition::Terminal
+            };
+            match tokio::spawn(async move { execution.shutdown_with(disposition).await }).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     cleanup_succeeded = false;

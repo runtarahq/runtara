@@ -7,13 +7,32 @@ use tokio::sync::mpsc;
 use super::channel::Channel;
 use super::session::InboundMessage;
 
+/// The collector already notified the user; leave the workflow wait unanswered.
+#[derive(Debug, thiserror::Error)]
+#[error("Field collection stopped without a response")]
+pub struct CollectionStopped;
+
+/// Reads replies already buffered by this actor before a wait was discovered.
+/// Field progress itself remains in memory; restartable collection is deferred.
+pub struct BufferedReplies<'a> {
+    pub conn: &'a mut redis::aio::ConnectionManager,
+    pub scope: &'a crate::api::services::session_queue::managed::QueueScope,
+    pub instance: &'a str,
+}
+
 /// Collect structured field values from a user via sequential text prompts.
-pub async fn collect_fields(
+pub async fn collect_fields<F, Fut>(
     schema_value: &Value,
     channel: &dyn Channel,
     conv_id: &str,
     user_rx: &mut mpsc::Receiver<InboundMessage>,
-) -> anyhow::Result<Value> {
+    mut buffered: Option<BufferedReplies<'_>>,
+    ensure_open: F,
+) -> anyhow::Result<Value>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+{
     let schema: HashMap<String, SchemaField> = serde_json::from_value(schema_value.clone())?;
 
     let fields = sort_fields(&schema);
@@ -30,22 +49,69 @@ pub async fn collect_fields(
             continue;
         }
 
+        // Presentation is conditional on authoritative state, not the event
+        // which caused this collection attempt. Recheck at every field.
+        ensure_open().await?;
         let prompt = runtara_text_parser::build_prompt(name, field);
         channel.send_text(conv_id, &prompt).await?;
 
         let mut retries = 0;
         loop {
-            let inbound = user_rx
-                .recv()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("Channel closed during field collection"))?;
-            let input = &inbound.text;
+            ensure_open().await?;
+            let queued = if let Some(buffer) = buffered.as_mut() {
+                use crate::api::services::session_queue;
+                if let Some(source) = session_queue::peek_event(
+                    buffer.conn,
+                    buffer.scope.tenant_id(),
+                    buffer.scope.session_id(),
+                )
+                .await?
+                {
+                    anyhow::ensure!(
+                        source.event.instance_id.as_deref() == Some(buffer.instance)
+                            && source.event.target.is_none(),
+                        "Buffered reply belongs to another target"
+                    );
+                    let text = source
+                        .event
+                        .payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow::anyhow!("Buffered reply has no text"))?
+                        .to_owned();
+                    ensure_open().await?;
+                    session_queue::acknowledge_event(
+                        buffer.conn,
+                        buffer.scope.tenant_id(),
+                        buffer.scope.session_id(),
+                        &source,
+                    )
+                    .await?;
+                    Some(text)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let input = if let Some(text) = queued {
+                text
+            } else {
+                tokio::select! {
+                    message = user_rx.recv() => message.ok_or_else(|| anyhow::anyhow!("Channel closed during field collection"))?.text,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                        ensure_open().await?;
+                        continue;
+                    }
+                }
+            };
+            ensure_open().await?;
 
             let trimmed = input.trim();
 
             if trimmed.eq_ignore_ascii_case("/cancel") {
                 channel.send_text(conv_id, "Input cancelled.").await?;
-                anyhow::bail!("Cancelled by user");
+                return Err(CollectionStopped.into());
             }
 
             if trimmed.eq_ignore_ascii_case("/skip") && !field.required {
@@ -55,7 +121,7 @@ pub async fn collect_fields(
                 break;
             }
 
-            match runtara_text_parser::parse_text(input, field) {
+            match runtara_text_parser::parse_text(&input, field) {
                 ParseResult::Ok(value) => {
                     collected.insert(name.to_string(), value);
                     break;
@@ -72,7 +138,7 @@ pub async fn collect_fields(
                                 ),
                             )
                             .await?;
-                        anyhow::bail!("Max retries exceeded for field '{}'", name);
+                        return Err(CollectionStopped.into());
                     }
                     let skip_hint = if !field.required { " (or /skip)" } else { "" };
                     channel
@@ -83,5 +149,6 @@ pub async fn collect_fields(
         }
     }
 
+    ensure_open().await?;
     Ok(Value::Object(collected))
 }

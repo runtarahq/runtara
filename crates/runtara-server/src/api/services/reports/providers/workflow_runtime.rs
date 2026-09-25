@@ -21,7 +21,8 @@ use crate::api::services::reports::{
     validate_report_workflow_action_row_conditions,
 };
 use crate::api::services::workflow_runtime::{
-    WorkflowRuntimeAction, list_instance_actions, list_workflow_actions,
+    WorkflowRuntimeAction, WorkflowRuntimeError, action_from_request, list_instance_actions,
+    list_workflow_actions, map_execution_error,
 };
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::ExecutionEngine;
@@ -34,6 +35,48 @@ pub struct WorkflowRuntimeProvider {
 }
 
 impl WorkflowRuntimeProvider {
+    /// Re-authorize report scope from retained immutable request metadata. An
+    /// accepted request need not remain in the current actionable result set.
+    pub async fn retained_action_for_block_context(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        condition: Option<&Condition>,
+        instance_id: &str,
+        request_id: &str,
+    ) -> Result<WorkflowRuntimeAction, ReportServiceError> {
+        let workflow_id = workflow_runtime_workflow_id(block)?;
+        let not_found = || {
+            WorkflowRuntimeError::Managed(runtara_core::persistence::inputs::InputError::NotFound)
+        };
+        if block
+            .source
+            .instance_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .is_some_and(|id| id != instance_id)
+        {
+            return Err(not_found().into());
+        }
+        self.engine()?
+            .authorize_execution(workflow_id, instance_id, tenant_id)
+            .await
+            .map_err(map_execution_error)?;
+        let request = self
+            .runtime_client()?
+            .get_input_request(tenant_id, instance_id, request_id)
+            .await
+            .map_err(WorkflowRuntimeError::from)?;
+        let action = action_from_request(workflow_id, &request);
+        if let Some(condition) = condition
+            && !condition_matches_row(condition, &workflow_action_report_row(&action), &block.id)?
+        {
+            return Err(not_found().into());
+        }
+        Ok(action)
+    }
+
     pub fn new(
         engine: Option<Arc<ExecutionEngine>>,
         runtime_client: Option<Arc<RuntimeClient>>,
@@ -102,27 +145,36 @@ impl WorkflowRuntimeProvider {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let execution = engine
-                .get_execution_with_metadata(workflow_id, instance_id, tenant_id)
-                .await?;
-            if !should_check_instance_actions(&execution.instance) {
-                return Ok(Vec::new());
-            }
-            return list_instance_actions(runtime_client, workflow_id, instance_id)
+            engine
+                .authorize_execution(workflow_id, instance_id, tenant_id)
+                .await
+                .map_err(map_execution_error)?;
+            return list_instance_actions(runtime_client, tenant_id, workflow_id, instance_id)
                 .await
                 .map_err(Into::into);
         }
 
-        Ok(list_workflow_actions(
-            engine,
-            runtime_client,
-            tenant_id,
-            workflow_id,
-            Some(0),
-            Some(100),
-        )
-        .await?
-        .actions)
+        let mut actions = Vec::new();
+        let mut page = 0_i32;
+        loop {
+            let result = list_workflow_actions(
+                engine,
+                runtime_client,
+                tenant_id,
+                workflow_id,
+                Some(page),
+                Some(100),
+            )
+            .await?;
+            actions.extend(result.actions);
+            if !result.page.has_next_page {
+                break;
+            }
+            page = page.checked_add(1).ok_or_else(|| {
+                ReportServiceError::Validation("Action page offset out of range".into())
+            })?;
+        }
+        Ok(actions)
     }
 }
 
@@ -194,7 +246,13 @@ impl ReportSourceProvider for WorkflowRuntimeProvider {
                             break;
                         }
                         let actions = if should_check_instance_actions(&instance) {
-                            list_instance_actions(runtime_client, workflow_id, &instance.id).await?
+                            list_instance_actions(
+                                runtime_client,
+                                params.tenant_id,
+                                workflow_id,
+                                &instance.id,
+                            )
+                            .await?
                         } else {
                             Vec::new()
                         };
@@ -429,6 +487,7 @@ fn workflow_instance_report_row(
 
 fn workflow_action_report_row(action: &WorkflowRuntimeAction) -> Map<String, Value> {
     let mut row = Map::new();
+    row.insert("requestId".into(), Value::String(action.request_id.clone()));
     row.insert("id".to_string(), Value::String(action.id.clone()));
     row.insert(
         "actionId".to_string(),
@@ -557,6 +616,7 @@ pub(crate) fn workflow_runtime_fields(
         ReportWorkflowRuntimeEntity::Actions => [
             "id",
             "actionId",
+            "requestId",
             "actionKind",
             "targetKind",
             "targetId",

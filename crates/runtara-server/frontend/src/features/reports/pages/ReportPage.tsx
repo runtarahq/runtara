@@ -1,4 +1,8 @@
 import {
+  ManagedInputScope,
+  InputRetryPanel,
+} from '@/features/workflows/components/ManagedInputSubmissions';
+import {
   lazy,
   Suspense,
   useCallback,
@@ -86,6 +90,14 @@ const waitForReportState = (milliseconds: number) =>
  *  layout, but the report itself (grids, blocks, real-data previews) renders
  *  identically in both modes. */
 export function ReportPage() {
+  return (
+    <ManagedInputScope>
+      <ReportPageContent />
+    </ManagedInputScope>
+  );
+}
+
+function ReportPageContent() {
   const { reportId } = useParams();
   const isExisting = Boolean(reportId);
   const navigate = useNavigate();
@@ -632,6 +644,12 @@ export function ReportPage() {
       className={!editing ? 'report-print-root' : undefined}
       contentClassName={!editing ? 'report-print-content pb-16' : undefined}
     >
+      <InputRetryPanel
+        matches={(request) =>
+          request.kind === 'report' &&
+          request.reportId === (existingReport?.id ?? reportId)
+        }
+      />
       {needsReAuthoring ? (
         <Alert variant="warning" className="mb-4">
           <AlertTriangle className="size-4" />
@@ -687,7 +705,7 @@ export function ReportPage() {
               editing={editing}
               blockResults={blockResults}
               filters={filterValues}
-              reportId={reportId}
+              reportId={existingReport?.id ?? reportId}
               onChange={(nextDefinition) => {
                 setDefinition(nextDefinition);
                 setSaveError(null);
@@ -706,7 +724,7 @@ export function ReportPage() {
         </div>
       ) : reportId ? (
         <ReportRenderer
-          reportId={reportId}
+          reportId={existingReport?.id ?? reportId}
           definition={definition}
           renderResponse={renderQuery.data}
           filters={filterValues}

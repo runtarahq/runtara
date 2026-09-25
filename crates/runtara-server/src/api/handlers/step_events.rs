@@ -11,7 +11,7 @@ use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::api::services::pending_inputs::{fetch_input_and_end_events, open_input_events};
+use crate::api::services::pending_inputs::pending_input_page;
 use crate::api::services::workflow_runtime::{
     SubmitWorkflowActionRequest, WorkflowRuntimeError, list_instance_actions,
     list_workflow_actions, submit_workflow_action as submit_runtime_workflow_action,
@@ -411,28 +411,6 @@ pub async fn get_scope_ancestors(
     }
 }
 
-/// Response for pending human input requests
-#[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingInputResponse {
-    /// Legacy field name: checkpoint address to deliver the response to, not a value ID
-    pub signal_id: String,
-    /// Tool name that requested the input
-    pub tool_name: Option<String>,
-    /// Message from the AI Agent explaining what input is needed
-    pub message: String,
-    /// Schema describing expected response fields (same format as workflow inputSchema)
-    pub response_schema: Option<Value>,
-    /// The AI Agent step that initiated this request
-    pub ai_agent_step_id: Option<String>,
-    /// Iteration number in the agent loop
-    pub iteration: Option<u32>,
-    /// Tool call number
-    pub call_number: Option<u32>,
-    /// When the input was requested
-    pub requested_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowActionsQuery {
@@ -440,12 +418,7 @@ pub struct WorkflowActionsQuery {
     pub size: Option<i32>,
 }
 
-/// Get pending human input requests for a running execution.
-///
-/// Returns any active `external_input_requested` events that haven't been
-/// resolved yet (the corresponding tool call step hasn't completed).
-/// The frontend uses this to render input forms when an AI Agent is
-/// waiting for human-in-the-loop input.
+/// Get authoritative pending requests, including suspended waits.
 #[utoipa::path(
     get,
     path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
@@ -454,117 +427,36 @@ pub struct WorkflowActionsQuery {
         ("instanceId" = String, Path, description = "Instance/execution ID"),
     ),
     responses(
-        (status = 200, description = "Pending input requests"),
+        (status = 200, description = "Pending input requests", body = crate::api::dto::common::ApiResponse<crate::api::services::pending_inputs::PendingInputPage>),
         (status = 404, description = "Instance not found"),
         (status = 503, description = "Runtime client not configured"),
     ),
     tag = "step-events"
 )]
 pub async fn get_pending_input(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
-    Path((_workflow_id, instance_id)): Path<(String, String)>,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    Path((workflow_id, instance_id)): Path<(String, String)>,
+    State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
-    // Parse instance UUID
-    if Uuid::parse_str(&instance_id).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "message": "Invalid instance ID format",
-                "data": Value::Null
-            })),
+    let Some(client) = runtime_client else {
+        return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
+    };
+    if let Err(error) = engine
+        .authorize_execution(&workflow_id, &instance_id, &tenant_id)
+        .await
+    {
+        return workflow_runtime_error_response(
+            crate::api::services::workflow_runtime::map_execution_error(error),
         );
     }
-
-    // Get runtime client
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "success": false,
-                    "message": "Runtime client not configured",
-                    "data": Value::Null
-                })),
-            );
-        }
-    };
-
-    let (input_events, end_events) = match fetch_input_and_end_events(&client, &instance_id).await {
-        Ok(events) => events,
-        Err(message) => {
-            if message.contains("not found") {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "success": false,
-                        "message": format!("Instance not found: {}", instance_id),
-                        "data": Value::Null
-                    })),
-                );
-            }
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "success": false,
-                    "message": format!("Failed to query events: {}", message),
-                    "data": Value::Null
-                })),
-            );
-        }
-    };
-
-    // The payload fields are at the top level (not nested under "data")
-    let pending: Vec<PendingInputResponse> = open_input_events(&input_events, &end_events)
-        .into_iter()
-        .filter_map(|event| {
-            let data = event.payload.as_ref()?;
-
-            let signal_id = data.get("signal_id")?.as_str()?.to_string();
-            let ai_step_id = data.get("ai_agent_step_id").and_then(|v| v.as_str());
-            let tool_name = data.get("tool_name").and_then(|v| v.as_str());
-            let call_number = data
-                .get("call_number")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
-
-            Some(PendingInputResponse {
-                signal_id,
-                tool_name: tool_name.map(|s| s.to_string()),
-                message: data
-                    .get("message")
-                    .or_else(|| data.get("step_name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("External input requested")
-                    .to_string(),
-                response_schema: data.get("response_schema").cloned(),
-                ai_agent_step_id: ai_step_id.map(|s| s.to_string()),
-                iteration: data
-                    .get("iteration")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32),
-                call_number,
-                requested_at: Some(event.created_at),
-            })
-        })
-        .collect();
-
-    let count = pending.len();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "success": true,
-            "message": if count > 0 { "Pending input requests found" } else { "No pending input requests" },
-            "data": {
-                "instanceId": instance_id,
-                "pendingInputs": pending,
-                "count": count
-            }
-        })),
-    )
+    match pending_input_page(&client, &tenant_id, &instance_id).await {
+        Ok(page) => (
+            StatusCode::OK,
+            Json(json!({"success":true,"message":"Pending inputs retrieved","data":page})),
+        ),
+        Err(error) => workflow_runtime_error_response(error.into()),
+    }
 }
 
 #[utoipa::path(
@@ -575,7 +467,7 @@ pub async fn get_pending_input(
         WorkflowActionsQuery,
     ),
     responses(
-        (status = 200, description = "Open workflow actions"),
+        (status = 200, description = "Open workflow actions", body = crate::api::dto::common::ApiResponse<crate::api::services::workflow_runtime::WorkflowRuntimeActionPage>),
         (status = 503, description = "Runtime client not configured"),
     ),
     tag = "actions"
@@ -637,40 +529,17 @@ pub async fn list_workflow_instance_open_actions(
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
 
-    let execution = match engine
-        .get_execution_with_metadata(&workflow_id, &instance_id, &tenant_id)
+    if let Err(error) = engine
+        .authorize_execution(&workflow_id, &instance_id, &tenant_id)
         .await
     {
-        Ok(execution) => execution,
-        Err(error) => {
-            return (
-                error.http_status(),
-                Json(json!({
-                    "success": false,
-                    "message": error.to_string(),
-                    "data": Value::Null,
-                })),
-            );
-        }
-    };
-
-    if execution.instance.status.is_terminal() || !execution.instance.has_pending_input {
         return (
-            StatusCode::OK,
-            Json(json!({
-                "success": true,
-                "message": "Workflow instance actions retrieved",
-                "data": {
-                    "workflowId": workflow_id,
-                    "instanceId": instance_id,
-                    "actions": [],
-                    "count": 0,
-                },
-            })),
+            error.http_status(),
+            Json(json!({"success":false,"message":error.to_string(),"data":null})),
         );
     }
 
-    match list_instance_actions(&client, &workflow_id, &instance_id).await {
+    match list_instance_actions(&client, &tenant_id, &workflow_id, &instance_id).await {
         Ok(actions) => {
             let count = actions.len();
             (
@@ -701,11 +570,11 @@ pub async fn list_workflow_instance_open_actions(
     ),
     request_body = SubmitWorkflowActionRequest,
     responses(
-        (status = 200, description = "Action submitted successfully"),
-        (status = 400, description = "Invalid action payload"),
-        (status = 404, description = "Instance not found"),
-        (status = 409, description = "Action is no longer open"),
-        (status = 503, description = "Runtime client not configured"),
+        (status = 200, description = "Response accepted or original receipt replayed", body = crate::api::dto::common::ApiResponse<crate::api::services::workflow_runtime::WorkflowActionReceipt>),
+        (status = 400, description = "Invalid action payload", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 409, description = "Action is no longer open", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 503, description = "Runtime client not configured", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
     ),
     tag = "actions"
 )]
@@ -714,11 +583,22 @@ pub async fn submit_workflow_action(
     State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((workflow_id, instance_id, action_id)): Path<(String, String, String)>,
-    Json(body): Json<SubmitWorkflowActionRequest>,
+    body: Result<Json<SubmitWorkflowActionRequest>, axum::extract::rejection::JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
+    let Ok(Json(body)) = body else {
+        return workflow_runtime_error_response(WorkflowRuntimeError::Managed(
+            runtara_core::persistence::inputs::InputError::InvalidRequest,
+        ));
+    };
     let Some(client) = runtime_client else {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
+
+    if body.request_id != action_id {
+        return workflow_runtime_error_response(WorkflowRuntimeError::Managed(
+            runtara_core::persistence::inputs::InputError::InvalidRequest,
+        ));
+    }
 
     match submit_runtime_workflow_action(
         &engine,
@@ -726,7 +606,8 @@ pub async fn submit_workflow_action(
         &tenant_id,
         &workflow_id,
         &instance_id,
-        &action_id,
+        &body.request_id,
+        &body.operation_id,
         &body.payload,
     )
     .await
@@ -736,81 +617,27 @@ pub async fn submit_workflow_action(
             Json(json!({
                 "success": true,
                 "message": "Workflow action submitted successfully",
-                "data": {
-                    "workflowId": workflow_id,
-                    "instanceId": instance_id,
-                    "actionId": action.action_id,
-                    "signalId": action.signal_id,
-                },
+                "data": action,
             })),
         ),
         Err(error) => workflow_runtime_error_response(error),
     }
 }
 
-/// Request body for submitting human input to a waiting AI Agent.
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitSignalRequest {
-    /// Checkpoint/wait address from the pending input request or external-input event.
-    /// Legacy `signalId` and `signal_id` request fields are accepted as aliases.
-    #[serde(alias = "signalId", alias = "signal_id")]
-    pub checkpoint_id: String,
-    /// The response payload to deliver to the waiting step.
-    /// Should conform to the response_schema from the pending input request.
-    pub payload: Value,
+/// Managed response contract shared with workflow actions. No raw-signal aliases.
+pub type SubmitSignalRequest = SubmitWorkflowActionRequest;
+
+pub(crate) fn workflow_runtime_error_response(
+    error: WorkflowRuntimeError,
+) -> (StatusCode, Json<Value>) {
+    let (status, code, message) = error.public_error();
+    (
+        status,
+        Json(json!({"success":false,"code":code,"message":message,"data":null})),
+    )
 }
 
-fn workflow_runtime_error_response(error: WorkflowRuntimeError) -> (StatusCode, Json<Value>) {
-    match error {
-        WorkflowRuntimeError::InvalidRequest(message) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "message": message,
-                "data": Value::Null,
-            })),
-        ),
-        WorkflowRuntimeError::NotFound(message) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "success": false,
-                "message": message,
-                "data": Value::Null,
-            })),
-        ),
-        WorkflowRuntimeError::Conflict(message) => (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "success": false,
-                "message": message,
-                "data": Value::Null,
-            })),
-        ),
-        WorkflowRuntimeError::RuntimeUnavailable => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "success": false,
-                "message": "Runtime client not configured",
-                "data": Value::Null,
-            })),
-        ),
-        WorkflowRuntimeError::Runtime(message) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "success": false,
-                "message": message,
-                "data": Value::Null,
-            })),
-        ),
-    }
-}
-
-/// Submit a human response to a waiting AI Agent step.
-///
-/// Delivers a custom signal to the workflow instance, resuming the AI Agent's
-/// WaitForSignal tool call. The checkpoint address must match the wait key from
-/// the `pending-input` endpoint or the `external_input_requested` event.
+/// Accept a response for an authorized managed request, or replay its receipt.
 #[utoipa::path(
     post,
     path = "/api/runtime/signals/{instanceId}",
@@ -819,111 +646,49 @@ fn workflow_runtime_error_response(error: WorkflowRuntimeError) -> (StatusCode, 
     ),
     request_body = SubmitSignalRequest,
     responses(
-        (status = 200, description = "Signal delivered successfully"),
-        (status = 400, description = "Invalid request"),
-        (status = 404, description = "Instance or signal not found"),
-        (status = 503, description = "Runtime client not configured"),
+        (status = 200, description = "Response accepted or receipt replayed", body = crate::api::dto::common::ApiResponse<crate::api::services::workflow_runtime::WorkflowActionReceipt>),
+        (status = 400, description = "Invalid request or payload", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 404, description = "Request not found", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 409, description = "Inactive request or operation conflict", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 503, description = "Acceptance unavailable", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
     ),
     tag = "signals"
 )]
 pub async fn submit_signal(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Path(instance_id): Path<String>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
-    Json(body): Json<SubmitSignalRequest>,
+    body: Result<Json<SubmitSignalRequest>, axum::extract::rejection::JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
-    // Validate instance ID format
+    let Ok(Json(body)) = body else {
+        return workflow_runtime_error_response(
+            runtara_core::persistence::inputs::InputError::InvalidRequest.into(),
+        );
+    };
     if Uuid::parse_str(&instance_id).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "message": "Invalid instance ID format",
-                "data": Value::Null
-            })),
+        return workflow_runtime_error_response(
+            runtara_core::persistence::inputs::InputError::InvalidRequest.into(),
         );
     }
-
-    // Validate checkpoint_id is not empty
-    if body.checkpoint_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "message": "checkpointId is required",
-                "data": Value::Null
-            })),
-        );
-    }
-
-    // Get runtime client
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "success": false,
-                    "message": "Runtime client not configured",
-                    "data": Value::Null
-                })),
-            );
-        }
+    let Some(client) = runtime_client else {
+        return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
-
-    // Serialize payload to bytes
-    let payload_bytes = match serde_json::to_vec(&body.payload) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "success": false,
-                    "message": format!("Failed to serialize payload: {}", e),
-                    "data": Value::Null
-                })),
-            );
-        }
-    };
-
-    // Send custom signal
     match client
-        .send_custom_signal(&instance_id, &body.checkpoint_id, Some(&payload_bytes))
+        .submit_input_response(
+            &tenant_id,
+            &instance_id,
+            &body.request_id,
+            &body.operation_id,
+            &body.payload,
+        )
         .await
     {
-        Ok(signal_id) => (
+        Ok(receipt) => (
             StatusCode::OK,
-            Json(json!({
-                "success": true,
-                "message": "Signal delivered successfully",
-                "data": {
-                    "instanceId": instance_id,
-                    "signalId": signal_id,
-                    "checkpointId": body.checkpoint_id
-                }
-            })),
+            Json(
+                json!({"success":true,"message":"Response accepted","data":crate::api::services::workflow_runtime::WorkflowActionReceipt::from(receipt)}),
+            ),
         ),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "success": false,
-                        "message": format!("Instance or signal not found: {}", msg),
-                        "data": Value::Null
-                    })),
-                )
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "success": false,
-                        "message": format!("Failed to deliver signal: {}", msg),
-                        "data": Value::Null
-                    })),
-                )
-            }
-        }
+        Err(error) => workflow_runtime_error_response(error.into()),
     }
 }

@@ -1227,3 +1227,343 @@ async fn instances_sharing_a_timestamp_break_the_tie_bytewise() {
 
     backend.delete_instances_batch(&ids).await.unwrap();
 }
+
+#[tokio::test]
+async fn managed_input_conformance() {
+    use runtara_core::persistence::conformance::inputs;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool);
+    inputs::receipt_replay(&backend).await;
+    inputs::contextual_receipt_replay(&backend).await;
+    inputs::closure_and_deadline(&backend).await;
+    inputs::raw_signal_boundary(&backend).await;
+    inputs::competing_operations(&backend).await;
+    inputs::discovery(&backend).await;
+    inputs::batched_discovery(&backend).await;
+    inputs::invocation_ownership(&backend).await;
+    inputs::park_and_accept(&backend).await;
+    inputs::paused_acceptance(&backend).await;
+    inputs::wake_identity_and_claim(&backend).await;
+    inputs::conditional_wake_retry(&backend).await;
+    inputs::descendant_ownership(&backend).await;
+}
+
+/// Inject a scheduler write failure and verify acceptance/park roll back as a
+/// unit, then exercise a bounded recovery pass from a durable pending intent.
+#[tokio::test]
+async fn managed_input_wake_transaction_and_recovery() {
+    use runtara_core::{
+        domain::InstanceStatus,
+        lifecycle::{ParkReason, ParkRequest},
+        persistence::{Persistence, inputs::*},
+    };
+    use serde_json::json;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "wake-rollback")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let owner = InputAuthority::Root {
+        tenant_id: "wake-rollback".into(),
+        instance_id: id.clone(),
+    };
+    let spec = InputRequestSpec {
+        signal_id: "wait".into(),
+        response_schema: None,
+        metadata: json!({}),
+        deadline: None,
+    };
+    let inputs = backend.input_requests().unwrap();
+    inputs.register_input(&owner, &spec).await.unwrap();
+    let park = ParkRequest {
+        reason: ParkReason::Signal,
+        deadline: None,
+    };
+    backend
+        .park_instance_on_signals(&id, park, std::slice::from_ref(&spec.signal_id))
+        .await
+        .unwrap();
+    // The id is generated inside this test; no external text enters the DDL.
+    let constraint = format!("wake_failure_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("ALTER TABLE instances ADD CONSTRAINT {constraint} CHECK (instance_id <> '{id}' OR sleep_until IS NULL)"))
+        .execute(&pool).await.unwrap();
+    let context = InputAcceptanceContext::new(
+        "report_action",
+        "viewer",
+        &json!({"block":"test"}),
+        &json!({"yes":true}),
+    )
+    .unwrap();
+    let response = ValidatedInputResponse::new(&spec, "answer", &json!({"yes":true}))
+        .unwrap()
+        .with_context(&context);
+    assert!(matches!(
+        inputs.accept_input("wake-rollback", &id, &response).await,
+        Err(InputError::Storage(_))
+    ));
+    let row = inputs
+        .get_input("wake-rollback", &id, &spec.request_id())
+        .await
+        .unwrap();
+    assert_eq!(row.state, InputState::Open);
+    let retained_context: Option<Vec<u8>> = sqlx::query_scalar("SELECT acceptance_context FROM instance_input_requests WHERE instance_id=$1 AND request_id=$2")
+        .bind(&id).bind(spec.request_id()).fetch_one(&pool).await.unwrap();
+    assert!(
+        retained_context.is_none(),
+        "context must roll back with receipt and wake"
+    );
+    assert!(!row.wake_pending);
+    assert!(
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sleep_until
+            .is_none()
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE instances DROP CONSTRAINT {constraint}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let receipt = inputs
+        .accept_input("wake-rollback", &id, &response)
+        .await
+        .unwrap();
+
+    // Simulate a persisted recovery candidate without invoking the worker.
+    // Include unrelated running and paused intents: a bounded scan must skip
+    // them rather than repeatedly selecting an ineligible first row.
+    for suffix in ["running", "paused"] {
+        let other = format!("000-{suffix}-{}", uuid::Uuid::new_v4());
+        backend
+            .register_instance(&other, "wake-rollback")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&other, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let owner = InputAuthority::Root {
+            tenant_id: "wake-rollback".into(),
+            instance_id: other.clone(),
+        };
+        inputs.register_input(&owner, &spec).await.unwrap();
+        inputs
+            .accept_input("wake-rollback", &other, &response)
+            .await
+            .unwrap();
+        if suffix == "paused" {
+            backend
+                .update_instance_status(&other, InstanceStatus::Suspended, None)
+                .await
+                .unwrap();
+        }
+    }
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE instances SET sleep_until=NULL, wake_reason=NULL WHERE instance_id=$1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE instance_input_parks SET wake_scheduled=false WHERE instance_id=$1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE instance_input_requests SET wake_pending=true WHERE instance_id=$1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let restarted = PostgresPersistence::new(pool.clone());
+    let recovered = restarted.input_requests().unwrap();
+    assert_eq!(recovered.reconcile_input_wakes(0).await.unwrap(), 0);
+    assert_eq!(recovered.reconcile_input_wakes(1).await.unwrap(), 1);
+    assert_eq!(recovered.reconcile_input_wakes(1).await.unwrap(), 0);
+    assert!(backend.claim_sleeping_instance(&id).await.unwrap());
+    assert_eq!(
+        recovered
+            .accept_input("wake-rollback", &id, &response)
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert!(
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sleep_until
+            .is_none()
+    );
+
+    // Acceptance has already committed; a failed park must leave execution
+    // running and preserve the receipt for the next successful park/replay.
+    backend
+        .update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    sqlx::query(&format!("ALTER TABLE instances ADD CONSTRAINT {constraint} CHECK (instance_id <> '{id}' OR sleep_until IS NULL)"))
+        .execute(&pool).await.unwrap();
+    assert!(
+        backend
+            .park_instance_on_signals(&id, park, std::slice::from_ref(&spec.signal_id))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        InstanceStatus::Running
+    );
+    assert_eq!(
+        recovered
+            .accept_input("wake-rollback", &id, &response)
+            .await
+            .unwrap(),
+        receipt
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE instances DROP CONSTRAINT {constraint}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    backend
+        .park_instance_on_signals(&id, park, std::slice::from_ref(&spec.signal_id))
+        .await
+        .unwrap();
+    assert!(backend.claim_sleeping_instance(&id).await.unwrap());
+}
+
+/// Terminal SQL issued outside core lifecycle helpers (launch expiry, runner
+/// failure, administrative completion) must close inputs in that same commit.
+#[tokio::test]
+async fn managed_inputs_follow_external_terminal_transactions() {
+    use runtara_core::{
+        domain::InstanceStatus,
+        persistence::{Persistence, inputs::*},
+    };
+    use serde_json::json;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    for status in ["completed", "failed", "cancelled"] {
+        let id = uuid::Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "external-terminal")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let owner = InputAuthority::Root {
+            tenant_id: "external-terminal".into(),
+            instance_id: id.clone(),
+        };
+        let mut spec = InputRequestSpec {
+            signal_id: "open".into(),
+            response_schema: None,
+            metadata: json!({}),
+            deadline: None,
+        };
+        let inputs = backend.input_requests().unwrap();
+        let open = inputs.register_input(&owner, &spec).await.unwrap();
+        spec.signal_id = "answered".into();
+        inputs.register_input(&owner, &spec).await.unwrap();
+        let response = ValidatedInputResponse::new(&spec, "answer", &json!({"yes":true})).unwrap();
+        let receipt = inputs
+            .accept_input("external-terminal", &id, &response)
+            .await
+            .unwrap();
+        let fences = backend.invocation_fences().unwrap();
+        fences
+            .claim_invocation_lease("external-terminal", &id, "physical-run", None)
+            .await
+            .unwrap();
+        // A transaction rollback must roll back trigger-written closure too.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE instances SET status=$2::instance_status WHERE instance_id=$1")
+            .bind(&id)
+            .bind(status)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert!(
+            fences
+                .get_invocation_lease("external-terminal", &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert_eq!(
+            inputs
+                .get_input("external-terminal", &id, &open.request_id)
+                .await
+                .unwrap()
+                .state,
+            InputState::Open
+        );
+        assert!(
+            inputs
+                .get_input("external-terminal", &id, &spec.request_id())
+                .await
+                .unwrap()
+                .wake_pending
+        );
+        sqlx::query("UPDATE instances SET status=$2::instance_status WHERE instance_id=$1")
+            .bind(&id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !fences
+                .get_invocation_lease("external-terminal", &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert!(matches!(
+            inputs
+                .get_input("external-terminal", &id, &open.request_id)
+                .await
+                .unwrap()
+                .state,
+            InputState::Closed {
+                reason: InputClosure::InstanceTerminated,
+                ..
+            }
+        ));
+        assert!(
+            !inputs
+                .get_input("external-terminal", &id, &spec.request_id())
+                .await
+                .unwrap()
+                .wake_pending
+        );
+        assert_eq!(
+            inputs
+                .accept_input("external-terminal", &id, &response)
+                .await
+                .unwrap(),
+            receipt
+        );
+        let root = backend.get_instance(&id).await.unwrap().unwrap();
+        assert!(root.sleep_until.is_none());
+        assert!(root.wake_reason.is_none());
+    }
+}

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
-use runtara_core::persistence::{CompleteInstanceParams, PairedRecordStatus, Persistence};
+use runtara_core::persistence::{PairedRecordStatus, Persistence};
 
 use crate::container_registry::ContainerRegistry;
 use crate::db;
@@ -1116,14 +1116,11 @@ pub async fn handle_resume_instance(
 /// When the process exits, we:
 /// 1. Collect metrics and stderr (`runner.collect_result`).
 /// 2. Persist them best-effort.
-/// 3. Claim the registry row this monitor registered. The delete succeeds only
-///    while this monitor still owns the instance, so it doubles as the
-///    ownership check — a resumed instance gets a new monitor, and the old one
-///    must not write crash state for the previous PID.
-/// 4. If we're still the owning monitor, mirror Core's view: if the SDK already
-///    wrote a terminal status we leave it alone, otherwise we mark the instance
-///    failed/crashed (or suspended/shutdown_requested if draining).
-/// 5. Clean up the container registry entry.
+/// 3. Persist an exit intent against the exact launch and physical handle.
+/// 4. Under its ownership locks, preserve accepted Core outcomes or record the
+///    crash/drain fallback. Retain and retry the intent on storage failure.
+/// 5. Remove the registration only after Core cleanup commits. Restart recovery
+///    consumes the same intent if the monitor itself is lost.
 ///
 /// ## Timeout branch
 ///
@@ -1237,7 +1234,6 @@ async fn settle_execution_timeout(
     instance_id: &str,
     timeout: Duration,
 ) {
-    let container_registry = ContainerRegistry::new(pool.clone());
     warn!(
         instance_id = %instance_id,
         timeout_secs = %timeout.as_secs(),
@@ -1245,28 +1241,16 @@ async fn settle_execution_timeout(
     );
     let _ = runner.stop(handle).await;
 
-    // Update instance status to failed with termination_reason = "timeout"
-    if let Err(e) = persistence
-        .complete_instance(
-            CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Failed)
-                .if_running()
-                .with_termination("timeout", None)
-                .with_error("Execution timed out"),
-        )
-        .await
+    if !crate::observed_exit::settle_with_retry(
+        pool,
+        persistence.as_ref(),
+        handle,
+        crate::observed_exit::ObservedExit::timeout(),
+    )
+    .await
     {
-        warn!(
-            instance_id = %instance_id,
-            error = %e,
-            "Failed to update instance status after timeout"
-        );
+        return;
     }
-
-    // Clean up container registry, but only the row this monitor
-    // registered: a resume may have replaced it with a live run.
-    let _ = container_registry
-        .cleanup_handle(instance_id, &handle.launch_id, &handle.handle_id)
-        .await;
 
     release_launch_after_monitor(
         pool,
@@ -1365,30 +1349,15 @@ async fn record_exit_diagnostics(
 /// them apart: during a drain this is the expected force-kill, and the instance
 /// is parked for the wake scheduler to relaunch; otherwise the process died on
 /// its own and the run is a crash.
-async fn settle_unreported_exit(
-    persistence: &Arc<dyn Persistence>,
+fn observed_unreported_exit(
     drain: &DrainController,
-    instance_id: &str,
     stderr: Option<&str>,
-) {
-    // Process died without a terminal SDK event. If the environment
-    // is draining, this is the expected force-kill path — mark the
-    // instance as `suspended + shutdown_requested` so restart-time
-    // heartbeat-monitor recovery treats it as a normal suspension
-    // rather than a crash.
+) -> crate::observed_exit::ObservedExit {
     let draining = drain.is_draining();
-    let (status, termination_reason, default_error) = if draining {
-        (
-            CoreInstanceStatus::Suspended,
-            "shutdown_requested",
-            "Process terminated during graceful shutdown",
-        )
+    let default_error = if draining {
+        "Process terminated during graceful shutdown"
     } else {
-        (
-            CoreInstanceStatus::Failed,
-            "crashed",
-            "Process terminated without SDK event",
-        )
+        "Process terminated without SDK event"
     };
 
     // A crash with no terminal SDK event (e.g. a guest trap such as
@@ -1405,61 +1374,7 @@ async fn settle_unreported_exit(
         _ => default_error.to_string(),
     };
 
-    let mut params = CompleteInstanceParams::new(instance_id, status)
-        .if_running()
-        .with_termination(termination_reason, None)
-        .with_error(&crash_error);
-    if let Some(s) = stderr {
-        params = params.with_stderr(s);
-    }
-    match persistence.complete_instance(params).await {
-        Ok(applied) => {
-            if applied {
-                if drain.is_draining() {
-                    // Schedule an immediate wake so the wake
-                    // scheduler relaunches the instance after
-                    // restart — without this a force-stopped
-                    // instance with no checkpoint stays
-                    // suspended forever.
-                    if let Err(e) = persistence
-                        .schedule_wake(
-                            instance_id,
-                            chrono::Utc::now(),
-                            runtara_core::domain::WakeReason::Recovery,
-                        )
-                        .await
-                    {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to schedule post-restart wake"
-                        );
-                    }
-                    info!(
-                        instance_id = %instance_id,
-                        "Process terminated during drain - suspended for shutdown"
-                    );
-                } else {
-                    warn!(
-                        instance_id = %instance_id,
-                        "Process terminated without SDK event - marked as crashed"
-                    );
-                }
-            } else {
-                info!(
-                    instance_id = %instance_id,
-                    "Instance SDK event arrived just in time"
-                );
-            }
-        }
-        Err(e) => {
-            error!(
-                instance_id = %instance_id,
-                error = %e,
-                "Failed to mark instance terminal state"
-            );
-        }
-    }
+    crate::observed_exit::ObservedExit::unreported(draining, crash_error, stderr.map(str::to_owned))
 }
 
 /// What the monitor should do once a start gate has failed to open.
@@ -1660,7 +1575,6 @@ pub fn spawn_container_monitor(
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let poll_interval = Duration::from_millis(50);
-        let container_registry = ContainerRegistry::new(pool.clone());
         let sleep_until = tokio::time::Instant::now() + timeout;
 
         let wait_fut = runner.wait_for_exit(&handle, poll_interval);
@@ -1673,7 +1587,7 @@ pub fn spawn_container_monitor(
                     "Process terminated, checking Core status"
                 );
 
-                let (observed_status, stderr) = record_exit_diagnostics(
+                let (_observed_status, stderr) = record_exit_diagnostics(
                     &pool,
                     &persistence,
                     &runner,
@@ -1682,82 +1596,16 @@ pub fn spawn_container_monitor(
                 )
                 .await;
 
-                // Guard: check that this monitor is still the active one for this instance.
-                // When an instance is resumed, a NEW monitor is spawned for the new process.
-                // The OLD monitor (for the previous PID) may still be running and must not
-                // interfere with the new execution. The check intentionally happens AFTER
-                // metrics/stderr writes so a stale monitor doesn't drop diagnostic data
-                // for the previous process.
-                // Deleting the row this monitor registered answers both
-                // questions in one statement: it succeeds only while this
-                // monitor is still the owner, so a `false` IS the stale signal,
-                // and the cleanup the tail of this arm used to repeat is
-                // already done. That tail deleted by instance alone, which a
-                // stale monitor would have used to throw away the row of the
-                // run that replaced it.
-                let is_stale_monitor = match container_registry
-                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
-                    .await
-                {
-                    Ok(owned) => !owned,
-                    Err(e) => {
-                        // Unknown rather than stale. Being conservative here
-                        // would silently drop the crash-detection write on a
-                        // transient blip; the row is left to the cleanup
-                        // workers instead.
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Could not claim the container registry row; assuming this monitor still owns it"
-                        );
-                        false
-                    }
-                };
-
-                if is_stale_monitor {
-                    info!(
-                        instance_id = %instance_id,
-                        monitor_handle = %handle.handle_id,
-                        "Stale monitor detected — instance was resumed with a new process, skipping crash check"
-                    );
-                } else {
-                    // Status came back with the metrics write above, so this
-                    // no longer needs a read of its own.
-                    match &observed_status {
-                        Ok(Some((status, _)))
-                            if matches!(status, CoreInstanceStatus::Completed | CoreInstanceStatus::Failed | CoreInstanceStatus::Cancelled | CoreInstanceStatus::Suspended) =>
-                        {
-                            // SDK already reported terminal status — normal termination
-                            info!(
-                                instance_id = %instance_id,
-                                status = ?status,
-                                "Instance completed normally (SDK reported)"
-                            );
-                        }
-                        _ => {
-                            settle_unreported_exit(
-                                &persistence,
-                                &drain,
-                                &instance_id,
-                                stderr.as_deref(),
-                            )
-                            .await;
-                        }
-                    }
-
-                    // The Core transition above (whether guest-reported,
-                    // crash-derived, or drain-derived) has committed before
-                    // this reconciliation runs. Release admission only after
-                    // the matching queue generation is durably terminal or
-                    // parked; observer failure is intentionally out-of-band.
+                // Retain the observed exit before Core cleanup. Both local retry
+                // and restart recovery keep the exact physical ownership fence.
+                if crate::observed_exit::settle_with_retry(
+                    &pool, persistence.as_ref(), &handle,
+                    observed_unreported_exit(&drain, stderr.as_deref()),
+                ).await {
                     release_launch_after_monitor(
-                        &pool,
-                        persistence.as_ref(),
-                        &handle.launch_id,
-                        &instance_id,
-                        &lifecycle_observers,
-                    )
-                    .await;
+                        &pool, persistence.as_ref(), &handle.launch_id,
+                        &instance_id, &lifecycle_observers,
+                    ).await;
                 }
 
             }
@@ -1959,27 +1807,10 @@ pub async fn handle_send_custom_signal(
 /// stamping `sleep_until` on those would relaunch a replay that runs PAST the
 /// pause, silently auto-resuming a paused instance on any custom signal.
 pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id: &str) {
-    match persistence.get_instance_meta(instance_id).await {
-        Ok(Some(inst))
-            if inst.status == CoreInstanceStatus::Suspended
-                && inst.termination_reason.as_deref()
-                    == Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION) =>
-        {
-            if let Err(e) = persistence
-                .schedule_wake(
-                    instance_id,
-                    chrono::Utc::now(),
-                    runtara_core::domain::WakeReason::CustomSignal,
-                )
-                .await
-            {
-                warn!(instance_id, error = %e, "Failed to wake suspended instance after custom signal");
-            } else {
-                info!(instance_id, "Woke suspended instance for a custom signal");
-            }
-        }
-        Ok(_) => {}
-        Err(e) => warn!(instance_id, error = %e, "Waker could not read instance status"),
+    match persistence.schedule_signal_wake(instance_id).await {
+        Ok(true) => info!(instance_id, "Woke suspended instance for a custom signal"),
+        Ok(false) => {}
+        Err(error) => warn!(instance_id, %error, "Could not conditionally wake signal waiter"),
     }
 }
 
@@ -2610,6 +2441,8 @@ pub async fn handle_store_image(
 mod tests {
     #[cfg(feature = "db-integration-tests")]
     use crate::test_support;
+    #[cfg(feature = "db-integration-tests")]
+    use runtara_core::persistence::CompleteInstanceParams;
 
     /// A suspended instance with the given `termination_reason` marker.
     #[cfg(feature = "db-integration-tests")]

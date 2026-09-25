@@ -18,7 +18,7 @@ fn root(store: &Store, tenant: &str, instance: &str, running: bool) -> FenceResu
     }
     Ok(())
 }
-fn lease(store: &Store, token: &InvocationLease, active: bool) -> FenceResult<()> {
+pub(super) fn lease(store: &Store, token: &InvocationLease, active: bool) -> FenceResult<()> {
     root(store, &token.tenant_id, &token.instance_id, active)?;
     match store.invocation_leases.get(&token.instance_id) {
         Some((current, live)) if current == token && (!active || *live) => Ok(()),
@@ -38,7 +38,7 @@ fn attempt(store: &Store, token: &AttemptFence) -> FenceResult<usize> {
     }
     Ok(found)
 }
-fn active_attempt(store: &Store, token: &AttemptFence) -> FenceResult<()> {
+pub(super) fn active_attempt(store: &Store, token: &AttemptFence) -> FenceResult<()> {
     lease(store, &token.lease, true)?;
     let index = attempt(store, token)?;
     match store.invocation_attempts[index].state {
@@ -159,16 +159,48 @@ impl InvocationFences for InMemoryPersistence {
             .1 = false;
         Ok(())
     }
+    async fn inspect_invocation_attempt(&self, fence: &AttemptFence) -> FenceResult<AttemptState> {
+        let store = self.store.lock().unwrap();
+        lease(&store, &fence.lease, true)?;
+        Ok(store.invocation_attempts[attempt(&store, fence)?].state)
+    }
+
     async fn begin_invocation_attempt(
         &self,
         token: &InvocationLease,
         path: &str,
         start_id: &str,
     ) -> FenceResult<InvocationAttempt> {
+        self.begin_invocation_attempt_with_parent(token, path, start_id, None)
+            .await
+    }
+
+    async fn begin_invocation_attempt_with_parent(
+        &self,
+        token: &InvocationLease,
+        path: &str,
+        start_id: &str,
+        parent: Option<&AttemptFence>,
+    ) -> FenceResult<InvocationAttempt> {
         validate_identity(path)?;
         validate_identity(start_id)?;
         let mut store = self.store.lock().unwrap();
         lease(&store, token, true)?;
+        if let Some(parent) = parent {
+            if parent.lease != *token || parent.path == path {
+                return Err(denied(FenceRejection::AttemptMismatch));
+            }
+            active_attempt(&store, parent)?;
+        }
+        let parent_path = parent.map(|fence| fence.path.clone());
+        let parent_key = (token.instance_id.clone(), path.to_owned());
+        if store
+            .invocation_parents
+            .get(&parent_key)
+            .is_some_and(|existing| existing != &parent_path)
+        {
+            return Err(denied(FenceRejection::AttemptMismatch));
+        }
         if let Some(existing) = store
             .invocation_attempts
             .iter()
@@ -210,6 +242,7 @@ impl InvocationFences for InMemoryPersistence {
             state: AttemptState::Active,
         };
         store.invocation_attempts.push(result.clone());
+        store.invocation_parents.insert(parent_key, parent_path);
         Ok(result)
     }
     async fn cancel_invocation_attempt(&self, token: &AttemptFence) -> FenceResult<AttemptState> {
@@ -221,11 +254,15 @@ impl InvocationFences for InMemoryPersistence {
             false,
         )?;
         let index = attempt(&store, token)?;
-        let state = &mut store.invocation_attempts[index].state;
-        if *state == AttemptState::Active {
-            *state = AttemptState::Cancelled;
+        if store.invocation_attempts[index].state == AttemptState::Active {
+            store.invocation_attempts[index].state = AttemptState::Cancelled;
+            super::inputs::close_invocation(
+                &mut store,
+                token,
+                crate::persistence::inputs::InputClosure::InvocationCancelled,
+            );
         }
-        Ok(*state)
+        Ok(store.invocation_attempts[index].state)
     }
     async fn settle_invocation_attempt(
         &self,
@@ -244,6 +281,11 @@ impl InvocationFences for InMemoryPersistence {
                 committed = Some(checkpoint(&mut store, token, write));
             }
             store.invocation_attempts[index].state = AttemptState::Settled;
+            super::inputs::close_invocation(
+                &mut store,
+                token,
+                crate::persistence::inputs::InputClosure::InvocationSettled,
+            );
         }
         Ok(InvocationSettlement {
             state: store.invocation_attempts[index].state,

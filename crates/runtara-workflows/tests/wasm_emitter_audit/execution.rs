@@ -659,16 +659,25 @@ fn assert_independent_waits(second_id: &str) {
     let first = signal_key(invoke());
     let fields = super::key_fields(&first);
     let old_key = format!("{}/audit-waits/wait/[0]", fields[4][0].as_str().unwrap());
-    host.deliver_signal(&old_key, br#"{"stale":true}"#);
+    assert!(
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(
+                host.managed_inputs
+                    .respond(&old_key, &json!({"stale":true}))
+            )
+            .is_err(),
+        "unknown legacy addresses cannot accept managed responses"
+    );
     // A replay with no response must address the same first waiter.
     assert_eq!(signal_key(invoke()), first);
-    host.deliver_signal(&first, br#"{"approved":true}"#);
+    host.accept_response(&first, br#"{"approved":true}"#);
     let second = signal_key(invoke());
     assert_ne!(
         first, second,
         "AUDIT-03: sibling loop IDs must distinguish signal keys"
     );
-    host.deliver_signal(&second, br#"{"approved":false}"#);
+    host.accept_response(&second, br#"{"approved":false}"#);
     assert_eq!(completed(invoke()), json!({"ok": true}));
 }
 
@@ -704,7 +713,7 @@ fn assert_sequential_signals(graph: Value, count: usize) {
             keys.insert(key.clone()),
             "each invocation must own its signal: {key}"
         );
-        host.deliver_signal(&key, &serde_json::to_vec(&json!({"response":n})).unwrap());
+        host.accept_response(&key, &serde_json::to_vec(&json!({"response":n})).unwrap());
     }
     assert_eq!(completed(invoke()), json!({"ok":true}));
 }
@@ -832,7 +841,8 @@ fn configured_wait_body(timeout: u64, poll: u64, label: &str) -> Value {
 
 fn assert_configured_waits(artifact: &DirectCompilationResult, labels: [&str; 2]) {
     let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
-    *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
+    let clock = super::now_ms();
+    *host.pinned_clock_ms.lock().unwrap() = Some(clock);
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     for (label, timeout, poll) in [(labels[0], 60_000, 11), (labels[1], 120_000, 22)] {
         let exit = invoke();
@@ -844,7 +854,7 @@ fn assert_configured_waits(artifact: &DirectCompilationResult, labels: [&str; 2]
         };
         assert_eq!(
             wait.deadline_ms,
-            Some(1_000_000 + timeout),
+            Some(clock + timeout),
             "the selected graph's timeout sets the deadline"
         );
         let key = signal_key(exit);
@@ -879,7 +889,7 @@ fn assert_configured_waits(artifact: &DirectCompilationResult, labels: [&str; 2]
         drop(events);
         // Recreate the Store with identical source; a pending wait keeps its key/deadline.
         assert_eq!(signal_key(invoke()), key);
-        host.deliver_signal(
+        host.accept_response(
             &key,
             &serde_json::to_vec(&json!({"decision":label})).unwrap(),
         );
@@ -938,7 +948,7 @@ fn audit_04_on_wait_graph_can_shadow_its_parent_step_type() {
     let (_temp, artifact) =
         compile_configured_tracking("audit-registry-onwait", graph, vec![], None, true);
     let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
-    *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(super::now_ms());
     let key = signal_key(run_invoke_once(
         &artifact.wasm_path,
         host.clone(),
@@ -964,7 +974,7 @@ fn audit_04_on_wait_graph_can_shadow_its_parent_step_type() {
         .expect("onWait Finish event");
     assert_eq!(notification.1["step_type"], "Finish");
     assert_eq!(notification.1["outputs"]["outputs"]["notification"], "sent");
-    host.deliver_signal(&key, b"{}");
+    host.accept_response(&key, b"{}");
     assert_eq!(
         completed(run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec())),
         json!({"ok":true})
@@ -1184,7 +1194,9 @@ fn audit_05_signal_wakes_respect_the_enclosing_budget() {
             }
             graph["steps"]["loop"]["subgraph"] = json!({"entryPoint":"wait","steps":{"wait":wait,"body_finish":finish("body_finish")},"executionPlan":[{"fromStep":"wait","toStep":"body_finish"}]});
             let (_temp, artifact) = compile("audit-wait-budget", graph);
-            let host = audit_deadline_host(1_000_000);
+            // The virtual guest clock must mint a future persistence deadline.
+            let clock = super::now_ms() + 60_000;
+            let host = audit_deadline_host(clock);
             let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
             let first = invoke();
             let InvokeExit::Suspended(ref wakes) = first else {
@@ -1195,11 +1207,11 @@ fn audit_05_signal_wakes_respect_the_enclosing_budget() {
             };
             assert_eq!(
                 wait.deadline_ms,
-                Some(1_000_000 + wait_timeout.unwrap_or(1_000).min(1_000))
+                Some(clock + wait_timeout.unwrap_or(1_000).min(1_000))
             );
             let key = signal_key(first);
-            *host.pinned_clock_ms.lock().unwrap() = Some(1_000_250);
-            host.deliver_signal(&key, b"{}");
+            *host.pinned_clock_ms.lock().unwrap() = Some(clock + 250);
+            host.accept_response(&key, b"{}");
             assert_eq!(completed(invoke()), json!({"ok":true}));
         }
     }

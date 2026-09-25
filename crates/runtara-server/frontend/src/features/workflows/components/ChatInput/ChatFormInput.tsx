@@ -11,14 +11,16 @@ import {
   initialWorkflowFormValues,
   useWorkflowFormDefinition,
 } from '@/features/workflows/utils/form-schema-adapter';
-import { deliverSignal } from '@/features/workflows/queries';
 import { useChatStore } from '@/features/workflows/stores/chatStore';
 import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ChatFormInputProps {
   waitingForInput: WaitingForInputData;
-  instanceId: string;
-  token: string;
+  onSubmit: (
+    requestId: string,
+    payload: Record<string, unknown>,
+    instanceId?: string
+  ) => Promise<boolean>;
 }
 
 function humanizeKey(value: string): string {
@@ -31,8 +33,7 @@ function humanizeKey(value: string): string {
 
 export function ChatFormInput({
   waitingForInput,
-  instanceId,
-  token,
+  onSubmit,
 }: ChatFormInputProps) {
   const {
     definition,
@@ -79,10 +80,14 @@ export function ChatFormInput({
     const store = useChatStore.getState();
 
     try {
-      await deliverSignal(token, instanceId, {
-        signalId: waitingForInput.signalId,
-        payload,
-      });
+      if (
+        !(await onSubmit(
+          waitingForInput.requestId,
+          payload,
+          waitingForInput.instanceId
+        ))
+      )
+        return;
 
       // Add a user message summarizing the submitted form
       const summary = Object.entries(payload)
@@ -95,10 +100,6 @@ export function ChatFormInput({
         })
         .join(' | ');
       store.addUserMessage(summary);
-
-      // Clear waiting state — SSE stream will deliver the next events
-      store.setWaitingForInput(null);
-      store.setStatus('streaming');
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : 'Failed to submit form';
@@ -110,9 +111,9 @@ export function ChatFormInput({
     isSubmitting,
     definition,
     formValues,
-    token,
-    instanceId,
-    waitingForInput.signalId,
+    onSubmit,
+    waitingForInput.requestId,
+    waitingForInput.instanceId,
     formLoading,
     formError,
   ]);
