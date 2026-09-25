@@ -355,7 +355,10 @@ async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> any
 async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let components = components();
-    let staging = suspending_child_with_timeout(dir.path(), &components, Some(150))?;
+    // Long enough that registration and the first poll cannot straddle expiry
+    // on a busy runner; the deadline itself is read back from persistence.
+    const TIMEOUT_MS: u64 = 2_000;
+    let staging = suspending_child_with_timeout(dir.path(), &components, Some(TIMEOUT_MS))?;
     let parent = parent_of(dir.path(), &components, &staging)?;
 
     // Finish Wasmtime compilation before starting the persistence deadline.
@@ -391,6 +394,7 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     host.clock_override.store(epoch, Ordering::SeqCst);
 
     let first = invoke_prepared().await.exit;
+    let after_first = now_ms();
 
     // The capability result type has no wake channel, so the child carries its
     // absolute deadline out through the sentinel's category field and the owner
@@ -411,12 +415,30 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     );
     assert_eq!(
         wait.deadline_ms,
-        Some(epoch + 150),
+        Some(epoch + TIMEOUT_MS),
         "the park must carry the child's own deadline"
     );
 
+    // The guest clock runs 5s ahead of persistence. Registration rebases the
+    // remaining budget onto persistence time, so skew cannot pre-expire the
+    // wait nor stretch it by the skew.
+    let stored = host
+        .managed_inputs
+        .request(&wait.checkpoint_id)
+        .await
+        .spec
+        .deadline
+        .expect("a timed wait stores its deadline")
+        .timestamp_millis() as u64;
+    assert!(
+        stored >= epoch - 5_000 + TIMEOUT_MS && stored <= after_first + TIMEOUT_MS,
+        "the stored deadline must be the remaining budget on persistence time, \
+         not the guest's skewed clock: stored {stored}, guest deadline {}",
+        epoch + TIMEOUT_MS
+    );
+
     // Persistence owns expiry, even while the guest clock remains before it.
-    let remaining = (epoch + 151).saturating_sub(now_ms());
+    let remaining = (stored + 1).saturating_sub(now_ms());
     tokio::time::sleep(Duration::from_millis(remaining)).await;
     let second = invoke_prepared().await.exit;
     assert!(

@@ -63,6 +63,7 @@ import {
   getTerminationTypeDisplay,
   getStatusDisplay,
   isActiveStatus,
+  isFinishedStatus,
 } from '@/shared/utils/status-display';
 import {
   getRunEventsEmptyState,
@@ -135,12 +136,16 @@ function WorkflowHistoryContent() {
         input.request.instanceId === instanceId &&
         input.request.requestId === requestId
     );
-  const pendingInputs = (pendingInputData ?? []).filter(
-    (input) =>
-      !forTarget(input.requestId).some(
-        (submission) => submission.state === 'accepted'
-      )
-  );
+  // Pending-input polling stops once the run ends, so its last result can be
+  // stale: a finished run has no actionable inputs, whatever was fetched last.
+  const pendingInputs = isFinishedStatus(data?.status)
+    ? []
+    : (pendingInputData ?? []).filter(
+        (input) =>
+          !forTarget(input.requestId).some(
+            (submission) => submission.state === 'accepted'
+          )
+      );
   const handleSignalSubmit = (
     requestId: string,
     payload: Record<string, unknown>

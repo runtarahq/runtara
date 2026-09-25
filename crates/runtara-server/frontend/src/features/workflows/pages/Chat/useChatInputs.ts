@@ -5,6 +5,7 @@ import { deliverSignal, getPendingInput } from '../../queries';
 import {
   InputSubmissionError,
   InputSubmissionTracker,
+  isClosedInputSubmission,
   isStaleInputSubmission,
 } from '../../utils/input-submission';
 import type { WaitingForInputData } from '../../types/chat';
@@ -179,6 +180,17 @@ export function useChatInputs(workflowId: string, token: string) {
         if (!isCurrent()) return false;
         if (isStaleInputSubmission(error)) {
           uncertain.current.delete(retryKey);
+          if (isClosedInputSubmission(error)) {
+            // Closed unanswered: an earlier uncertain operation on the same
+            // request cannot have been accepted, so its form must not return.
+            for (const [key, retry] of uncertain.current) {
+              if (
+                retry.instanceId === targetInstanceId &&
+                retry.request.requestId === requestId
+              )
+                uncertain.current.delete(key);
+            }
+          }
           owner.setPendingInputs(
             useChatStore.getState().pendingInputs.filter(isOtherRequest)
           );

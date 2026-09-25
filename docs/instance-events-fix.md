@@ -145,10 +145,9 @@ Concrete source evidence:
   is open. The optional composed HTTP runtime still traps before input IO; see the
   latest checkpoint for the control result and verification limit.
 - The active `api/services/session_queue/delivery.rs` no longer queues executions.
-  A terminal target blocks the response as stale, preserving its payload. A bound
-  response still replays its receipt before current-state checks. Read-only source
-  observation remains to distinguish initial session registration delay from a
-  rejected/missing target; it cannot create a replacement execution.
+  Every response is bound to its request when it is retained (see the post-review
+  fixes below); delivery submits only that binding and replays its receipt before
+  current-state checks. An unbound legacy message is blocked for resolution.
 
 ### Scope inventory after extraction
 
@@ -159,7 +158,6 @@ Concrete source evidence:
 | Retained runner-exit intent and forward environment migration | A failed terminal cleanup must remain recoverable instead of reopening an abandoned request through ordinary orphan recovery. |
 | API/report/MCP/frontend migration and receipt retries | Existing consumers must agree on actionable state and handle stale or uncertain submissions. |
 | Response envelopes, lease/bind/ack, delivery status and worker | A failed managed response cannot be popped and lost or rebound to a newer request. |
-| Existing-session source observation | A response can arrive before an explicitly started session registers; observation distinguishes that delay without launching another run. |
 
 Moved: `StartupIntent`, `DeliveryMode`, startup handoff states/transitions,
 `delivery/startup.rs`, replacement `LaunchIntent` preparation/publication,
@@ -466,6 +464,45 @@ binding remains unverified as explained above. Manual benchmarks/capacity soak
 are excluded; startup/provider reliability remains on the follow-up track. These
 limitations do not leave an actionable event-based consumer or an unresolved
 failure in the supported managed-input path.
+
+### Post-review fixes (2026-09-25)
+
+A review of this change found the stale-target class of bug surviving in
+response delivery, plus robustness gaps. Fixed:
+
+- **Responses bind when retained, never at delivery.** Channel replies are bound
+  on arrival to the single open request whose prompt was sent, and buffered per
+  execution (apart from idle startup messages, so neither blocks the other).
+  A reply whose request closes before handoff is reported undelivered and
+  dropped, never re-aimed at a newer request; so are replies with no prompted
+  open request, or several open. Buffered replies of an execution an actor
+  leaves are settled on exit, and a retained response that became stale is
+  failed and reported while idle instead of blocking the session.
+  `POST /sessions/{id}/events` binds at submit time: to `requestId` when given,
+  else to the only open request, else `409 INPUT_NOT_WAITING`/`INPUT_AMBIGUOUS`.
+  Delivery never selects a target; an unbound message is blocked (`no_target`).
+- **Persistence owns deadlines.** Hosts rebase the guest's host-clock deadline
+  onto persistence time at registration (`persistence_deadline_ms`), and a
+  timed signal park wakes at the stored deadline. Host/database skew can no
+  longer pre-expire, shorten or lengthen a wait, or cause a re-park loop.
+- **Replay registration compares identity only** (full signal id and logical
+  owner); the first registration's metadata and deadline win. Migration 031
+  stores the spec as exact text: JSONB renumbered floats (`1e16`) and rejected
+  NUL escapes, which failed replay or registration on PostgreSQL only.
+- **Discovery takes no row locks.** Reads use a repeatable-read, read-only
+  snapshot. Workflow-wide discovery considers only live instances holding an
+  open request, not every historical run.
+- Accept's final update is guarded by `state='open'`. `FenceRejected` delivery
+  failures block as stale instead of retrying forever. The delivery worker caps
+  deliveries rather than visited sessions per tick, and a drained session's
+  route expires after an idle week.
+- The run history hides inputs once a run is finished; web chat drops every
+  retained retry of a request that closed unanswered and treats a refused
+  session message as final.
+
+Waits suspended before this deployment are not backfilled: the feature is
+unused, and deriving requests from historical events would reintroduce the bug.
+Deploy with rebuilt workflow images as described in the release notes.
 
 ### Remaining event and signal uses
 

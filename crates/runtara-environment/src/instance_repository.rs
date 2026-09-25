@@ -207,15 +207,17 @@ impl InstanceRepository {
         )
     }
 
-    /// All tenant-owned instance associations for an exact workflow-name prefix.
-    /// Managed input discovery pages requests after this filter, not executions.
-    pub async fn ids_for_image_name_prefix(
+    /// Live tenant-owned instances of an exact workflow-name prefix that hold an
+    /// open managed input. Terminal and input-free runs are excluded up front so
+    /// discovery cost tracks open waits, not the workflow's whole history.
+    /// Managed input discovery still applies the authoritative filter after this.
+    pub async fn input_candidate_ids_for_image_name_prefix(
         &self,
         tenant: &str,
         prefix: &str,
     ) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar(
-            "SELECT i.instance_id FROM instances i JOIN instance_images ii USING(instance_id) JOIN images img USING(image_id) WHERE i.tenant_id=$1 AND img.name LIKE $2 ORDER BY i.instance_id COLLATE \"C\"",
+            "SELECT i.instance_id FROM instances i JOIN instance_images ii USING(instance_id) JOIN images img USING(image_id) WHERE i.tenant_id=$1 AND img.name LIKE $2 AND i.status NOT IN ('completed','failed','cancelled') AND EXISTS (SELECT 1 FROM instance_input_requests r WHERE r.instance_id=i.instance_id AND r.state='open') ORDER BY i.instance_id COLLATE \"C\"",
         ).bind(tenant).bind(format!("{}%", crate::db::escape_like_literal(prefix)))
             .fetch_all(&self.pool).await?)
     }

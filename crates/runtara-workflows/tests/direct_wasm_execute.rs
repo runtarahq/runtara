@@ -485,13 +485,16 @@ impl ServerState {
         &self,
         descriptor: Vec<u8>,
         deadline: Option<u64>,
+        host_now_ms: Option<u64>,
     ) -> Result<(), String> {
         let signal =
             serde_json::from_slice::<Value>(&descriptor).map_err(|e| e.to_string())?["signal_id"]
                 .as_str()
                 .ok_or("missing signal id")?
                 .to_owned();
-        self.managed_inputs.register(descriptor, deadline).await?;
+        self.managed_inputs
+            .register(descriptor, deadline, host_now_ms)
+            .await?;
         if self.managed_inputs.request(&signal).await.state
             == runtara_core::persistence::inputs::InputState::Open
         {
@@ -997,6 +1000,7 @@ fn route(
                             .register_managed_input(
                                 serde_json::to_vec(&request["descriptor"]).unwrap(),
                                 request["deadline_ms"].as_u64(),
+                                request["requested_at_ms"].as_u64(),
                             )
                             .await?;
                         return Ok(serde_json::json!({"success":true}));
@@ -1780,8 +1784,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         descriptor: Vec<u8>,
         deadline: Option<u64>,
     ) -> Result<(), String> {
+        let now = self.now_ms()?;
         self.state
-            .register_managed_input(descriptor, deadline)
+            .register_managed_input(descriptor, deadline, Some(now))
             .await
     }
     async fn poll_input(
@@ -2598,7 +2603,10 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
         descriptor: Vec<u8>,
         deadline: Option<u64>,
     ) -> Result<(), String> {
-        self.managed_inputs.register(descriptor, deadline).await
+        let now = self.now_ms()?;
+        self.managed_inputs
+            .register(descriptor, deadline, Some(now))
+            .await
     }
     async fn poll_input(
         &self,
@@ -7964,7 +7972,10 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
                 .as_str()
                 .ok_or("missing signal id")?
                 .to_owned();
-        self.managed_inputs.register(descriptor, deadline).await?;
+        let now = self.now_ms()?;
+        self.managed_inputs
+            .register(descriptor, deadline, Some(now))
+            .await?;
         let response = self.next_input_response.lock().unwrap().take();
         if let Some(response) = response {
             self.managed_inputs.respond(&signal, &response).await?;

@@ -2,11 +2,10 @@
 use crate::{
     api::services::session_queue::{
         delivery::deliver_session,
-        managed::{prune_completed, scan_scopes},
+        managed::{has_unresolved, prune_completed, scan_scopes},
     },
     runtime_client::RuntimeClient,
     shutdown::ShutdownSignal,
-    workers::execution_engine::ExecutionEngine,
 };
 use redis::aio::ConnectionManager;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
@@ -15,7 +14,6 @@ use tracing::warn;
 pub async fn run(
     mut conn: ConnectionManager,
     client: Arc<RuntimeClient>,
-    engine: Arc<ExecutionEngine>,
     shutdown: ShutdownSignal,
 ) {
     let mut cursor = 0;
@@ -52,19 +50,24 @@ pub async fn run(
                 }
             }
             // Preserve the remaining SCAN page instead of dropping excess scopes.
-            for _ in 0..16 {
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
+            // Only deliveries are capped per tick: idle sessions cost one cheap
+            // check, so a sweep's length tracks pending work, not session count.
+            let mut deliveries = 0;
+            while deliveries < 16 && tokio::time::Instant::now() < deadline {
                 let Some(scope) = scopes.pop_front() else {
                     break;
                 };
                 let delivery = async {
                     prune_completed(&mut conn, &scope, 100).await?;
-                    deliver_session(&mut conn, &scope, &client, &engine).await
+                    if !has_unresolved(&mut conn, &scope).await? {
+                        return Ok(false);
+                    }
+                    deliver_session(&mut conn, &scope, &client)
+                        .await
+                        .map(|_| true)
                 };
                 match tokio::time::timeout_at(deadline, delivery).await {
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(delivered)) => deliveries += usize::from(delivered),
                     Ok(Err(error)) => {
                         warn!(tenant_id=%scope.tenant_id(),session_id=%scope.session_id(),error=%error,"Session delivery deferred")
                     }

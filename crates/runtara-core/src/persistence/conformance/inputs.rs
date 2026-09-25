@@ -125,6 +125,31 @@ pub async fn receipt_replay(p: &dyn Persistence) {
     );
 }
 
+/// Stored specs round-trip exactly: float representation and NUL escapes in
+/// rendered metadata neither fail registration nor make replay conflict.
+pub async fn spec_fidelity(p: &dyn Persistence) {
+    let (id, owner, mut spec) = fixture(p).await;
+    let inputs = p.input_requests().unwrap();
+    spec.metadata = json!({"step_id": "ask", "context": {"big": 1e16, "text": "a\u{0}b"}});
+    let registered = inputs.register_input(&owner, &spec).await.unwrap();
+    assert_eq!(registered.spec, spec);
+    assert_eq!(
+        inputs.register_input(&owner, &spec).await.unwrap(),
+        registered
+    );
+    let stored = inputs
+        .get_input("input-tenant", &id, &spec.request_id())
+        .await
+        .unwrap();
+    assert_eq!(stored.spec, spec);
+    let response =
+        ValidatedInputResponse::new(&stored.spec, "fidelity", &json!({"answer": "yes"})).unwrap();
+    inputs
+        .accept_input("input-tenant", &id, &response)
+        .await
+        .unwrap();
+}
+
 /// Closed requests never reopen, and expiry applies without a completion event.
 pub async fn closure_and_deadline(p: &dyn Persistence) {
     let (id, owner, mut spec) = fixture(p).await;
@@ -162,11 +187,14 @@ pub async fn closure_and_deadline(p: &dyn Persistence) {
             ..
         }
     ));
+    // Replay keeps the first registration: a later deadline or re-rendered
+    // metadata can neither reopen nor extend it, nor fail the replaying wait.
+    let original_deadline = spec.deadline;
     spec.deadline = Some(Utc::now() + Duration::hours(1));
-    assert_eq!(
-        inputs.register_input(&owner, &spec).await,
-        Err(InputError::IdentityConflict)
-    );
+    spec.metadata = json!({"signal_id": spec.signal_id, "rerendered": 1e16});
+    let replayed = inputs.register_input(&owner, &spec).await.unwrap();
+    assert_eq!(replayed, expired);
+    assert_eq!(replayed.spec.deadline, original_deadline);
     spec.signal_id.push_str("/fresh");
     inputs.register_input(&owner, &spec).await.unwrap();
     let too_early = inputs
@@ -1299,6 +1327,10 @@ mod tests {
     #[tokio::test]
     async fn memory_receipt_replay() {
         receipt_replay(&InMemoryPersistence::new()).await;
+    }
+    #[tokio::test]
+    async fn memory_spec_fidelity() {
+        spec_fidelity(&InMemoryPersistence::new()).await;
     }
     #[tokio::test]
     async fn memory_closure_and_deadline() {

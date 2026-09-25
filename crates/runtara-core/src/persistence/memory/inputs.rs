@@ -216,7 +216,9 @@ impl InputRequests for InMemoryPersistence {
         authority(&store, owner)?;
         let key = (owner.instance_id().to_owned(), spec.request_id());
         if let Some(existing) = store.input_requests.get_mut(&key) {
-            if existing.spec != *spec || existing.invocation_path != owner.invocation_path() {
+            if existing.spec.signal_id != spec.signal_id
+                || existing.invocation_path != owner.invocation_path()
+            {
                 return Err(InputError::IdentityConflict);
             }
             if let InputAuthority::Invocation(fence) = owner {

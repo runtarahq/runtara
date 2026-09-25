@@ -67,6 +67,20 @@ fn mcp_json(result: rmcp::model::CallToolResult) -> Value {
     serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap()
 }
 
+/// Settle the targeted submission so the legacy message reaches the queue head.
+#[cfg(feature = "valkey-integration-tests")]
+async fn fail_targeted(
+    conn: &mut redis::aio::ConnectionManager,
+    scope: &runtara_server::api::services::session_queue::managed::QueueScope,
+    lease: &runtara_server::api::services::session_queue::managed::Envelope,
+) {
+    use runtara_server::api::services::session_queue::managed::*;
+    block(conn, scope, lease, DeliveryReason::ExplicitFailure)
+        .await
+        .unwrap();
+    fail_blocked(conn, scope, &lease.message_id).await.unwrap();
+}
+
 #[cfg(feature = "valkey-integration-tests")]
 async fn delivery_api_contract(
     tenant: &str,
@@ -80,29 +94,64 @@ async fn delivery_api_contract(
     use axum::extract::Query;
     use runtara_server::api::{handlers::sessions::*, services::session_queue::managed::*};
     let scope = QueueScope::new(tenant, session).unwrap();
-    let enqueue = |owner: &str, operation: &str| {
+    let submit = |owner: &str, operation: &str, request_id: Option<&str>| {
         submit_event(
             OrgId(owner.into()),
+            State(Some(client.clone())),
             State(Some(conn.clone())),
             Path(session.into()),
             Ok(Json(SubmitEventRequest {
-                message_id: "api-message".into(),
+                message_id: "api-targeted".into(),
                 operation_id: operation.into(),
                 message: None,
                 payload: Some(json!({"answer":true})),
+                request_id: request_id.map(str::to_owned),
             })),
         )
     };
     assert_eq!(
-        enqueue("foreign", "api-operation").await.0,
+        submit("foreign", "api-operation", Some(request)).await.0,
         StatusCode::NOT_FOUND
     );
-    let (status, Json(first)) = enqueue(tenant, "api-operation").await;
+    // Two waits are open: an unnamed message is refused, never retained for
+    // whichever wait delivery happens to find later.
+    let (status, Json(refused)) = submit(tenant, "api-operation", None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(refused["code"], "INPUT_AMBIGUOUS");
+    assert_eq!(
+        submit(tenant, "api-operation", Some("missing")).await.1.0["code"],
+        "INPUT_NOT_WAITING"
+    );
+    let (status, Json(first)) = submit(tenant, "api-operation", Some(request)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first["data"]["state"], "queued");
-    assert_eq!(enqueue(tenant, "api-operation").await.1.0, first);
-    assert_eq!(enqueue(tenant, "different").await.0, StatusCode::CONFLICT);
+    assert_eq!(first["data"]["requestId"], request);
+    // A retry replays its original binding, with or without naming it again.
+    assert_eq!(
+        submit(tenant, "api-operation", Some(request)).await.1.0,
+        first
+    );
+    assert_eq!(submit(tenant, "api-operation", None).await.1.0, first);
+    assert_eq!(
+        submit(tenant, "different", Some(request)).await.0,
+        StatusCode::CONFLICT
+    );
     assert!(serde_json::from_value::<SubmitEventRequest>(json!({"message":"legacy"})).is_err());
+    let ClaimOutcome::Claimed(targeted) = claim(&mut conn.clone(), &scope, 30_000).await.unwrap()
+    else {
+        panic!("targeted submission claim")
+    };
+    fail_targeted(&mut conn.clone(), &scope, &targeted).await;
+    // A message retained before submit-time binding has no target at all.
+    enqueue(
+        &mut conn.clone(),
+        &scope,
+        "api-message",
+        "legacy-operation",
+        &json!({"answer":true}),
+    )
+    .await
+    .unwrap();
     let page = |owner: &str, limit| {
         list_session_deliveries(
             OrgId(owner.into()),
@@ -118,10 +167,14 @@ async fn delivery_api_contract(
     assert_eq!(page(tenant, 0).await.0, StatusCode::BAD_REQUEST);
     let (status, Json(body)) = page(tenant, 50).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"]["deliveries"].as_array().unwrap().len(), 1);
+    // The failed targeted submission and the unbound legacy message.
+    let deliveries = body["data"]["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 2);
     assert_eq!(body["data"]["nextCursor"], "0");
-    for field in ["payload", "payload_json", "lease_token", "launch_json"] {
-        assert!(body["data"]["deliveries"][0].get(field).is_none());
+    for delivery in deliveries {
+        for field in ["payload", "payload_json", "lease_token", "launch_json"] {
+            assert!(delivery.get(field).is_none());
+        }
     }
     let resolve = |owner: &str, body| {
         resolve_session_delivery(
@@ -138,17 +191,19 @@ async fn delivery_api_contract(
         request_id: request.into(),
     };
     assert_eq!(resolve(tenant, selection()).await.0, StatusCode::CONFLICT);
-    // Two eligible waits block the message; no latest-event selection is allowed.
+    // An unbound message is blocked; delivery never selects a wait for it.
     assert!(matches!(
         runtara_server::api::services::session_queue::delivery::deliver_session(
             &mut conn.clone(),
             &scope,
             &client,
-            &engine
         )
         .await
         .unwrap(),
-        DeliveryOutcome::Blocked(_)
+        DeliveryOutcome::Blocked(Envelope {
+            reason: Some(DeliveryReason::NoTarget),
+            ..
+        })
     ));
     assert_eq!(
         resolve("foreign", ResolveDeliveryRequest::Fail).await.0,
@@ -640,7 +695,6 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         let worker = tokio::spawn(runtara_server::workers::session_delivery_worker::run(
             recovered.clone(),
             client.clone(),
-            engine.clone(),
             shutdown.clone(),
         ));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {

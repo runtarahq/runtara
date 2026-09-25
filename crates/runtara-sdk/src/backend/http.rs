@@ -706,6 +706,9 @@ impl SdkBackend for HttpBackend {
             &self.url("inputs/register"),
             &serde_json::json!({
                 "descriptor": descriptor, "deadline_ms": deadline_ms, "tenant_id": self.tenant_id,
+                // The runner's clock reading paired with `deadline_ms`, so the
+                // server can rebase the remaining budget onto persistence time.
+                "requested_at_ms": chrono::Utc::now().timestamp_millis(),
             }),
         )?;
         Ok(())

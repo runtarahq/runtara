@@ -5510,6 +5510,11 @@ export interface SubmitEventRequest {
   operationId: string;
   /** Structured payload (used directly) */
   payload?: any;
+  /**
+   * The open input request this message answers. Optional only when exactly
+   * one request is open; the binding is fixed when the message is accepted.
+   */
+  requestId?: string | null;
 }
 
 export interface SubmitReportWorkflowActionRequest {
@@ -8280,7 +8285,7 @@ export class Api<
      *
      * @tags sessions
      * @name SubmitEvent
-     * @summary Durable queue acceptance is distinct from acceptance by a workflow wait.
+     * @summary Durable queue acceptance is distinct from acceptance by a workflow wait. The message is bound to its request here; a retry replays that original binding.
      * @request POST:/api/runtime/sessions/{sessionId}/events
      */
     submitEvent: (

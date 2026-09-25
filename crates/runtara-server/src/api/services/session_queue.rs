@@ -54,18 +54,33 @@ pub async fn release_activity_dedup(conn: &mut ConnectionManager, identity: &str
     let _: redis::RedisResult<i64> = redis::cmd("DEL").arg(&key).query_async(conn).await;
 }
 
-/// An actor-buffered message. Its original execution is frozen before discovery;
-/// `None` is a fresh idle/startup message, never an implicit managed response.
+/// Replies received while an execution runs are buffered per execution, apart
+/// from idle messages that start the next run. Neither can block the other.
+fn reply_key(org_id: &str, session_id: &str, instance_id: &str) -> String {
+    format!("{}:{}", queue_key(org_id, session_id), instance_id)
+}
+
+/// Backstop for reply buffers orphaned by a crashed actor. Live actors hand
+/// replies off or report them undeliverable long before this.
+const REPLY_BUFFER_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// An actor-buffered message. `instance_id` is `None` for a fresh idle/startup
+/// message, never an implicit managed response. A reply records the request
+/// that was open and prompted when it arrived; it is only ever delivered to
+/// that request, never to whichever request is open later.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct BufferedEvent {
     pub message_id: String,
     pub instance_id: Option<String>,
     pub target: Option<managed::InputTarget>,
+    #[serde(default)]
+    pub for_request: Option<String>,
     pub payload: Value,
 }
 pub struct PeekedEvent {
     pub event: BufferedEvent,
     encoded: String,
+    key: String,
 }
 
 pub async fn push_event(
@@ -73,35 +88,55 @@ pub async fn push_event(
     org_id: &str,
     session_id: &str,
     instance_id: Option<&str>,
+    for_request: Option<&str>,
     payload: &Value,
 ) -> managed::QueueResult<()> {
+    if for_request.is_some() && instance_id.is_none() {
+        return Err(managed::QueueError::Invalid);
+    }
     let event = BufferedEvent {
         message_id: uuid::Uuid::new_v4().to_string(),
         instance_id: instance_id.map(str::to_owned),
         target: None,
+        for_request: for_request.map(str::to_owned),
         payload: payload.clone(),
     };
     let encoded = serde_json::to_string(&event).expect("buffered event");
-    // No expiry may discard a reply while discovery/delivery is unavailable.
-    redis::pipe()
-        .atomic()
-        .rpush(queue_key(org_id, session_id), encoded)
-        .persist(queue_key(org_id, session_id))
-        .query_async::<()>(conn)
-        .await?;
+    let mut pipe = redis::pipe();
+    pipe.atomic();
+    match instance_id {
+        Some(instance) => {
+            let key = reply_key(org_id, session_id, instance);
+            pipe.rpush(&key, encoded)
+                .expire(&key, REPLY_BUFFER_TTL_SECS);
+        }
+        None => {
+            // Startup messages wait for the idle loop without expiring.
+            let key = queue_key(org_id, session_id);
+            pipe.rpush(&key, encoded).persist(&key);
+        }
+    }
+    pipe.query_async::<()>(conn).await?;
     Ok(())
 }
 
+/// Peek the head of an execution's reply buffer, or of the startup buffer.
 pub async fn peek_event(
     conn: &mut ConnectionManager,
     org_id: &str,
     session_id: &str,
+    instance_id: Option<&str>,
 ) -> managed::QueueResult<Option<PeekedEvent>> {
-    let raw: Option<String> = conn.lindex(queue_key(org_id, session_id), 0).await?;
+    let key = match instance_id {
+        Some(instance) => reply_key(org_id, session_id, instance),
+        None => queue_key(org_id, session_id),
+    };
+    let raw: Option<String> = conn.lindex(&key, 0).await?;
     raw.map(|encoded| {
         let event: BufferedEvent =
             serde_json::from_str(&encoded).map_err(|_| managed::QueueError::Corrupt)?;
         if uuid::Uuid::parse_str(&event.message_id).is_err()
+            || event.instance_id.as_deref() != instance_id
             || event
                 .target
                 .as_ref()
@@ -109,21 +144,25 @@ pub async fn peek_event(
         {
             return Err(managed::QueueError::Corrupt);
         }
-        Ok(PeekedEvent { event, encoded })
+        Ok(PeekedEvent {
+            event,
+            encoded,
+            key,
+        })
     })
     .transpose()
 }
 
-/// Freeze target before the managed-queue handoff. Even if destination retention
-/// later expires, this source can only replay the same request and operation.
+/// Freeze the target before the managed-queue handoff. Only the request the
+/// reply was received for can be chosen. Even if destination retention later
+/// expires, this source can only replay the same request and operation.
 pub async fn bind_event(
     conn: &mut ConnectionManager,
-    org_id: &str,
-    session_id: &str,
     source: &PeekedEvent,
     target: &managed::InputTarget,
 ) -> managed::QueueResult<PeekedEvent> {
     if source.event.instance_id.as_ref() != Some(&target.instance_id)
+        || source.event.for_request.as_ref() != Some(&target.request_id)
         || source
             .event
             .target
@@ -136,30 +175,34 @@ pub async fn bind_event(
     event.target = Some(target.clone());
     let encoded = serde_json::to_string(&event).expect("buffered event");
     let changed: bool = redis::Script::new("if redis.call('LINDEX', KEYS[1], 0) ~= ARGV[1] then return 0 end redis.call('LSET', KEYS[1], 0, ARGV[2]) return 1")
-        .key(queue_key(org_id, session_id)).arg(&source.encoded).arg(&encoded).invoke_async(conn).await?;
+        .key(&source.key).arg(&source.encoded).arg(&encoded).invoke_async(conn).await?;
     if !changed {
         return Err(managed::QueueError::Conflict);
     }
-    Ok(PeekedEvent { event, encoded })
+    Ok(PeekedEvent {
+        event,
+        encoded,
+        key: source.key.clone(),
+    })
 }
 
-/// Remove exactly the observed head after durable handoff (or field consumption).
-/// A stale acknowledgement cannot consume the following, even identical, reply.
+/// Remove exactly the observed head after durable handoff, field consumption or
+/// an explicit undeliverable notice. A stale acknowledgement cannot consume the
+/// following, even identical, reply.
 pub async fn acknowledge_event(
     conn: &mut ConnectionManager,
-    org_id: &str,
-    session_id: &str,
     source: &PeekedEvent,
 ) -> managed::QueueResult<()> {
     let changed: bool = redis::Script::new("if redis.call('LINDEX', KEYS[1], 0) ~= ARGV[1] then return 0 end redis.call('LPOP', KEYS[1]) return 1")
-        .key(queue_key(org_id, session_id)).arg(&source.encoded).invoke_async(conn).await?;
+        .key(&source.key).arg(&source.encoded).invoke_async(conn).await?;
     if !changed {
         return Err(managed::QueueError::Conflict);
     }
     Ok(())
 }
 
-/// Existing idle-phase startup intake. It cannot consume an execution's reply.
+/// Idle-phase startup intake. Replies live in per-execution buffers, so this
+/// can neither consume nor be blocked by an execution's reply.
 /// Durable launch handoff is a separate follow-up; managed response delivery
 /// must use peek/bind/acknowledge instead.
 pub async fn take_startup_event(
@@ -167,16 +210,14 @@ pub async fn take_startup_event(
     org_id: &str,
     session_id: &str,
 ) -> managed::QueueResult<Option<Value>> {
-    let Some(source) = peek_event(conn, org_id, session_id).await? else {
+    let Some(source) = peek_event(conn, org_id, session_id, None).await? else {
         return Ok(None);
     };
-    if source.event.instance_id.is_some() || source.event.target.is_some() {
-        return Err(managed::QueueError::Conflict);
-    }
-    acknowledge_event(conn, org_id, session_id, &source).await?;
+    acknowledge_event(conn, &source).await?;
     Ok(Some(source.event.payload))
 }
 
+/// Whether an idle/startup message is waiting to start the next run.
 pub async fn has_events(
     conn: &mut ConnectionManager,
     org_id: &str,

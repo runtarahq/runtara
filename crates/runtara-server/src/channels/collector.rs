@@ -18,6 +18,8 @@ pub struct BufferedReplies<'a> {
     pub conn: &'a mut redis::aio::ConnectionManager,
     pub scope: &'a crate::api::services::session_queue::managed::QueueScope,
     pub instance: &'a str,
+    /// Only replies received for this request may be consumed as its answers.
+    pub request: &'a str,
 }
 
 /// Collect structured field values from a user via sequential text prompts.
@@ -64,12 +66,13 @@ where
                     buffer.conn,
                     buffer.scope.tenant_id(),
                     buffer.scope.session_id(),
+                    Some(buffer.instance),
                 )
                 .await?
                 {
                     anyhow::ensure!(
-                        source.event.instance_id.as_deref() == Some(buffer.instance)
-                            && source.event.target.is_none(),
+                        source.event.target.is_none()
+                            && source.event.for_request.as_deref() == Some(buffer.request),
                         "Buffered reply belongs to another target"
                     );
                     let text = source
@@ -80,13 +83,7 @@ where
                         .ok_or_else(|| anyhow::anyhow!("Buffered reply has no text"))?
                         .to_owned();
                     ensure_open().await?;
-                    session_queue::acknowledge_event(
-                        buffer.conn,
-                        buffer.scope.tenant_id(),
-                        buffer.scope.session_id(),
-                        &source,
-                    )
-                    .await?;
+                    session_queue::acknowledge_event(buffer.conn, &source).await?;
                     Some(text)
                 } else {
                     None

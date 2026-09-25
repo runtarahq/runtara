@@ -86,14 +86,14 @@ impl std::fmt::Debug for EnvironmentClient {
 }
 
 impl EnvironmentClient {
-    /// Resolve all workflow associations before paging actionable requests.
+    /// Resolve live workflow instances with open inputs before paging requests.
     pub async fn workflow_input_instances(
         &self,
         tenant: &str,
         workflow: &str,
     ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
         self.instances()
-            .ids_for_image_name_prefix(tenant, &format!("{workflow}:"))
+            .input_candidate_ids_for_image_name_prefix(tenant, &format!("{workflow}:"))
             .await
             .map_err(|error| {
                 runtara_core::persistence::inputs::InputError::Storage(error.to_string())

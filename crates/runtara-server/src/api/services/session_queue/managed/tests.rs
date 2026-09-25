@@ -369,7 +369,7 @@ async fn register(
         .request_id
 }
 #[tokio::test]
-async fn delivery_blocks_ambiguity_and_schema_failure_without_consuming_the_message() {
+async fn delivery_never_guesses_a_target_and_blocks_schema_failure_without_consuming() {
     use runtara_core::{
         domain::InstanceStatus,
         persistence::{Persistence, memory::InMemoryPersistence},
@@ -384,8 +384,9 @@ async fn delivery_blocks_ambiguity_and_schema_failure_without_consuming_the_mess
         .update_instance_status("instance", InstanceStatus::Running, None)
         .await
         .unwrap();
+    // Even a single open request is not a safe guess for an unbound message:
+    // the sender may have been answering a request that has since closed.
     let first = register(persistence.as_ref(), "first").await;
-    register(persistence.as_ref(), "second").await;
     let client = runtime(persistence);
     enqueue(
         &mut conn,
@@ -396,20 +397,21 @@ async fn delivery_blocks_ambiguity_and_schema_failure_without_consuming_the_mess
     )
     .await
     .unwrap();
-    let outcome = deliver_to_instance(&mut conn, &scope, &client, Some("instance"))
+    let outcome = deliver_to_instance(&mut conn, &scope, &client)
         .await
         .unwrap();
     assert!(matches!(
         outcome,
         DeliveryOutcome::Blocked(Envelope {
-            reason: Some(DeliveryReason::AmbiguousTarget),
+            reason: Some(DeliveryReason::NoTarget),
+            target: None,
             ..
         })
     ));
     resolve(&mut conn, &scope, "message", &target(&first))
         .await
         .unwrap();
-    let outcome = deliver_to_instance(&mut conn, &scope, &client, Some("instance"))
+    let outcome = deliver_to_instance(&mut conn, &scope, &client)
         .await
         .unwrap();
     assert!(matches!(
@@ -470,7 +472,7 @@ async fn delivery_after_lost_ack_replays_original_receipt_without_retargeting() 
         .unwrap();
     // Simulate process death after the durable receipt but before queue ack.
     expire(&mut conn, &scope, &lease).await;
-    let result = deliver_to_instance(&mut conn, &scope, &client, Some("replacement-instance"))
+    let result = deliver_to_instance(&mut conn, &scope, &client)
         .await
         .unwrap();
     let DeliveryOutcome::Accepted(envelope) = result else {

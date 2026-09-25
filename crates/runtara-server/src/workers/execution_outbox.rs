@@ -218,12 +218,6 @@ struct ExistingRequest {
     run_label: Option<String>,
 }
 
-#[derive(FromRow)]
-pub(crate) struct RetainedExecutionRequest {
-    pub instance_id: String,
-    pub state: String,
-}
-
 /// Server-owned database boundary for accepted asynchronous executions.
 #[derive(Clone)]
 pub struct ExecutionOutbox {
@@ -242,18 +236,6 @@ impl ExecutionOutbox {
 
     pub fn policy(&self) -> ExecutionOutboxPolicy {
         self.policy
-    }
-
-    /// Observe source progress independently of mutable workflow configuration.
-    /// A retained idempotency record can represent a launch that already expired.
-    pub(crate) async fn retained_request(
-        &self,
-        tenant_id: &str,
-        idempotency_key: &str,
-    ) -> Result<Option<RetainedExecutionRequest>, ExecutionOutboxError> {
-        Ok(sqlx::query_as(
-            "SELECT instance_id, state FROM execution_requests WHERE tenant_id=$1 AND idempotency_key=$2",
-        ).bind(tenant_id).bind(idempotency_key).fetch_optional(&self.pool).await?)
     }
 
     /// Read an existing request before a caller performs non-durable admission

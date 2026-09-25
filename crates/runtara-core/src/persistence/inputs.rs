@@ -64,7 +64,8 @@ pub struct InputRequestSpec {
     pub response_schema: Option<Value>,
     /// Step/tool presentation, action key, correlation and context.
     pub metadata: Value,
-    /// Original absolute deadline; replay cannot extend it.
+    /// Original absolute deadline in persistence time; replay cannot move it.
+    /// Hosts rebase guest deadlines with [`persistence_deadline_ms`] first.
     pub deadline: Option<DateTime<Utc>>,
 }
 
@@ -116,6 +117,27 @@ impl InputRequestSpec {
     pub fn request_id(&self) -> String {
         request_id(&self.signal_id)
     }
+}
+
+/// Rebase a guest deadline minted from the host clock onto persistence time.
+///
+/// Expiry is decided by persistence, so the remaining budget measured on the
+/// guest's own clock is re-anchored at persistence `now`. Skew between the host
+/// and the database therefore cannot shorten, lengthen or pre-expire a wait.
+/// Registration replay keeps the first stored deadline regardless.
+pub async fn persistence_deadline_ms(
+    inputs: &dyn InputRequests,
+    deadline_ms: Option<u64>,
+    host_now_ms: u64,
+) -> InputResult<Option<u64>> {
+    let Some(deadline_ms) = deadline_ms else {
+        return Ok(None);
+    };
+    let now = u64::try_from(inputs.input_clock().await?.timestamp_millis())
+        .map_err(|_| InputError::Storage("persistence clock before epoch".into()))?;
+    Ok(Some(
+        now.saturating_add(deadline_ms.saturating_sub(host_now_ms)),
+    ))
 }
 
 /// Stable bounded key for a full wait identity, scoped to one instance.
@@ -425,7 +447,14 @@ pub trait InputRequests: Send + Sync {
     /// never shortens a scheduler claim or wakes an explicit pause.
     async fn reconcile_input_wakes(&self, limit: u32) -> InputResult<u64>;
 
+    /// The clock deadlines and expiry are evaluated against.
+    async fn input_clock(&self) -> InputResult<DateTime<Utc>> {
+        Ok(Utc::now())
+    }
+
     /// Register/replay a logical wait under current execution authority.
+    /// Identity is the full signal id plus logical owner; a replay keeps the
+    /// first registration's metadata and deadline rather than comparing them.
     async fn register_input(
         &self,
         authority: &InputAuthority,

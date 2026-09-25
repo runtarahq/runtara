@@ -165,8 +165,7 @@ impl Fixture {
     }
 
     async fn deliver(&mut self) -> DeliveryOutcome {
-        let engine = self.engine();
-        deliver_session(&mut self.conn, &self.scope, &self.client, &engine)
+        deliver_session(&mut self.conn, &self.scope, &self.client)
             .await
             .unwrap()
     }
@@ -289,8 +288,11 @@ async fn wait_until_backend_time(conn: &mut ConnectionManager, deadline_ms: u64)
     .expect("backend deadline");
 }
 
+/// A message retained before any wait existed was not an answer to a prompt
+/// the sender saw. It is blocked for resolution, and neither starts another
+/// execution nor answers the wait that opens afterwards.
 #[tokio::test]
-async fn a_message_waits_for_initial_session_registration_without_starting_another_execution() {
+async fn an_unbound_message_is_never_bound_to_a_wait_that_opens_later() {
     let mut f = Fixture::new().await;
     let ClaimOutcome::Claimed(lease) = claim(&mut f.conn, &f.scope, 30_000).await.unwrap() else {
         panic!("claim")
@@ -334,19 +336,22 @@ async fn a_message_waits_for_initial_session_registration_without_starting_anoth
         f.client.get_instance_info(&f.route.instance_id).await,
         Err(runtara_server::runtime_client::RuntimeError::InstanceNotFound(_))
     ));
-    let DeliveryOutcome::Deferred(pending) = f.deliver().await else {
-        panic!("pending initial launch")
+    let DeliveryOutcome::Blocked(blocked) = f.deliver().await else {
+        panic!("an unbound message requires explicit resolution")
     };
-    assert_eq!(pending.reason, Some(DeliveryReason::NoTarget));
+    assert_eq!(blocked.reason, Some(DeliveryReason::NoTarget));
     assert_eq!(f.request_count().await, 1);
     f.register_instance(&f.route.instance_id, InstanceStatus::Running)
         .await;
     let request = f.register_wait(&f.route.instance_id, "initial").await;
-    wait_until_backend_time(&mut f.conn, pending.retry_at_ms.unwrap()).await;
-    let DeliveryOutcome::Accepted(accepted) = f.deliver().await else {
-        panic!("initial managed input receipt")
-    };
-    assert_eq!(accepted.target.as_ref().unwrap().request_id, request);
+    assert!(matches!(f.deliver().await, DeliveryOutcome::Blocked(_)));
+    let page = f
+        .client
+        .list_input_requests(f.scope.tenant_id(), &[f.route.instance_id.clone()], 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(page.requests.len(), 1);
+    assert_eq!(page.requests[0].request_id, request);
     assert_eq!(f.request_count().await, 1);
     f.cleanup().await;
 }
@@ -362,7 +367,7 @@ async fn terminal_session_blocks_response_without_launching_a_replacement() {
     let DeliveryOutcome::Blocked(blocked) = f.deliver().await else {
         panic!("a terminal session must require explicit resolution")
     };
-    assert_eq!(blocked.reason, Some(DeliveryReason::StaleTarget));
+    assert_eq!(blocked.reason, Some(DeliveryReason::NoTarget));
     assert_eq!(blocked.payload().unwrap(), json!({"answer":true}));
     assert!(blocked.target.is_none());
     assert_eq!(f.request_count().await, 0);
@@ -445,14 +450,14 @@ async fn lost_ack_replays_the_bound_receipt_without_answering_the_next_wait() {
 }
 
 #[tokio::test]
-async fn ambiguous_waits_retain_the_response_without_choosing_the_latest() {
+async fn open_waits_retain_an_unbound_response_without_choosing_one() {
     let mut f = Fixture::new().await;
     f.register_wait(&f.route.instance_id, "first").await;
     f.register_wait(&f.route.instance_id, "second").await;
     let DeliveryOutcome::Blocked(blocked) = f.deliver().await else {
         panic!("ambiguous response requires an explicit target")
     };
-    assert_eq!(blocked.reason, Some(DeliveryReason::AmbiguousTarget));
+    assert_eq!(blocked.reason, Some(DeliveryReason::NoTarget));
     assert!(blocked.target.is_none());
     assert_eq!(blocked.payload().unwrap(), json!({"answer":true}));
     assert_eq!(

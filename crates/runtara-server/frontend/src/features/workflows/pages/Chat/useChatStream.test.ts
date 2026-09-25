@@ -69,3 +69,28 @@ it('does not duplicate an in-flight enqueue or put an old-session error into a n
   });
   expect(useChatStore.getState().error).toBeNull();
 });
+
+it('treats a refused message as final: nothing retained, nothing to retry', async () => {
+  const { InputSubmissionError } = await import('../../utils/input-submission');
+  const { result } = renderHook(() => useChatStream('workflow'));
+  vi.mocked(sendSessionMessage).mockRejectedValueOnce(
+    new InputSubmissionError(
+      'The session is not waiting for input',
+      'INPUT_NOT_WAITING',
+      409
+    )
+  );
+  await act(async () =>
+    expect(await result.current.sendMessage('Hello')).toBe(false)
+  );
+  expect(result.current.uncertainMessage).toBeNull();
+  expect(useChatStore.getState().error).toBe(
+    'The session is not waiting for input'
+  );
+  vi.mocked(sendSessionMessage).mockRejectedValueOnce(new TypeError('lost'));
+  await act(() => result.current.sendMessage('Hello'));
+  // A fresh intent, not a replay of the refused one.
+  expect(vi.mocked(sendSessionMessage).mock.calls[1][2].operationId).not.toBe(
+    vi.mocked(sendSessionMessage).mock.calls[0][2].operationId
+  );
+});

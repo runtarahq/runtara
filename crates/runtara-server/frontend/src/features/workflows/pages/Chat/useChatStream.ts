@@ -9,6 +9,7 @@ import {
   type SessionMessageSubmission,
 } from '@/features/workflows/queries/chat';
 import { parseSSEStream } from '@/features/workflows/utils/sse';
+import { isRefusedSessionMessage } from '@/features/workflows/utils/input-submission';
 import { ChatSSEEvent } from '@/features/workflows/types/chat';
 
 /**
@@ -318,7 +319,14 @@ export function useChatStream(workflowId: string) {
         );
         return true;
       } catch (err: unknown) {
-        setUncertainMessage({ sessionId, message: content });
+        if (isRefusedSessionMessage(err)) {
+          // Definitive: nothing (or nothing unambiguous) was waiting, so the
+          // server retained nothing. Retrying the same message cannot help.
+          if (queueIntent.current === intent) queueIntent.current = null;
+          setUncertainMessage(null);
+        } else {
+          setUncertainMessage({ sessionId, message: content });
+        }
         if (useChatStore.getState().sessionId === sessionId)
           store.setError(
             err instanceof Error ? err.message : 'Failed to send message'

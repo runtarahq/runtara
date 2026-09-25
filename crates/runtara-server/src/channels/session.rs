@@ -23,7 +23,10 @@ use super::channel::{Channel, TelegramChannel};
 use super::collector;
 
 mod inputs;
-use inputs::{InputProgress, ManagedChannelInputs};
+use inputs::{InputProgress, ManagedChannelInputs, ReplyTarget, UNDELIVERED_NOTICE};
+
+const AMBIGUOUS_NOTICE: &str =
+    "Several inputs are waiting. Answer the intended one in the workflow view.";
 
 /// A normalized inbound message from any channel.
 #[derive(Debug, Clone)]
@@ -567,7 +570,7 @@ async fn session_loop(
                             // Replies received during this execution remain responses.
                             // They must not fall through to idle startup handling.
                             if !foreign {
-                                match managed_inputs.finish_instance(&instance_id).await {
+                                match managed_inputs.finish_instance(&instance_id, &channel, &conv_id).await {
                                     Ok(true) => {},
                                     Ok(false) => continue,
                                     Err(error) => {
@@ -635,7 +638,12 @@ async fn session_loop(
                     // Input discovery is mandatory even with no debug events or
                     // when event history retrieval fails.
                     let notice = match managed_inputs.poll(&instance_id, &channel, &conv_id, &mut user_rx).await {
-                        Ok(InputProgress::Ambiguous) => Some("Several inputs are waiting. Choose the intended input in the workflow view; your queued reply has been retained."),
+                        Ok(InputProgress::Ambiguous) => Some(AMBIGUOUS_NOTICE),
+                        // Each dropped reply is reported, even if it repeats.
+                        Ok(InputProgress::Undelivered) => {
+                            let _ = channel.send_text(&conv_id, UNDELIVERED_NOTICE).await;
+                            None
+                        }
                         Ok(_) => None,
                         Err(error) => {
                             warn!(error = %error, "Channel input processing unavailable or collection ended");
@@ -663,8 +671,28 @@ async fn session_loop(
                     if let Some(target) = &inbound.target {
                         event["target"] = target.clone();
                     }
-                    if let Err(e) = session_queue::push_event(&mut valkey, org_id, &session_id, Some(&instance_id), &event).await {
-                        warn!(error = %e, "Failed to push user message to queue");
+                    // Bind the reply now, to the request its sender was shown.
+                    // Anything else is reported undelivered, never retained for
+                    // whichever request happens to open next.
+                    let refusal = match managed_inputs.reply_target(&instance_id).await {
+                        Ok(ReplyTarget::Request(request)) => {
+                            match session_queue::push_event(&mut valkey, org_id, &session_id, Some(&instance_id), Some(&request), &event).await {
+                                Ok(()) => None,
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to buffer channel reply");
+                                    Some("Your reply could not be saved. Please send it again.")
+                                }
+                            }
+                        }
+                        Ok(ReplyTarget::NotWaiting) => Some("Nothing is waiting for a reply right now, so your message was not delivered."),
+                        Ok(ReplyTarget::Ambiguous) => Some("Several inputs are waiting. Answer in the workflow view; your message was not delivered."),
+                        Err(error) => {
+                            warn!(error = %error, "Channel input discovery unavailable");
+                            Some("Unable to confirm which input your reply answers, so it was not delivered. Please try again.")
+                        }
+                    };
+                    if let Some(message) = refusal {
+                        let _ = channel.send_text(&conv_id, message).await;
                     }
                 }
             }
@@ -690,9 +718,15 @@ async fn session_loop(
                         match managed::has_unresolved(&mut valkey, &managed_inputs.scope).await {
                             Ok(false) => {},
                             Ok(true) => {
-                                if last_input_notice != Some("pending_response") {
-                                    let _ = channel.send_text(&conv_id, "A previous reply still needs delivery or resolution. Resolve it in the workflow view before starting another run.").await;
-                                    last_input_notice = Some("pending_response");
+                                // Deliver or explicitly fail earlier replies before
+                                // a new run can start; never leave them to block.
+                                match managed_inputs.settle_queue(&channel, &conv_id).await {
+                                    Ok(true) if last_input_notice != Some("pending_response") => {
+                                        let _ = channel.send_text(&conv_id, "A previous reply is still being delivered. Please wait a moment.").await;
+                                        last_input_notice = Some("pending_response");
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => warn!(error = %error, "Unable to settle channel replies"),
                                 }
                                 continue;
                             }
@@ -784,7 +818,7 @@ async fn session_loop(
                         if let Some(target) = &inbound.target {
                             event["target"] = target.clone();
                         }
-                        let _ = session_queue::push_event(&mut valkey, org_id, &session_id, None, &event).await;
+                        let _ = session_queue::push_event(&mut valkey, org_id, &session_id, None, None, &event).await;
                     }
                 }
             }
@@ -793,6 +827,23 @@ async fn session_loop(
 
     if start_time.elapsed() >= max_duration {
         debug!(conv_id = %conv_id, "Channel session timed out");
+    }
+
+    // Replies buffered for the execution this actor is leaving are settled
+    // now: bound ones are handed to the managed queue, the rest are reported.
+    // Nothing is left for a later actor to bind to a different request.
+    for _ in 0..100 {
+        match managed_inputs
+            .finish_instance(&instance_id, &channel, &conv_id)
+            .await
+        {
+            Ok(false) => continue,
+            Ok(true) => break,
+            Err(error) => {
+                warn!(error = %error, "Unable to settle buffered channel replies on exit");
+                break;
+            }
+        }
     }
 
     Ok(())

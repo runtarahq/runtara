@@ -59,6 +59,10 @@ pub struct SubmitEventRequest {
 
     /// Structured payload (used directly)
     pub payload: Option<Value>,
+
+    /// The open input request this message answers. Optional only when exactly
+    /// one request is open; the binding is fixed when the message is accepted.
+    pub request_id: Option<String>,
 }
 
 /// Create a new session, start execution, and return an SSE stream.
@@ -211,11 +215,71 @@ fn queue_error_response(error: QueueError) -> (StatusCode, Json<Value>) {
     )
 }
 
-/// Durable queue acceptance is distinct from acceptance by a workflow wait.
+fn input_target_response(code: &str, message: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"success":false,"code":code,"message":message,"data":null})),
+    )
+}
+
+/// Choose the request a new message answers, while the sender can still see it.
+/// Binding later (at delivery) could attach a late reply to a different wait.
+async fn bind_session_message(
+    client: &RuntimeClient,
+    tenant_id: &str,
+    instance_id: &str,
+    requested: Option<&str>,
+) -> Result<managed::InputTarget, (StatusCode, Json<Value>)> {
+    use runtara_core::persistence::inputs::InputError;
+    let page = match client
+        .list_input_requests(tenant_id, &[instance_id.into()], 0, u32::MAX)
+        .await
+    {
+        Ok(page) => page,
+        Err(InputError::NotFound) => {
+            return Err(input_target_response(
+                "INPUT_NOT_WAITING",
+                "The session is not waiting for input",
+            ));
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({"success":false,"code":"INPUT_DISCOVERY_UNAVAILABLE","message":"Input discovery unavailable","data":null}),
+                ),
+            ));
+        }
+    };
+    let selected = match requested {
+        Some(requested) => page.requests.iter().find(|r| r.request_id == requested),
+        None if page.requests.len() > 1 => {
+            return Err(input_target_response(
+                "INPUT_AMBIGUOUS",
+                "Several inputs are waiting; specify requestId",
+            ));
+        }
+        None => page.requests.first(),
+    };
+    let request = selected.ok_or_else(|| {
+        input_target_response(
+            "INPUT_NOT_WAITING",
+            "The requested input is not waiting for a response",
+        )
+    })?;
+    Ok(managed::InputTarget {
+        instance_id: instance_id.into(),
+        request_id: request.request_id.clone(),
+    })
+}
+
+/// Durable queue acceptance is distinct from acceptance by a workflow wait. The
+/// message is bound to its request here; a retry replays that original binding.
 #[utoipa::path(post,path="/api/runtime/sessions/{sessionId}/events",params(("sessionId"=String,Path)),request_body=SubmitEventRequest,
-    responses((status=200,description="Message retained or enqueue replayed",body=crate::api::dto::common::ApiResponse<DeliveryStatus>),(status=400,description="Invalid envelope"),(status=404,description="Session not found"),(status=409,description="Message identity conflict"),(status=503,description="Queue unavailable")),tag="sessions")]
+    responses((status=200,description="Message retained or enqueue replayed",body=crate::api::dto::common::ApiResponse<DeliveryStatus>),(status=400,description="Invalid envelope"),(status=404,description="Session not found"),(status=409,description="Message identity conflict, or no/several inputs waiting"),(status=503,description="Queue unavailable")),tag="sessions")]
 pub async fn submit_event(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     Path(session_id): Path<String>,
     body: Result<Json<SubmitEventRequest>, axum::extract::rejection::JsonRejection>,
@@ -238,18 +302,72 @@ pub async fn submit_event(
         Ok(scope) => scope,
         Err(error) => return queue_error_response(error),
     };
-    if let Err(error) = managed::session_route(&mut conn, &scope).await {
-        return queue_error_response(error);
-    }
-    match managed::enqueue(
-        &mut conn,
-        &scope,
-        &request.message_id,
-        &request.operation_id,
-        &event,
-    )
-    .await
-    {
+    let route = match managed::session_route(&mut conn, &scope).await {
+        Ok(route) => route,
+        Err(error) => return queue_error_response(error),
+    };
+    // A retried message keeps the target it was first bound to, even after
+    // that request was answered; the queue replays or reports the conflict.
+    let existing = match managed::get(&mut conn, &scope, &request.message_id).await {
+        Ok(existing) => Some(existing),
+        Err(QueueError::NotFound) => None,
+        Err(error) => return queue_error_response(error),
+    };
+    let target = match existing {
+        Some(existing) => {
+            if request.request_id.is_some()
+                && existing.target.as_ref().map(|t| &t.request_id) != request.request_id.as_ref()
+            {
+                return queue_error_response(QueueError::Conflict);
+            }
+            existing.target
+        }
+        None => {
+            let Some(client) = runtime_client else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(
+                        json!({"success":false,"code":"RUNTIME_UNAVAILABLE","message":"Runtime client not configured"}),
+                    ),
+                );
+            };
+            match bind_session_message(
+                &client,
+                &tenant_id,
+                &route.instance_id,
+                request.request_id.as_deref(),
+            )
+            .await
+            {
+                Ok(target) => Some(target),
+                Err(response) => return response,
+            }
+        }
+    };
+    let enqueued = match &target {
+        Some(target) => {
+            managed::enqueue_targeted(
+                &mut conn,
+                &scope,
+                &request.message_id,
+                &request.operation_id,
+                &event,
+                target,
+            )
+            .await
+        }
+        None => {
+            managed::enqueue(
+                &mut conn,
+                &scope,
+                &request.message_id,
+                &request.operation_id,
+                &event,
+            )
+            .await
+        }
+    };
+    match enqueued {
         Ok(envelope) => (
             StatusCode::OK,
             Json(json!({"success":true,"data":DeliveryStatus::from(envelope)})),

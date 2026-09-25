@@ -1156,6 +1156,47 @@ fn earliest_wake_deadline_ms(
         .min()
 }
 
+/// Replace each timed `on-signal` deadline with its managed request's stored
+/// deadline. Expiry is decided on the persistence clock, which the guest's
+/// `now-ms` reading may be skewed from: an early wake would find the wait still
+/// open and re-park on an already-past deadline in a relaunch loop. Waits with
+/// no managed record, or a failed lookup, keep the guest's deadline.
+async fn with_persistence_input_deadlines(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) -> Vec<runtara_component_host::lifecycle::WorkflowWake> {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    let mut wakes = wakes.to_vec();
+    let timed = |wake: &WorkflowWake| matches!(wake, WorkflowWake::OnSignal(wait) if wait.deadline_ms.is_some());
+    if !wakes.iter().any(timed) {
+        return wakes;
+    }
+    let Some(inputs) = persistence.input_requests() else {
+        return wakes;
+    };
+    let tenant = match persistence.get_instance_meta(instance_id).await {
+        Ok(Some(meta)) => meta.tenant_id,
+        _ => return wakes,
+    };
+    for wake in &mut wakes {
+        let WorkflowWake::OnSignal(wait) = wake else {
+            continue;
+        };
+        if wait.deadline_ms.is_none() {
+            continue;
+        }
+        let request = runtara_core::persistence::inputs::request_id(&wait.checkpoint_id);
+        if let Ok(record) = inputs.get_input(&tenant, instance_id, &request).await
+            && record.spec.signal_id == wait.checkpoint_id
+            && let Some(deadline) = record.spec.deadline
+        {
+            wait.deadline_ms = u64::try_from(deadline.timestamp_millis()).ok();
+        }
+    }
+    wakes
+}
+
 /// True when any wake is an `on-signal` — the instance is parked waiting for an
 /// externally-delivered custom signal (the store-freeing Wait path).
 fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake]) -> bool {
@@ -1317,6 +1358,7 @@ async fn park_invoke_suspend(
     instance_id: &str,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
 ) {
+    let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
     let deadline_ms = earliest_wake_deadline_ms(wakes);
     if deadline_ms.is_none() && !has_on_signal_wake(wakes) {
         // Pure on-resume: already handled by the ack path.
@@ -2118,6 +2160,73 @@ mod tests {
             }),
         ];
         assert_eq!(earliest_wake_deadline_ms(&wakes), None);
+    }
+
+    /// A timed signal wait parks until its stored persistence deadline, not the
+    /// guest's skewed clock; waits without a managed record keep theirs.
+    #[tokio::test]
+    async fn timed_signal_parks_use_the_stored_persistence_deadline() {
+        use runtara_core::domain::InstanceStatus;
+        use runtara_core::persistence::{
+            inputs::{InputAuthority, InputRequestSpec},
+            memory::InMemoryPersistence,
+        };
+        let persistence = InMemoryPersistence::new();
+        persistence
+            .register_instance("park", "tenant")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status("park", InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let stored = chrono::DateTime::from_timestamp_millis(1_900_000_000_000).unwrap();
+        persistence
+            .input_requests()
+            .unwrap()
+            .register_input(
+                &InputAuthority::Root {
+                    tenant_id: "tenant".into(),
+                    instance_id: "park".into(),
+                },
+                &InputRequestSpec {
+                    signal_id: "managed".into(),
+                    response_schema: None,
+                    metadata: serde_json::json!({}),
+                    deadline: Some(stored),
+                },
+            )
+            .await
+            .unwrap();
+        let wakes = vec![
+            // The guest's clock ran 3s behind persistence.
+            WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "managed".into(),
+                deadline_ms: Some(1_899_999_997_000),
+            }),
+            WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "raw".into(),
+                deadline_ms: Some(1_950_000_000_000),
+            }),
+            WorkflowWake::At(1_960_000_000_000),
+        ];
+        let rebased = with_persistence_input_deadlines(&persistence, "park", &wakes).await;
+        let deadlines: Vec<_> = rebased
+            .iter()
+            .map(|wake| match wake {
+                WorkflowWake::OnSignal(wait) => wait.deadline_ms,
+                WorkflowWake::At(ms) => Some(*ms),
+                WorkflowWake::OnResume => None,
+            })
+            .collect();
+        assert_eq!(
+            deadlines,
+            [
+                Some(1_900_000_000_000),
+                Some(1_950_000_000_000),
+                Some(1_960_000_000_000)
+            ]
+        );
     }
 
     #[cfg(feature = "db-integration-tests")]

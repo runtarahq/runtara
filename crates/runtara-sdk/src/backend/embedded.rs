@@ -435,12 +435,18 @@ impl SdkBackend for EmbeddedBackend {
     }
 
     fn register_input(&self, descriptor: &[u8], deadline_ms: Option<u64>) -> Result<()> {
-        use runtara_core::persistence::inputs::InputRequestSpec;
-        let spec = InputRequestSpec::from_descriptor(descriptor, deadline_ms)
-            .map_err(|e| SdkError::Internal(e.to_string()))?;
+        use runtara_core::persistence::inputs::{InputRequestSpec, persistence_deadline_ms};
         let inputs = self.persistence.input_requests().ok_or_else(|| {
             SdkError::Internal("persistence does not support managed inputs".into())
         })?;
+        // The guest's `now-ms` is this process's wall clock.
+        let host_now = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+        let deadline_ms = self
+            .rt
+            .block_on(persistence_deadline_ms(inputs, deadline_ms, host_now))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+        let spec = InputRequestSpec::from_descriptor(descriptor, deadline_ms)
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
         self.rt
             .block_on(inputs.register_input(&self.input_authority(), &spec))
             .map_err(|e| SdkError::Internal(e.to_string()))?;

@@ -164,14 +164,6 @@ impl std::fmt::Display for ExecutionError {
 
 impl std::error::Error for ExecutionError {}
 
-/// Durable source progress for one immutable session launch intent.
-pub(crate) enum SessionLaunchState {
-    Missing,
-    Pending,
-    HandedOff,
-    Rejected,
-}
-
 impl ExecutionError {
     /// Default HTTP status mapping for this error.
     ///
@@ -750,36 +742,6 @@ impl ExecutionEngine {
     // =========================================================================
     // Async queuing
     // =========================================================================
-
-    /// Recover a persisted session launch before reevaluating mutable workflow configuration.
-    pub(crate) async fn session_launch_state(
-        &self,
-        tenant_id: &str,
-        idempotency_key: &str,
-        expected_instance_id: &str,
-    ) -> Result<SessionLaunchState, ExecutionError> {
-        let request = self
-            .outbox
-            .retained_request(tenant_id, idempotency_key)
-            .await
-            .map_err(map_outbox_error)?;
-        let Some(request) = request else {
-            return Ok(SessionLaunchState::Missing);
-        };
-        if request.instance_id != expected_instance_id {
-            return Err(ExecutionError::ValidationError(
-                "Session launch identity conflict".into(),
-            ));
-        }
-        match request.state.as_str() {
-            "queued" | "delivered" | "launching" => Ok(SessionLaunchState::Pending),
-            "accepted" => Ok(SessionLaunchState::HandedOff),
-            "expired" | "cancelled" | "terminal" => Ok(SessionLaunchState::Rejected),
-            _ => Err(ExecutionError::DatabaseError(
-                "Invalid session launch state".into(),
-            )),
-        }
-    }
 
     /// Queue a workflow execution through the durable source outbox.
     ///

@@ -1666,10 +1666,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     ));
     println!("✓ Execution engine initialized");
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
-        let engine = execution_engine.clone();
         let shutdown = shutdown_signal.clone();
         shutdown_coordinator.spawn_intake(async move {
-            workers::session_delivery_worker::run(connection, client, engine, shutdown).await;
+            workers::session_delivery_worker::run(connection, client, shutdown).await;
         });
     }
 

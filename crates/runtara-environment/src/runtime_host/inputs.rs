@@ -35,6 +35,22 @@ impl PersistenceRuntimeHost {
             .ok_or_else(|| "persistence does not support managed inputs".into())
     }
 
+    /// Rebase a guest deadline (minted from this host's `now-ms`) onto the
+    /// persistence clock that decides expiry.
+    pub(super) async fn persistence_deadline(
+        &self,
+        deadline: Option<u64>,
+    ) -> Result<Option<u64>, String> {
+        let host_now = runtara_component_host::runtime_host::RuntimeHost::now_ms(self)?;
+        runtara_core::persistence::inputs::persistence_deadline_ms(
+            self.inputs()?,
+            deadline,
+            host_now,
+        )
+        .await
+        .map_err(Self::err)
+    }
+
     async fn input_authority(&self) -> Result<InputAuthority, String> {
         if let Some(lease) = self.input_lease.get() {
             return Ok(InputAuthority::LeasedRoot(lease.clone()));
@@ -57,6 +73,7 @@ impl PersistenceRuntimeHost {
         descriptor: Vec<u8>,
         deadline: Option<u64>,
     ) -> Result<(), String> {
+        let deadline = self.persistence_deadline(deadline).await?;
         let spec = InputRequestSpec::from_descriptor(&descriptor, deadline).map_err(Self::err)?;
         let owner = self.input_authority().await?;
         self.inputs()?

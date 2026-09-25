@@ -8,8 +8,8 @@ use runtara_core::domain::InstanceStatus;
 use runtara_core::persistence::{
     Persistence,
     inputs::{
-        InputAuthority, InputClosure, InputRequest, InputRequestSpec, InputState, request_id,
-        submit_input,
+        InputAuthority, InputClosure, InputRequest, InputRequestSpec, InputState,
+        persistence_deadline_ms, request_id, submit_input,
     },
     memory::InMemoryPersistence,
 };
@@ -70,17 +70,24 @@ impl ManagedInputs {
         );
     }
 
+    /// Register like a production host: a guest deadline minted against
+    /// `host_now_ms` is rebased onto persistence time. `None` keeps it absolute.
     pub(super) async fn register(
         &self,
         descriptor: Vec<u8>,
         deadline: Option<u64>,
+        host_now_ms: Option<u64>,
     ) -> Result<(), String> {
+        let inputs = self.persistence().await.input_requests().unwrap();
+        let deadline = match host_now_ms {
+            Some(now) => persistence_deadline_ms(inputs, deadline, now)
+                .await
+                .map_err(|e| e.to_string())?,
+            None => deadline,
+        };
         let spec =
             InputRequestSpec::from_descriptor(&descriptor, deadline).map_err(|e| e.to_string())?;
-        self.persistence()
-            .await
-            .input_requests()
-            .unwrap()
+        inputs
             .register_input(&self.authority(), &spec)
             .await
             .map_err(|e| e.to_string())?;

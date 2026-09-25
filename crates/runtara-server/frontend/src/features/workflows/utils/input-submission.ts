@@ -47,11 +47,30 @@ export class InputSubmissionError extends Error {
   }
 }
 
+/** The request closed without any answer (or is gone). Unlike
+ * `INPUT_ALREADY_ANSWERED`, no earlier operation on it can still have won, so
+ * every retained retry for that request is obsolete. */
+export function isClosedInputSubmission(error: unknown): boolean {
+  return (
+    error instanceof InputSubmissionError &&
+    ['INPUT_INACTIVE', 'INPUT_NOT_FOUND'].includes(error.code ?? '')
+  );
+}
+
 export function isStaleInputSubmission(error: unknown): boolean {
   return (
     error instanceof InputSubmissionError &&
     ['INPUT_INACTIVE', 'INPUT_ALREADY_ANSWERED', 'INPUT_NOT_FOUND'].includes(
       error.code ?? ''
     )
+  );
+}
+
+/** A session message the server refused to retain: it is bound to an open
+ * request when sent, and none (or several) were waiting. Nothing to retry. */
+export function isRefusedSessionMessage(error: unknown): boolean {
+  return (
+    error instanceof InputSubmissionError &&
+    ['INPUT_NOT_WAITING', 'INPUT_AMBIGUOUS'].includes(error.code ?? '')
   );
 }

@@ -22,7 +22,8 @@ struct RequestRow {
     request_id: String,
     invocation_path: String,
     fence: Option<Value>,
-    spec: Value,
+    // Exact serialized text: JSONB would renumber floats and reject NUL escapes.
+    spec: String,
     created_at: DateTime<Utc>,
     state: String,
     receipt_id: Option<uuid::Uuid>,
@@ -70,7 +71,7 @@ impl RequestRow {
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(storage)?,
-            spec: serde_json::from_value(self.spec).map_err(storage)?,
+            spec: serde_json::from_str(&self.spec).map_err(storage)?,
             created_at: self.created_at,
             state,
             wake_pending: self.wake_pending,
@@ -90,15 +91,30 @@ async fn root(db: &mut PgConnection, tenant: &str, instance: &str) -> InputResul
     .ok_or(InputError::NotFound)
 }
 
-/// Lock roots in the same byte order as other multi-root input operations, in
-/// one round trip. Authorization failure never becomes a partial/empty result.
+/// Unlocked read of a root's status inside a read-only snapshot. Writers keep
+/// taking the root lock; readers never block lifecycle or checkpoint writes.
+async fn root_snapshot(db: &mut PgConnection, tenant: &str, instance: &str) -> InputResult<()> {
+    let found: Option<String> = sqlx::query_scalar(
+        "SELECT instance_id FROM instances WHERE instance_id=$1 AND tenant_id=$2",
+    )
+    .bind(instance)
+    .bind(tenant)
+    .fetch_optional(db)
+    .await
+    .map_err(storage)?;
+    found.map(|_| ()).ok_or(InputError::NotFound)
+}
+
+/// Authorize every root inside the caller's read-only snapshot, in one round
+/// trip and without row locks. Authorization failure never becomes a
+/// partial/empty result.
 async fn discovery_roots(
     db: &mut PgConnection,
     tenant: &str,
     instances: &[String],
 ) -> InputResult<Vec<String>> {
     let expected: std::collections::BTreeSet<_> = instances.iter().collect();
-    let ids: Vec<String> = sqlx::query_scalar("SELECT instance_id FROM instances WHERE tenant_id=$1 AND instance_id=ANY($2) ORDER BY instance_id COLLATE \"C\" FOR UPDATE")
+    let ids: Vec<String> = sqlx::query_scalar("SELECT instance_id FROM instances WHERE tenant_id=$1 AND instance_id=ANY($2) ORDER BY instance_id COLLATE \"C\"")
         .bind(tenant).bind(instances).fetch_all(db).await.map_err(storage)?;
     if ids.len() != expected.len() {
         return Err(InputError::NotFound);
@@ -294,10 +310,25 @@ impl PostgresPersistence {
     async fn input_transaction(&self) -> InputResult<Transaction<'static, Postgres>> {
         self.pool.begin().await.map_err(storage)
     }
+
+    /// One consistent snapshot for count, page and eligibility, without locks.
+    async fn read_transaction(&self) -> InputResult<Transaction<'static, Postgres>> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        Ok(tx)
+    }
 }
 
 #[async_trait]
 impl InputRequests for PostgresPersistence {
+    async fn input_clock(&self) -> InputResult<DateTime<Utc>> {
+        let mut db = self.pool.acquire().await.map_err(storage)?;
+        now(&mut db).await
+    }
+
     async fn reconcile_input_wakes(&self, limit: u32) -> InputResult<u64> {
         let mut tx = self.input_transaction().await?;
         // Lock roots first. Skip unrelated running/paused intents so they cannot
@@ -341,7 +372,10 @@ impl InputRequests for PostgresPersistence {
             _ => None,
         };
         if let Some(existing) = load(&mut tx, owner.instance_id(), &id).await? {
-            if existing.spec != *spec || existing.invocation_path != owner.invocation_path() {
+            // Identity only: the first registration's metadata and deadline win.
+            if existing.spec.signal_id != spec.signal_id
+                || existing.invocation_path != owner.invocation_path()
+            {
                 return Err(InputError::IdentityConflict);
             }
             sqlx::query("UPDATE instance_input_requests SET fence=$3 WHERE instance_id=$1 AND request_id=$2")
@@ -356,7 +390,7 @@ impl InputRequests for PostgresPersistence {
             let expired = spec.deadline.is_some_and(|deadline| deadline <= at);
             sqlx::query("INSERT INTO instance_input_requests (instance_id,tenant_id,request_id,signal_id,invocation_path,fence,spec,created_at,deadline,state,closure_reason,closed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
                 .bind(owner.instance_id()).bind(owner.tenant_id()).bind(&id).bind(&spec.signal_id).bind(owner.invocation_path()).bind(fence)
-                .bind(serde_json::to_value(spec).map_err(storage)?).bind(at).bind(spec.deadline)
+                .bind(serde_json::to_string(spec).map_err(storage)?).bind(at).bind(spec.deadline)
                 .bind(if expired { "closed" } else { "open" }).bind(expired.then_some("expired")).bind(expired.then_some(at))
                 .execute(&mut *tx).await.map_err(storage)?;
         }
@@ -373,8 +407,8 @@ impl InputRequests for PostgresPersistence {
         instance: &str,
         request: &str,
     ) -> InputResult<InputRequest> {
-        let mut tx = self.input_transaction().await?;
-        root(&mut tx, tenant, instance).await?;
+        let mut tx = self.read_transaction().await?;
+        root_snapshot(&mut tx, tenant, instance).await?;
         let record = load(&mut tx, instance, request)
             .await?
             .ok_or(InputError::NotFound)?;
@@ -391,8 +425,9 @@ impl InputRequests for PostgresPersistence {
         identity: InputReplayIdentity<'_>,
     ) -> InputResult<Option<InputReceipt>> {
         validate_operation_id(operation)?;
-        let mut tx = self.input_transaction().await?;
-        root(&mut tx, tenant, instance).await?;
+        // Pre-check only: accept_input repeats replay under the root lock.
+        let mut tx = self.read_transaction().await?;
+        root_snapshot(&mut tx, tenant, instance).await?;
         let receipt = replay(&mut tx, tenant, instance, request, operation, identity).await?;
         tx.commit().await.map_err(storage)?;
         Ok(receipt)
@@ -451,9 +486,14 @@ impl InputRequests for PostgresPersistence {
             payload: response.payload().to_vec(),
             acceptance_context: response.acceptance_context().map(<[u8]>::to_vec),
         };
-        sqlx::query("UPDATE instance_input_requests SET state='accepted', receipt_id=$3::uuid, operation_id=$4, accepted_payload=$5, accepted_at=$6, acceptance_context=$7, wake_pending=true WHERE instance_id=$1 AND request_id=$2")
+        // The root lock already serializes writers; the state guard keeps a
+        // future lock-free writer from turning closed into accepted.
+        let updated = sqlx::query("UPDATE instance_input_requests SET state='accepted', receipt_id=$3::uuid, operation_id=$4, accepted_payload=$5, accepted_at=$6, acceptance_context=$7, wake_pending=true WHERE instance_id=$1 AND request_id=$2 AND state='open'")
             .bind(instance).bind(&id).bind(&receipt.receipt_id).bind(&receipt.operation_id).bind(&receipt.payload).bind(at).bind(&receipt.acceptance_context)
             .execute(&mut *tx).await.map_err(storage)?;
+        if updated.rows_affected() != 1 {
+            return Err(InputError::Inactive);
+        }
         schedule_accepted(&mut tx, instance, false)
             .await
             .map_err(storage)?;
@@ -497,9 +537,9 @@ impl InputRequests for PostgresPersistence {
         offset: u64,
         limit: u32,
     ) -> InputResult<InputRequestPage> {
-        let mut tx = self.input_transaction().await?;
-        // Sorted root locks make authorization, count, page and invocation state
-        // one stable snapshot without racing any of their participating writers.
+        // A repeatable-read snapshot makes authorization, count, page and
+        // invocation state consistent without blocking any writer.
+        let mut tx = self.read_transaction().await?;
         let ids = discovery_roots(&mut tx, tenant, instances).await?;
         let at = now(&mut tx).await?;
         let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM instance_input_requests r JOIN instances i USING(instance_id) WHERE {ACTIONABLE_FILTER}"))
@@ -523,7 +563,7 @@ impl InputRequests for PostgresPersistence {
         tenant: &str,
         instances: &[String],
     ) -> InputResult<std::collections::BTreeSet<String>> {
-        let mut tx = self.input_transaction().await?;
+        let mut tx = self.read_transaction().await?;
         let ids = discovery_roots(&mut tx, tenant, instances).await?;
         let at = now(&mut tx).await?;
         let found: Vec<String> = sqlx::query_scalar(&format!("SELECT DISTINCT r.instance_id FROM instance_input_requests r JOIN instances i USING(instance_id) WHERE {ACTIONABLE_FILTER}"))

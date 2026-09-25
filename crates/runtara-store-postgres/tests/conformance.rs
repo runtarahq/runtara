@@ -1236,6 +1236,7 @@ async fn managed_input_conformance() {
     inputs::receipt_replay(&backend).await;
     inputs::contextual_receipt_replay(&backend).await;
     inputs::closure_and_deadline(&backend).await;
+    inputs::spec_fidelity(&backend).await;
     inputs::raw_signal_boundary(&backend).await;
     inputs::competing_operations(&backend).await;
     inputs::discovery(&backend).await;

@@ -573,6 +573,11 @@ pub async fn fail_blocked(
             .await?,
     )
 }
+/// How long a drained session keeps its route metadata before it is forgotten.
+pub const IDLE_ROUTE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Remove expired accepted/failed envelopes. A drained queue's owner metadata
+/// then starts an idle expiry window, which any new message cancels.
 pub async fn prune_completed(
     conn: &mut ConnectionManager,
     scope: &QueueScope,
@@ -582,7 +587,14 @@ pub async fn prune_completed(
         return Err(QueueError::Invalid);
     }
     let (code, result) = scope
-        .run(conn, &["prune".into(), limit.to_string()])
+        .run(
+            conn,
+            &[
+                "prune".into(),
+                limit.to_string(),
+                IDLE_ROUTE_TTL_SECS.to_string(),
+            ],
+        )
         .await?;
     if code != "ok" {
         return Err(QueueError::Corrupt);
@@ -602,14 +614,12 @@ pub enum DeliveryOutcome {
     Accepted(Envelope),
 }
 
-/// One bounded delivery attempt, shared by session/channel workers. The candidate
-/// instance comes from authorized routing metadata. Once bound, it is ignored:
-/// receipt replay must use the original target even after routing advances.
+/// One bounded delivery attempt, shared by session/channel workers. Responses are
+/// bound to their request when retained; delivery never picks a target itself.
 pub async fn deliver_to_instance(
     conn: &mut ConnectionManager,
     scope: &QueueScope,
     client: &crate::runtime_client::RuntimeClient,
-    candidate_instance: Option<&str>,
 ) -> QueueResult<DeliveryOutcome> {
     let lease = match claim(conn, scope, 30_000).await? {
         ClaimOutcome::Empty => return Ok(DeliveryOutcome::Idle),
@@ -618,47 +628,24 @@ pub async fn deliver_to_instance(
         ClaimOutcome::Deferred(envelope) => return Ok(DeliveryOutcome::Deferred(envelope)),
         ClaimOutcome::Claimed(envelope) => envelope,
     };
-    deliver_claimed(conn, scope, client, lease, candidate_instance).await
+    deliver_claimed(conn, scope, client, lease).await
 }
 
+/// Submit a claimed response to the request it was bound to. An unbound message
+/// is blocked for explicit resolution: whichever request happens to be open at
+/// delivery time is not necessarily the one the sender answered, and binding it
+/// there would resurrect the stale-input bug through the queue.
 pub async fn deliver_claimed(
     conn: &mut ConnectionManager,
     scope: &QueueScope,
     client: &crate::runtime_client::RuntimeClient,
-    mut lease: Envelope,
-    candidate_instance: Option<&str>,
+    lease: Envelope,
 ) -> QueueResult<DeliveryOutcome> {
     use runtara_core::persistence::inputs::InputError;
     if lease.target.is_none() {
-        let Some(instance) = candidate_instance else {
-            return defer(conn, scope, &lease, DeliveryReason::NoTarget).await;
-        };
-        match client
-            .list_input_requests(scope.tenant_id(), &[instance.into()], 0, 2)
-            .await
-        {
-            Ok(page) if page.total_count == 1 && page.requests.len() == 1 => {
-                let target = InputTarget {
-                    instance_id: instance.into(),
-                    request_id: page.requests[0].request_id.clone(),
-                };
-                lease = bind(conn, scope, &lease, &target).await?;
-            }
-            Ok(page) if page.total_count == 0 => {
-                return defer(conn, scope, &lease, DeliveryReason::NoTarget).await;
-            }
-            Ok(_) => {
-                return Ok(DeliveryOutcome::Blocked(
-                    block(conn, scope, &lease, DeliveryReason::AmbiguousTarget).await?,
-                ));
-            }
-            Err(InputError::NotFound) => {
-                return Ok(DeliveryOutcome::Blocked(
-                    block(conn, scope, &lease, DeliveryReason::StaleTarget).await?,
-                ));
-            }
-            Err(_) => return defer(conn, scope, &lease, DeliveryReason::BackendUnavailable).await,
-        }
+        return Ok(DeliveryOutcome::Blocked(
+            block(conn, scope, &lease, DeliveryReason::NoTarget).await?,
+        ));
     }
     let target = lease.target.as_ref().ok_or(QueueError::Corrupt)?;
     let outcome = client
@@ -676,12 +663,15 @@ pub async fn deliver_claimed(
         )),
         Err(error) => {
             let reason = match error {
-                InputError::Storage(_) | InputError::FenceRejected => {
+                InputError::Storage(_) => {
                     return defer(conn, scope, &lease, DeliveryReason::BackendUnavailable).await;
                 }
-                InputError::NotFound | InputError::Inactive | InputError::AlreadyAnswered => {
-                    DeliveryReason::StaleTarget
-                }
+                // A fence rejection is permanent for this target (its owner is
+                // gone), so retrying it forever would wedge the session queue.
+                InputError::NotFound
+                | InputError::Inactive
+                | InputError::AlreadyAnswered
+                | InputError::FenceRejected => DeliveryReason::StaleTarget,
                 InputError::InvalidPayload(_) => DeliveryReason::InvalidPayload,
                 _ => DeliveryReason::OperationConflict,
             };

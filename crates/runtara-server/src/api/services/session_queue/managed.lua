@@ -145,7 +145,16 @@ elseif op == 'prune' then
         redis.call('HDEL', KEYS[3], e.operation_id)
         redis.call('ZREM', KEYS[4], e.message_id)
     end
-    if redis.call('HLEN', KEYS[2]) == 0 and redis.call('LLEN', KEYS[1]) == 0 and not redis.call('HGET', KEYS[5], 'route_json') then redis.call('DEL', KEYS[5]) end
+    if redis.call('HLEN', KEYS[2]) == 0 and redis.call('LLEN', KEYS[1]) == 0 then
+        -- A drained queue keeps its route only for an idle window; any enqueue
+        -- or route change PERSISTs it again. Otherwise owner keys would pile up
+        -- and every worker sweep would revisit every session ever created.
+        if redis.call('HGET', KEYS[5], 'route_json') then
+            if redis.call('TTL', KEYS[5]) < 0 then redis.call('EXPIRE', KEYS[5], tonumber(ARGV[3])) end
+        else
+            redis.call('DEL', KEYS[5])
+        end
+    end
     return {'ok', tostring(#ids)}
 end
 

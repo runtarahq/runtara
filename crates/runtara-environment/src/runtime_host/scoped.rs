@@ -461,6 +461,8 @@ impl RuntimeHost for ScopedRuntimeHost {
         deadline: Option<u64>,
     ) -> Result<(), String> {
         use runtara_core::persistence::inputs::{InputAuthority, InputRequestSpec};
+        // The child's `now-ms` is the root's clock, so the root rebases it.
+        let deadline = self.owner.root.persistence_deadline(deadline).await?;
         let spec = InputRequestSpec::from_descriptor(&descriptor, deadline)
             .map_err(PersistenceRuntimeHost::err)?;
         self.key(&spec.signal_id)?;

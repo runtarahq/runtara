@@ -236,7 +236,10 @@ impl RuntimeHost for Host {
         descriptor: Vec<u8>,
         deadline: Option<u64>,
     ) -> Result<(), String> {
-        self.managed_inputs.register(descriptor, deadline).await
+        let now = self.now_ms()?;
+        self.managed_inputs
+            .register(descriptor, deadline, Some(now))
+            .await
     }
     async fn poll_input(&self, key: String) -> Result<RuntimeInputState, String> {
         self.input_polls.fetch_add(1, Ordering::SeqCst);

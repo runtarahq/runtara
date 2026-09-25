@@ -1,7 +1,8 @@
 //! Managed input operations on the internal instance protocol.
 use super::*;
 use runtara_core::persistence::inputs::{
-    InputAuthority, InputClosure, InputError, InputRequestSpec, InputResult, InputState, request_id,
+    InputAuthority, InputClosure, InputError, InputRequestSpec, InputResult, InputState,
+    persistence_deadline_ms, request_id,
 };
 
 #[derive(Deserialize)]
@@ -9,6 +10,10 @@ pub(super) struct RegisterInputBody {
     tenant_id: String,
     descriptor: Value,
     deadline_ms: Option<u64>,
+    /// The runner clock reading `deadline_ms` was minted against. Absent from
+    /// older runners, whose deadline is then taken as persistence time.
+    #[serde(default)]
+    requested_at_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -46,14 +51,20 @@ pub(super) async fn register(
     Json(body): Json<RegisterInputBody>,
 ) -> Response {
     let result: InputResult<()> = async {
-        let spec = InputRequestSpec::from_descriptor(
-            &serde_json::to_vec(&body.descriptor).map_err(|_| InputError::InvalidRequest)?,
-            body.deadline_ms,
-        )?;
         let inputs = state
             .persistence
             .input_requests()
             .ok_or_else(|| InputError::Storage("managed inputs unavailable".into()))?;
+        let deadline_ms = match body.requested_at_ms {
+            Some(requested_at) => {
+                persistence_deadline_ms(inputs, body.deadline_ms, requested_at).await?
+            }
+            None => body.deadline_ms,
+        };
+        let spec = InputRequestSpec::from_descriptor(
+            &serde_json::to_vec(&body.descriptor).map_err(|_| InputError::InvalidRequest)?,
+            deadline_ms,
+        )?;
         let authority = InputAuthority::Root {
             tenant_id: body.tenant_id,
             instance_id,

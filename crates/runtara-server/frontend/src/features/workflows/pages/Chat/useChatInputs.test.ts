@@ -231,6 +231,31 @@ describe('authoritative chat input discovery and acceptance', () => {
     expect(useChatStore.getState().error).toBe('Already answered');
   });
 
+  it('drops every uncertain retry once its request closed unanswered', async () => {
+    const { result } = renderHook(() => useChatInputs('workflow', 'token'));
+    await waitFor(() =>
+      expect(useChatStore.getState().pendingInputs).toHaveLength(1)
+    );
+    vi.mocked(deliverSignal).mockRejectedValueOnce(
+      new TypeError('lost acknowledgement')
+    );
+    await act(() =>
+      result.current.submitInput('request', { message: 'First' }, 'instance')
+    );
+    expect(result.current.uncertainResponses).toHaveLength(1);
+    // The request then times out; discovery no longer lists it.
+    vi.mocked(checkPendingInput).mockResolvedValue(page([]));
+    vi.mocked(deliverSignal).mockRejectedValueOnce(
+      new InputSubmissionError('Input closed', 'INPUT_INACTIVE', 409)
+    );
+    await act(() =>
+      result.current.submitInput('request', { message: 'Second' }, 'instance')
+    );
+    expect(result.current.uncertainResponses).toEqual([]);
+    await act(() => result.current.refreshPendingInput());
+    expect(useChatStore.getState().pendingInputs).toEqual([]);
+  });
+
   it('supports a resumed instance without a session and polls with tracking disabled', async () => {
     useChatStore.getState().setSessionId(null);
     vi.mocked(getPendingInput).mockResolvedValue([
