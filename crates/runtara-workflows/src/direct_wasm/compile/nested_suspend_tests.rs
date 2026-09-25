@@ -358,7 +358,28 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     let staging = suspending_child_with_timeout(dir.path(), &components, Some(150))?;
     let parent = parent_of(dir.path(), &components, &staging)?;
 
+    // Finish Wasmtime compilation before starting the persistence deadline.
+    // Loading can take longer than the entire wait budget on a busy CI runner.
+    // Reuse this prepared component for replay, with a fresh store each time.
+    let executor = executor();
+    let pre = executor.load_instance_pre(&parent.wasm_path).await?;
     let host = Arc::new(Host::new());
+    let invoke_prepared = || {
+        executor.execute_invoke(
+            &pre,
+            WorkflowRunSpec {
+                trusted_instance: None,
+                trusted_tenant: Some("fixture".into()),
+                env: HashMap::new(),
+                stderr: None,
+                timeout: Duration::from_secs(5),
+                cancel: None,
+                limits: Default::default(),
+                runtime: Some(host.clone()),
+            },
+            b"{}".to_vec(),
+        )
+    };
     // Pin the clock so the parked deadline is exactly checkable.
     let now_ms = || {
         std::time::SystemTime::now()
@@ -369,7 +390,7 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     let epoch = now_ms() + 5_000;
     host.clock_override.store(epoch, Ordering::SeqCst);
 
-    let first = invoke(&parent, host.clone()).await?;
+    let first = invoke_prepared().await.exit;
 
     // The capability result type has no wake channel, so the child carries its
     // absolute deadline out through the sentinel's category field and the owner
@@ -397,10 +418,10 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     // Persistence owns expiry, even while the guest clock remains before it.
     let remaining = (epoch + 151).saturating_sub(now_ms());
     tokio::time::sleep(Duration::from_millis(remaining)).await;
-    let second = invoke(&parent, host.clone()).await?;
+    let second = invoke_prepared().await.exit;
     assert!(
-        !matches!(second, InvokeExit::Suspended(_)),
-        "an expired nested wait must stop parking and resolve: {second:?}"
+        matches!(&second, InvokeExit::Failed(error) if error.code == "WAIT_TIMEOUT"),
+        "an expired nested wait must fail with WAIT_TIMEOUT: {second:?}"
     );
     assert!(matches!(
         host.managed_inputs.request(&wait.checkpoint_id).await.state,
