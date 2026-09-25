@@ -1,6 +1,7 @@
 //! Provider acceptance of URLs produced by the actual restricted WASM exports.
 //! Container credentials below are synthetic and exist only for each test.
 use super::*;
+use anyhow::Context;
 use std::collections::HashMap;
 use testcontainers::{
     GenericBuildableImage, GenericImage, ImageExt,
@@ -103,6 +104,98 @@ async fn roundtrip(
     Ok(())
 }
 
+async fn wait_for_minio_bucket(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    // MinIO's health probe can succeed before its S3 API accepts writes. Use
+    // bucket creation as the readiness boundary; never retry signing failures
+    // or the actual presigned-URL operations that this fixture is testing.
+    tokio::time::timeout(timeout, async {
+        loop {
+            let response = request
+                .try_clone()
+                .context("bucket creation request must be replayable")?
+                .send()
+                .await?;
+            if response.status() != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                response.error_for_status()?;
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .context("MinIO did not become ready for bucket creation before the deadline")?
+}
+
+#[tokio::test]
+async fn minio_bucket_readiness_retries_only_startup_503s() -> anyhow::Result<()> {
+    for final_status in [
+        reqwest::StatusCode::OK,
+        reqwest::StatusCode::FORBIDDEN,
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let app = axum::Router::new().route(
+            "/bucket",
+            axum::routing::put(move || {
+                let attempt = observed.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt < 2 {
+                        reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        final_status
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let result = wait_for_minio_bucket(
+            reqwest::Client::new().put(format!("http://{address}/bucket")),
+            Duration::from_secs(5),
+        )
+        .await;
+        server.abort();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        if final_status.is_success() {
+            result?;
+        } else {
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<reqwest::Error>()
+                    .unwrap()
+                    .status(),
+                Some(final_status)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn minio_bucket_readiness_has_a_deadline() -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let app = axum::Router::new().route(
+        "/bucket",
+        axum::routing::put(|| async { reqwest::StatusCode::SERVICE_UNAVAILABLE }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let result = wait_for_minio_bucket(
+        reqwest::Client::new().put(format!("http://{address}/bucket")),
+        Duration::from_millis(250),
+    )
+    .await;
+    server.abort();
+    assert!(result.unwrap_err().is::<tokio::time::error::Elapsed>());
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn wasm_presigned_urls_work_against_minio() -> anyhow::Result<()> {
     // Upstream registry images can disappear independently of the release.
@@ -159,7 +252,7 @@ async fn wasm_presigned_urls_work_against_minio() -> anyhow::Result<()> {
     for (key, value) in headers {
         request = request.header(key, value);
     }
-    request.send().await?.error_for_status()?;
+    wait_for_minio_bucket(request, Duration::from_secs(30)).await?;
     let (_bundle, dispatcher) = dispatcher_with_credentials(Arc::new(EmulatorCredentials {
         integration: "s3_compatible", fields: json!({"base_url":base, "access_key_id":S3_USER, "secret_access_key":S3_KEY, "region":"us-east-1"}),
     })).await?;
