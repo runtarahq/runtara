@@ -27,9 +27,8 @@ pub use workflow_runtime::WorkflowRuntimeProvider;
 ///
 /// `condition` is pre-resolved from the block + active filters + view.
 /// `sort` / `offset` / `limit` carry the requested page. Providers with
-/// aggregate pushdown apply all of these at storage; providers without
-/// (system, workflow_runtime) fetch the full set matching `condition`
-/// and let the renderer slice in-memory.
+/// query pushdown apply supported predicates and pagination at storage;
+/// otherwise they fetch the full matching set and let the renderer slice it.
 #[derive(Clone, Copy)]
 pub struct FetchParams<'a> {
     pub tenant_id: &'a str,
