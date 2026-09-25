@@ -276,6 +276,7 @@ async fn start_chat_stream(
     let _ = pool;
     let result = engine
         .queue(QueueRequest {
+            run_label: None,
             tenant_id: &tenant_id,
             workflow_id: &params.workflow_id,
             version: params.version,

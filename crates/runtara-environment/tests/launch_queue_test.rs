@@ -1091,6 +1091,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let instance_id = Uuid::new_v4().to_string();
     let launch_id = Uuid::new_v4().to_string();
     let request = InitialLaunchRequest {
+        run_label: Some(" Order_123:/?% ".into()),
         launch: EnqueueRequest::immediate(
             &launch_id,
             &instance_id,
@@ -1131,17 +1132,57 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
         Some(image_id.clone())
     );
 
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    assert_eq!(
+        persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .run_label,
+        request.run_label,
+        "the label must be visible with the pending instance and queued launch"
+    );
+    let mut conflicting = request.clone();
+    conflicting.run_label = Some("replacement".into());
     let replay = repository
-        .claim_initial(request)
+        .claim_initial(conflicting)
         .await
         .expect("idempotent initial claim must succeed");
     assert!(matches!(
         replay,
         InitialLaunchOutcome::ExistingLaunch(ref launch) if launch.launch_id == launch_id
     ));
+    assert_eq!(
+        persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .run_label,
+        request.run_label,
+        "a losing initial claim cannot overwrite the start label"
+    );
+
+    let invalid_label_id = Uuid::new_v4().to_string();
+    let mut invalid_label = request;
+    invalid_label.launch.instance_id = invalid_label_id.clone();
+    invalid_label.run_label = Some("bad\nlabel".into());
+    assert!(matches!(
+        repository.claim_initial(invalid_label).await,
+        Err(LaunchQueueError::InvalidRunLabel(_))
+    ));
+    assert!(
+        persistence
+            .get_instance(&invalid_label_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let invalid_instance = Uuid::new_v4().to_string();
     let invalid = InitialLaunchRequest {
+        run_label: None,
         launch: EnqueueRequest::immediate(
             Uuid::new_v4().to_string(),
             &invalid_instance,

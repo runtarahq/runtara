@@ -573,11 +573,7 @@ impl SdkBackend for HttpBackend {
     }
 
     fn completed(&self, output: &[u8]) -> Result<()> {
-        self.completed_with_label(output, None)
-    }
-
-    fn completed_with_label(&self, output: &[u8], run_label: Option<&str>) -> Result<()> {
-        let body = serde_json::json!({ "output": encode_b64(output), "runLabel": run_label });
+        let body = serde_json::json!({ "output": encode_b64(output) });
         let resp: SuccessResp = self.post(&self.url("completed"), &body)?;
 
         if resp.success {

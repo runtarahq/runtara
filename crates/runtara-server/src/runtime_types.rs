@@ -183,7 +183,7 @@ pub struct HealthStatus {
 /// Instance status response with full details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
     // Identity
@@ -245,7 +245,7 @@ pub struct InstanceInfo {
 /// Summary of an instance (used in list results).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceSummary {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
     /// Instance ID.
@@ -285,6 +285,10 @@ pub struct ListInstancesResult {
 /// Options for starting an instance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StartInstanceOptions {
+    /// Immutable optional execution reference, validated at start.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
+    pub run_label: Option<String>,
+
     /// Image ID to launch.
     pub image_id: String,
     /// Tenant ID.
@@ -318,6 +322,12 @@ impl StartInstanceOptions {
     /// Set the input data.
     pub fn with_input(mut self, input: serde_json::Value) -> Self {
         self.input = Some(input);
+        self
+    }
+
+    /// Set an exact execution reference; Environment validates it before creation.
+    pub fn with_run_label(mut self, label: impl Into<String>) -> Self {
+        self.run_label = Some(label.into());
         self
     }
 
@@ -422,7 +432,7 @@ impl ListInstancesOrder {
 pub struct ListInstancesOptions {
     /// Case-insensitive literal substring search across run metadata.
     pub search: Option<String>,
-    /// Exact normalized execution label filter.
+    /// Exact execution label filter (no normalization).
     pub run_label: Option<String>,
     /// Workflow IDs whose names match search, resolved in the server database.
     #[serde(default)]

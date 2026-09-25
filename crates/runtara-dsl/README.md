@@ -31,35 +31,31 @@ Enable the `utoipa` feature if you need `ToSchema` derives for OpenAPI generatio
 
 ## Execution labels
 
-A top-level Finish may set optional `runLabel` metadata independently of its
-`inputMapping` output:
+Pass optional `runLabel` alongside `inputs` when starting an execution:
 
 ```json
 {
-  "id": "finish",
-  "stepType": "Finish",
-  "runLabel": { "valueType": "template", "value": "Order/{{ data.orderId }} [done]" },
-  "inputMapping": { "success": { "valueType": "immediate", "value": true } }
+  "inputs": { "data": { "orderId": "order_123" }, "variables": {} },
+  "runLabel": "order_123"
 }
 ```
 
-Literal strings and references are supported too. The resolved string is trimmed
-of surrounding spaces and may contain up to 250 ASCII letters, digits, spaces,
-dots, dashes, forward slashes, parentheses, or square brackets. Omitted, null,
-and empty labels mean no label. A supplied nonempty label must contain at least
-one letter or digit; whitespace-only, punctuation-only, and invisible characters
-are invalid. Duplicate labels are allowed. Invalid literals
-fail workflow validation; invalid dynamic results (including evaluation errors)
-are ignored and Finish completes normally without a label. Labels longer than
-250 characters are truncated, then trailing spaces are removed. The retained
-text must still contain a letter or digit.
+Labels contain 1–250 printable ASCII bytes with at least one non-space character.
+Accepted strings are preserved exactly, including case and surrounding spaces.
+Empty, control-character, non-ASCII, and oversized labels are rejected. Omission
+or null starts an unlabeled execution. Labels are non-unique references, separate
+from the instance ID and idempotency key. Replaying an idempotency key with a
+conflicting label fails without modifying the original execution.
 
-The label is saved with successful completion and replaces the workflow name in
-execution lists. Executions that have not reached Finish retain their workflow
-name. Finish steps inside Split, While, or onWait subgraphs cannot set labels;
-inline child workflows and workflow agent capabilities cannot rename their parent.
-The execution list supports case-insensitive literal substring `search` and an
-exact `runLabel` filter, both applied before pagination and counting.
+Labels are stored at instance creation and remain unchanged through suspension,
+resume, retries, and completion. Execution lists display the label when present
+and otherwise the workflow name. Exact `runLabel` and other execution filters
+apply before pagination and counting. Workflow-backed reports use these same
+filters.
+
+`Finish` only maps outputs. It does not accept `runLabel`, and inline child
+workflows cannot label the parent execution. Independently started executions
+can receive their own label through the start API.
 
 ## Inside Runtara
 

@@ -1,35 +1,26 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Validation shared by workflow authoring and execution boundaries.
+//! Exact execution-reference validation shared by start and query boundaries.
 
-/// Maximum length of a resolved execution label.
+/// Maximum label length in bytes (the accepted alphabet is ASCII).
 pub const MAX_RUN_LABEL_LENGTH: usize = 250;
 
-/// Normalize an optional label. Only ordinary spaces are trimmed; tabs and
-/// newlines remain invalid rather than silently disappearing.
+/// Validate without trimming, truncating, or otherwise changing an identifier.
+/// Only omission means no label; an explicitly empty label is invalid.
 pub fn normalize_run_label(label: Option<&str>) -> Result<Option<String>, String> {
     let Some(label) = label else { return Ok(None) };
-    if label.is_empty() {
-        return Ok(None);
+    if label.is_empty() || label.len() > MAX_RUN_LABEL_LENGTH {
+        return Err(format!(
+            "Run label must contain 1–{MAX_RUN_LABEL_LENGTH} ASCII bytes"
+        ));
     }
-    let label = label.trim_matches(' ');
-    if !label
-        .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || b" .-/()[]".contains(&c))
-    {
-        return Err("Run label may contain only letters A-Z, numbers, spaces, dots, dashes, forward slashes, parentheses, and square brackets".into());
+    if !label.bytes().all(|c| (b' '..=b'~').contains(&c)) {
+        return Err("Run label may contain only printable ASCII characters".into());
     }
-    // The alphabet above is ASCII, so slicing cannot split a code point.
-    let label = label[..label.len().min(MAX_RUN_LABEL_LENGTH)].trim_end_matches(' ');
-    if !label.bytes().any(|c| c.is_ascii_alphanumeric()) {
-        return Err("Run label must contain at least one letter or digit".into());
+    if label.bytes().all(|c| c == b' ') {
+        return Err("Run label must contain a non-space character".into());
     }
     Ok(Some(label.to_owned()))
-}
-
-/// Runtime metadata is best-effort: invalid values are treated as absent.
-pub fn adopt_run_label(label: Option<&str>) -> Option<String> {
-    normalize_run_label(label).ok().flatten()
 }
 
 #[cfg(test)]
@@ -37,56 +28,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn optional_and_normalized() {
-        for label in [None, Some("")] {
-            assert_eq!(normalize_run_label(label).unwrap(), None);
+    fn exact_references_are_preserved() {
+        assert_eq!(normalize_run_label(None).unwrap(), None);
+        for label in [
+            "order_123",
+            " Order/12 [done] ",
+            "a:b@c%?=x",
+            "---",
+            "A",
+            "a",
+        ] {
+            assert_eq!(
+                normalize_run_label(Some(label)).unwrap().as_deref(),
+                Some(label)
+            );
         }
         assert_eq!(
-            normalize_run_label(Some("  Order/AZ09-1.2 (done) [x]  "))
-                .unwrap()
-                .as_deref(),
-            Some("Order/AZ09-1.2 (done) [x]")
+            normalize_run_label(Some(&"x".repeat(250))).unwrap(),
+            Some("x".repeat(250))
         );
     }
 
     #[test]
-    fn boundaries_and_characters() {
-        for valid in ["A", "0", "--[1]/--", " a "] {
-            assert!(normalize_run_label(Some(valid)).is_ok());
+    fn invalid_references_are_rejected() {
+        for label in ["", "   ", "\tx", "x\ny", "x\0y", "é", "🙂", "\u{7f}"] {
+            assert!(normalize_run_label(Some(label)).is_err(), "{label:?}");
         }
-        assert!(normalize_run_label(Some(&"a".repeat(250))).is_ok());
-        assert_eq!(
-            normalize_run_label(Some(&"a".repeat(251))).unwrap(),
-            Some("a".repeat(250))
-        );
-        assert_eq!(
-            adopt_run_label(Some(&format!("{}A", "-".repeat(250)))),
-            None
-        );
-        assert_eq!(
-            adopt_run_label(Some(&format!("{} z", "a".repeat(249)))),
-            Some("a".repeat(249))
-        );
-        for invalid in [
-            "x_y",
-            "x%y",
-            "x\\y",
-            "x\ny",
-            "\tx",
-            "é",
-            "🙂",
-            "<x>",
-            "   ",
-            "---",
-            "./()[] -",
-            "\u{200b}",
-            "x\u{200b}y",
-            "\u{a0}",
-            "\u{feff}",
-            "\u{200e}",
-        ] {
-            assert!(normalize_run_label(Some(invalid)).is_err(), "{invalid:?}");
-            assert_eq!(adopt_run_label(Some(invalid)), None);
-        }
+        assert!(normalize_run_label(Some(&"x".repeat(251))).is_err());
     }
 }

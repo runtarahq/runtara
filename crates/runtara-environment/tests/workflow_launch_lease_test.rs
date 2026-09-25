@@ -41,6 +41,7 @@ fn initial_request(
     single_instance: bool,
 ) -> InitialLaunchRequest {
     InitialLaunchRequest {
+        run_label: None,
         launch: EnqueueRequest::immediate(
             launch_id,
             instance_id,

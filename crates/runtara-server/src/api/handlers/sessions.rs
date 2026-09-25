@@ -117,6 +117,7 @@ pub async fn create_session(
     // Queue execution via the shared engine
     let result = engine
         .queue(QueueRequest {
+            run_label: None,
             tenant_id: &tenant_id,
             workflow_id: &workflow_id,
             version: request.version,
@@ -522,6 +523,7 @@ async fn start_new_instance(
 
     match engine
         .queue(QueueRequest {
+            run_label: None,
             tenant_id,
             workflow_id,
             version: None,

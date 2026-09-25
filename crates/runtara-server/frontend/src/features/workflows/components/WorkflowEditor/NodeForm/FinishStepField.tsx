@@ -1,4 +1,3 @@
-import { RunLabelField } from './RunLabelField';
 import { Fragment, useContext, useEffect, useRef, useMemo } from 'react';
 import { useFieldArray, useFormContext, useWatch } from 'react-hook-form';
 import { SchemaPreview } from '@/features/workflows/components/SchemaPreview';
@@ -228,7 +227,6 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
 
   return (
     <div className="space-y-4">
-      <RunLabelField />
       <div className="flex items-start justify-between gap-2">
         <div>
           <p className="text-sm font-medium">Output configuration</p>

@@ -43,7 +43,6 @@ pub(super) struct DirectCoreConfig {
     pub(super) run_plan: DirectRunPlan,
     pub(super) static_data: DirectCoreStaticData,
     pub(super) track_events: bool,
-    pub(super) has_run_label: bool,
     /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
     /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
@@ -107,11 +106,6 @@ impl DirectCoreConfig {
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowAbi::default(),
             omit_runtime: false,
-            has_run_label: manifest
-                .graph
-                .mappings
-                .iter()
-                .any(|mapping| mapping.purpose == "finish.runLabel"),
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
@@ -403,7 +397,6 @@ pub(super) fn emit_direct_core_module(
         config.abi,
         config.omit_runtime,
         config.static_data.has_connections(),
-        config.has_run_label,
     )?;
 
     // Async canonical lowering permits fewer flat params than sync lowering.
@@ -1042,9 +1035,6 @@ pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
 pub(super) const NESTED_SUSPEND_SIGNAL_PTR_LOCAL: u32 = 189;
 pub(super) const NESTED_SUSPEND_SIGNAL_LEN_LOCAL: u32 = 190;
 
-pub(super) const RUN_LABEL_PTR_LOCAL: u32 = 186;
-pub(super) const RUN_LABEL_LEN_LOCAL: u32 = 187;
-
 /// Both normal and handled-error terminal paths use the same completion API.
 pub(super) fn emit_complete(
     body: &mut WasmFunction,
@@ -1052,28 +1042,10 @@ pub(super) fn emit_complete(
     output_ptr: u32,
     output_len: u32,
 ) {
-    if !indices.has_run_label {
-        body.instruction(&Instruction::LocalGet(output_ptr));
-        body.instruction(&Instruction::LocalGet(output_len));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_complete));
-        return;
-    }
-    body.instruction(&Instruction::LocalGet(RUN_LABEL_LEN_LOCAL));
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::LocalGet(output_ptr));
-    body.instruction(&Instruction::LocalGet(output_len));
-    body.instruction(&Instruction::LocalGet(RUN_LABEL_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(RUN_LABEL_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_complete_with_label));
-    body.instruction(&Instruction::Else);
     body.instruction(&Instruction::LocalGet(output_ptr));
     body.instruction(&Instruction::LocalGet(output_len));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_complete));
-    body.instruction(&Instruction::End);
-    emit_fail_if_retptr_error(body, indices, output_ptr, output_len);
 }
 
 /// Write `Ok(outcome::completed(output))` for the invoke export into the

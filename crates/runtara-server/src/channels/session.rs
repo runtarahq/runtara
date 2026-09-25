@@ -474,6 +474,7 @@ async fn session_loop(
 
     let result = engine
         .queue(QueueRequest {
+            run_label: None,
             tenant_id: org_id,
             workflow_id,
             version: None,
@@ -763,6 +764,7 @@ async fn session_loop(
                             }
                             let inputs = json!({ "data": requeue_data, "variables": {} });
                             match engine.queue(QueueRequest {
+                                run_label: None,
                                 tenant_id: org_id,
                                 workflow_id,
                                 version: None,

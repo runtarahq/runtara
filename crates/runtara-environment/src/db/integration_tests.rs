@@ -27,18 +27,20 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     for index in 0..28 {
         let id = format!("{tenant}-{index:02}");
         persistence
-            .register_instance(&id, if index == 27 { &other_tenant } else { &tenant })
+            .try_register_instance_with_label(
+                &id,
+                if index == 27 { &other_tenant } else { &tenant },
+                None,
+                if index % 3 == 0 {
+                    Some("Order/12 [done] (v1.2)")
+                } else {
+                    None
+                },
+            )
             .await
             .unwrap();
         let params = CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"{}");
-        persistence
-            .complete_instance(if index % 3 == 0 {
-                params.with_run_label("Order/12 [done] (v1.2)")
-            } else {
-                params
-            })
-            .await
-            .unwrap();
+        persistence.complete_instance(params).await.unwrap();
         // Identical timestamps exercise the ordering tie-breaker.
         sqlx::query(
             "UPDATE instances SET created_at = $2, finished_at = $2 WHERE instance_id = $1",
@@ -114,13 +116,11 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
     // The database enforces the same constraints even outside application code.
     let id = format!("{tenant}-00");
     for invalid in [
-        "bad_label".to_owned(),
-        "--- ./()[]".to_owned(),
+        "bad\nlabel".to_owned(),
         "   ".to_owned(),
         "\u{200b}".to_owned(),
         "x\u{a0}y".to_owned(),
         "x".repeat(251),
-        " padded ".to_owned(),
         "".into(),
     ] {
         assert!(
@@ -525,4 +525,59 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
 
     delete_tenant_instances(&pool, &tenant_id).await;
     delete_tenant_instances(&pool, &other_tenant).await;
+}
+
+#[tokio::test]
+async fn start_labels_find_ten_unfinished_runs_beyond_the_first_thousand_row_page() {
+    let pool = crate::test_support::pool().await;
+    let tenant = format!("label-pages-{}", Uuid::new_v4());
+    let image = format!("{tenant}-image");
+    let label = " Order_123:/?% ";
+    sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $2, 'labels-workflow:1', '/test-only')")
+        .bind(&image).bind(&tenant).execute(&pool).await.unwrap();
+    // The ten matches are the oldest, unfinished runs. A first-page post-filter
+    // would see only completed non-matches, even with a page size of 500.
+    sqlx::query("INSERT INTO instances (instance_id, tenant_id, status, created_at, run_label) SELECT $1 || '-' || n, $1, CASE WHEN n < 10 THEN 'suspended' ELSE 'completed' END::instance_status, to_timestamp(1000 + n), CASE WHEN n < 10 THEN $2 ELSE NULL END FROM generate_series(0, 999) n")
+        .bind(&tenant).bind(label).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO instance_images (instance_id, tenant_id, image_id) SELECT instance_id, tenant_id, $2 FROM instances WHERE tenant_id = $1")
+        .bind(&tenant).bind(&image).execute(&pool).await.unwrap();
+    let mut options = ListInstancesOptions {
+        tenant_id: Some(tenant.clone()),
+        image_name_prefix: Some("labels-workflow:".into()),
+        run_label: Some(label.into()),
+        statuses: Some(vec!["suspended".into(), "running".into()]),
+        created_after: Some(epoch(1_000)),
+        created_before: Some(epoch(1_010)),
+        limit: 3,
+        ..Default::default()
+    };
+    let mut ids = std::collections::HashSet::new();
+    for offset in [0, 3, 6, 9] {
+        options.offset = offset;
+        assert_eq!(count_instances(&pool, &options).await.unwrap(), 10);
+        for instance in list_instances(&pool, &options).await.unwrap() {
+            assert_eq!(instance.run_label.as_deref(), Some(label));
+            assert_eq!(instance.status, "suspended");
+            assert!(
+                ids.insert(instance.instance_id),
+                "pagination must not repeat rows"
+            );
+        }
+    }
+    assert_eq!(ids.len(), 10);
+    options.offset = 0;
+    options.created_after = Some(epoch(1_001));
+    options.created_before = Some(epoch(1_009));
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 8);
+    options.finished_after = Some(epoch(0));
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    options.finished_after = None;
+    options.run_label = Some(label.trim().into());
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    options.run_label = Some(label.into());
+    options.tenant_id = Some(format!("{tenant}-other"));
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    options.tenant_id = Some(tenant);
+    options.image_name_prefix = Some("another-workflow:".into());
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
 }

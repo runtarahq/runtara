@@ -79,6 +79,7 @@ fn assert_instances_ordered(page: &[InstanceRecord]) {
 /// Intentionally linear, with no test-specific branches: each step documents
 /// the invariant it checks so a failure points at a specific behaviour.
 pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
+    run_start_label_sequence(backend).await;
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "conformance-tenant";
 
@@ -2231,4 +2232,109 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
         .delete_instances_batch(&sleepers)
         .await
         .expect("delete_instances_batch failed (batch lease cleanup)");
+}
+
+/// Start references are exact, non-unique, and immutable throughout the lifecycle.
+async fn run_start_label_sequence<P: Persistence>(backend: &P) {
+    let label = " Order_123:/?% ";
+    let tenant = "label-conformance";
+    for status in [
+        CoreInstanceStatus::Running,
+        CoreInstanceStatus::Suspended,
+        CoreInstanceStatus::Completed,
+        CoreInstanceStatus::Failed,
+        CoreInstanceStatus::Cancelled,
+    ] {
+        let id = Uuid::new_v4().to_string();
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, Some(b"input"), Some(label))
+                .await
+                .unwrap()
+        );
+        let instance = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Pending);
+        assert_eq!(instance.run_label.as_deref(), Some(label));
+        assert_eq!(instance.input.as_deref(), Some(b"input".as_slice()));
+        // A conflicting replay loses the claim, including from another tenant.
+        assert!(
+            !backend
+                .try_register_instance_with_label(
+                    &id,
+                    "other-tenant",
+                    Some(b"replacement"),
+                    Some("different")
+                )
+                .await
+                .unwrap()
+        );
+        backend
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        backend
+            .save_retry_attempt(&id, "step", 1, Some("retryable failure"))
+            .await
+            .unwrap();
+        backend
+            .set_instance_sleep(&id, Utc::now() - Duration::seconds(1))
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .get_instance(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_label
+                .as_deref(),
+            Some(label)
+        );
+        assert!(backend.claim_sleeping_instance(&id).await.unwrap());
+        backend.clear_instance_sleep(&id).await.unwrap();
+        assert_eq!(
+            backend
+                .get_instance(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_label
+                .as_deref(),
+            Some(label)
+        );
+        backend
+            .complete_instance(
+                CompleteInstanceParams::new(&id, status).with_termination("timeout", None),
+            )
+            .await
+            .unwrap();
+        let instance = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.run_label.as_deref(), Some(label));
+        assert_eq!(instance.tenant_id, tenant);
+        assert_eq!(instance.input.as_deref(), Some(b"input".as_slice()));
+        assert_eq!(
+            backend
+                .get_instance_meta(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_label
+                .as_deref(),
+            Some(label)
+        );
+    }
+    for label in ["", " ", "bad\nlabel", &"x".repeat(251)] {
+        let id = Uuid::new_v4().to_string();
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, None, Some(label))
+                .await
+                .is_err()
+        );
+        assert!(backend.get_instance(&id).await.unwrap().is_none());
+    }
 }

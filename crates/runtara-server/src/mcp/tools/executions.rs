@@ -105,6 +105,8 @@ pub struct StopExecutionParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowWaitParams {
+    /// Optional exact execution reference (1–250 printable ASCII bytes).
+    pub run_label: Option<String>,
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
     #[schemars(
@@ -418,6 +420,7 @@ pub async fn execute_workflow_wait(
     };
     let body = serde_json::json!({
         "inputs": inputs,
+        "runLabel": params.run_label,
     });
     let exec_result = api_post(
         server,

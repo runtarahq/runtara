@@ -165,6 +165,7 @@ pub fn runtara_instance_to_dto_with_info(
     WorkflowInstanceDto {
         id: inst.instance_id.clone(),
         run_label: inst.run_label,
+        completed_at: inst.finished_at.map(|t| t.to_rfc3339()),
         created: inst.created_at.to_rfc3339(),
         updated: inst
             .finished_at
@@ -217,6 +218,7 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
     WorkflowInstanceDto {
         id: info.instance_id.clone(),
         run_label: info.run_label.clone(),
+        completed_at: info.finished_at.map(|t| t.to_rfc3339()),
         created,
         updated,
         status,
@@ -266,6 +268,7 @@ pub fn runtara_info_to_execution_with_metadata(
     let instance = WorkflowInstanceDto {
         id: info.instance_id.clone(),
         run_label: info.run_label.clone(),
+        completed_at: info.finished_at.map(|t| t.to_rfc3339()),
         created,
         updated,
         status,

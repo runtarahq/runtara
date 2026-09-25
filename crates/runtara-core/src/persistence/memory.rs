@@ -158,16 +158,40 @@ impl Persistence for InMemoryPersistence {
     }
 
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
+        if self
+            .try_register_instance_with_label(instance_id, tenant_id, None, None)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(CoreError::InstanceAlreadyExists {
+                instance_id: instance_id.into(),
+            })
+        }
+    }
+
+    async fn try_register_instance_with_label(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        let run_label =
+            runtara_dsl::run_label::normalize_run_label(run_label).map_err(|message| {
+                CoreError::ValidationError {
+                    field: "runLabel".into(),
+                    message,
+                }
+            })?;
         let mut store = self.store.lock().unwrap();
         if store.instances.contains_key(instance_id) {
-            return Err(CoreError::InstanceAlreadyExists {
-                instance_id: instance_id.to_string(),
-            });
+            return Ok(false);
         }
         store.instances.insert(
             instance_id.to_string(),
             InstanceRecord {
-                run_label: None,
+                run_label,
                 instance_id: instance_id.to_string(),
                 tenant_id: tenant_id.to_string(),
                 definition_version: 1,
@@ -178,7 +202,7 @@ impl Persistence for InMemoryPersistence {
                 created_at: Utc::now(),
                 started_at: None,
                 finished_at: None,
-                input: None,
+                input: input.map(ToOwned::to_owned),
                 output: None,
                 error: None,
                 sleep_until: None,
@@ -189,7 +213,7 @@ impl Persistence for InMemoryPersistence {
                 recovery_marker: None,
             },
         );
-        Ok(())
+        Ok(true)
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
@@ -237,7 +261,6 @@ impl Persistence for InMemoryPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
-        let run_label = params.normalized_run_label()?;
         let mut store = self.store.lock().unwrap();
         let Some(inst) = store.instances.get_mut(params.instance_id) else {
             return match params.guard {
@@ -254,7 +277,6 @@ impl Persistence for InMemoryPersistence {
         }
 
         inst.status = params.status;
-        inst.run_label = run_label;
         // Replaced: a transition that carries no output or error clears the
         // previous one, so a failure cannot be read as still holding a stale
         // success payload.

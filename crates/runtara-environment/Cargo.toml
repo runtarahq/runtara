@@ -24,6 +24,7 @@ name = "embedded_runner_test"
 required-features = ["db-integration-tests"]
 
 [dependencies]
+runtara-dsl = { path = "../runtara-dsl" }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

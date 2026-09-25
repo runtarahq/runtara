@@ -234,6 +234,9 @@ impl EnvironmentHandlerState {
 
 /// Request to start a new instance.
 pub struct StartInstanceRequest {
+    /// Immutable optional execution reference, validated at start.
+    pub run_label: Option<String>,
+
     /// Image ID to create instance from.
     pub image_id: String,
     /// Tenant ID for multi-tenancy isolation.
@@ -363,6 +366,7 @@ async fn existing_start_response(
     instance_id: &str,
     tenant_id: &str,
     image_id: &str,
+    run_label: Option<&str>,
 ) -> Result<Option<StartInstanceResponse>> {
     let Some(existing) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(None);
@@ -379,6 +383,14 @@ async fn existing_start_response(
             StartRejection::InstanceAlreadyExists {
                 instance_id: instance_id.to_string(),
             },
+        )));
+    }
+
+    if existing.run_label.as_deref() != run_label {
+        return Ok(Some(StartInstanceResponse::rejected(
+            StartRejection::InvalidRequest(
+                "Idempotent start conflicts with the original runLabel".into(),
+            ),
         )));
     }
 
@@ -481,6 +493,16 @@ pub async fn handle_start_instance(
         "Start instance request received"
     );
 
+    let run_label = match runtara_dsl::run_label::normalize_run_label(request.run_label.as_deref())
+    {
+        Ok(label) => label,
+        Err(error) => {
+            return Ok(StartInstanceResponse::rejected(
+                StartRejection::InvalidRequest(error),
+            ));
+        }
+    };
+
     // Validate image_id
     if request.image_id.is_empty() {
         return Ok(StartInstanceResponse::rejected(
@@ -551,9 +573,14 @@ pub async fn handle_start_instance(
         // A replay of an already-accepted start is still answered from the
         // existing row: it was accepted when the artifact was present, and
         // losing the file afterwards must not turn a duplicate into an error.
-        if let Some(response) =
-            existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
-                .await?
+        if let Some(response) = existing_start_response(
+            state,
+            &instance_id,
+            &request.tenant_id,
+            &request.image_id,
+            run_label.as_deref(),
+        )
+        .await?
         {
             return Ok(response);
         }
@@ -636,6 +663,7 @@ pub async fn handle_start_instance(
         None => launch,
     };
     let initial = InitialLaunchRequest {
+        run_label: run_label.clone(),
         launch,
         input: input_bytes,
         env: Some(launch_env),
@@ -666,9 +694,14 @@ pub async fn handle_start_instance(
         Ok(InitialLaunchOutcome::ExistingLaunch(_)) => {
             // The existing active generation is the idempotency winner. Keep
             // the older response contract while never enqueueing a second run.
-            if let Some(response) =
-                existing_start_response(state, &instance_id, &request_tenant_id, &request_image_id)
-                    .await?
+            if let Some(response) = existing_start_response(
+                state,
+                &instance_id,
+                &request_tenant_id,
+                &request_image_id,
+                run_label.as_deref(),
+            )
+            .await?
             {
                 Ok(response)
             } else {

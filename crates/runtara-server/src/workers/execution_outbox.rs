@@ -199,6 +199,10 @@ pub enum ExecutionOutboxError {
     AdmissionFull { limit: u64 },
     #[error("idempotency key is required and must not exceed 512 bytes")]
     InvalidIdempotencyKey,
+    #[error("idempotent start conflicts with the original runLabel")]
+    RunLabelConflict,
+    #[error("invalid runLabel: {0}")]
+    InvalidRunLabel(String),
     #[error("trigger event tenant does not match the enqueue tenant")]
     TenantMismatch,
     #[error("failed to serialize trigger event: {0}")]
@@ -211,6 +215,7 @@ pub enum ExecutionOutboxError {
 struct ExistingRequest {
     request_id: Uuid,
     instance_id: String,
+    run_label: Option<String>,
 }
 
 /// Server-owned database boundary for accepted asynchronous executions.
@@ -240,10 +245,11 @@ impl ExecutionOutbox {
         &self,
         tenant_id: &str,
         idempotency_key: &str,
+        run_label: Option<&str>,
     ) -> Result<Option<EnqueuedExecution>, ExecutionOutboxError> {
         let request = sqlx::query_as::<_, ExistingRequest>(
             r#"
-            SELECT request_id, instance_id
+            SELECT request_id, instance_id, trigger_event->>'runLabel' AS run_label
             FROM execution_requests
             WHERE tenant_id = $1 AND idempotency_key = $2
             "#,
@@ -253,6 +259,12 @@ impl ExecutionOutbox {
         .fetch_optional(&self.pool)
         .await?;
 
+        if request
+            .as_ref()
+            .is_some_and(|request| request.run_label.as_deref() != run_label)
+        {
+            return Err(ExecutionOutboxError::RunLabelConflict);
+        }
         Ok(request.map(|request| EnqueuedExecution {
             request_id: request.request_id,
             instance_id: request.instance_id,
@@ -273,6 +285,8 @@ impl ExecutionOutbox {
         idempotency_key: &str,
         admission_limit: u64,
     ) -> Result<EnqueuedExecution, ExecutionOutboxError> {
+        runtara_dsl::run_label::normalize_run_label(event.run_label.as_deref())
+            .map_err(ExecutionOutboxError::InvalidRunLabel)?;
         if tenant_id != event.tenant_id {
             return Err(ExecutionOutboxError::TenantMismatch);
         }
@@ -296,6 +310,9 @@ impl ExecutionOutbox {
         if let Some(existing) =
             find_by_idempotency_in_tx(&mut tx, tenant_id, idempotency_key).await?
         {
+            if existing.run_label != event.run_label {
+                return Err(ExecutionOutboxError::RunLabelConflict);
+            }
             tx.commit().await?;
             return Ok(EnqueuedExecution {
                 request_id: existing.request_id,
@@ -1123,7 +1140,7 @@ async fn find_by_idempotency_in_tx(
 ) -> Result<Option<ExistingRequest>, sqlx::Error> {
     sqlx::query_as::<_, ExistingRequest>(
         r#"
-        SELECT request_id, instance_id
+        SELECT request_id, instance_id, trigger_event->>'runLabel' AS run_label
         FROM execution_requests
         WHERE tenant_id = $1 AND idempotency_key = $2
         "#,

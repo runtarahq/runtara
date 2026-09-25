@@ -286,6 +286,9 @@ pub struct EnqueueRequest {
 /// `pending` state this queue replaces.
 #[derive(Debug, Clone)]
 pub struct InitialLaunchRequest {
+    /// Immutable optional execution reference, validated at start.
+    pub run_label: Option<String>,
+
     /// The first physical launch generation. Its kind must be [`LaunchKind::Start`].
     pub launch: EnqueueRequest,
     /// Enriched input persisted on the durable Core instance.
@@ -386,6 +389,9 @@ pub enum CancelOutcome {
 /// Failures while reading or transitioning durable launch state.
 #[derive(Debug, Error)]
 pub enum LaunchQueueError {
+    /// The start reference failed exact-label validation.
+    #[error("invalid run label: {0}")]
+    InvalidRunLabel(String),
     /// PostgreSQL rejected or could not complete a queue operation.
     #[error("launch queue database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -529,6 +535,8 @@ impl LaunchRepository {
         &self,
         request: InitialLaunchRequest,
     ) -> Result<InitialLaunchOutcome, LaunchQueueError> {
+        let run_label = runtara_dsl::run_label::normalize_run_label(request.run_label.as_deref())
+            .map_err(LaunchQueueError::InvalidRunLabel)?;
         if request.launch.kind != LaunchKind::Start {
             return Err(LaunchQueueError::InitialLaunchRequiresStart);
         }
@@ -570,8 +578,8 @@ impl LaunchRepository {
         let claimed: Option<String> = sqlx::query_scalar(
             r#"
             INSERT INTO instances
-                (instance_id, tenant_id, definition_version, status, created_at, input)
-            VALUES ($1, $2, 1, 'pending', NOW(), $3)
+                (instance_id, tenant_id, definition_version, status, created_at, input, run_label)
+            VALUES ($1, $2, 1, 'pending', NOW(), $3, $4)
             ON CONFLICT (instance_id) DO NOTHING
             RETURNING instance_id
             "#,
@@ -579,6 +587,7 @@ impl LaunchRepository {
         .bind(&request.launch.instance_id)
         .bind(&request.launch.tenant_id)
         .bind(request.input.as_deref())
+        .bind(run_label.as_deref())
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -2170,6 +2179,7 @@ mod tests {
         sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $1, 'telemetry', '/unused')")
             .bind(&id).execute(&pool).await.unwrap();
         let request = InitialLaunchRequest {
+            run_label: None,
             launch: EnqueueRequest::immediate(
                 &id,
                 &id,
@@ -2250,6 +2260,7 @@ mod tests {
         ] {
             let next = format!("{id}-{suffix}");
             repo.claim_initial(InitialLaunchRequest {
+                run_label: None,
                 launch: EnqueueRequest::immediate(
                     &next,
                     &next,

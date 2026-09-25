@@ -8,7 +8,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::Json,
 };
@@ -45,7 +45,8 @@ use crate::workers::execution_engine::{ExecutionEngine, SyncRequest};
     post,
     path = "/api/runtime/events/http-sync/{workflow_id}",
     params(
-        ("workflow_id" = String, Path, description = "Workflow identifier")
+        ("workflow_id" = String, Path, description = "Workflow identifier"),
+        crate::api::dto::workflows::RunLabelQuery
     ),
     request_body(content = String, description = "Optional raw HTTP request body (accepts any content type or no body)", content_type = "application/octet-stream"),
     responses(
@@ -59,6 +60,7 @@ use crate::workers::execution_engine::{ExecutionEngine, SyncRequest};
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_http_event_sync(
     Path(workflow_id): Path<String>,
+    Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -74,6 +76,7 @@ pub async fn capture_http_event_sync(
     // Execute synchronously via the shared engine
     match engine
         .run_sync(SyncRequest {
+            run_label: metadata.run_label,
             tenant_id: &tenant_id,
             workflow_id: &workflow_id,
             version: None,

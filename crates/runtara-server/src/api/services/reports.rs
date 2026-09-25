@@ -581,6 +581,7 @@ impl ReportService {
         let queued = self
             .require_execution_engine()?
             .queue(QueueRequest {
+                run_label: None,
                 tenant_id,
                 workflow_id: &located.action.workflow_id,
                 version: located.action.version,

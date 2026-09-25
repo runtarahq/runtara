@@ -538,7 +538,6 @@ async fn completed_handler(
         }
     };
 
-    let run_label = body.get("runLabel").and_then(Value::as_str);
     let event = HandlerInstanceEvent {
         instance_id,
         event_type: HandlerEventType::EventCompleted as i32,
@@ -548,7 +547,7 @@ async fn completed_handler(
         subtype: None,
     };
 
-    match instance_handlers::handle_instance_event_with_run_label(&state, event, run_label).await {
+    match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => core_error_response("COMPLETED_ERROR", "Completed handler error", e),
     }

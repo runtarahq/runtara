@@ -210,17 +210,9 @@ impl SdkBackend for EmbeddedBackend {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len())))]
     fn completed(&self, output: &[u8]) -> Result<()> {
-        self.completed_with_label(output, None)
-    }
-
-    fn completed_with_label(&self, output: &[u8], run_label: Option<&str>) -> Result<()> {
-        let mut params =
-            CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Completed)
-                .if_running()
-                .with_output(output);
-        if let Some(label) = run_label {
-            params = params.with_run_label(label);
-        }
+        let params = CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Completed)
+            .if_running()
+            .with_output(output);
         self.rt
             .block_on(self.persistence.complete_instance(params))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
