@@ -512,7 +512,6 @@ use runtime_client::RuntimeClient;
         (name = "steps-controller", description = "Step type discovery API endpoints"),
         (name = "agents-controller", description = "Agent discovery API endpoints"),
         (name = "workflow-step-type-api", description = "Workflow step type metadata endpoints"),
-        (name = "object-storage-internal", description = "Internal object storage API endpoints"),
         (name = "object-storage-legacy", description = "Legacy object storage API endpoints"),
         (name = "object-model", description = "Object model schema and instance management API endpoints"),
         (name = "connections-controller", description = "Connection management API endpoints (credentials never exposed in responses)"),
@@ -651,7 +650,7 @@ struct HealthResponse {
     /// expected in local/dev; an operator dashboard alerting on this in a
     /// production environment is the readiness surface this was missing —
     /// `is_encryption_enabled()` was previously only checked internally by
-    /// the `/reencrypt` maintenance endpoint.
+    /// the re-encryption maintenance job.
     encryption_enabled: bool,
 }
 
@@ -980,8 +979,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = config::get();
         if let Some(ref dir) = cfg.agent_components_dir {
             use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+            // Agent components reach the host through imports, not HTTP, so
+            // no core URL is exported into their environment.
             let env = DispatcherEnv {
-                core_http_url: format!("http://127.0.0.1:{}", cfg.internal_port),
+                core_http_url: String::new(),
             };
             match ComponentDispatcherService::from_dir(dir, env).await {
                 Ok(dispatcher) => {
@@ -2311,10 +2312,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
 
-    // Connections admin routes (operator-triggered maintenance, e.g. re-encrypt).
-    // Crate-owned so the HTTP surface stays colocated with the domain logic.
-    let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
-
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
     // configured TENANT_ID directly (single-tenant runtime).
@@ -2506,7 +2503,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
-        .merge(public_routes.clone())
+        .merge(public_routes)
         .merge(event_routes)
         .merge(channel_routes)
         .merge(oidc_routes)
@@ -2568,15 +2565,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));
 
-    // =========================================================================
-    // Internal API server — localhost only, called by workflow binaries / WASM
-    // =========================================================================
-    let internal_app = Router::new()
-        .nest("/api/internal/connections-admin", connections_admin_routes)
-        .merge(public_routes)
-        .layer(TraceLayer::new_for_http())
-        .layer(from_fn(middleware::http_metrics::http_metrics_middleware));
-
     // Get port/host from environment variables or use defaults
     let port = std::env::var("SERVER_PORT")
         .unwrap_or_else(|_| "7001".to_string())
@@ -2584,13 +2572,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(7001);
     let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let public_addr = format!("{}:{}", host, port);
-
-    let internal_port = std::env::var("INTERNAL_PORT")
-        .unwrap_or_else(|_| "7002".to_string())
-        .parse::<u16>()
-        .unwrap_or(7002);
-    let internal_host = std::env::var("INTERNAL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let internal_addr = format!("{}:{}", internal_host, internal_port);
 
     // Safety: refuse to boot in a non-OIDC provider mode on a non-loopback public bind.
     // Matches the valkey validation pattern above: print the error and exit with a
@@ -2600,26 +2581,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Safety: the internal listener is UNAUTHENTICATED and injects connection
-    // credentials server-side, so it must stay on loopback unless a shared
-    // secret is configured to gate it. Refuse to boot a non-loopback internal
-    // bind that would expose credentialed egress + SSRF to any host that can
-    // send an X-Org-Id header (F6).
-    let internal_shared_secret = std::env::var("RUNTARA_INTERNAL_SHARED_SECRET")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    if let Err(msg) = crate::bind::enforce_internal_listener_safe(
-        &internal_host,
-        internal_shared_secret.is_some(),
-    ) {
-        eprintln!("❌ Configuration error: {msg}");
-        std::process::exit(1);
-    }
-
-    // Cap concurrent TCP connections per listener so a slow-loris attack or a
-    // connection storm can't exhaust file descriptors and take the whole
-    // server down. Configurable via MAX_CONNECTIONS; see `conn_limit`.
+    // Cap concurrent TCP connections so a slow-loris attack or a connection
+    // storm can't exhaust file descriptors and take the whole server down.
+    // Configurable via MAX_CONNECTIONS; see `conn_limit`.
     let max_connections = crate::conn_limit::max_connections_from_env();
 
     // Start public API server
@@ -2632,18 +2596,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         address = %public_addr,
         max_connections = max_connections,
         "Public API server started"
-    );
-
-    // Start internal API server (localhost only)
-    let internal_listener = crate::conn_limit::LimitedListener::new(
-        tokio::net::TcpListener::bind(&internal_addr).await?,
-        max_connections,
-    );
-    tracing::info!(
-        port = internal_port,
-        address = %internal_addr,
-        max_connections = max_connections,
-        "Internal API server started"
     );
 
     // Ready banner with a clickable UI link. Printed to stdout (not via
@@ -2681,25 +2633,16 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // The public API server stops accepting as soon as SIGTERM flips
-    // `shutdown_signal` (no new external intake). The internal API server
-    // (object-model / agents / proxy — called by running guest instances) is
-    // held on its OWN signal and kept alive until AFTER the environment drain,
-    // so a still-running guest's in-flight agent calls keep succeeding while it
-    // reaches a checkpoint and suspends. Tearing the internal API down early
-    // (the previous behaviour) made running guests fail with ConnectionRefused
-    // and be marked `failed` instead of `suspended` — which meant they were
-    // never recovered after the restart.
+    // `shutdown_signal` (no new external intake). Running guests don't call
+    // this listener: agent calls are in-process host imports and the embedded
+    // core stays up until the drain below finishes.
     let public_shutdown = shutdown_signal.clone();
-    let internal_shutdown = crate::shutdown::ShutdownSignal::new();
-    let internal_shutdown_for_server = internal_shutdown.clone();
     let public_server = axum::serve(public_listener, public_app)
         .with_graceful_shutdown(async move { public_shutdown.wait().await });
-    let internal_server = axum::serve(internal_listener, internal_app)
-        .with_graceful_shutdown(async move { internal_shutdown_for_server.wait().await });
 
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
-    // concurrently with the servers — exiting is driven by the flag, not by
-    // whichever server happens to error first.
+    // concurrently with the server — exiting is driven by the flag, not by
+    // the server returning.
     let signal_coordinator = shutdown_coordinator.clone();
     let signal_task = tokio::spawn(async move {
         if let Err(e) = wait_for_shutdown_signal().await {
@@ -2709,73 +2652,57 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         signal_coordinator.request_shutdown();
     });
 
-    // The axum graceful-shutdown future isn't `Send`, so we can't spawn the
-    // internal server on a separate task. Instead drive it concurrently with an
-    // orchestration future on THIS task via `join!`: the orchestration awaits
-    // the public server (returns on SIGTERM), runs the drain while the internal
-    // server is still being polled (and thus still serving guest agent calls),
-    // then triggers the internal server's own shutdown.
-    let orchestrate = async {
-        if let Err(e) = public_server.await {
-            tracing::error!(error = %e, "Public API server error");
-        }
+    if let Err(e) = public_server.await {
+        tracing::error!(error = %e, "Public API server error");
+    }
 
-        // Make sure the flag is set even if the public server stopped for
-        // another reason (e.g. a bind error).
-        shutdown_coordinator.request_shutdown();
-        signal_task.abort();
+    // Make sure the flag is set even if the public server stopped for
+    // another reason (e.g. a bind error).
+    shutdown_coordinator.request_shutdown();
+    signal_task.abort();
 
-        // Let the intake workers finish the unit of work they are holding,
-        // bounded by RUNTARA_SHUTDOWN_INTAKE_GRACE_MS. This runs in dev mode
-        // too: it is what makes the dev-mode message below true, and workers
-        // that park on the signal return immediately, so Ctrl+C stays prompt
-        // unless something is genuinely mid-task.
-        //
-        // Before the Environment drain, so intake workers can finish handing
-        // off launches before the runtime stops dispatch and snapshots its
-        // active instances.
-        shutdown_coordinator.drain_intake().await;
+    // Let the intake workers finish the unit of work they are holding,
+    // bounded by RUNTARA_SHUTDOWN_INTAKE_GRACE_MS. This runs in dev mode
+    // too: it is what makes the dev-mode message below true, and workers
+    // that park on the signal return immediately, so Ctrl+C stays prompt
+    // unless something is genuinely mid-task.
+    //
+    // Before the Environment drain, so intake workers can finish handing
+    // off launches before the runtime stops dispatch and snapshots its
+    // active instances.
+    shutdown_coordinator.drain_intake().await;
 
-        // Drain running executions and embedded instances unless we're in dev
-        // mode — local `cargo run` users want Ctrl+C to exit promptly instead
-        // of waiting up to RUNTARA_SHUTDOWN_GRACE_MS for each in-flight
-        // workflow to checkpoint. Release builds and explicit
-        // RUNTARA_DEV_MODE=false keep the full graceful drain. The internal API
-        // and embedded core are still serving throughout this drain, so guests
-        // can finish in-flight agent calls and write their suspend checkpoint.
-        if config::dev_mode() {
-            tracing::warn!(
-                "Dev mode: skipping graceful drain of executions and instances. \
-                 Set RUNTARA_DEV_MODE=false (or run a release build) to enable. \
-                 In-flight workers will finish their current task before exiting."
-            );
-        } else if let Some(runtara) = embedded_runtara.as_ref() {
-            println!("Draining embedded Runtara environment...");
-            match runtara.drain(shutdown_coordinator.grace()).await {
-                // A drain that could not enumerate what to park leaves every
-                // guest to die with the process, so say so rather than let
-                // shutdown read as orderly.
-                Err(e) => eprintln!("Error draining embedded Runtara: {e}"),
-                Ok(report) if report.is_clean() => {
-                    println!("Drained {} instance(s) cleanly", report.settled);
-                }
-                Ok(report) => {
-                    eprintln!(
-                        "Drain finished with {} of {} instance(s) parked on their own, \
-                         {} force-stopped, {} operation(s) failed",
-                        report.settled, report.active, report.force_stopped, report.failures
-                    );
-                }
+    // Drain running executions and embedded instances unless we're in dev
+    // mode — local `cargo run` users want Ctrl+C to exit promptly instead
+    // of waiting up to RUNTARA_SHUTDOWN_GRACE_MS for each in-flight
+    // workflow to checkpoint. Release builds and explicit
+    // RUNTARA_DEV_MODE=false keep the full graceful drain. The embedded core
+    // is still serving throughout this drain, so guests can finish in-flight
+    // agent calls and write their suspend checkpoint.
+    if config::dev_mode() {
+        tracing::warn!(
+            "Dev mode: skipping graceful drain of executions and instances. \
+             Set RUNTARA_DEV_MODE=false (or run a release build) to enable. \
+             In-flight workers will finish their current task before exiting."
+        );
+    } else if let Some(runtara) = embedded_runtara.as_ref() {
+        println!("Draining embedded Runtara environment...");
+        match runtara.drain(shutdown_coordinator.grace()).await {
+            // A drain that could not enumerate what to park leaves every
+            // guest to die with the process, so say so rather than let
+            // shutdown read as orderly.
+            Err(e) => eprintln!("Error draining embedded Runtara: {e}"),
+            Ok(report) if report.is_clean() => {
+                println!("Drained {} instance(s) cleanly", report.settled);
+            }
+            Ok(report) => {
+                eprintln!(
+                    "Drain finished with {} of {} instance(s) parked on their own, \
+                     {} force-stopped, {} operation(s) failed",
+                    report.settled, report.active, report.force_stopped, report.failures
+                );
             }
         }
-
-        // Drain complete (or skipped): now let the internal API server stop.
-        internal_shutdown.trigger();
-    };
-
-    let (internal_result, ()) = tokio::join!(internal_server, orchestrate);
-    if let Err(e) = internal_result {
-        tracing::error!(error = %e, "Internal API server error");
     }
 
     // Always tear down the embedded server so ports/pools close cleanly.
@@ -2886,7 +2813,7 @@ mod health_handler_tests {
     use super::*;
 
     /// The readiness gap this closes: `is_encryption_enabled()` existed but was
-    /// only ever checked internally by the `/reencrypt` maintenance endpoint, so
+    /// only ever checked internally by the re-encryption maintenance job, so
     /// there was no way to observe encryption status from outside the process.
     /// This exercises `health_handler` directly rather than through the full
     /// router — it's a plain function, so no need for the `Router` +

@@ -32,6 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_internal_precompile_component();
     }
 
+    let reencrypt = match runtara_server::reencrypt::parse_args(std::env::args_os()) {
+        Some(Ok(args)) => Some(args),
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+
     dotenvy::dotenv().ok();
 
     // The server's primary database: workflows, connections, API keys, triggers.
@@ -53,6 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
+
+    // Maintenance command: runs against the existing schema and exits without
+    // migrating or starting the server.
+    if let Some(args) = reencrypt {
+        runtara_server::observability::init_cli_logging();
+        if let Err(msg) = runtara_server::reencrypt::run(pool, args).await {
+            eprintln!("❌ {msg}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Run server-level migrations (workflows, connections, compilations, etc.)
     // ignore_missing(true) allows existing databases that have the old individual

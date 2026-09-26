@@ -20,6 +20,7 @@ pub mod middleware;
 pub mod observability;
 pub mod plan_check;
 pub mod product_events;
+pub mod reencrypt;
 pub mod runtime_client;
 pub mod runtime_types;
 pub mod server;
