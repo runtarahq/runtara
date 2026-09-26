@@ -102,7 +102,7 @@ def server(disabled=False):
         "OBJECT_MODEL_DATABASE_URL": f"{base}/{TAG}_server",
         "RUNTARA_DATABASE_URL": f"{base}/{TAG}_runtime",
         "TENANT_ID": TAG, "AUTH_PROVIDER": "local", "ENABLE_OPENAPI_DOCS": "true", "SERVER_HOST": "127.0.0.1",
-        "SERVER_PORT": str(PUBLIC), "INTERNAL_PORT": str(PUBLIC + 1),
+        "SERVER_PORT": str(PUBLIC),
         "RUNTARA_CORE_PORT": str(PUBLIC + 10), "RUNTARA_ENVIRONMENT_PORT": str(PUBLIC + 11),
         "RUNTARA_CORE_HTTP_PORT": str(PUBLIC + 12), "RUNTARA_ENV_HTTP_PORT": str(PUBLIC + 13),
         "DATA_DIR": str(ARTIFACTS / "data"), "RUNTARA_DEV_MODE": "false",

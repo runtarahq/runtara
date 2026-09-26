@@ -195,7 +195,7 @@ class TestServer:
             "RUNTARA_AUTH_REQUIRE_JTI": "true", "TENANT_ID": self.tenant,
             "OAUTH2_JWKS_URI": self.fixture.url + "/jwks", "OAUTH2_ISSUER": self.fixture.url,
             "OAUTH2_AUDIENCE": "cancellation-api", "OAUTH2_MCP_AUDIENCE": "cancellation-mcp",
-            "SERVER_HOST": "127.0.0.1", "INTERNAL_HOST": "127.0.0.1", "RUNTARA_EMBEDDED": "true",
+            "SERVER_HOST": "127.0.0.1", "RUNTARA_EMBEDDED": "true",
             "RUNTARA_AGENT_COMPONENTS_DIR": str(self.args.components.resolve()),
             "DATA_DIR": str(self.directory / "data"), "OTEL_SDK_DISABLED": "true",
             "RUNTARA_PROXY_ALLOWED_HOSTS": "127.0.0.1", "MAX_CONCURRENT_EXECUTIONS": "2",
@@ -207,11 +207,11 @@ class TestServer:
     def launch_server(self, label):
         env = self.server_env.copy()
         ports = set()
-        while len(ports) < 3:
+        while len(ports) < 2:
             ports.add(free_port())
-        public, internal, core = sorted(ports)
+        public, core = sorted(ports)
         base = f"http://127.0.0.1:{public}"
-        env.update(SERVER_PORT=str(public), INTERNAL_PORT=str(internal), RUNTARA_CORE_HTTP_PORT=str(core))
+        env.update(SERVER_PORT=str(public), RUNTARA_CORE_HTTP_PORT=str(core))
         directory = self.directory / label
         directory.mkdir()
         # Prevent dotenv's parent-directory search from reaching real settings.

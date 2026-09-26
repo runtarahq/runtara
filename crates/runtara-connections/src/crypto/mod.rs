@@ -24,8 +24,12 @@
 //! [`CredentialCipher::decrypt`] passes plaintext through unchanged when it
 //! does not recognize the envelope shape. This lets the system be deployed
 //! against existing plaintext data without a hard migration — new writes
-//! encrypt, old plaintext is returned as-is. Run [`ReencryptJob`] to eagerly
-//! convert existing plaintext to ciphertext.
+//! encrypt, old plaintext is returned as-is. Run
+//! `runtara-server reencrypt-connections` (which calls
+//! [`ConnectionRepository::reencrypt_all`]) to eagerly convert existing
+//! plaintext to ciphertext.
+//!
+//! [`ConnectionRepository::reencrypt_all`]: crate::repository::connections::ConnectionRepository::reencrypt_all
 //!
 //! # Pluggable backends
 //!

@@ -28,7 +28,6 @@ PG_CONTAINER="${PG_CONTAINER:-runtara-dev-postgres}"
 
 TEST_DB="execution_timeout_e2e_${$}"
 TEST_PORT_PUBLIC="${TEST_PORT_PUBLIC:-17790}"
-TEST_PORT_INTERNAL="${TEST_PORT_INTERNAL:-17791}"
 TEST_LOG="$(mktemp -t runtara_execution_timeout_e2e_XXXXXX)"
 SERVER_PID=""
 TENANT="execution_timeout_e2e"
@@ -68,7 +67,6 @@ start_server() {
     TENANT_ID="${TENANT}" \
     SERVER_HOST=127.0.0.1 \
     SERVER_PORT="${TEST_PORT_PUBLIC}" \
-    INTERNAL_PORT="${TEST_PORT_INTERNAL}" \
     RUNTARA_EMBEDDED=false \
     RUNTARA_AGENT_COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR}" \
     RUNTARA_MCP_SESSION_STORE=local \

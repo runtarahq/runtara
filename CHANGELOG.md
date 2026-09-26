@@ -140,6 +140,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On first run after upgrade, existing data older than 3 days in terminal
   states will be deleted.
 
+### Removed
+
+- **The internal API listener (`INTERNAL_PORT`, default `7002`) is gone.**
+  Running workflows stopped calling it when agent, object-model and proxy calls
+  moved to in-process host imports; all it still served was connection
+  re-encryption plus duplicates of `/health` and `/ready`. `runtara-server` now
+  binds only the public port. `INTERNAL_PORT`, `INTERNAL_HOST` and
+  `RUNTARA_INTERNAL_SHARED_SECRET` are ignored. Point any health check that
+  targeted `7002` at the public port's `/health` instead.
+- `POST /api/internal/connections-admin/reencrypt` is replaced by a CLI
+  subcommand that uses the same database and key configuration as the server:
+  `runtara-server reencrypt-connections [--tenant-id <id>]`. It prints the
+  scanned/re-encrypted/unchanged/failed counts and exits non-zero if encryption
+  is off or any row fails.
+
 ### Fixed
 
 - **`GET /workflows/{id}/instances/{instanceId}/checkpoints` now honors

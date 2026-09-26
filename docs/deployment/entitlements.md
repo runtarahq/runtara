@@ -1,6 +1,6 @@
 # Entitlements
 
-RUNTARA ships a per-process entitlement system that gates product features (Reports, Database, API access, MCP), the agent allowlist, and a handful of numeric tier limits. Entitlements are env-driven, resolved once at startup, and enforced on every authenticated entry point — REST, MCP tools, and the internal routes the WASM workflow runtime calls.
+RUNTARA ships a per-process entitlement system that gates product features (Reports, Database, API access, MCP), the agent allowlist, and a handful of numeric tier limits. Entitlements are env-driven, resolved once at startup, and enforced on every authenticated entry point — REST and MCP tools.
 
 This document is the operator-facing reference. For engineering details — the data model, enforcement points, and error codes — see the `entitlements`, `entitlement_error`, and `middleware::entitlement` modules in `crates/runtara-server`.
 
@@ -140,18 +140,9 @@ WARN  entitlement denial
 
 Open the UI. The Reports menu item is hidden. Direct navigation to `/ui/reports` shows the "Feature not enabled" page rather than the report list.
 
-## Public vs. internal API
+## Listening port
 
-The server binds **two ports** by default:
-
-| Port | Role | Reached by | Auth | Gated since |
-|---|---|---|---|---|
-| `7001` (`SERVER_PORT`) | Public API + embedded SPA | Browsers, API-key callers | JWT / API key / proxy header (depends on `AUTH_PROVIDER`) | Phase 3 |
-| `7002` (`INTERNAL_PORT`) | Internal routes | WASM workflow binaries on the same machine | None — localhost-only | Phase 5 |
-
-The two share the same entitlement snapshot. A feature you disable applies to both — the gates are mounted on each sub-router individually so a request hitting either port lands at the same `ENTITLEMENT_REQUIRED` body.
-
-Internal routes are bound to `127.0.0.1` by default (`INTERNAL_HOST`). Do not expose this port externally; entitlement gating is the second line of defense, not the first.
+The server binds one port, `SERVER_PORT` (default `7001`), for the public API and the embedded SPA. Auth is JWT, API key or proxy header depending on `AUTH_PROVIDER`. Running workflows reach the host through in-process imports, not HTTP, so there is no separate internal port to gate.
 
 ## Troubleshooting
 
@@ -192,7 +183,7 @@ Two checks:
 
 ## Audit logging
 
-Every entitlement denial — REST, MCP, internal — emits one structured `WARN` line. The fields are split across two layers: ones on the denial event itself, and ones inherited from surrounding tracing spans.
+Every entitlement denial — REST or MCP — emits one structured `WARN` line. The fields are split across two layers: ones on the denial event itself, and ones inherited from surrounding tracing spans.
 
 ### On the denial event
 

@@ -14,13 +14,10 @@
 #          -> Finish
 #   Leg 2  Run the same compiled binary AGAIN: the full-replace must not
 #          duplicate derived rows (idempotent rebuild).
-#   Leg 3  Internal-API contract, direct curl against :INTERNAL_PORT:
-#          multi-statement string -> HTTP 400 and nothing executed;
-#          write-spelled-as-query -> HTTP 400 (READ ONLY transaction).
-#   Leg 4  SIGTERM exactly-once: counter-bump execute-sql -> delay; drain
+#   Leg 3  SIGTERM exactly-once: counter-bump execute-sql -> delay; drain
 #          mid-delay, restart, instance resumes; checkpoint-cache hit means
 #          the bump applied exactly once.
-#   Leg 5  CRON trigger fires the rebuild workflow through the Valkey trigger
+#   Leg 4  CRON trigger fires the rebuild workflow through the Valkey trigger
 #          stream (the path direct execute never touches).
 #
 # Prerequisites: Postgres + docker (isolated Valkey) and the agent / shared
@@ -45,7 +42,6 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-GueUkDKea0CjKP4Rn5Bk0FDV}"
 TEST_DB_SERVER="obm_sql_e2e_server_$$"
 TEST_DB_RUNTIME="obm_sql_e2e_runtime_$$"
 TEST_PORT_PUBLIC="${TEST_PORT_PUBLIC:-17720}"
-TEST_PORT_INTERNAL="${TEST_PORT_INTERNAL:-17721}"
 TEST_CORE_PORT="${TEST_CORE_PORT:-18711}"
 TEST_ENV_PORT="${TEST_ENV_PORT:-18712}"
 TEST_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT:-18713}"
@@ -89,7 +85,6 @@ cleanup() {
 trap cleanup EXIT
 
 API="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/runtime"
-INTERNAL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/internal"
 
 api_post() {
     curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" \
@@ -106,7 +101,6 @@ start_server() {
     TENANT_ID="${TENANT}" \
     SERVER_HOST=127.0.0.1 \
     SERVER_PORT="${TEST_PORT_PUBLIC}" \
-    INTERNAL_PORT="${TEST_PORT_INTERNAL}" \
     RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
     RUNTARA_ENVIRONMENT_PORT="${TEST_ENV_PORT}" \
     RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
@@ -387,32 +381,7 @@ STOCK_ROWS=$(psql_server -c "SELECT COUNT(*) FROM obm_sql_e2e_stock")
 print_success "Leg 1+2: rebuild pipeline correct and idempotent (derived=2, stock=6)"
 
 #-------------------------------------------------------------------------
-print_step "Leg 3: internal-API contract (status-coded failures)..."
-
-# Multi-statement string must fail at the prepared-statement protocol with a
-# status-coded 400 — and nothing may have executed.
-HTTP_CODE=$(curl -sS -o "${TEST_DATA_DIR}/multi.json" -w "%{http_code}" --max-time 30 \
-    -X POST -H "Content-Type: application/json" -H "X-Org-Id: ${TENANT}" \
-    -d "{\"sql\": \"DELETE FROM sku_velocity; DROP TABLE sku_velocity\", \"connectionId\": \"${CONN_ID}\"}" \
-    "${INTERNAL}/object-model/sql/execute")
-[ "${HTTP_CODE}" = "400" ] || { print_error "multi-statement: expected HTTP 400, got ${HTTP_CODE}: $(cat "${TEST_DATA_DIR}/multi.json")"; exit 1; }
-DERIVED_ROWS=$(psql_server -c "SELECT COUNT(*) FROM sku_velocity")
-[ "${DERIVED_ROWS}" = "2" ] || { print_error "multi-statement executed something (derived=${DERIVED_ROWS})"; exit 1; }
-echo "  multi-statement → 400, nothing executed ✓"
-
-# A write spelled as a query must be rejected by the READ ONLY transaction.
-HTTP_CODE=$(curl -sS -o "${TEST_DATA_DIR}/ro.json" -w "%{http_code}" --max-time 30 \
-    -X POST -H "Content-Type: application/json" -H "X-Org-Id: ${TENANT}" \
-    -d "{\"sql\": \"UPDATE sku_velocity SET in_stock = 0 RETURNING sku\", \"connectionId\": \"${CONN_ID}\"}" \
-    "${INTERNAL}/object-model/sql/query")
-[ "${HTTP_CODE}" = "400" ] || { print_error "write-as-query: expected HTTP 400, got ${HTTP_CODE}: $(cat "${TEST_DATA_DIR}/ro.json")"; exit 1; }
-grep -q "read-only" "${TEST_DATA_DIR}/ro.json" || { print_error "write-as-query error does not mention read-only: $(cat "${TEST_DATA_DIR}/ro.json")"; exit 1; }
-B_STOCK=$(psql_server -c "SELECT in_stock FROM sku_velocity WHERE sku = 'B'")
-[ "${B_STOCK}" = "14" ] || { print_error "write-as-query mutated data (B in_stock=${B_STOCK}, expected 14)"; exit 1; }
-print_success "Leg 3: internal SQL routes are status-coded and fail closed"
-
-#-------------------------------------------------------------------------
-print_step "Leg 4: SIGTERM exactly-once (drain mid-run, restart, resume)..."
+print_step "Leg 3: SIGTERM exactly-once (drain mid-run, restart, resume)..."
 
 psql_server -c "CREATE TABLE sql_counter (id INT PRIMARY KEY, n INT NOT NULL)" >/dev/null
 
@@ -485,10 +454,10 @@ wait_completed "${COUNTER_INSTANCE}"
 
 COUNTER=$(psql_server -c "SELECT n FROM sql_counter WHERE id = 1")
 [ "${COUNTER}" = "1" ] || { print_error "execute-sql re-ran on replay: counter=${COUNTER}, expected 1 (checkpoint-cache miss)"; exit 1; }
-print_success "Leg 4: drain + restart + resume applied the write exactly once (n=1)"
+print_success "Leg 3: drain + restart + resume applied the write exactly once (n=1)"
 
 #-------------------------------------------------------------------------
-print_step "Leg 5: CRON trigger fires the rebuild workflow..."
+print_step "Leg 4: CRON trigger fires the rebuild workflow..."
 
 RESP=$(api_post /triggers "{
   \"workflow_id\": \"${WF_ID}\",
@@ -513,7 +482,7 @@ curl -sS -X DELETE "${API}/triggers/${TRIGGER_ID}" >/dev/null 2>&1 || true
 [ -n "${CRON_OK}" ] || { print_error "CRON run did not complete the pipeline within 150s (stock=${STOCK_ROWS}, B=${B_STOCK})"; tail -40 "${TEST_LOG}"; exit 1; }
 DERIVED_ROWS=$(psql_server -c "SELECT COUNT(*) FROM sku_velocity")
 [ "${DERIVED_ROWS}" = "2" ] || { print_error "derived table has ${DERIVED_ROWS} rows after cron run, expected 2"; exit 1; }
-print_success "Leg 5: CRON trigger ran the rebuild end-to-end (stock=${STOCK_ROWS}, B in_stock=21, derived=2)"
+print_success "Leg 4: CRON trigger ran the rebuild end-to-end (stock=${STOCK_ROWS}, B in_stock=21, derived=2)"
 
 echo ""
 print_success "All raw-SQL e2e legs passed."

@@ -248,7 +248,6 @@ jobs:
       TENANT_ID: Organity
       SERVER_HOST: 127.0.0.1
       SERVER_PORT: "7001"
-      INTERNAL_PORT: "7002"
       VALKEY_HOST: 127.0.0.1
       VALKEY_PORT: "6379"
       DATA_DIR: ${{ github.workspace }}/.data/smoke

@@ -440,6 +440,16 @@ pub fn record_scope_denial(permission: &'static str, scope: &'static str) {
     }
 }
 
+/// Plain stderr logging for one-shot maintenance commands, which exit before
+/// any spans would reach an exporter. Honors `RUST_LOG` like the server does.
+pub fn init_cli_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(default_env_filter())
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+}
+
 /// Initialize OpenTelemetry with OTLP exporter
 ///
 /// Uses environment variables:
