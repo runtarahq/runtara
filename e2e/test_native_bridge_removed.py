@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Exercise a running local server after removal of native capability dispatch.
 
-Set RUNTARA_TEST_PUBLIC_URL and RUNTARA_TEST_INTERNAL_URL to an isolated server
-using local authentication. Requires the complete current component bundle.
+Set RUNTARA_TEST_PUBLIC_URL to an isolated server using local authentication. Requires the complete current component bundle.
 """
 
 import json
@@ -11,7 +10,6 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 PUBLIC = os.environ.get("RUNTARA_TEST_PUBLIC_URL", "http://127.0.0.1:7001")
-INTERNAL = os.environ.get("RUNTARA_TEST_INTERNAL_URL", "http://127.0.0.1:7002")
 
 
 def request(base, path, method="GET", body=None):
@@ -43,10 +41,6 @@ def main():
     assert "sftp" not in integrations
     assert {"http_bearer", "s3_compatible", "mcp"} <= integrations
 
-    for module, capability in [("sftp", "sftp-list-files"), ("http", "http-request"), ("unknown", "anything")]:
-        status, _ = request(INTERNAL, f"/api/internal/agents/{module}/{capability}", "POST", {})
-        assert status == 404, f"native bridge still responds for {module}: {status}"
-
     status, _ = request(PUBLIC, "/api/runtime/connections", "POST", {
         "title": "Removed SFTP", "integrationId": "sftp", "connectionParameters": {},
     })
@@ -76,10 +70,7 @@ def main():
         status, _ = request(PUBLIC, f"/api/runtime/workflows/{workflow_id}/delete", "POST", {})
         assert status == 200, "disposable workflow cleanup failed"
 
-    for path in ["/api/internal/proxy", "/api/internal/presign", "/api/internal/object-model/sql/query", "/api/internal/object-model/sql/execute", "/api/internal/object-model/instances", "/api/internal/object-model/schemas"]:
-        status, _ = request(INTERNAL, path, "POST", {})
-        assert status == 404, f"legacy route still available: {path}: {status}"
-    print("PASS: native dispatch, presign, Object Model and outbound proxy HTTP routes removed")
+    print("PASS: native SFTP dispatch removed from the catalog, connections and workflows")
 
 
 if __name__ == "__main__":

@@ -58,8 +58,8 @@ pub struct Config {
     /// How long each stage of the shutdown drain waits.
     pub shutdown_grace: ShutdownGrace,
     /// Guard rails for workflow-facing raw SQL (query-sql / execute-sql
-    /// capabilities on the internal API). The runtime/MCP SQL routes are
-    /// unguarded for now — retrofit is tracked separately.
+    /// capabilities). The runtime/MCP SQL routes are unguarded for now —
+    /// retrofit is tracked separately.
     pub raw_sql_guardrails: runtara_object_store::SqlGuardrails,
     /// Connection-pool tuning for per-connection object-model PostgreSQL pools
     /// (the cross-cloud path to customer databases) and the default pool.
@@ -68,8 +68,6 @@ pub struct Config {
     pub object_model_pool_cache_max: u64,
     /// Idle seconds before an unused object-model store pool is evicted.
     pub object_model_pool_cache_ttl_secs: u64,
-    /// Internal HTTP port (used to derive default service URLs).
-    pub internal_port: u16,
     /// Directory containing per-agent WASM components (`runtara_agent_*.wasm`).
     /// When set, `AgentTestingService` routes known agents through the
     /// embedded wasmtime path instead of the legacy dispatcher image.
@@ -206,11 +204,6 @@ impl Config {
             )?,
         };
 
-        let internal_port: u16 = std::env::var("INTERNAL_PORT")
-            .unwrap_or_else(|_| "7002".to_string())
-            .parse()
-            .map_err(|_| ConfigError::Invalid("INTERNAL_PORT", "must be a valid port number"))?;
-
         let agent_components_dir = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -288,7 +281,6 @@ impl Config {
             object_model_pool,
             object_model_pool_cache_max,
             object_model_pool_cache_ttl_secs,
-            internal_port,
             agent_components_dir,
             direct_wasm_components_dir,
             isolation_policy,

@@ -11,8 +11,8 @@
 //!
 //! The server drains intake before calling the embedded runtime's drain, which
 //! stops dispatch, snapshots active instances, signals them to checkpoint, and
-//! force-stops stragglers after `RUNTARA_SHUTDOWN_GRACE_MS`. The internal API and
-//! core remain available until that drain finishes. This coordinator retains
+//! force-stops stragglers after `RUNTARA_SHUTDOWN_GRACE_MS`. The embedded core
+//! remains available until that drain finishes. This coordinator retains
 //! the configured execution grace for that call; Environment owns the active
 //! instance registry and execution drain.
 
@@ -68,11 +68,6 @@ impl ShutdownSignal {
     }
 
     /// Flip this signal directly (waking any `wait()`-ers). Idempotent.
-    ///
-    /// Used for the internal API server's *own* signal, which is held back
-    /// until the environment drain completes so in-flight guest agent calls
-    /// (object-model / agents / proxy) keep succeeding while running instances
-    /// reach a checkpoint and suspend.
     pub fn trigger(&self) {
         if !self.flag.swap(true, Ordering::SeqCst) {
             self.notify.notify_waiters();

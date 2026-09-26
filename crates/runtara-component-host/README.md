@@ -25,7 +25,7 @@ use runtara_component_host::{
 };
 
 let env = DispatcherEnv {
-    core_http_url: "http://127.0.0.1:7002".into(),
+    core_http_url: String::new(),
 };
 
 let dispatcher = ComponentDispatcherService::from_dir(

@@ -42,7 +42,6 @@ VALKEY_PORT="${VALKEY_PORT:-6379}"
 TEST_DB_SERVER="tier2_e2e_server_$$"
 TEST_DB_RUNTIME="tier2_e2e_runtime_$$"
 TEST_PORT_PUBLIC="${TEST_PORT_PUBLIC:-17600}"
-TEST_PORT_INTERNAL="${TEST_PORT_INTERNAL:-17601}"
 TEST_DATA_DIR="$(mktemp -d -t runtara_tier2_e2e_XXXXXX)"
 TEST_LOG="${TEST_DATA_DIR}/server.log"
 SERVER_PID=""
@@ -120,14 +119,13 @@ print_step "Creating test databases (${TEST_DB_SERVER}, ${TEST_DB_RUNTIME})..."
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
 
-print_step "Starting runtara-server on :${TEST_PORT_PUBLIC} (internal :${TEST_PORT_INTERNAL})..."
+print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
 RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}" \
 OBJECT_MODEL_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}" \
 RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
 TENANT_ID=tier2_e2e \
 SERVER_HOST=127.0.0.1 \
 SERVER_PORT="${TEST_PORT_PUBLIC}" \
-INTERNAL_PORT="${TEST_PORT_INTERNAL}" \
 RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:18600" \
 DATA_DIR="${TEST_DATA_DIR}" \
 RUST_LOG="warn,runtara_server=warn,runtara_object_store=warn" \

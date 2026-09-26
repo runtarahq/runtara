@@ -14,8 +14,6 @@ RUNTARA ships three deploy-time authentication modes. Pick one with the `AUTH_PR
 
 `SERVER_HOST` defaults to `0.0.0.0`. That is fine under `oidc`, but `local` and `trust_proxy` both refuse to start on a non-loopback address (see [Startup safety check](#startup-safety-check)) — so those two modes need `SERVER_HOST=127.0.0.1` set explicitly.
 
-The internal listener has its own guard: a non-loopback `INTERNAL_HOST` refuses to boot unless `RUNTARA_INTERNAL_SHARED_SECRET` is set. The secret is checked at boot only; nothing on the request path validates it.
-
 RUNTARA-issued API keys (`rt_*` / `smo_*` prefixes) continue to work in every mode. They are validated against the local database independently of the provider, so operators always have a direct-access path that does not depend on the perimeter.
 
 Auth answers "who is calling"; **entitlements answer "what they can do"**. Both are env-driven and resolve at startup. See [`entitlements.md`](entitlements.md) for the feature gates, agent allowlist, and tier limits — common questions like "why is the Reports menu hidden" or "why does this workflow fail with `AGENT_NOT_ENABLED`" live there.

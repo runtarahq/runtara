@@ -160,7 +160,6 @@ Default local ports:
 | Component | Default port |
 | --- | --- |
 | `runtara-server` public API | `7001` |
-| `runtara-server` internal API | `7002` |
 | `runtara-environment` API (served by `runtara-server`) | `8002` |
 | `runtara-core` instance API (served by `runtara-server`) | `8001` |
 

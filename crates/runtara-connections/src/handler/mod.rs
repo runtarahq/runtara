@@ -1,4 +1,3 @@
-pub mod admin;
 pub mod connections;
 pub mod oauth;
 pub mod rate_limits;

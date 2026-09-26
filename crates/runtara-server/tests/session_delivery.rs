@@ -253,7 +253,6 @@ fn init_config() {
             object_model_pool: Default::default(),
             object_model_pool_cache_max: 1,
             object_model_pool_cache_ttl_secs: 60,
-            internal_port: 7002,
             agent_components_dir: None,
             direct_wasm_components_dir: None,
             isolation_policy: None,
