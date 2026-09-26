@@ -38,6 +38,23 @@ pub enum DirectCompileError {
     Io(std::io::Error),
     /// Component-model artifact emission failed.
     Component(String),
+    /// A published workflow-agent was composed against a trusted built-in
+    /// version that is not in the installed bundle, so a parent composed from
+    /// it would pin a version no host runs. Typed so the server can record
+    /// `pins` with the failure and retry it once the workflow-agent is
+    /// republished.
+    StaleTrustedDependency {
+        /// The workflow-agent to republish.
+        dependency: String,
+        /// Canonical id of the trusted built-in it pins.
+        agent: String,
+        /// The stale `runtara:trusted-artifacts/*` pins it carries.
+        pins: Vec<String>,
+        /// The staged artifact the parent was composed from. The server
+        /// re-reads it before recording the failure, so a republish during
+        /// the compile is retried rather than recorded.
+        wasm_path: std::path::PathBuf,
+    },
 }
 
 impl fmt::Display for DirectCompileError {
@@ -69,6 +86,15 @@ impl fmt::Display for DirectCompileError {
             DirectCompileError::Component(err) => {
                 write!(f, "direct workflow component emission failed: {err}")
             }
+            DirectCompileError::StaleTrustedDependency {
+                dependency, agent, ..
+            } => write!(
+                f,
+                "published workflow-agent `{dependency}` was built against a version of trusted \
+                 built-in `{agent}` that is not in the installed component bundle; republish it \
+                 (POST /workflows/<id>/publish-agent), after which workflows that use it \
+                 recompile on their next launch"
+            ),
         }
     }
 }

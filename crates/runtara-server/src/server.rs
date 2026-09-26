@@ -1302,6 +1302,27 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     let trusted_executor = component_dispatcher.as_ref().map(|d| d.trusted_executor());
     if let Some(executor) = &trusted_executor {
+        // Compilation readiness needs every pin an artifact records to be one
+        // this server can run; a trusted-agent upgrade then recompiles.
+        api::repositories::workflows::set_installed_trusted_pins(
+            executor.artifact_pins().map(str::to_owned),
+        );
+        if let Some(compile_dir) = config::direct_wasm_components_dir() {
+            let differing = api::services::compilation::trusted_builtins_differing_from(
+                &compile_dir,
+                executor.artifact_pins(),
+            );
+            if !differing.is_empty() {
+                tracing::warn!(
+                    compile_dir = %compile_dir.display(),
+                    trusted_builtins = ?differing,
+                    "the direct-compile component bundle ships different versions of trusted \
+                     built-ins than the bundle loaded for execution; workflows using them fail \
+                     to compile until RUNTARA_DIRECT_WASM_COMPONENTS_DIR and \
+                     RUNTARA_AGENT_COMPONENTS_DIR name the same bundle"
+                );
+            }
+        }
         executor.set_credentials(Arc::new(api::services::trusted::BuiltinTrustedCredentials(
             connections_facade.clone(),
         )))?;

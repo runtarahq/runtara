@@ -460,17 +460,12 @@ impl WorkflowExecutor {
         &self,
         component: &Component,
     ) -> Result<wasmtime::component::Linker<WorkflowState>> {
-        // Empty instance imports describe dependencies but Wasmtime does not
-        // require a linker definition for them. Validate them explicitly.
+        // Empty instance imports describe dependencies, and Wasmtime does not
+        // require a linker definition for them, so a pin for a trusted
+        // version this host no longer runs still links. That artifact's
+        // trusted calls fail with TRUSTED_VERSION_REQUIRED before any
+        // credential lookup; everything else in it keeps running.
         let pins = self.trusted_pins(component);
-        for pin in pins.iter() {
-            anyhow::ensure!(
-                self.trusted
-                    .get()
-                    .is_some_and(|executor| executor.has_artifact_pin(pin)),
-                "approved trusted artifact unavailable: {pin}"
-            );
-        }
         if component
             .component_type()
             .imports(&self.engine)
@@ -678,24 +673,24 @@ impl WorkflowExecutor {
         package: crate::precompile::CompiledWorkflowPackage,
     ) -> Result<PreparedWorkflow> {
         // Child bytes were verified by the precompile worker against these
-        // digests. Bare built-ins have no workflow pin import, so bind them to
-        // the approved registry AND the root's metadata-bound version here.
+        // digests. Bare built-ins have no workflow pin import, so bind each to
+        // the root's pin for exactly those bytes. When that version is no
+        // longer installed, the child still links and its trusted calls fail
+        // with TRUSTED_VERSION_REQUIRED, as they do for the root.
         let root_pins = self.trusted_pins(&package.root);
         let mut child_pins = std::collections::BTreeMap::new();
         let linker = self.linker_with_trusted_pins(&package.root)?;
         for (digest, component) in &package.artifacts {
             let mut pins = (*self.trusted_pins(component)).clone();
-            if let Some(pin) = self
-                .trusted
-                .get()
-                .and_then(|executor| executor.pin_for_wasm(digest))
-            {
-                anyhow::ensure!(
-                    root_pins.contains(pin),
-                    "isolated trusted built-in lacks matching root artifact pin"
-                );
-                pins.insert(pin.to_owned());
-            }
+            pins.extend(
+                root_pins
+                    .iter()
+                    .filter(|pin| {
+                        runtara_dsl::agent_meta::trusted_artifact_import_wasm_sha256(pin)
+                            == Some(digest.as_str())
+                    })
+                    .cloned(),
+            );
             for pin in &pins {
                 anyhow::ensure!(
                     root_pins.contains(pin),

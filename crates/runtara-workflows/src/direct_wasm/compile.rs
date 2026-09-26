@@ -63,6 +63,7 @@ mod step_context;
 mod step_error;
 mod switch_route;
 mod trusted;
+pub use trusted::{bundled_trusted_pin, staged_dependency_is_stale, trusted_artifact_pins};
 mod wait;
 mod while_loop;
 
@@ -810,7 +811,7 @@ fn compose_direct_workflow_selected(
         composed_bytes = composed_wasm.len(),
         "compose: in-process wac-graph composition complete",
     );
-    trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components)?;
+    trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
     let isolation = if bindings.is_empty() {
         None
     } else {

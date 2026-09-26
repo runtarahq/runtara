@@ -3029,9 +3029,64 @@ pub fn trusted_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha25
     )
 }
 
+/// The component SHA-256 a [`trusted_artifact_import`] name binds, or `None`
+/// when `import` is not such a name.
+pub fn trusted_artifact_import_wasm_sha256(import: &str) -> Option<&str> {
+    parse_trusted_artifact_import(import).map(|(_, wasm)| wasm)
+}
+
+/// The canonical agent id a [`trusted_artifact_import`] name pins, or `None`
+/// when `import` is not such a name.
+pub fn trusted_artifact_import_agent_id(import: &str) -> Option<&str> {
+    parse_trusted_artifact_import(import).map(|(agent, _)| agent)
+}
+
+fn parse_trusted_artifact_import(import: &str) -> Option<(&str, &str)> {
+    let (rest, metadata) = import
+        .strip_prefix("runtara:trusted-artifacts/")?
+        .strip_suffix("@0.1.0")?
+        .rsplit_once("-h")?;
+    let (agent, wasm) = rest.rsplit_once("-h")?;
+    let digest = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    (!agent.is_empty() && digest(wasm) && digest(metadata)).then_some((agent, wasm))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_artifact_import_names_round_trip_their_component_digest() {
+        let wasm = "a".repeat(64);
+        let import = trusted_artifact_import("s3_storage", &wasm, &"b".repeat(64));
+        assert_eq!(
+            trusted_artifact_import_wasm_sha256(&import),
+            Some(wasm.as_str())
+        );
+        // Agent ids may contain "-h"; the digests are taken from the right.
+        assert_eq!(
+            trusted_artifact_import_agent_id(&import),
+            Some("s3-storage")
+        );
+        let import = trusted_artifact_import("fetch-http", &wasm, &"c".repeat(64));
+        assert_eq!(
+            trusted_artifact_import_wasm_sha256(&import),
+            Some(wasm.as_str())
+        );
+        assert_eq!(
+            trusted_artifact_import_agent_id(&import),
+            Some("fetch-http")
+        );
+        for name in [
+            "runtara:trusted/executor@0.1.0",
+            "runtara:trusted-artifacts/s3-storage-hab-hcd@0.1.0",
+            &format!("runtara:trusted-artifacts/-h{wasm}-h{wasm}@0.1.0"),
+            &format!("runtara:trusted-artifacts/x-h{wasm}-h{wasm}@0.2.0"),
+        ] {
+            assert_eq!(trusted_artifact_import_wasm_sha256(name), None, "{name}");
+            assert_eq!(trusted_artifact_import_agent_id(name), None, "{name}");
+        }
+    }
 
     #[test]
     fn test_builtin_agent_modules_count() {

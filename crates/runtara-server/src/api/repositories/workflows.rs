@@ -28,6 +28,7 @@ struct WorkflowVersionRow {
     compiled_track_events: Option<bool>,
     compiled_template_major: Option<String>,
     compiled_lowering_mode: Option<String>,
+    compiled_trusted_pins: Option<Vec<String>>,
     definition: Value,
 }
 
@@ -43,6 +44,95 @@ fn compiler_provenance_matches(template_major: Option<&str>, lowering_mode: Opti
     let current_lowering_mode = crate::config::workflow_lowering_tag();
     template_major == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && lowering_mode == Some(current_lowering_mode.as_str())
+}
+
+/// Approved trusted built-in versions installed on this server, as
+/// `runtara:trusted-artifacts/*` import names. Set once at boot from the
+/// operator bundle; empty when no component bundle is loaded.
+static INSTALLED_TRUSTED_PINS: std::sync::RwLock<std::collections::BTreeSet<String>> =
+    std::sync::RwLock::new(std::collections::BTreeSet::new());
+
+/// Serializes unit tests that change the process-wide installed set.
+#[cfg(test)]
+pub(crate) static INSTALLED_PINS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Record the trusted built-in versions this server can run.
+pub fn set_installed_trusted_pins(pins: impl IntoIterator<Item = String>) {
+    let pins = pins.into_iter().collect();
+    *INSTALLED_TRUSTED_PINS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = pins;
+}
+
+fn installed_trusted_pins() -> Vec<String> {
+    INSTALLED_TRUSTED_PINS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// Whether every trusted built-in version a successful artifact pins is
+/// installed here. Checked beside [`compiler_provenance_matches`] wherever a
+/// success is treated as ready: after a trusted-agent upgrade the old
+/// artifact's trusted calls cannot run, so the workflow recompiles instead.
+/// `None` is a row written before pins were recorded; like other missing
+/// provenance it misses and recompiles once.
+fn trusted_pins_installed(recorded: Option<&[String]>) -> bool {
+    all_pins_installed(
+        recorded,
+        &INSTALLED_TRUSTED_PINS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+fn all_pins_installed(
+    recorded: Option<&[String]>,
+    installed: &std::collections::BTreeSet<String>,
+) -> bool {
+    recorded.is_some_and(|recorded| recorded.iter().all(|pin| installed.contains(pin)))
+}
+
+/// The pins in `pins` this server does not run, in their given order. A
+/// fresh compile that still pins one of them can never become ready, so the
+/// compile path records it as a failure rather than a success that every
+/// launch would recompile.
+pub fn uninstalled_trusted_pins(pins: &[String]) -> Vec<String> {
+    let installed = INSTALLED_TRUSTED_PINS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pins.iter()
+        .filter(|pin| !installed.contains(*pin))
+        .cloned()
+        .collect()
+}
+
+/// Why a raw `success` row is not ready, for the compile-status APIs. Only a
+/// trusted-dependency upgrade is named; every other cause is a change to the
+/// definition, tracking mode or compiler.
+pub fn stale_artifact_message(recorded_pins: Option<&[String]>) -> &'static str {
+    stale_artifact_message_for(
+        recorded_pins,
+        &INSTALLED_TRUSTED_PINS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+fn stale_artifact_message_for(
+    recorded_pins: Option<&[String]>,
+    installed: &std::collections::BTreeSet<String>,
+) -> &'static str {
+    match recorded_pins {
+        Some(pins) if !all_pins_installed(Some(pins), installed) => {
+            "Compilation artifact pins a trusted built-in version this server no longer runs (the trusted agent was upgraded); retry compilation"
+        }
+        _ => {
+            "Compilation artifact is stale: the workflow definition, event tracking or compiler changed since it was built; retry compilation"
+        }
+    }
 }
 
 /// Identity of the compiler binary itself, used to decide whether a recorded
@@ -88,6 +178,9 @@ pub struct CompilationSuccessRecord<'a> {
     /// This is part of the artifact identity: changing it changes generated
     /// code even when the workflow definition itself has not changed.
     pub track_events: bool,
+    /// Trusted built-in versions the artifact pins; see
+    /// `NativeCompilationResult::trusted_pins`.
+    pub trusted_pins: &'a [String],
 }
 
 /// The exact artifact identity to attach after Environment has accepted it.
@@ -104,6 +197,7 @@ pub struct RegisteredImageRecord<'a> {
     pub source_checksum: &'a str,
     pub compiler_mode: Option<&'a str>,
     pub track_events: bool,
+    pub trusted_pins: &'a [String],
 }
 
 /// Repository for workflow CRUD operations
@@ -132,8 +226,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -153,7 +247,8 @@ impl CompilationWriteGuard<'_> {
                 compiler_mode = $10,
                 track_events = $11,
                 template_major = $12,
-                lowering_mode = $13
+                lowering_mode = $13,
+                trusted_pins = $14
             "#,
         )
         .bind(record.tenant_id)
@@ -169,6 +264,7 @@ impl CompilationWriteGuard<'_> {
         .bind(record.track_events)
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
+        .bind(record.trusted_pins)
         .execute(&mut *self.transaction)
         .await?;
 
@@ -183,8 +279,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode, trusted_pins)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 registered_image_id = $4,
@@ -195,7 +291,8 @@ impl CompilationWriteGuard<'_> {
                 compiler_mode = COALESCE($7, workflow_compilations.compiler_mode),
                 track_events = $8,
                 template_major = $9,
-                lowering_mode = $10
+                lowering_mode = $10,
+                trusted_pins = $11
             "#,
         )
         .bind(record.tenant_id)
@@ -208,12 +305,14 @@ impl CompilationWriteGuard<'_> {
         .bind(record.track_events)
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
+        .bind(record.trusted_pins)
         .execute(&mut *self.transaction)
         .await?;
 
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_failure(
         &mut self,
         tenant_id: &str,
@@ -222,13 +321,14 @@ impl CompilationWriteGuard<'_> {
         error_message: &str,
         source_checksum: &str,
         track_events: bool,
+        trusted_pins: Option<&[String]>,
     ) -> Result<bool, sqlx::Error> {
         let lowering_mode = crate::config::workflow_lowering_tag();
         let result = sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build)
-            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10)
+                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build, trusted_pins)
+            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10, $12)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compilation_status = 'failed',
@@ -242,6 +342,11 @@ impl CompilationWriteGuard<'_> {
                 template_major = $8,
                 lowering_mode = $9,
                 compiler_build = $10,
+                -- Set only for a failure caused by depending on trusted
+                -- versions this server does not run; readiness retries it
+                -- once they are all installed (a restart onto the matching
+                -- bundle), or after a workflow-agent republish releases it.
+                trusted_pins = $12,
                 -- A failed row never attests that a previously registered
                 -- image remains executable.
                 registered_image_id = NULL,
@@ -265,6 +370,11 @@ impl CompilationWriteGuard<'_> {
                     IS DISTINCT FROM EXCLUDED.template_major
                OR workflow_compilations.lowering_mode
                     IS DISTINCT FROM EXCLUDED.lowering_mode
+               -- An artifact pinning a trusted built-in version this server
+               -- no longer has is not ready either, so it must not mask the
+               -- failure of the rebuild that was meant to replace it.
+               OR workflow_compilations.trusted_pins IS NULL
+               OR NOT (workflow_compilations.trusted_pins <@ $11::text[])
             "#,
         )
         .bind(tenant_id)
@@ -277,6 +387,8 @@ impl CompilationWriteGuard<'_> {
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
         .bind(compiler_build_id())
+        .bind(installed_trusted_pins())
+        .bind(trusted_pins)
         .execute(&mut *self.transaction)
         .await?;
 
@@ -1104,6 +1216,7 @@ impl WorkflowRepository {
                 sc.track_events AS compiled_track_events,
                 sc.template_major AS compiled_template_major,
                 sc.lowering_mode AS compiled_lowering_mode,
+                sc.trusted_pins AS compiled_trusted_pins,
                 sd.definition
             FROM workflow_definitions sd
             LEFT JOIN workflow_compilations sc
@@ -1141,7 +1254,8 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         row.compiled_template_major.as_deref(),
                         row.compiled_lowering_mode.as_deref(),
-                    );
+                    )
+                    && trusted_pins_installed(row.compiled_trusted_pins.as_deref());
 
                 WorkflowVersionInfoDto {
                     workflow_id: workflow_id.to_string(),
@@ -1447,6 +1561,68 @@ impl WorkflowRepository {
         track_events: bool,
         error_message: &str,
     ) -> Result<bool, sqlx::Error> {
+        self.record_compilation_failure_with_trusted_pins(
+            tenant_id,
+            workflow_id,
+            version,
+            definition,
+            source_checksum,
+            track_events,
+            error_message,
+            None,
+        )
+        .await
+    }
+
+    /// Make every recorded failure in `tenant_id` that depends on a trusted
+    /// built-in version this server does not run retry once on its next
+    /// launch, by clearing the compiler build that makes it authoritative.
+    ///
+    /// Called after a workflow-agent is republished: a parent refused for
+    /// composing a workflow-agent built against an older trusted version
+    /// records that stale pin, which no restart installs, so without this it
+    /// would stay terminal until a forced recompile. A failure that still
+    /// fails is recorded again under the current build and is terminal again.
+    /// Returns how many failures were released.
+    pub async fn release_stale_trusted_dependency_failures(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workflow_compilations
+            SET compiler_build = NULL
+            WHERE tenant_id = $1
+              AND compilation_status = 'failed'
+              AND compiler_build IS NOT NULL
+              AND trusted_pins IS NOT NULL
+              AND NOT (trusted_pins <@ $2::text[])
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(installed_trusted_pins())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// [`Self::record_compilation_failure`] for a compile that depends on
+    /// trusted built-in versions this server does not run. The failure is
+    /// terminal while any of `trusted_pins` stays uninstalled and retries
+    /// once they all are, or once
+    /// [`Self::release_stale_trusted_dependency_failures`] releases it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_compilation_failure_with_trusted_pins(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        definition: &Value,
+        source_checksum: &str,
+        track_events: bool,
+        error_message: &str,
+        trusted_pins: Option<&[String]>,
+    ) -> Result<bool, sqlx::Error> {
         let Some(mut guard) = self
             .lock_current_compilation_source(
                 tenant_id,
@@ -1468,6 +1644,7 @@ impl WorkflowRepository {
                 error_message,
                 source_checksum,
                 track_events,
+                trusted_pins,
             )
             .await?;
         guard.commit().await?;
@@ -1515,6 +1692,7 @@ impl WorkflowRepository {
                    sc.track_events AS compiled_track_events,
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
+                   sc.trusted_pins AS compiled_trusted_pins,
                    wd.definition,
                    wd.track_events AS definition_track_events
             FROM workflow_definitions wd
@@ -1544,6 +1722,7 @@ impl WorkflowRepository {
         let compiled_track_events: Option<bool> = row.try_get("compiled_track_events")?;
         let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
         let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
+        let compiled_trusted_pins: Option<Vec<String>> = row.try_get("compiled_trusted_pins")?;
         let definition: Value = row.try_get("definition")?;
         let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
@@ -1555,7 +1734,8 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         compiled_template_major.as_deref(),
                         compiled_lowering_mode.as_deref(),
-                    ) =>
+                    )
+                    && trusted_pins_installed(compiled_trusted_pins.as_deref()) =>
             {
                 Some(image_id)
             }
@@ -1579,6 +1759,7 @@ impl WorkflowRepository {
                    sc.track_events AS compiled_track_events,
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
+                   sc.trusted_pins AS compiled_trusted_pins,
                    wd.definition,
                    wd.track_events AS definition_track_events
             FROM workflow_definitions wd
@@ -1609,6 +1790,7 @@ impl WorkflowRepository {
         let compiled_track_events: Option<bool> = row.try_get("compiled_track_events")?;
         let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
         let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
+        let compiled_trusted_pins: Option<Vec<String>> = row.try_get("compiled_trusted_pins")?;
         let definition: Value = row.try_get("definition")?;
         let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
@@ -1632,7 +1814,8 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         compiled_template_major.as_deref(),
                         compiled_lowering_mode.as_deref(),
-                    ) =>
+                    )
+                    && trusted_pins_installed(compiled_trusted_pins.as_deref()) =>
                 {
                     Some(image_id)
                 }
@@ -2466,6 +2649,7 @@ impl WorkflowRepository {
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.compiler_build AS compiled_build,
+                   sc.trusted_pins AS compiled_trusted_pins,
                    wd.definition,
                    wd.track_events AS definition_track_events,
                    wd.version AS resolved_version
@@ -2512,6 +2696,8 @@ impl WorkflowRepository {
                 let compiled_lowering_mode: Option<String> =
                     record.try_get("compiled_lowering_mode")?;
                 let compiled_build: Option<String> = record.try_get("compiled_build")?;
+                let compiled_trusted_pins: Option<Vec<String>> =
+                    record.try_get("compiled_trusted_pins")?;
                 let definition: Value = record.try_get("definition")?;
                 let definition_track_events: bool = record.try_get("definition_track_events")?;
                 let execution_timeout = match execution_timeout_from_definition(&definition) {
@@ -2540,6 +2726,7 @@ impl WorkflowRepository {
                     && registered_image_id.is_some()
                     && source_checksum.as_deref() == Some(current_checksum.as_str())
                     && artifact_matches_tracking_mode
+                    && trusted_pins_installed(compiled_trusted_pins.as_deref())
                 {
                     return Ok((
                         resolved_version,
@@ -2568,9 +2755,18 @@ impl WorkflowRepository {
                     // not move between releases, so without this a build that
                     // widens what the compiler accepts would keep replaying
                     // the stored error and never run the new compiler at all.
+                    // A failure caused by depending on trusted versions this
+                    // server did not run stops being authoritative once they
+                    // are all installed, e.g. after a restart onto the bundle
+                    // the compiler read. (A stale workflow-agent's pins are
+                    // never installed; its republish clears compiler_build
+                    // instead.) Other failures record no pins.
+                    let trusted_pins_now_installed = compiled_trusted_pins.is_some()
+                        && trusted_pins_installed(compiled_trusted_pins.as_deref());
                     if source_checksum.as_deref() == Some(current_checksum.as_str())
                         && artifact_matches_tracking_mode
                         && failure_build_is_current(compiled_build.as_deref())
+                        && !trusted_pins_now_installed
                     {
                         let authoring = is_workflow_authoring_error(&error_msg);
                         // An unrunnable graph is reported to its author, not
@@ -2632,6 +2828,7 @@ impl WorkflowRepository {
                               AND template_major IS NOT DISTINCT FROM $6
                               AND lowering_mode IS NOT DISTINCT FROM $7
                               AND compiler_build IS NOT DISTINCT FROM $8
+                              AND trusted_pins IS NOT DISTINCT FROM $9
                             "#,
                         )
                         .bind(tenant_id)
@@ -2642,6 +2839,7 @@ impl WorkflowRepository {
                         .bind(compiled_template_major.as_deref())
                         .bind(compiled_lowering_mode.as_deref())
                         .bind(compiled_build.as_deref())
+                        .bind(compiled_trusted_pins.as_deref())
                         .execute(&self.pool)
                         .await;
                     }
@@ -2732,6 +2930,65 @@ pub enum CompilationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_requires_every_recorded_trusted_pin_to_be_installed() {
+        let pins = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let installed: std::collections::BTreeSet<String> = pins(&["a", "b"]).into_iter().collect();
+        assert!(!all_pins_installed(None, &installed), "unknown pins");
+        assert!(
+            all_pins_installed(Some(&[]), &installed),
+            "no trusted dependency"
+        );
+        assert!(all_pins_installed(Some(&[]), &Default::default()));
+        assert!(all_pins_installed(Some(&pins(&["a"])), &installed));
+        assert!(all_pins_installed(Some(&pins(&["b", "a"])), &installed));
+        assert!(
+            !all_pins_installed(Some(&pins(&["a", "c"])), &installed),
+            "one uninstalled pin is enough to recompile"
+        );
+        assert!(!all_pins_installed(
+            Some(&pins(&["a"])),
+            &Default::default()
+        ));
+    }
+
+    #[test]
+    fn stale_artifact_message_names_a_trusted_upgrade_only_when_one_caused_it() {
+        let installed: std::collections::BTreeSet<String> =
+            ["new".to_owned()].into_iter().collect();
+        let upgraded = stale_artifact_message_for(Some(&["old".to_owned()]), &installed);
+        assert!(upgraded.contains("trusted built-in"), "{upgraded}");
+        assert!(upgraded.contains("retry compilation"), "{upgraded}");
+        for recorded in [None, Some(&[][..]), Some(&["new".to_owned()][..])] {
+            let other = stale_artifact_message_for(recorded, &installed);
+            assert!(!other.contains("trusted"), "{recorded:?}: {other}");
+            assert!(other.contains("retry compilation"), "{other}");
+        }
+    }
+
+    #[test]
+    fn installing_trusted_pins_replaces_the_previous_set() {
+        let _installed = INSTALLED_PINS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = installed_trusted_pins();
+        set_installed_trusted_pins(["unit-a".to_owned(), "unit-b".to_owned()]);
+        assert!(trusted_pins_installed(Some(&["unit-a".to_owned()])));
+        set_installed_trusted_pins(["unit-c".to_owned()]);
+        assert!(!trusted_pins_installed(Some(&["unit-a".to_owned()])));
+        assert!(trusted_pins_installed(Some(&["unit-c".to_owned()])));
+        assert_eq!(installed_trusted_pins(), vec!["unit-c".to_owned()]);
+        assert_eq!(
+            uninstalled_trusted_pins(&["unit-c".to_owned(), "unit-a".to_owned()]),
+            vec!["unit-a".to_owned()],
+            "a fresh compile pinning an uninstalled version must not record a success"
+        );
+        assert!(uninstalled_trusted_pins(&[]).is_empty());
+        set_installed_trusted_pins(previous);
+    }
 
     #[test]
     fn stepless_workflow_diagnostic_is_an_authoring_error() {

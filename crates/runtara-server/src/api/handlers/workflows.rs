@@ -1408,7 +1408,13 @@ pub async fn compile_workflow_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::compilation::ServiceError::CompilationError(msg)) => {
+        Err(
+            crate::api::services::compilation::ServiceError::CompilationError(msg)
+            | crate::api::services::compilation::ServiceError::TrustedDependencyUnavailable {
+                message: msg,
+                ..
+            },
+        ) => {
             // The compile actually ran and failed (vs. NotFound/DatabaseError, which are
             // pre-compile failures) — record it as a failed compile on the synchronous path.
             events.emit(
@@ -1590,7 +1596,7 @@ pub async fn compilation_progress_handler(
     // real failure here — so we query the row directly to keep the three
     // outcomes (success / failed / unknown) distinct.
     let row: Result<Option<CompilationRow>, sqlx::Error> = sqlx::query_as(
-        "SELECT compilation_status, registered_image_id, wasm_size, error_message \
+        "SELECT compilation_status, registered_image_id, wasm_size, error_message, trusted_pins \
          FROM workflow_compilations \
          WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
     )
@@ -1661,8 +1667,10 @@ pub async fn compilation_progress_handler(
                 updated_at: None,
                 image_id: None,
                 error_message: Some(
-                    "Compilation artifact no longer matches the current workflow definition; retry compilation"
-                        .to_string(),
+                    crate::api::repositories::workflows::stale_artifact_message(
+                        row.trusted_pins.as_deref(),
+                    )
+                    .to_string(),
                 ),
             };
             (
@@ -1735,6 +1743,7 @@ struct CompilationRow {
     registered_image_id: Option<String>,
     wasm_size: Option<i32>,
     error_message: Option<String>,
+    trusted_pins: Option<Vec<String>>,
 }
 
 /// Query the compilation result from the database after the compilation worker has processed it
@@ -1745,7 +1754,7 @@ async fn query_compilation_result(
     version: i32,
 ) -> Result<CompilationQueryResult, sqlx::Error> {
     let result: Option<CompilationRow> = sqlx::query_as(
-        "SELECT compilation_status, registered_image_id, wasm_size, error_message \
+        "SELECT compilation_status, registered_image_id, wasm_size, error_message, trusted_pins \
          FROM workflow_compilations \
          WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
     )
@@ -1776,8 +1785,10 @@ async fn query_compilation_result(
                 wasm_size: if success { record.wasm_size } else { None },
                 error_message: if raw_success && !success {
                     Some(
-                        "Compilation artifact no longer matches the current workflow definition; retry compilation"
-                            .to_string(),
+                        crate::api::repositories::workflows::stale_artifact_message(
+                            record.trusted_pins.as_deref(),
+                        )
+                        .to_string(),
                     )
                 } else {
                     record.error_message

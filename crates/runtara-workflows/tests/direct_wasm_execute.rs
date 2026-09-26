@@ -13490,18 +13490,7 @@ mod wasm_emitter_audit;
 async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     let components = shared_components_dir();
     let (_bundle, dispatcher, resolves) = trusted_test_dispatcher(&components).await;
-    let graph = serde_json::json!({
-        "steps": {
-            "sign": {"id":"sign", "stepType":"Agent", "agentId":"s3-storage", "capabilityId":"storage-generate-presigned-url", "maxRetries":0, "durable":true,
-                "inputMapping": {
-                    "bucket":{"valueType":"immediate","value":"uploads"},
-                    "key":{"valueType":"immediate","value":"report.csv"},
-                    "operation":{"valueType":"immediate","value":"download"},
-                    "_connection":{"valueType":"immediate","value":{"connection_id":"s3-connection"}}
-                }},
-            "finish":{"id":"finish","stepType":"Finish","inputMapping":{"url":{"valueType":"reference","value":"steps.sign.outputs.url"}}}
-        }, "entryPoint":"sign", "executionPlan":[{"fromStep":"sign","toStep":"finish"}]
-    });
+    let graph = trusted_presign_graph();
     let temp = tempfile::tempdir().unwrap();
     let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
         DirectCompilationInput {
@@ -13525,6 +13514,20 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
         imports
             .iter()
             .any(|name| name.starts_with("runtara:trusted-artifacts/s3-storage-"))
+    );
+    // The pins the server records for readiness are exactly the installed
+    // built-in's pin, so an unchanged bundle keeps the artifact ready.
+    let installed: std::collections::BTreeSet<String> = dispatcher
+        .trusted_executor()
+        .artifact_pins()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        runtara_workflows::direct_wasm::trusted_artifact_pins(
+            &fs::read(&compiled.wasm_path).unwrap()
+        )
+        .unwrap(),
+        installed
     );
     let executor =
         runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
@@ -13652,6 +13655,11 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             .iter()
             .any(|name| name.starts_with("runtara:trusted-artifacts/s3-storage-"))
     );
+    assert_eq!(
+        runtara_workflows::direct_wasm::trusted_artifact_pins(&packaged).unwrap(),
+        installed,
+        "a packaged artifact records its root's pins"
+    );
 
     // Parallel Split uses the same host route for every item.
     let split_graph = serde_json::json!({
@@ -13677,13 +13685,19 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     )
     .unwrap();
     compose_direct_workflow(&mut split, &components).unwrap();
+    assert_eq!(
+        runtara_workflows::direct_wasm::trusted_artifact_pins(&fs::read(&split.wasm_path).unwrap())
+            .unwrap(),
+        installed,
+        "a parallel Split artifact records the pin its items call through"
+    );
     let split_output = run_trusted_fixture(&executor, &split.wasm_path).await;
     assert_eq!(split_output["urls"].as_array().unwrap().len(), 3);
     assert!(split_output.to_string().contains("X-Amz-Signature="));
 
     // A published workflow-agent may call the trusted built-in, while its own
     // metadata stays untrusted. Its transitive artifact pin must survive WAC.
-    let child_graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+    let child_graph: ExecutionGraph = serde_json::from_value(graph.clone()).unwrap();
     let child_info = certified_workflow_agent_info(
         "trusted-wrapper",
         "Wrapper",
@@ -13723,7 +13737,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     )
     .unwrap();
     let mut agents = dispatcher.catalog().agents().to_vec();
-    agents.push(child_info);
+    agents.push(child_info.clone());
     let parent_graph = serde_json::json!({
         "steps": {
             "child":{"id":"child","stepType":"Agent","agentId":"trusted-wrapper","capabilityId":"run","maxRetries":0},
@@ -13735,7 +13749,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             workflow_id: "trusted-parent".into(),
             version: 1,
             source_checksum: None,
-            execution_graph: serde_json::from_value(parent_graph).unwrap(),
+            execution_graph: serde_json::from_value(parent_graph.clone()).unwrap(),
             child_workflows: vec![],
             output_dir: temp.path().join("parent"),
             track_events: false,
@@ -13751,9 +13765,17 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
         &mut parent,
         &components,
-        &[staging],
+        std::slice::from_ref(&staging),
     )
     .unwrap();
+    assert_eq!(
+        runtara_workflows::direct_wasm::trusted_artifact_pins(
+            &fs::read(&parent.wasm_path).unwrap()
+        )
+        .unwrap(),
+        installed,
+        "a parent records the pin its published workflow-agent carries"
+    );
     let parent_output = run_trusted_fixture(&executor, &parent.wasm_path).await;
     assert!(
         parent_output["url"]
@@ -13762,18 +13784,18 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             .contains("X-Amz-Signature=")
     );
 
-    // Hosts without that approved version cannot link a persisted workflow.
+    // A host without a trusted executor still links the persisted workflow;
+    // only the trusted call is denied.
     let older_host =
         runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
             .unwrap();
-    let error = older_host
-        .load_instance_pre(&compiled.wasm_path)
-        .await
-        .err()
-        .expect("missing trusted dependency must fail before execution");
-    assert!(format!("{error:#}").contains("trusted-artifacts"));
+    let failure = run_trusted_failure(&older_host, &compiled.wasm_path).await;
+    assert!(failure.contains("TRUSTED_CAPABILITY_DENIED"), "{failure}");
 
-    // Even valid replacement metadata constitutes a different approved version.
+    // Even valid replacement metadata constitutes a different approved
+    // version. Artifacts pinning the old one still load on the upgraded host
+    // (root, Split and workflow-agent routes); their trusted call fails with
+    // TRUSTED_VERSION_REQUIRED before any credential is resolved.
     let sidecar = _bundle.path().join("runtara_agent_s3_storage.meta.json");
     let mut metadata = fs::read(&sidecar).unwrap();
     metadata.push(b'\n');
@@ -13786,15 +13808,326 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     )
     .await
     .unwrap();
-    older_host
+    let upgraded_resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    replacement
+        .trusted_executor()
+        .set_credentials(Arc::new(TrustedTestCredentials(upgraded_resolves.clone())))
+        .unwrap();
+    let upgraded_pins: std::collections::BTreeSet<String> = replacement
+        .trusted_executor()
+        .artifact_pins()
+        .map(str::to_owned)
+        .collect();
+    assert!(upgraded_pins.is_disjoint(&installed), "{upgraded_pins:?}");
+    let upgraded_host =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    upgraded_host
         .set_trusted_executor(replacement.trusted_executor())
         .unwrap();
-    let error = older_host
-        .load_instance_pre(&compiled.wasm_path)
+    for path in [&compiled.wasm_path, &split.wasm_path, &parent.wasm_path] {
+        let failure = run_trusted_failure(&upgraded_host, path).await;
+        assert!(
+            failure.contains("TRUSTED_VERSION_REQUIRED"),
+            "{}: {failure}",
+            path.display()
+        );
+        assert!(!failure.contains("synthetic-test-secret"));
+    }
+    assert_eq!(
+        upgraded_resolves.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a stale pin must fail before credentials are resolved"
+    );
+
+    // The precompile-worker route (an unpackaged root linked from an already
+    // compiled component, as the embedded runner does) behaves the same.
+    let component = wasmtime::component::Component::from_file(
+        embedded_executor().engine(),
+        &compiled.wasm_path,
+    )
+    .unwrap();
+    let prepared = upgraded_host
+        .prepare_precompiled(component)
         .await
-        .err()
-        .expect("different trusted version must fail before credentials");
-    assert!(format!("{error:#}").contains("trusted-artifacts"));
+        .expect("a stale pin must not fail precompiled linking");
+    let (failure, _) = invoke_trusted_failure(&upgraded_host, prepared.instance_pre()).await;
+    assert!(failure.contains("TRUSTED_VERSION_REQUIRED"), "{failure}");
+    assert_eq!(
+        upgraded_resolves.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    // TRUSTED_VERSION_REQUIRED is permanent: a durable step with retries
+    // fails on its first attempt instead of backing off and retrying a call
+    // that can never succeed on this host.
+    let mut retry_graph = trusted_presign_graph();
+    retry_graph["steps"]["sign"]["maxRetries"] = serde_json::json!(3);
+    retry_graph["steps"]["sign"]["retryDelay"] = serde_json::json!(3000);
+    let mut retrying = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "trusted-retry".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(retry_graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("retry"),
+            track_events: false,
+            agent_catalog: Some(dispatcher.catalog()),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut retrying, &components).unwrap();
+    let started = std::time::Instant::now();
+    let (failure, retry_host) = run_trusted_failure_on(&upgraded_host, &retrying.wasm_path).await;
+    assert!(failure.contains("TRUSTED_VERSION_REQUIRED"), "{failure}");
+    let attempts: Vec<String> = retry_host
+        .checkpoints
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|key| key.contains("::attempt::"))
+        .cloned()
+        .collect();
+    assert_eq!(attempts.len(), 1, "exactly one attempt ran: {attempts:?}");
+    assert!(attempts[0].ends_with("::attempt::1"), "{attempts:?}");
+    assert!(
+        started.elapsed() < Duration::from_millis(2500),
+        "no retry backoff was slept: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        upgraded_resolves.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    // A bundle that no longer ships the pinned built-in at all: the artifact
+    // still loads and its call fails the same way, before any credential.
+    let without_s3 = tempfile::tempdir().unwrap();
+    let removed = runtara_component_host::ComponentDispatcherService::from_dir(
+        without_s3.path(),
+        runtara_component_host::DispatcherEnv {
+            core_http_url: "http://127.0.0.1:1".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed.trusted_executor().artifact_pins().count(), 0);
+    let removed_resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    removed
+        .trusted_executor()
+        .set_credentials(Arc::new(TrustedTestCredentials(removed_resolves.clone())))
+        .unwrap();
+    let removed_host =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    removed_host
+        .set_trusted_executor(removed.trusted_executor())
+        .unwrap();
+    let failure = run_trusted_failure(&removed_host, &compiled.wasm_path).await;
+    assert!(failure.contains("TRUSTED_VERSION_REQUIRED"), "{failure}");
+    assert_eq!(
+        removed_resolves.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a removed built-in must fail before credentials are resolved"
+    );
+
+    // Recompiling the parent after the upgrade cannot drop the pin its staged
+    // workflow-agent carries: nothing restages the child. The compiler refuses
+    // it and names the workflow-agent to republish, instead of recording a pin
+    // that no host runs (which would never become ready and recompile on every
+    // launch).
+    let upgraded_components = temp.path().join("upgraded-components");
+    fs::create_dir_all(&upgraded_components).unwrap();
+    for entry in fs::read_dir(&components).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.is_file() && (name.ends_with(".wasm") || name.ends_with(".json")) {
+            fs::copy(&path, upgraded_components.join(&name)).unwrap();
+        }
+    }
+    fs::copy(
+        &sidecar,
+        upgraded_components.join("runtara_agent_s3_storage.meta.json"),
+    )
+    .unwrap();
+    let mut upgraded_agents = replacement.catalog().agents().to_vec();
+    upgraded_agents.push(child_info.clone());
+    let upgraded_catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+        upgraded_agents,
+    ));
+    let compile_parent = |name: &str| {
+        compile_workflow_direct(
+            CompilationInput {
+                tenant_id: "trusted-pins".into(),
+                workflow_id: name.into(),
+                version: 1,
+                execution_graph: serde_json::from_value(parent_graph.clone()).unwrap(),
+                track_events: false,
+                child_workflows: vec![],
+                agent_catalog: Some(upgraded_catalog.clone()),
+                progress_callback: None,
+                agent_slug: None,
+            },
+            DirectWorkflowCompileOptions {
+                output_dir: temp.path().join(name),
+                components_dir: upgraded_components.clone(),
+                extra_component_dirs: vec![staging.clone()],
+                source_checksum: None,
+            },
+        )
+    };
+    let stale = match compile_parent("parent-stale-child") {
+        Ok(_) => panic!("a stale published workflow-agent must not compile into a parent"),
+        Err(error) => {
+            // Typed, so the server records the stale pin with the failure and
+            // releases it when the workflow-agent is republished.
+            match error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<DirectCompileError>())
+            {
+                Some(DirectCompileError::StaleTrustedDependency {
+                    dependency,
+                    agent,
+                    pins,
+                    wasm_path,
+                }) => {
+                    assert_eq!(
+                        wasm_path,
+                        &staging.join("runtara_agent_trusted_wrapper.wasm"),
+                        "the error names the staged artifact the server re-reads"
+                    );
+                    assert!(
+                        runtara_workflows::direct_wasm::staged_dependency_is_stale(
+                            &upgraded_components,
+                            wasm_path
+                        ),
+                        "until it is republished, the staged workflow-agent reads as stale"
+                    );
+                    assert_eq!(dependency, "trusted-wrapper");
+                    assert_eq!(agent, "s3-storage");
+                    assert_eq!(
+                        pins.iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        installed,
+                        "the stale pin is the one the workflow-agent was built against"
+                    );
+                }
+                other => panic!("expected a typed stale dependency, got {other:?}: {error}"),
+            }
+            error.to_string()
+        }
+    };
+    assert!(
+        stale.contains("workflow-agent `trusted-wrapper`")
+            && stale.contains("`s3-storage`")
+            && stale.contains("republish"),
+        "{stale}"
+    );
+
+    // Republishing the workflow-agent against the upgraded bundle clears it:
+    // the parent pins only installed versions and runs on the upgraded host.
+    let republished = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "trusted-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-republished"),
+            track_events: false,
+            agent_catalog: Some(replacement.catalog()),
+            agent_slug: Some("trusted-wrapper".into()),
+        },
+        &upgraded_components,
+        RuntimeBinding::HostImport,
+        WorkflowAbi::AgentCapabilities,
+        false,
+    )
+    .unwrap();
+    fs::copy(
+        republished.wasm_path,
+        staging.join("runtara_agent_trusted_wrapper.wasm"),
+    )
+    .unwrap();
+    assert!(
+        !runtara_workflows::direct_wasm::staged_dependency_is_stale(
+            &upgraded_components,
+            &staging.join("runtara_agent_trusted_wrapper.wasm")
+        ),
+        "a compile refused just before this republish is superseded, not recorded"
+    );
+    let rebuilt = compile_parent("parent-republished-child").unwrap();
+    assert_eq!(
+        rebuilt.trusted_pins,
+        upgraded_pins.iter().cloned().collect::<Vec<_>>()
+    );
+    let rebuilt_output = run_trusted_fixture(&upgraded_host, &rebuilt.binary_path).await;
+    assert!(
+        rebuilt_output["url"]
+            .as_str()
+            .unwrap()
+            .contains("X-Amz-Signature="),
+        "{rebuilt_output}"
+    );
+    assert_eq!(
+        upgraded_resolves.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+/// Run a trusted fixture that must not complete; returns its exit for asserts.
+async fn run_trusted_failure(
+    executor: &runtara_component_host::WorkflowExecutor,
+    path: &Path,
+) -> String {
+    run_trusted_failure_on(executor, path).await.0
+}
+
+/// [`run_trusted_failure`], also returning the runtime host it ran against.
+async fn run_trusted_failure_on(
+    executor: &runtara_component_host::WorkflowExecutor,
+    path: &Path,
+) -> (String, Arc<RecordingRuntimeHost>) {
+    let pre = executor
+        .load_instance_pre(path)
+        .await
+        .expect("a stale or missing trusted pin must not fail at load");
+    invoke_trusted_failure(executor, &pre).await
+}
+
+/// Invoke a linked trusted fixture that must not complete.
+async fn invoke_trusted_failure(
+    executor: &runtara_component_host::WorkflowExecutor,
+    pre: &wasmtime::component::InstancePre<runtara_component_host::WorkflowState>,
+) -> (String, Arc<RecordingRuntimeHost>) {
+    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let run = executor
+        .execute_invoke(
+            pre,
+            runtara_component_host::WorkflowRunSpec {
+                trusted_instance: None,
+                trusted_tenant: Some("tenant-authorized".into()),
+                env: HashMap::new(),
+                stderr: None,
+                timeout: Duration::from_secs(10),
+                cancel: None,
+                limits: runtara_component_host::WorkflowLimits::default(),
+                runtime: Some(host.clone()),
+            },
+            b"{}".to_vec(),
+        )
+        .await;
+    assert!(
+        matches!(run.exit, runtara_component_host::InvokeExit::Failed(_)),
+        "{:?}",
+        run.exit
+    );
+    (format!("{:?}", run.exit), host)
 }
 
 async fn run_trusted_fixture(
@@ -13825,6 +14158,388 @@ async fn run_trusted_fixture(
     serde_json::from_slice(&output).unwrap()
 }
 
+fn trusted_presign_graph() -> Value {
+    serde_json::json!({
+        "steps": {
+            "sign": {"id":"sign", "stepType":"Agent", "agentId":"s3-storage", "capabilityId":"storage-generate-presigned-url", "maxRetries":0, "durable":true,
+                "inputMapping": {
+                    "bucket":{"valueType":"immediate","value":"uploads"},
+                    "key":{"valueType":"immediate","value":"report.csv"},
+                    "operation":{"valueType":"immediate","value":"download"},
+                    "_connection":{"valueType":"immediate","value":{"connection_id":"s3-connection"}}
+                }},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{"url":{"valueType":"reference","value":"steps.sign.outputs.url"}}}
+        }, "entryPoint":"sign", "executionPlan":[{"fromStep":"sign","toStep":"finish"}]
+    })
+}
+
+/// The server's compile entry records exactly the installed trusted versions
+/// an artifact pins; an empty set would read as ready after any upgrade. That
+/// holds for each trusted built-in (S3 and Azure), for a graph using both, and
+/// for one reaching a built-in only through an embedded child workflow.
+#[tokio::test(flavor = "multi_thread")]
+async fn production_compile_entry_records_installed_trusted_pins() {
+    let components = shared_components_dir();
+    let (_bundle, dispatcher, _resolves) =
+        trusted_bundle_dispatcher(&components, &TRUSTED_TEST_AGENTS).await;
+    let temp = tempfile::tempdir().unwrap();
+    let compile = |workflow_id: &str,
+                   graph: ExecutionGraph,
+                   child_workflows: Vec<runtara_workflows::ChildWorkflowInput>| {
+        compile_workflow_direct(
+            CompilationInput {
+                tenant_id: "trusted-pins".into(),
+                workflow_id: workflow_id.into(),
+                version: 1,
+                execution_graph: graph,
+                track_events: false,
+                child_workflows,
+                agent_catalog: Some(dispatcher.catalog()),
+                progress_callback: None,
+                agent_slug: None,
+            },
+            DirectWorkflowCompileOptions {
+                output_dir: temp.path().join(workflow_id),
+                components_dir: components.clone(),
+                extra_component_dirs: vec![],
+                source_checksum: None,
+            },
+        )
+        .unwrap()
+    };
+    let installed = |agent: &str| -> String {
+        let executor = dispatcher.trusted_executor();
+        let pins: Vec<String> = executor
+            .artifact_pins()
+            .filter(|pin| {
+                runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin) == Some(agent)
+            })
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(pins.len(), 1, "{agent}: {pins:?}");
+        pins[0].clone()
+    };
+    let (s3, azure) = (installed("s3-storage"), installed("azure-blob-storage"));
+
+    let trusted = compile(
+        "trusted-pins",
+        serde_json::from_value(trusted_presign_graph()).unwrap(),
+        vec![],
+    );
+    assert_eq!(trusted.trusted_pins, vec![s3.clone()]);
+    let azure_only = compile(
+        "azure-pins",
+        serde_json::from_value(two_trusted_presign_graph(&["azure-blob-storage"])).unwrap(),
+        vec![],
+    );
+    assert_eq!(azure_only.trusted_pins, vec![azure.clone()]);
+    let mut both = vec![s3.clone(), azure.clone()];
+    both.sort();
+    let mixed = compile(
+        "mixed-pins",
+        serde_json::from_value(two_trusted_presign_graph(&[
+            "s3-storage",
+            "azure-blob-storage",
+        ]))
+        .unwrap(),
+        vec![],
+    );
+    assert_eq!(mixed.trusted_pins, both);
+
+    // A built-in reached only through an embedded child still pins the root;
+    // otherwise the parent would stay ready after an upgrade and fail only
+    // at the call, never recompiling.
+    let embed_parent = serde_json::json!({
+        "steps": {
+            "embed": {"id":"embed", "stepType":"EmbedWorkflow", "childWorkflowId":"presign-child", "childVersion":"latest"},
+            "finish": {"id":"finish", "stepType":"Finish", "inputMapping":{"url":{"valueType":"reference","value":"steps.embed.outputs.url"}}}
+        }, "entryPoint":"embed", "executionPlan":[{"fromStep":"embed","toStep":"finish"}]
+    });
+    let embedded = compile(
+        "embed-pins",
+        serde_json::from_value(embed_parent).unwrap(),
+        vec![runtara_workflows::ChildWorkflowInput {
+            step_id: "embed".into(),
+            workflow_id: "presign-child".into(),
+            version_requested: "latest".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(trusted_presign_graph()).unwrap(),
+        }],
+    );
+    assert_eq!(embedded.trusted_pins, vec![s3]);
+
+    let plain = compile(
+        "plain-pins",
+        serde_json::from_str(SIMPLE_PASSTHROUGH).unwrap(),
+        vec![],
+    );
+    assert!(plain.trusted_pins.is_empty(), "{:?}", plain.trusted_pins);
+}
+
+/// The per-call check is per agent. An artifact pinning the installed version
+/// of one trusted built-in and a stale version of another (an operator
+/// upgraded only one) runs the current one's calls and refuses only the stale
+/// one's, before resolving its credentials. Each direction is checked, so an
+/// Azure upgrade fails at the call just like an S3 one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_trusted_pin_fails_only_its_own_agent_calls() {
+    let components = shared_components_dir();
+    for (current, upgraded, current_marker) in [
+        ("azure-blob-storage", "s3-storage", "sig="),
+        ("s3-storage", "azure-blob-storage", "X-Amz-Signature="),
+    ] {
+        let (bundle, dispatcher, resolves) =
+            trusted_bundle_dispatcher(&components, &TRUSTED_TEST_AGENTS).await;
+        let temp = tempfile::tempdir().unwrap();
+        // The current agent's step runs first, so the stale one's call is
+        // reached only after the current one has run.
+        let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+            DirectCompilationInput {
+                workflow_id: format!("mixed-{upgraded}"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(two_trusted_presign_graph(&[
+                    current, upgraded,
+                ]))
+                .unwrap(),
+                child_workflows: vec![],
+                output_dir: temp.path().to_path_buf(),
+                track_events: false,
+                agent_catalog: Some(dispatcher.catalog()),
+                agent_slug: None,
+            },
+            WorkflowAbi::InvokeHostImports,
+            false,
+        )
+        .unwrap();
+        compose_direct_workflow(&mut compiled, &components).unwrap();
+        let installed: std::collections::BTreeSet<String> = dispatcher
+            .trusted_executor()
+            .artifact_pins()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(installed.len(), 2);
+        assert_eq!(
+            runtara_workflows::direct_wasm::trusted_artifact_pins(
+                &fs::read(&compiled.wasm_path).unwrap()
+            )
+            .unwrap(),
+            installed
+        );
+        let host =
+            runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+                .unwrap();
+        host.set_trusted_executor(dispatcher.trusted_executor())
+            .unwrap();
+        let output = run_trusted_fixture(&host, &compiled.wasm_path).await;
+        assert!(output.to_string().contains("sig="), "{output}");
+        assert!(output.to_string().contains("X-Amz-Signature="), "{output}");
+        assert_eq!(resolves.count(current), 1);
+        assert_eq!(resolves.count(upgraded), 1);
+
+        // Upgrade only `upgraded`.
+        let file = format!("runtara_agent_{}.meta.json", upgraded.replace('-', "_"));
+        let sidecar = bundle.path().join(file);
+        let mut metadata = fs::read(&sidecar).unwrap();
+        metadata.push(b'\n');
+        fs::write(&sidecar, metadata).unwrap();
+        let replacement = runtara_component_host::ComponentDispatcherService::from_dir(
+            bundle.path(),
+            runtara_component_host::DispatcherEnv {
+                core_http_url: "http://127.0.0.1:1".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let upgraded_resolves = Arc::new(PerAgentTrustedCredentials::default());
+        replacement
+            .trusted_executor()
+            .set_credentials(upgraded_resolves.clone())
+            .unwrap();
+        let upgraded_pins: std::collections::BTreeSet<String> = replacement
+            .trusted_executor()
+            .artifact_pins()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            installed.intersection(&upgraded_pins).count(),
+            1,
+            "only {upgraded} changed: {upgraded_pins:?}"
+        );
+        let upgraded_host =
+            runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+                .unwrap();
+        upgraded_host
+            .set_trusted_executor(replacement.trusted_executor())
+            .unwrap();
+        let (failure, run_host) = run_trusted_failure_on(&upgraded_host, &compiled.wasm_path).await;
+        assert!(
+            failure.contains("TRUSTED_VERSION_REQUIRED"),
+            "{upgraded}: {failure}"
+        );
+        assert_eq!(
+            upgraded_resolves.count(current),
+            1,
+            "the installed {current} call still runs, exactly once"
+        );
+        assert_eq!(
+            upgraded_resolves.count(upgraded),
+            0,
+            "the stale {upgraded} call fails before resolving credentials"
+        );
+        let checkpoints = run_host.checkpoints.lock().unwrap();
+        assert!(
+            checkpoints
+                .values()
+                .any(|bytes| String::from_utf8_lossy(bytes).contains(current_marker)),
+            "the {current} step completed and checkpointed its signed URL"
+        );
+        for bytes in checkpoints.values() {
+            assert!(!String::from_utf8_lossy(bytes).contains("synthetic-test-secret"));
+        }
+    }
+}
+
+/// Trusted built-ins that the mixed-bundle fixtures install.
+const TRUSTED_TEST_AGENTS: [&str; 2] = ["s3_storage", "azure_blob_storage"];
+
+/// A graph that presigns once with each of `agents`, in order, and returns
+/// every URL.
+fn two_trusted_presign_graph(agents: &[&str]) -> Value {
+    let mut steps = serde_json::Map::new();
+    let mut plan = Vec::new();
+    let mut finish = serde_json::Map::new();
+    let ids: Vec<String> = (0..agents.len()).map(|i| format!("sign{i}")).collect();
+    for (i, agent) in agents.iter().enumerate() {
+        let connection = if agent.starts_with("s3") {
+            "s3-connection"
+        } else {
+            "azure-connection"
+        };
+        steps.insert(
+            ids[i].clone(),
+            serde_json::json!({"id": ids[i], "stepType":"Agent", "agentId": agent,
+            "capabilityId":"storage-generate-presigned-url", "maxRetries":0, "durable":true,
+            "inputMapping": {
+                "bucket":{"valueType":"immediate","value":"uploads"},
+                "key":{"valueType":"immediate","value":"report.csv"},
+                "operation":{"valueType":"immediate","value":"download"},
+                "_connection":{"valueType":"immediate","value":{"connection_id":connection}}
+            }}),
+        );
+        let next = ids.get(i + 1).map(String::as_str).unwrap_or("finish");
+        plan.push(serde_json::json!({"fromStep": ids[i], "toStep": next}));
+        finish.insert(
+            ids[i].clone(),
+            serde_json::json!({"valueType":"reference","value":format!("steps.{}.outputs.url", ids[i])}),
+        );
+    }
+    steps.insert(
+        "finish".into(),
+        serde_json::json!({"id":"finish","stepType":"Finish","inputMapping":finish}),
+    );
+    serde_json::json!({"steps": steps, "entryPoint": ids[0], "executionPlan": plan})
+}
+
+/// Synthetic S3 and Azure signing credentials, counting resolutions per agent.
+#[derive(Default)]
+struct PerAgentTrustedCredentials(Mutex<HashMap<String, usize>>);
+
+impl PerAgentTrustedCredentials {
+    fn count(&self, agent: &str) -> usize {
+        self.0.lock().unwrap().get(agent).copied().unwrap_or(0)
+    }
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::trusted::TrustedCredentials for PerAgentTrustedCredentials {
+    async fn resolve(
+        &self,
+        tenant: &str,
+        agent: &str,
+        connection: &str,
+        allowed: &[String],
+    ) -> Result<runtara_agent_trusted::TrustedContext, String> {
+        *self.0.lock().unwrap().entry(agent.to_owned()).or_default() += 1;
+        assert_eq!(tenant, "tenant-authorized");
+        let (integration_id, credentials) = match (agent, connection) {
+            ("s3-storage", "s3-connection") => (
+                "s3_compatible",
+                serde_json::json!({"base_url":"https://storage.example.test", "access_key_id":"test-access", "secret_access_key":"synthetic-test-secret", "region":"us-east-1"}),
+            ),
+            ("azure-blob-storage", "azure-connection") => (
+                "azure_blob_storage",
+                serde_json::json!({"base_url":"https://test.blob.core.windows.net", "account_name":"test", "account_key":"c3ludGhldGljLXRlc3Qtc2VjcmV0"}),
+            ),
+            other => panic!("unexpected trusted credential request {other:?}"),
+        };
+        assert_eq!(allowed, [integration_id]);
+        Ok(runtara_agent_trusted::TrustedContext {
+            integration_id: integration_id.into(),
+            now_ms: 1_700_000_000_000,
+            credentials,
+        })
+    }
+}
+
+/// A dispatcher over a private copy of the bundle's `agents` (snake-case
+/// component names), with [`PerAgentTrustedCredentials`].
+async fn trusted_bundle_dispatcher(
+    components: &Path,
+    agents: &[&str],
+) -> (
+    tempfile::TempDir,
+    runtara_component_host::ComponentDispatcherService,
+    Arc<PerAgentTrustedCredentials>,
+) {
+    let bundle = tempfile::tempdir().unwrap();
+    for agent in agents {
+        for suffix in ["wasm", "meta.json"] {
+            let file = format!("runtara_agent_{agent}.{suffix}");
+            fs::copy(components.join(&file), bundle.path().join(file)).unwrap();
+        }
+    }
+    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
+        bundle.path(),
+        runtara_component_host::DispatcherEnv {
+            core_http_url: "http://127.0.0.1:1".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let resolves = Arc::new(PerAgentTrustedCredentials::default());
+    dispatcher
+        .trusted_executor()
+        .set_credentials(resolves.clone())
+        .unwrap();
+    (bundle, dispatcher, resolves)
+}
+
+/// Synthetic S3 credentials that count every resolution.
+struct TrustedTestCredentials(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl runtara_component_host::trusted::TrustedCredentials for TrustedTestCredentials {
+    async fn resolve(
+        &self,
+        tenant: &str,
+        agent: &str,
+        connection: &str,
+        allowed: &[String],
+    ) -> Result<runtara_agent_trusted::TrustedContext, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(tenant, "tenant-authorized");
+        assert_eq!(connection, "s3-connection");
+        assert_eq!(agent, "s3-storage");
+        assert_eq!(allowed, ["s3_compatible"]);
+        Ok(runtara_agent_trusted::TrustedContext {
+            integration_id: "s3_compatible".into(),
+            now_ms: 1_700_000_000_000,
+            credentials: serde_json::json!({"base_url":"https://storage.example.test", "access_key_id":"test-access", "secret_access_key":"synthetic-test-secret", "region":"us-east-1"}),
+        })
+    }
+}
+
 async fn trusted_test_dispatcher(
     components: &Path,
 ) -> (
@@ -13832,30 +14547,6 @@ async fn trusted_test_dispatcher(
     runtara_component_host::ComponentDispatcherService,
     Arc<std::sync::atomic::AtomicUsize>,
 ) {
-    use runtara_agent_trusted::TrustedContext;
-    use runtara_component_host::trusted::TrustedCredentials;
-    struct Credentials(Arc<std::sync::atomic::AtomicUsize>);
-    #[async_trait::async_trait]
-    impl TrustedCredentials for Credentials {
-        async fn resolve(
-            &self,
-            tenant: &str,
-            agent: &str,
-            connection: &str,
-            allowed: &[String],
-        ) -> Result<TrustedContext, String> {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(tenant, "tenant-authorized");
-            assert_eq!(connection, "s3-connection");
-            assert_eq!(agent, "s3-storage");
-            assert_eq!(allowed, ["s3_compatible"]);
-            Ok(TrustedContext {
-                integration_id: "s3_compatible".into(),
-                now_ms: 1_700_000_000_000,
-                credentials: serde_json::json!({"base_url":"https://storage.example.test", "access_key_id":"test-access", "secret_access_key":"synthetic-test-secret", "region":"us-east-1"}),
-            })
-        }
-    }
     let bundle = tempfile::tempdir().unwrap();
     for suffix in ["wasm", "meta.json"] {
         let file = format!("runtara_agent_s3_storage.{suffix}");
@@ -13872,7 +14563,7 @@ async fn trusted_test_dispatcher(
     let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     dispatcher
         .trusted_executor()
-        .set_credentials(Arc::new(Credentials(resolves.clone())))
+        .set_credentials(Arc::new(TrustedTestCredentials(resolves.clone())))
         .unwrap();
     (bundle, dispatcher, resolves)
 }

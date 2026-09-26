@@ -51,7 +51,6 @@ struct TrustedAgent {
     integration_ids: Vec<String>,
     digest: String,
     pin: String,
-    wasm_digest: String,
 }
 
 /// Logs only routing identity and outcome, including early denial and dropped callers.
@@ -175,25 +174,23 @@ impl TrustedExecutor {
                 integration_ids: info.integration_ids.clone(),
                 digest,
                 pin,
-                wasm_digest: format!("{:x}", Sha256::digest(wasm)),
             },
         );
         Ok(())
     }
 
-    pub(crate) fn pin_for_wasm(&self, digest: &str) -> Option<&str> {
-        self.agents
-            .values()
-            .find(|agent| agent.wasm_digest == digest)
-            .map(|agent| agent.pin.as_str())
+    /// Content-bound import names of every installed trusted built-in. The
+    /// server's compilation readiness requires an artifact's recorded pins to
+    /// be among these.
+    pub fn artifact_pins(&self) -> impl Iterator<Item = &str> + '_ {
+        self.agents.values().map(|agent| agent.pin.as_str())
     }
 
-    pub(crate) fn has_artifact_pin(&self, name: &str) -> bool {
-        self.agents.values().any(|agent| agent.pin == name)
-    }
-
-    /// Register content-bound imports. Old workflows fail linking after a
-    /// dependency changes, instead of silently running a newer privileged body.
+    /// Register content-bound imports for the installed versions. A pin for
+    /// any other version is an empty instance import, which Wasmtime links
+    /// without a definition, so an artifact compiled before an upgrade still
+    /// loads. Its trusted calls are rejected per call with
+    /// TRUSTED_VERSION_REQUIRED, never run against the newer privileged body.
     pub(crate) fn add_artifact_pins<T: Send + 'static>(
         &self,
         linker: &mut Linker<T>,
