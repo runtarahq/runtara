@@ -1976,6 +1976,7 @@ pub async fn execute_workflow_handler(
 
     match engine
         .queue(QueueRequest {
+            run_label: request.run_label,
             tenant_id: &tenant_id,
             workflow_id: &workflow_id,
             version,

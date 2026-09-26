@@ -1928,7 +1928,6 @@ mod tests {
         steps.insert(
             "finish".to_string(),
             Step::Finish(FinishStep {
-                run_label: None,
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,
@@ -2074,7 +2073,6 @@ mod tests {
         steps.insert(
             "finish".to_string(),
             Step::Finish(FinishStep {
-                run_label: None,
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,

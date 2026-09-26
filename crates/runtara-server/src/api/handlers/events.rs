@@ -6,7 +6,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{FromRequest, Multipart, Path, Request, State},
+    extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::Json,
 };
@@ -55,7 +55,8 @@ fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
     path = "/api/runtime/events/http/{trigger_id}/{action}",
     params(
         ("trigger_id" = String, Path, description = "Trigger ID"),
-        ("action" = String, Path, description = "Action name")
+        ("action" = String, Path, description = "Action name"),
+        crate::api::dto::workflows::RunLabelQuery
     ),
     request_body(content = String, description = "Optional raw HTTP request body (accepts any content type including multipart/form-data)", content_type = "application/octet-stream"),
     responses(
@@ -71,6 +72,7 @@ pub async fn capture_http_event(
     State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
     State(engine): State<std::sync::Arc<crate::workers::execution_engine::ExecutionEngine>>,
     Path((trigger_id, action)): Path<(String, String)>,
+    Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
     request: Request,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     // Events are webhook endpoints — tenant is implicit (single-tenant runtime)
@@ -220,7 +222,7 @@ pub async fn capture_http_event(
             .unwrap_or(false);
 
         // Build TriggerEvent
-        let event = TriggerEvent::http_event(
+        let mut event = TriggerEvent::http_event(
             instance_id.to_string(),
             tenant_id.clone(),
             trigger.workflow_id.clone(),
@@ -234,6 +236,7 @@ pub async fn capture_http_event(
             debug,
         );
 
+        event.run_label = metadata.run_label;
         match engine
             .enqueue_trigger_event(&tenant_id, event, idempotency_key)
             .await

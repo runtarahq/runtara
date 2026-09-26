@@ -42,7 +42,7 @@ use crate::error::{Error, Result};
 /// turning `found: false` back into an error.
 #[derive(Debug)]
 pub struct InstanceDetail {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
     /// Instance id.
     pub instance_id: String,
@@ -87,7 +87,7 @@ pub struct InstanceDetail {
 /// One instance as a list reports it.
 #[derive(Debug)]
 pub struct InstanceListItem {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
     /// Instance id.
     pub instance_id: String,

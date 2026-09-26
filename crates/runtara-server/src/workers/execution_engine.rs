@@ -79,6 +79,7 @@ pub struct ExecutionResult {
 #[allow(dead_code)] // A few variants are reserved for handler migrations.
 pub enum ExecutionError {
     ValidationError(String),
+    RunLabelConflict,
     WorkflowValidationError {
         message: String,
         errors: Vec<ValidationErrorDto>,
@@ -116,6 +117,9 @@ pub enum ExecutionError {
 impl std::fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ExecutionError::RunLabelConflict => {
+                write!(f, "Idempotent start conflicts with the original runLabel")
+            }
             ExecutionError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             ExecutionError::WorkflowValidationError { message, .. } => {
                 write!(f, "Workflow validation failed: {}", message)
@@ -168,6 +172,7 @@ impl ExecutionError {
     /// handler opts out, this is the recommended mapping.
     pub fn http_status(&self) -> StatusCode {
         match self {
+            ExecutionError::RunLabelConflict => StatusCode::CONFLICT,
             ExecutionError::ValidationError(_) => StatusCode::BAD_REQUEST,
             ExecutionError::WorkflowValidationError { .. } => StatusCode::BAD_REQUEST,
             ExecutionError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -201,6 +206,9 @@ pub enum TriggerSource {
 
 /// Request to queue an async workflow execution onto the trigger stream.
 pub struct QueueRequest<'a> {
+    /// Immutable optional execution reference, validated at start.
+    pub run_label: Option<String>,
+
     pub tenant_id: &'a str,
     pub workflow_id: &'a str,
     pub version: Option<i32>,
@@ -247,6 +255,9 @@ impl DetachedExecution {
 
 /// Request for synchronous execution via `ExecutionEngine::run_sync`.
 pub struct SyncRequest<'a> {
+    /// Immutable optional execution reference, validated at start.
+    pub run_label: Option<String>,
+
     pub tenant_id: &'a str,
     pub workflow_id: &'a str,
     pub version: Option<i32>,
@@ -617,9 +628,11 @@ impl ExecutionEngine {
         event: TriggerEvent,
         idempotency_key: String,
     ) -> Result<EnqueuedExecution, ExecutionError> {
+        runtara_dsl::run_label::normalize_run_label(event.run_label.as_deref())
+            .map_err(ExecutionError::ValidationError)?;
         if let Some(existing) = self
             .outbox
-            .find_by_idempotency(tenant_id, &idempotency_key)
+            .find_by_idempotency(tenant_id, &idempotency_key, event.run_label.as_deref())
             .await
             .map_err(map_outbox_error)?
         {
@@ -737,6 +750,8 @@ impl ExecutionEngine {
     /// admission reservation before the relay publishes it for the trigger
     /// worker to pick up.
     pub async fn queue(&self, req: QueueRequest<'_>) -> Result<QueuedExecution, ExecutionError> {
+        let run_label = runtara_dsl::run_label::normalize_run_label(req.run_label.as_deref())
+            .map_err(ExecutionError::ValidationError)?;
         // 1. Resolve version
         let version = self
             .resolve_version(req.tenant_id, req.workflow_id, req.version)
@@ -782,7 +797,7 @@ impl ExecutionEngine {
             TriggerSource::Cron => "cron",
             TriggerSource::Replay { .. } => "replay",
         };
-        let event = match req.trigger_source {
+        let mut event = match req.trigger_source {
             TriggerSource::HttpApi
             | TriggerSource::Session
             | TriggerSource::Chat
@@ -810,6 +825,8 @@ impl ExecutionEngine {
                 req.debug,
             ),
         };
+
+        event.run_label = run_label;
 
         // 7. Atomically reserve admission + record the source request + write
         // its relay outbox row. A Valkey outage now leaves a durable pending
@@ -922,6 +939,7 @@ impl ExecutionEngine {
         // authoritative admission decision.
         let queued = self
             .queue(QueueRequest {
+                run_label: req.run_label,
                 tenant_id: req.tenant_id,
                 workflow_id: req.workflow_id,
                 version: Some(version),
@@ -1251,6 +1269,7 @@ impl ExecutionEngine {
                 &event.tenant_id,
                 &event.workflow_id,
                 Some(event.instance_id.clone()),
+                event.run_label.clone(),
                 Some(workflow_input),
                 Some(execution_timeout),
                 event.debug,
@@ -1589,6 +1608,7 @@ impl ExecutionEngine {
             .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         self.queue(QueueRequest {
+            run_label: None,
             tenant_id,
             workflow_id: &workflow_id,
             version: Some(latest_version),
@@ -1830,7 +1850,9 @@ impl ExecutionEngine {
             .with_offset((page * size) as u32);
 
         options.search = filters.search.clone();
-        options.run_label = filters.run_label.clone();
+        options.run_label =
+            runtara_dsl::run_label::normalize_run_label(filters.run_label.as_deref())
+                .map_err(ExecutionError::ValidationError)?;
         if let Some(search) = filters.search.as_deref() {
             options.search_workflow_ids = self
                 .workflow_repo
@@ -1855,13 +1877,13 @@ impl ExecutionEngine {
             options = options.with_created_after(created_from);
         }
         if let Some(created_to) = filters.created_to {
-            options = options.with_created_before(created_to);
+            options = options.with_created_before(inclusive_execution_date_bound(created_to)?);
         }
         if let Some(completed_from) = filters.completed_from {
             options = options.with_finished_after(completed_from);
         }
         if let Some(completed_to) = filters.completed_to {
-            options = options.with_finished_before(completed_to);
+            options = options.with_finished_before(inclusive_execution_date_bound(completed_to)?);
         }
 
         let order = match (filters.sort_by.as_str(), filters.sort_order.as_str()) {
@@ -2490,6 +2512,18 @@ impl ExecutionEngine {
     }
 }
 
+// The public/report contract uses inclusive end dates; the runtime query uses
+// an exclusive upper bound. PostgreSQL timestamps have microsecond precision.
+fn inclusive_execution_date_bound(
+    value: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, ExecutionError> {
+    value
+        .checked_add_signed(chrono::Duration::microseconds(1))
+        .ok_or_else(|| {
+            ExecutionError::ValidationError("Execution date boundary is out of range".into())
+        })
+}
+
 fn map_outbox_error(error: ExecutionOutboxError) -> ExecutionError {
     match error {
         ExecutionOutboxError::AdmissionFull { limit } => ExecutionError::EntitlementDenied(
@@ -2498,7 +2532,10 @@ fn map_outbox_error(error: ExecutionOutboxError) -> ExecutionError {
                 maximum: limit,
             },
         ),
-        ExecutionOutboxError::InvalidIdempotencyKey | ExecutionOutboxError::TenantMismatch => {
+        ExecutionOutboxError::RunLabelConflict => ExecutionError::RunLabelConflict,
+        ExecutionOutboxError::InvalidRunLabel(_)
+        | ExecutionOutboxError::InvalidIdempotencyKey
+        | ExecutionOutboxError::TenantMismatch => {
             ExecutionError::ValidationError(error.to_string())
         }
         ExecutionOutboxError::Serialization(_) | ExecutionOutboxError::Database(_) => {

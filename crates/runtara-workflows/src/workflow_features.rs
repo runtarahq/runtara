@@ -29,8 +29,6 @@ pub struct ChildWorkflowReference {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkflowFeature {
-    /// A Finish assigns persistent execution metadata.
-    RunLabel,
     /// A workflow step invokes an agent capability.
     AgentCall,
     /// A workflow step runs an AI-agent loop.
@@ -122,8 +120,7 @@ impl WorkflowFeatureSummary {
         self.features.iter().any(|feature| {
             matches!(
                 feature,
-                WorkflowFeature::RunLabel
-                    | WorkflowFeature::AgentCall
+                WorkflowFeature::AgentCall
                     | WorkflowFeature::AiAgent
                     | WorkflowFeature::ChildWorkflow
                     | WorkflowFeature::LogEvent
@@ -190,8 +187,7 @@ impl WorkflowFeatureSummary {
         self.features.iter().any(|feature| {
             matches!(
                 feature,
-                WorkflowFeature::RunLabel
-                    | WorkflowFeature::AgentCall
+                WorkflowFeature::AgentCall
                     | WorkflowFeature::AiAgent
                     | WorkflowFeature::ChildWorkflow
                     | WorkflowFeature::LogEvent
@@ -325,11 +321,7 @@ impl FeatureAnalyzer {
         }
 
         match step {
-            Step::Finish(step) => {
-                if step.run_label.is_some() {
-                    self.summary.features.insert(WorkflowFeature::RunLabel);
-                }
-            }
+            Step::Finish(_) => {}
             Step::Agent(step) => {
                 self.summary.features.insert(WorkflowFeature::AgentCall);
                 self.agent_ids.insert(canonicalize_agent_id(&step.agent_id));

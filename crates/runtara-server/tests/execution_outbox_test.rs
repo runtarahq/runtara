@@ -119,7 +119,7 @@ async fn committed_request_survives_a_restart_before_stream_delivery() {
 
     let restarted = ExecutionOutbox::with_policy(pool.clone(), policy());
     let recovered = restarted
-        .find_by_idempotency(&tenant_id, &key)
+        .find_by_idempotency(&tenant_id, &key, None)
         .await
         .expect("find committed request after restart")
         .expect("outbox request remains durable");
@@ -635,4 +635,61 @@ async fn relay_writes_request_id_into_json_and_recovers_an_expired_worker_handof
 
     let _: () = redis.del(&stream_key).await.expect("remove test stream");
     cleanup(&pool, &tenant_id).await;
+}
+
+#[tokio::test]
+async fn start_label_is_durable_non_unique_and_conflicting_replays_are_rejected() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant = format!("label-outbox-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+    let mut request = event(&tenant, Uuid::new_v4());
+    request.run_label = Some(" Order_123 ".into());
+    let first = outbox
+        .enqueue(&tenant, &request, "first", 10)
+        .await
+        .unwrap();
+    let replay = outbox
+        .enqueue(&tenant, &request, "first", 10)
+        .await
+        .unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.instance_id, first.instance_id);
+    request.instance_id = Uuid::new_v4().to_string();
+    let second = outbox
+        .enqueue(&tenant, &request, "second", 10)
+        .await
+        .unwrap();
+    assert_ne!(second.instance_id, first.instance_id);
+    for conflicting in [None, Some("Order_123".into()), Some("another".into())] {
+        request.run_label = conflicting;
+        assert!(matches!(
+            outbox.enqueue(&tenant, &request, "first", 10).await,
+            Err(ExecutionOutboxError::RunLabelConflict)
+        ));
+        assert!(matches!(
+            outbox
+                .find_by_idempotency(&tenant, "first", request.run_label.as_deref())
+                .await,
+            Err(ExecutionOutboxError::RunLabelConflict)
+        ));
+    }
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT trigger_event FROM execution_requests WHERE request_id = $1")
+            .bind(first.request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stored: TriggerEvent = serde_json::from_value(payload).unwrap();
+    assert_eq!(stored.run_label.as_deref(), Some(" Order_123 "));
+    assert_eq!(reserved_count(&pool, &tenant).await, 2);
+    for invalid in ["".into(), "bad\nlabel".into(), "x".repeat(251)] {
+        request.run_label = Some(invalid);
+        assert!(matches!(
+            outbox.enqueue(&tenant, &request, "invalid", 10).await,
+            Err(ExecutionOutboxError::InvalidRunLabel(_))
+        ));
+    }
+    assert_eq!(reserved_count(&pool, &tenant).await, 2);
+    cleanup(&pool, &tenant).await;
 }

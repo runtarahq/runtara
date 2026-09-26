@@ -204,6 +204,7 @@ impl EnvironmentClient {
         let resp = handlers::handle_start_instance(
             &self.state,
             StartInstanceRequest {
+                run_label: options.run_label,
                 image_id: options.image_id,
                 tenant_id: options.tenant_id,
                 instance_id: options.instance_id,

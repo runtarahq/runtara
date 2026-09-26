@@ -376,8 +376,6 @@ pub struct CompleteInstanceParams<'a> {
     pub guard: CompleteInstanceGuard,
     /// Output blob from successful completion.
     pub output: Option<&'a [u8]>,
-    /// Execution label persisted with successful completion.
-    pub run_label: Option<&'a str>,
     /// Error message from failure.
     pub error: Option<&'a str>,
     /// Container stderr captured at termination time.
@@ -398,7 +396,6 @@ impl<'a> CompleteInstanceParams<'a> {
             instance_id,
             status,
             guard: CompleteInstanceGuard::Any,
-            run_label: None,
             output: None,
             error: None,
             stderr: None,
@@ -420,25 +417,6 @@ impl<'a> CompleteInstanceParams<'a> {
     #[must_use]
     pub fn with_output(mut self, output: &'a [u8]) -> Self {
         self.output = Some(output);
-        self
-    }
-
-    /// Normalize optional metadata without letting invalid labels prevent completion.
-    pub fn normalized_run_label(&self) -> Result<Option<String>, CoreError> {
-        let label = runtara_dsl::run_label::adopt_run_label(self.run_label);
-        if label.is_some() && self.status != InstanceStatus::Completed {
-            return Err(CoreError::ValidationError {
-                field: "runLabel".into(),
-                message: "Run labels require successful completion".into(),
-            });
-        }
-        Ok(label)
-    }
-
-    /// Attach an execution label; persistence normalizes or ignores it before writing.
-    #[must_use]
-    pub fn with_run_label(mut self, run_label: &'a str) -> Self {
-        self.run_label = Some(run_label);
         self
     }
 
@@ -510,6 +488,25 @@ pub trait Persistence: Send + Sync {
         tenant_id: &str,
         input: Option<&[u8]>,
     ) -> Result<bool, CoreError> {
+        self.try_register_instance_with_label(instance_id, tenant_id, input, None)
+            .await
+    }
+
+    /// Atomically persist the start label with the instance and input. A replay
+    /// never writes to the existing instance. Callers compare metadata on a lost claim.
+    async fn try_register_instance_with_label(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        if run_label.is_some() {
+            return Err(CoreError::ValidationError {
+                field: "runLabel".into(),
+                message: "This persistence backend does not support labeled starts".into(),
+            });
+        }
         if self.get_instance(instance_id).await?.is_some() {
             return Ok(false);
         }

@@ -73,23 +73,28 @@ macro_rules! impl_instance_ops {
                 instance_id: &str,
                 tenant_id: &str,
                 input: ::core::option::Option<&[u8]>,
+                run_label: ::core::option::Option<&str>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                let run_label = runtara_dsl::run_label::normalize_run_label(run_label)
+                    .map_err(|message| ::runtara_core::error::CoreError::ValidationError { field: "runLabel".into(), message })?;
                 use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
                 let now = <$Dialect>::NOW;
                 let p3 = <$Dialect>::placeholder(3);
+                let p4 = <$Dialect>::placeholder(4);
                 let sql = format!(
                     "INSERT INTO instances \
-                         (instance_id, tenant_id, definition_version, status, created_at, input) \
-                     VALUES ({p1}, {p2}, 1, 'pending'{status_cast}, {now}, {p3}) \
+                         (instance_id, tenant_id, definition_version, status, created_at, input, run_label) \
+                     VALUES ({p1}, {p2}, 1, 'pending'{status_cast}, {now}, {p3}, {p4}) \
                      ON CONFLICT (instance_id) DO NOTHING"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(tenant_id)
                     .bind(input)
+                    .bind(run_label.as_deref())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -355,7 +360,6 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 params: ::runtara_core::persistence::CompleteInstanceParams<'_>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
-                let run_label = params.normalized_run_label()?;
                 use ::runtara_core::persistence::CompleteInstanceGuard;
                 use crate::ops_common::error::{RowsAffected, not_found_if_empty};
                 use crate::dialect::{Dialect, EnumKind};
@@ -367,7 +371,6 @@ macro_rules! impl_instance_ops {
                 let p6 = <$Dialect>::placeholder(6);
                 let p7 = <$Dialect>::placeholder(7);
                 let p8 = <$Dialect>::placeholder(8);
-                let p9 = <$Dialect>::placeholder(9);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
                 let term_cast = <$Dialect>::enum_cast(EnumKind::TerminationReason);
                 let now = <$Dialect>::NOW;
@@ -380,7 +383,7 @@ macro_rules! impl_instance_ops {
                      SET status = {p2}{status_cast}, \
                          termination_reason = COALESCE({p3}{term_cast}, termination_reason), \
                          exit_code = COALESCE({p4}, exit_code), \
-                         output = {p5}, run_label = {p9}, \
+                         output = {p5}, \
                          error = {p6}, \
                          stderr = COALESCE({p7}, stderr), \
                          checkpoint_id = COALESCE({p8}, checkpoint_id), \
@@ -399,7 +402,6 @@ macro_rules! impl_instance_ops {
                     .bind(params.error)
                     .bind(params.stderr)
                     .bind(params.checkpoint_id)
-                    .bind(run_label.as_deref())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {

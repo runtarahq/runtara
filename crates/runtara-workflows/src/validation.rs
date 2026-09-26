@@ -128,8 +128,6 @@ impl ValidationResult {
 #[derive(Debug, Clone)]
 #[allow(missing_docs)] // Fields are self-documenting from variant docs
 pub enum ValidationError {
-    /// Invalid value or scope for an optional execution label.
-    InvalidRunLabel { step_id: String, message: String },
     // === Graph Structure Errors ===
     /// A map key disagrees with the step's inner ID. Enforcing equality also
     /// guarantees unique IDs within each graph, since map keys are unique.
@@ -474,7 +472,6 @@ impl ValidationError {
     /// rendered text and the structured code can never disagree.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidRunLabel { .. } => "E131",
             Self::EntryPointNotFound { .. } => "E001",
             Self::UnreachableStep { .. } => "E002",
             Self::UnreachableFinish { .. } => "E003",
@@ -532,9 +529,6 @@ impl ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::InvalidRunLabel { step_id, message } => {
-                write!(f, "[E131] Finish '{step_id}' runLabel: {message}")
-            }
             ValidationError::StepIdMismatch {
                 graph_path,
                 step_key,
@@ -1507,8 +1501,6 @@ pub fn validate_workflow(
             }),
     );
 
-    result.errors.extend(run_label_errors(graph));
-
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
 
@@ -2336,7 +2328,6 @@ fn validate_references_with_inherited(
         let connection_ref = match step {
             Step::Agent(agent_step) => agent_step.connection_ref.as_ref(),
             Step::AiAgent(ai_step) => ai_step.connection_ref.as_ref(),
-            Step::Finish(finish) => finish.run_label.as_ref(),
             _ => None,
         };
         if let Some(value) = connection_ref {
@@ -2674,55 +2665,6 @@ fn validate_step_output_reference(
     }
 }
 
-/// Validate every label declaration, even in unreachable nested graphs.
-pub(crate) fn run_label_errors(graph: &ExecutionGraph) -> Vec<ValidationError> {
-    fn visit(graph: &ExecutionGraph, nested: bool, errors: &mut Vec<ValidationError>) {
-        for (id, step) in &graph.steps {
-            match step {
-                Step::Finish(finish) => {
-                    if let Some(label) = &finish.run_label {
-                        let error = if nested {
-                            Some("Run labels are only allowed on a Finish ending the workflow execution".into())
-                        } else {
-                            match label {
-                                MappingValue::Immediate(value) => match &value.value {
-                                    serde_json::Value::Null => None,
-                                    serde_json::Value::String(label) => {
-                                        runtara_dsl::run_label::normalize_run_label(Some(label))
-                                            .err()
-                                    }
-                                    _ => Some("Run label must be a string or null".into()),
-                                },
-                                MappingValue::Composite(_) => Some(
-                                    "Run label must be a string, reference, or template".into(),
-                                ),
-                                _ => None,
-                            }
-                        };
-                        if let Some(message) = error {
-                            errors.push(ValidationError::InvalidRunLabel {
-                                step_id: id.clone(),
-                                message,
-                            });
-                        }
-                    }
-                }
-                Step::Split(step) => visit(&step.subgraph, true, errors),
-                Step::While(step) => visit(&step.subgraph, true, errors),
-                Step::WaitForSignal(step) => {
-                    if let Some(graph) = &step.on_wait {
-                        visit(graph, true, errors);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut errors = Vec::new();
-    visit(graph, false, &mut errors);
-    errors
-}
-
 /// Collect all input mappings from a step.
 fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
     let mut mappings = Vec::new();
@@ -2796,7 +2738,7 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
 /// `MappingValue` — a condition expression, a `config.value`, a prompt — never
 /// reaches step-reference checking. This is its complement.
 ///
-/// `connection_ref` and `Finish::run_label` are absent on purpose: they are bare
+/// `connection_ref` is absent on purpose: it is a bare
 /// values too, but `validate_references_with_inherited` already routes them
 /// through the full mapping walk.
 ///
@@ -2924,21 +2866,6 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
 
     // Check each step's references
     for (step_id, step) in &graph.steps {
-        if let Step::Finish(finish) = step
-            && let Some(label) = &finish.run_label
-        {
-            for referenced_step_id in extract_step_ids_from_mapping_value(label) {
-                if referenced_step_id != *step_id
-                    && graph.steps.contains_key(&referenced_step_id)
-                    && !has_path(&adjacency, &referenced_step_id, step_id)
-                {
-                    result.errors.push(ValidationError::StepNotYetExecuted {
-                        step_id: step_id.clone(),
-                        referenced_step_id,
-                    });
-                }
-            }
-        }
         let mappings = collect_step_mappings(step);
 
         for mapping in mappings {
@@ -5729,9 +5656,6 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
             if let Some(ref outputs) = finish_step.input_mapping {
                 extract_references_from_input_mapping(outputs, &mut refs);
             }
-            if let Some(label) = &finish_step.run_label {
-                extract_references_from_mapping_value(label, &mut refs);
-            }
         }
         Step::Log(log_step) => {
             if let Some(ref context) = log_step.context {
@@ -5856,9 +5780,6 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
         Step::Finish(finish_step) => {
             if let Some(ref outputs) = finish_step.input_mapping {
                 extract_template_static_references_from_input_mapping(outputs, &mut refs);
-            }
-            if let Some(label) = &finish_step.run_label {
-                extract_template_static_references_from_mapping_value(label, &mut refs);
             }
         }
         Step::Log(log_step) => {
@@ -6372,7 +6293,6 @@ mod tests {
 
     fn create_finish_step(id: &str, mapping: Option<InputMapping>) -> Step {
         Step::Finish(FinishStep {
-            run_label: None,
             id: id.to_string(),
             name: None,
             input_mapping: mapping,
@@ -7870,7 +7790,6 @@ mod tests {
         sub_steps.insert(
             "finish_iter".to_string(),
             Step::Finish(runtara_dsl::FinishStep {
-                run_label: None,
                 id: "finish_iter".to_string(),
                 name: None,
                 input_mapping: None,
@@ -7917,7 +7836,6 @@ mod tests {
         top_steps.insert(
             "finish".to_string(),
             Step::Finish(runtara_dsl::FinishStep {
-                run_label: None,
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,

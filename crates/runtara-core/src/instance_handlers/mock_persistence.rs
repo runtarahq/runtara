@@ -242,7 +242,6 @@ impl Persistence for MockPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> std::result::Result<bool, CoreError> {
-        let run_label = params.normalized_run_label()?;
         let mut instances = self.instances.lock().unwrap();
         let Some(inst) = instances.get_mut(params.instance_id) else {
             return match params.guard {
@@ -260,7 +259,6 @@ impl Persistence for MockPersistence {
             return Ok(false);
         }
         inst.status = params.status;
-        inst.run_label = run_label;
         // Output and error are replaced, including when the caller passes None.
         inst.output = params.output.map(|o| o.to_vec());
         inst.error = params.error.map(|e| e.to_string());

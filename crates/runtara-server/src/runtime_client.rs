@@ -243,6 +243,7 @@ impl RuntimeClient {
         tenant_id: &str,
         workflow_id: &str,
         instance_id: Option<String>,
+        run_label: Option<String>,
         input: Option<Value>,
         timeout: Option<ExecutionTimeoutSeconds>,
         debug: bool,
@@ -251,6 +252,7 @@ impl RuntimeClient {
         let sdk = &self.client;
 
         let mut options = StartInstanceOptions::new(image_id, tenant_id);
+        options.run_label = run_label;
 
         // Store instance_id for later use in env vars
         let actual_instance_id = if let Some(ref id) = instance_id {

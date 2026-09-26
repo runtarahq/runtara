@@ -8,16 +8,17 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::api::dto::executions::ExecutionFilters;
 use crate::api::dto::object_model::{AggregateRequest, Condition};
 use crate::api::dto::reports::*;
 use crate::api::dto::workflows::WorkflowInstanceDto;
 use crate::api::services::reports::{
-    MAX_TABLE_PAGE_SIZE, ReportServiceError, condition_matches_row, humanize_label,
-    validate_block_interactions, validate_report_condition_field_refs,
-    validate_report_condition_filter_refs, validate_report_interaction_buttons,
-    validate_report_source_filter_mappings, validate_report_table_action_config,
-    validate_report_table_display_templates, validate_report_workflow_action_config,
-    validate_report_workflow_action_context_field, validate_report_workflow_action_row_conditions,
+    ReportServiceError, condition_matches_row, humanize_label, validate_block_interactions,
+    validate_report_condition_field_refs, validate_report_condition_filter_refs,
+    validate_report_interaction_buttons, validate_report_source_filter_mappings,
+    validate_report_table_action_config, validate_report_table_display_templates,
+    validate_report_workflow_action_config, validate_report_workflow_action_context_field,
+    validate_report_workflow_action_row_conditions,
 };
 use crate::api::services::workflow_runtime::{
     WorkflowRuntimeAction, list_instance_actions, list_workflow_actions,
@@ -141,29 +142,75 @@ impl ReportSourceProvider for WorkflowRuntimeProvider {
                 let engine = self.engine()?;
                 let runtime_client = self.runtime_client()?;
                 let workflow_id = workflow_runtime_workflow_id(params.block)?;
-                let result = engine
-                    .list_executions(
-                        params.tenant_id,
-                        workflow_id,
-                        Some(0),
-                        Some(MAX_TABLE_PAGE_SIZE as i32),
-                    )
-                    .await?;
-
-                let mut rows = Vec::with_capacity(result.content.len());
-                for instance in result.content {
-                    let actions = if should_check_instance_actions(&instance) {
-                        list_instance_actions(runtime_client, workflow_id, &instance.id).await?
-                    } else {
-                        Vec::new()
-                    };
-                    rows.push(workflow_instance_report_row(&instance, &actions));
+                let mut filters = ExecutionFilters {
+                    workflow_id: Some(workflow_id.to_owned()),
+                    sort_by: "created_at".into(),
+                    ..Default::default()
+                };
+                let residual = instance_query_filters(params.condition, &mut filters)?;
+                let sql_sort = match params.sort {
+                    [] => true,
+                    [order] if matches!(order.field.as_str(), "createdAt" | "completedAt") => {
+                        filters.sort_by = if order.field == "createdAt" {
+                            "created_at"
+                        } else {
+                            "completed_at"
+                        }
+                        .into();
+                        filters.sort_order = order.direction.to_ascii_uppercase();
+                        true
+                    }
+                    _ => false,
+                };
+                // Supported predicates and ordering are applied in SQL, before
+                // the page and count. Residual predicates require the entire
+                // matching set; never silently truncate to the first 100 runs.
+                let paginated = residual.is_none() && sql_sort;
+                let offset = params.offset.max(0) as usize;
+                let limit = params.limit.max(0) as usize;
+                let mut page = if paginated { offset / 100 } else { 0 };
+                let mut skip = if paginated { offset % 100 } else { 0 };
+                let mut rows = Vec::new();
+                let total;
+                loop {
+                    // The execution API multiplies its i32 page by page size.
+                    if page > (i32::MAX / 100) as usize {
+                        return Err(ReportServiceError::Validation(
+                            "Execution report page offset is out of range".into(),
+                        ));
+                    }
+                    let result = engine
+                        .list_all_executions(
+                            params.tenant_id,
+                            Some(page as i32),
+                            Some(100),
+                            filters.clone(),
+                        )
+                        .await?;
+                    let count = result.total_elements;
+                    let last = result.last || result.content.is_empty();
+                    for instance in result.content.into_iter().skip(skip) {
+                        if paginated && rows.len() >= limit {
+                            break;
+                        }
+                        let actions = if should_check_instance_actions(&instance) {
+                            list_instance_actions(runtime_client, workflow_id, &instance.id).await?
+                        } else {
+                            Vec::new()
+                        };
+                        rows.push(workflow_instance_report_row(&instance, &actions));
+                    }
+                    if last || (paginated && rows.len() >= limit) {
+                        total = count;
+                        break;
+                    }
+                    skip = 0;
+                    page += 1;
                 }
-
-                let rows = post_filter_rows(rows, params.condition, &params.block.id)?;
+                let rows = post_filter_rows(rows, residual.as_ref(), &params.block.id)?;
                 Ok(FetchRowsOutput {
                     rows,
-                    total_count: None,
+                    total_count: paginated.then_some(total),
                 })
             }
             ReportWorkflowRuntimeEntity::Actions => {
@@ -230,6 +277,111 @@ impl ReportSourceProvider for WorkflowRuntimeProvider {
     }
 }
 
+/// Consume predicates supported by the execution query. OR/NOT and predicates
+/// on virtual action fields stay intact and are evaluated over all fetched pages.
+fn instance_query_filters(
+    condition: Option<&Condition>,
+    filters: &mut ExecutionFilters,
+) -> Result<Option<Condition>, ReportServiceError> {
+    let Some(condition) = condition else {
+        return Ok(None);
+    };
+    let args = condition.arguments.as_deref().unwrap_or_default();
+    let op = condition.op.to_ascii_uppercase();
+    if matches!(op.as_str(), "OR" | "NOT") {
+        // Validate exact references even when this logical expression cannot
+        // be pushed down. Each branch gets independent scratch filters.
+        for value in args {
+            let child: Condition = serde_json::from_value(value.clone())
+                .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
+            instance_query_filters(Some(&child), &mut ExecutionFilters::default())?;
+        }
+        return Ok(Some(condition.clone()));
+    }
+    if op == "AND" {
+        let mut remaining = Vec::new();
+        for value in args {
+            let child: Condition = serde_json::from_value(value.clone())
+                .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
+            if let Some(child) = instance_query_filters(Some(&child), filters)? {
+                remaining.push(serde_json::to_value(child).expect("condition serializes"));
+            }
+        }
+        return Ok((!remaining.is_empty()).then_some(Condition {
+            op,
+            arguments: Some(remaining),
+        }));
+    }
+    if args.len() != 2 {
+        return Ok(Some(condition.clone()));
+    }
+    let field = args[0].as_str().unwrap_or_default();
+    match (field, op.as_str()) {
+        ("runLabel", "EQ") => {
+            if let Some(label) = args[1].as_str() {
+                let label = runtara_dsl::run_label::normalize_run_label(Some(label))
+                    .map_err(ReportServiceError::Validation)?;
+                if filters.run_label.is_none() {
+                    filters.run_label = label;
+                    return Ok(None);
+                }
+            }
+        }
+        ("status", "EQ" | "IN") if filters.statuses.is_none() => {
+            let values = if op == "EQ" {
+                vec![args[1].clone()]
+            } else {
+                args[1].as_array().cloned().unwrap_or_default()
+            };
+            let statuses: Option<Vec<String>> = values
+                .iter()
+                .map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            if let Some(statuses) = statuses.filter(|s| {
+                !s.is_empty()
+                    && s.iter().all(|s| {
+                        matches!(
+                            s.as_str(),
+                            "queued"
+                                | "compiling"
+                                | "running"
+                                | "suspended"
+                                | "completed"
+                                | "failed"
+                                | "timeout"
+                                | "cancelled"
+                        )
+                    })
+            }) {
+                filters.statuses = Some(statuses);
+                return Ok(None);
+            }
+        }
+        ("createdAt" | "completedAt", "GTE" | "LTE") => {
+            let slot = match (field, op.as_str()) {
+                ("createdAt", "GTE") => &mut filters.created_from,
+                ("createdAt", _) => &mut filters.created_to,
+                (_, "GTE") => &mut filters.completed_from,
+                _ => &mut filters.completed_to,
+            };
+            let date = args[1]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+            if let Some(date) = date {
+                let date = date.with_timezone(&chrono::Utc);
+                *slot = Some(match *slot {
+                    Some(existing) if op == "GTE" => existing.max(date),
+                    Some(existing) => existing.min(date),
+                    None => date,
+                });
+                return Ok(None);
+            }
+        }
+        _ => {}
+    }
+    Ok(Some(condition.clone()))
+}
+
 // ============================================================================
 // Row builders
 // ============================================================================
@@ -251,7 +403,9 @@ fn workflow_instance_report_row(
             Value::String(workflow_name.clone()),
         );
     }
+    row.insert("runLabel".to_string(), json!(instance.run_label));
     row.insert("status".to_string(), json!(instance.status));
+    row.insert("completedAt".to_string(), json!(instance.completed_at));
     row.insert(
         "createdAt".to_string(),
         Value::String(instance.created.clone()),
@@ -388,6 +542,8 @@ pub(crate) fn workflow_runtime_fields(
             "instanceId",
             "workflowId",
             "workflowName",
+            "runLabel",
+            "completedAt",
             "status",
             "createdAt",
             "updatedAt",
@@ -678,4 +834,94 @@ fn post_filter_rows(
             },
         )
         .collect()
+}
+
+#[cfg(test)]
+mod run_label_query_tests {
+    use super::*;
+
+    #[test]
+    fn label_status_and_date_conditions_compose_before_pagination() {
+        let condition: Condition = serde_json::from_value(json!({"op":"AND","arguments":[
+            {"op":"EQ","arguments":["runLabel"," Order_123 "]},
+            {"op":"IN","arguments":["status",["suspended","running"]]},
+            {"op":"GTE","arguments":["createdAt","2026-01-01T00:00:00Z"]},
+            {"op":"LTE","arguments":["createdAt","2026-01-31T23:59:59Z"]},
+            {"op":"GTE","arguments":["completedAt","2026-01-02T00:00:00Z"]}
+        ]}))
+        .unwrap();
+        let mut filters = ExecutionFilters {
+            workflow_id: Some("orders".into()),
+            ..Default::default()
+        };
+        assert!(
+            instance_query_filters(Some(&condition), &mut filters)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(filters.run_label.as_deref(), Some(" Order_123 "));
+        assert_eq!(filters.workflow_id.as_deref(), Some("orders"));
+        assert_eq!(filters.statuses.unwrap(), ["suspended", "running"]);
+        assert!(filters.created_from.unwrap() < filters.created_to.unwrap());
+        assert!(filters.completed_from.is_some());
+    }
+
+    #[test]
+    fn disjunction_and_virtual_predicates_keep_the_full_result_set() {
+        let condition: Condition = serde_json::from_value(json!({"op":"OR","arguments":[
+            {"op":"EQ","arguments":["runLabel","order_123"]},
+            {"op":"EQ","arguments":["hasActions",true]}
+        ]}))
+        .unwrap();
+        let mut filters = ExecutionFilters::default();
+        let residual = instance_query_filters(Some(&condition), &mut filters)
+            .unwrap()
+            .unwrap();
+        assert_eq!(residual.op, "OR");
+        assert!(filters.run_label.is_none());
+    }
+
+    #[test]
+    fn exact_report_lookup_rejects_invalid_and_oversized_identifiers() {
+        for value in ["".into(), "bad\nlabel".into(), "x".repeat(251)] {
+            let condition: Condition =
+                serde_json::from_value(json!({"op":"EQ","arguments":["runLabel",value]})).unwrap();
+            assert!(
+                instance_query_filters(Some(&condition), &mut ExecutionFilters::default()).is_err()
+            );
+            for op in ["AND", "OR", "NOT"] {
+                let nested: Condition =
+                    serde_json::from_value(json!({"op":op,"arguments":[condition]})).unwrap();
+                assert!(
+                    instance_query_filters(Some(&nested), &mut ExecutionFilters::default())
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_date_bounds_use_the_strictest_instant() {
+        let condition: Condition = serde_json::from_value(json!({"op":"AND","arguments":[
+            {"op":"GTE","arguments":["createdAt","2026-01-01T00:00:00Z"]},
+            {"op":"GTE","arguments":["createdAt","2026-01-02T01:00:00+01:00"]},
+            {"op":"LTE","arguments":["completedAt","2026-01-05T00:00:00Z"]},
+            {"op":"LTE","arguments":["completedAt","2026-01-04T00:00:00Z"]}
+        ]}))
+        .unwrap();
+        let mut filters = ExecutionFilters::default();
+        assert!(
+            instance_query_filters(Some(&condition), &mut filters)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            filters.created_from.unwrap().to_rfc3339(),
+            "2026-01-02T00:00:00+00:00"
+        );
+        assert_eq!(
+            filters.completed_to.unwrap().to_rfc3339(),
+            "2026-01-04T00:00:00+00:00"
+        );
+    }
 }

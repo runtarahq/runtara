@@ -2181,6 +2181,8 @@ export interface ExecuteWorkflowRequest {
    */
   debug?: boolean | null;
   inputs: any;
+  /** Immutable optional execution reference, validated at start. */
+  runLabel?: string | null;
 }
 
 export interface ExecuteWorkflowResponse {
@@ -2497,21 +2499,6 @@ export interface FinishStep {
   inputMapping?: null | HashMap;
   /** Human-readable step name */
   name?: string | null;
-  /**
-   * Optional execution label, resolved when the top-level Finish completes.
-   * Use a MappingValue with valueType immediate, reference, or template.
-   * Separate from inputMapping/output; duplicate labels are allowed.
-   * Allowed characters: ASCII letters, digits, ordinary spaces, . - / ( ) [ ].
-   * Surrounding spaces are trimmed; valid long labels are truncated to 250
-   * characters and trailing spaces removed. The retained label must contain
-   * a letter or digit. Invalid literals fail authoring validation; invalid
-   * dynamic values (including non-strings and evaluation errors) are ignored
-   * without failing Finish or changing its output. Omitted, null, and empty
-   * strings mean no label. Execution lists display runLabel when present,
-   * otherwise the workflow name. Not supported inside Split, While, or onWait
-   * subgraphs; inline child workflows cannot rename their parent execution.
-   */
-  runLabel?: null | MappingValue;
 }
 
 /** Workflows held directly at one folder path */
@@ -5967,6 +5954,11 @@ export interface WorkflowDto {
 }
 
 export interface WorkflowInstanceDto {
+  /**
+   * Runtime finish timestamp used by completion-date filters. May also be
+   * present for a suspended attempt; absent until the runtime records it.
+   */
+  completedAt?: string | null;
   created: string;
   /**
    * Instance-level failure reason. Carries the host-side crash reason (e.g. a
@@ -5987,7 +5979,7 @@ export interface WorkflowInstanceDto {
   processingOverheadSeconds?: number | null;
   /** @format double */
   queueDurationSeconds?: number | null;
-  /** Optional label assigned at successful workflow completion. */
+  /** Optional immutable label supplied when the execution starts. */
   runLabel?: string | null;
   /** Current execution status */
   status: ExecutionStatus;
@@ -7026,11 +7018,16 @@ export class Api<
     captureHttpEventSync: (
       workflowId: string,
       data: string,
+      query?: {
+        /** Exact immutable reference: 1–250 printable ASCII bytes, not all spaces. */
+        runLabel?: string;
+      },
       params: RequestParams = {},
     ) =>
       this.request<any, any>({
         path: `/api/runtime/events/http-sync/${workflowId}`,
         method: "POST",
+        query: query,
         body: data,
         format: "json",
         ...params,
@@ -7048,11 +7045,16 @@ export class Api<
       triggerId: string,
       action: string,
       data: string,
+      query?: {
+        /** Exact immutable reference: 1–250 printable ASCII bytes, not all spaces. */
+        runLabel?: string;
+      },
       params: RequestParams = {},
     ) =>
       this.request<void, void>({
         path: `/api/runtime/events/http/${triggerId}/${action}`,
         method: "POST",
+        query: query,
         body: data,
         ...params,
       }),

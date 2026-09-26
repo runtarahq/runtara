@@ -10,6 +10,10 @@ use uuid::Uuid;
 /// Event published to Valkey stream to trigger workflow execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerEvent {
+    /// Immutable optional execution reference, validated at start.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
+    pub run_label: Option<String>,
+
     /// Durable source-request identity, set by the execution-outbox relay.
     ///
     /// It remains optional only so the worker can deserialize and terminally
@@ -127,6 +131,7 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         Self {
+            run_label: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -156,6 +161,7 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         Self {
+            run_label: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -221,6 +227,7 @@ impl TriggerEvent {
         scheduled_at: i64,
     ) -> Self {
         Self {
+            run_label: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -280,6 +287,7 @@ impl TriggerEvent {
         checkpoint_count: u64,
     ) -> Self {
         Self {
+            run_label: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -306,6 +314,7 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         Self {
+            run_label: None,
             request_id: None,
             instance_id,
             tenant_id,

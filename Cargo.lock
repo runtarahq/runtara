@@ -5026,6 +5026,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "runtara-core",
+ "runtara-dsl",
  "serde_json",
  "sqlx",
  "testcontainers",

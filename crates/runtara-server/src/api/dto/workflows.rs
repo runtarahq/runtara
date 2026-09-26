@@ -54,12 +54,6 @@ impl ValidationErrorDto {
         use runtara_workflows::validation::ValidationError;
 
         let (message, step_id, field_name, related_step_ids) = match error {
-            ValidationError::InvalidRunLabel { step_id, message } => (
-                message.clone(),
-                Some(step_id.clone()),
-                Some("runLabel".into()),
-                None,
-            ),
             ValidationError::StepIdMismatch { step_key, .. } => (
                 error.to_string(),
                 Some(step_key.clone()),
@@ -895,9 +889,17 @@ pub struct WorkflowVersionInfoDto {
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct WorkflowInstanceDto {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// Runtime finish timestamp used by completion-date filters. May also be
+    /// present for a suspended attempt; absent until the runtime records it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "completedAt"
+    )]
+    pub completed_at: Option<String>,
     pub id: String,
     pub created: String,
     pub updated: String,
@@ -1150,9 +1152,22 @@ pub struct CompileWorkflowResponse {
 // Execution DTOs
 // ============================================================================
 
+/// Start metadata for raw HTTP triggers, whose bodies remain workflow input.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RunLabelQuery {
+    /// Exact immutable reference: 1–250 printable ASCII bytes, not all spaces.
+    #[serde(default, rename = "runLabel")]
+    pub run_label: Option<String>,
+}
+
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ExecuteWorkflowRequest {
+    /// Immutable optional execution reference, validated at start.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
+    pub run_label: Option<String>,
+
     pub inputs: Value,
 
     /// When true, enables debug mode: execution pauses at steps with breakpoints.

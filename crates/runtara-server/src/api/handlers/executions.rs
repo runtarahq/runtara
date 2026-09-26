@@ -183,14 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn run_label_and_search_filters_are_optional_normalized_and_bounded() {
+    fn run_label_and_search_filters_are_optional_exact_and_bounded() {
         let mut query = query_with_status(None);
         query.search = Some(" Order/12 [done] ".into());
         query.run_label = Some(" Order/12 [done] ".into());
         let filters = parse_filters(&query).unwrap();
         assert_eq!(filters.search.as_deref(), Some("Order/12 [done]"));
-        assert_eq!(filters.run_label.as_deref(), Some("Order/12 [done]"));
-        query.run_label = Some("bad_label".into());
+        assert_eq!(filters.run_label.as_deref(), Some(" Order/12 [done] "));
+        query.run_label = Some("bad\nlabel".into());
         assert!(parse_filters(&query).is_err());
         query.run_label = None;
         query.search = Some("x".repeat(251));

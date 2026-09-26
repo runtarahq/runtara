@@ -13,7 +13,7 @@ use crate::instance_repository::ListInstancesOptions;
 /// Instance with image info (joined from instance_images).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct InstanceWithImage {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
     /// Unique identifier for the instance.
     pub instance_id: String,
@@ -38,7 +38,7 @@ pub struct InstanceWithImage {
 /// Full instance record with image info and heartbeat.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct InstanceFull {
-    /// Optional label assigned at successful workflow completion.
+    /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
     /// Unique identifier for the instance.
     pub instance_id: String,
