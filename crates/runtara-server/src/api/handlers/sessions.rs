@@ -10,13 +10,14 @@ use axum::{
 };
 use futures::stream::Stream;
 use redis::aio::ConnectionManager;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::debug;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::api::handlers::chat::{
@@ -24,8 +25,12 @@ use crate::api::handlers::chat::{
 };
 use crate::api::handlers::common::execution_error_response;
 use crate::api::services::session_queue;
+use crate::api::services::session_queue::managed::{self, QueueError, QueueScope};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
+
+mod delivery;
+pub use delivery::*;
 
 /// Request body for creating a session.
 #[derive(Debug, Deserialize)]
@@ -44,14 +49,20 @@ pub struct CreateSessionRequest {
 }
 
 /// Request body for submitting an event to a session.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmitEventRequest {
+    pub message_id: String,
+    pub operation_id: String,
     /// Simple text message (wrapped as `{"message": value}`)
     pub message: Option<String>,
 
     /// Structured payload (used directly)
     pub payload: Option<Value>,
+
+    /// The open input request this message answers. Optional only when exactly
+    /// one request is open; the binding is fixed when the message is accepted.
+    pub request_id: Option<String>,
 }
 
 /// Create a new session, start execution, and return an SSE stream.
@@ -121,7 +132,7 @@ pub async fn create_session(
             tenant_id: &tenant_id,
             workflow_id: &workflow_id,
             version: request.version,
-            inputs,
+            inputs: inputs.clone(),
             debug: false,
             correlation_id: None,
             idempotency_key: None,
@@ -133,29 +144,22 @@ pub async fn create_session(
 
     let instance_id = result.instance_id.to_string();
 
-    // Store session metadata in Valkey
-    if let Err(e) = session_queue::set_session_meta(
+    let scope = QueueScope::new(&tenant_id, &session_id).map_err(queue_error_response)?;
+    managed::configure_route(
         &mut valkey,
-        &tenant_id,
-        &session_id,
-        &instance_id,
-        &workflow_id,
+        &scope,
+        &managed::SessionRoute {
+            workflow_id: workflow_id.clone(),
+            instance_id: instance_id.clone(),
+        },
     )
     .await
-    {
-        error!(error = %e, "Failed to store session metadata in Valkey");
-    }
-
-    // Build SSE stream with session_created preamble + queue-drain bridge.
-    // The execution itself is already durably accepted by `engine`; Valkey
-    // delivery is a relay concern rather than an intake precondition.
+    .map_err(queue_error_response)?;
     let _ = pool;
     let stream = build_session_event_stream(SessionStreamParams {
         client: runtime_client,
         valkey,
-        engine,
         instance_id,
-        workflow_id,
         tenant_id,
         session_id,
     });
@@ -170,46 +174,206 @@ pub async fn create_session(
     Ok((headers, sse).into_response())
 }
 
-/// Submit an event to a session queue.
-///
-/// POST /api/runtime/sessions/{sessionId}/events
-pub async fn submit_event(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(valkey_conn): State<Option<ConnectionManager>>,
-    Path(session_id): Path<String>,
-    Json(request): Json<SubmitEventRequest>,
-) -> (StatusCode, Json<Value>) {
-    let mut valkey = match valkey_conn {
-        Some(c) => c,
-        None => {
-            return (
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryStatus {
+    pub message_id: String,
+    pub operation_id: String,
+    pub state: managed::DeliveryState,
+    pub reason: Option<managed::DeliveryReason>,
+    pub receipt_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub request_id: Option<String>,
+    pub enqueued_at_ms: u64,
+}
+impl From<managed::Envelope> for DeliveryStatus {
+    fn from(value: managed::Envelope) -> Self {
+        Self {
+            message_id: value.message_id,
+            operation_id: value.operation_id,
+            state: value.state,
+            reason: value.reason,
+            receipt_id: value.receipt_id,
+            instance_id: value.target.as_ref().map(|t| t.instance_id.clone()),
+            request_id: value.target.map(|t| t.request_id),
+            enqueued_at_ms: value.enqueued_at_ms,
+        }
+    }
+}
+fn queue_error_response(error: QueueError) -> (StatusCode, Json<Value>) {
+    let (status, code) = match error {
+        QueueError::Invalid => (StatusCode::BAD_REQUEST, "QUEUE_INVALID_REQUEST"),
+        QueueError::Conflict => (StatusCode::CONFLICT, "QUEUE_OPERATION_CONFLICT"),
+        QueueError::LeaseLost => (StatusCode::CONFLICT, "QUEUE_LEASE_LOST"),
+        QueueError::NotFound => (StatusCode::NOT_FOUND, "QUEUE_NOT_FOUND"),
+        QueueError::Corrupt => (StatusCode::SERVICE_UNAVAILABLE, "QUEUE_CORRUPT"),
+        QueueError::Backend(_) => (StatusCode::SERVICE_UNAVAILABLE, "QUEUE_UNAVAILABLE"),
+    };
+    (
+        status,
+        Json(json!({"success":false,"code":code,"message":error.to_string(),"data":null})),
+    )
+}
+
+fn input_target_response(code: &str, message: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"success":false,"code":code,"message":message,"data":null})),
+    )
+}
+
+/// Choose the request a new message answers, while the sender can still see it.
+/// Binding later (at delivery) could attach a late reply to a different wait.
+async fn bind_session_message(
+    client: &RuntimeClient,
+    tenant_id: &str,
+    instance_id: &str,
+    requested: Option<&str>,
+) -> Result<managed::InputTarget, (StatusCode, Json<Value>)> {
+    use runtara_core::persistence::inputs::InputError;
+    let page = match client
+        .list_input_requests(tenant_id, &[instance_id.into()], 0, u32::MAX)
+        .await
+    {
+        Ok(page) => page,
+        Err(InputError::NotFound) => {
+            return Err(input_target_response(
+                "INPUT_NOT_WAITING",
+                "The session is not waiting for input",
+            ));
+        }
+        Err(_) => {
+            return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"success": false, "message": "Valkey not configured"})),
-            );
+                Json(
+                    json!({"success":false,"code":"INPUT_DISCOVERY_UNAVAILABLE","message":"Input discovery unavailable","data":null}),
+                ),
+            ));
         }
     };
+    let selected = match requested {
+        Some(requested) => page.requests.iter().find(|r| r.request_id == requested),
+        None if page.requests.len() > 1 => {
+            return Err(input_target_response(
+                "INPUT_AMBIGUOUS",
+                "Several inputs are waiting; specify requestId",
+            ));
+        }
+        None => page.requests.first(),
+    };
+    let request = selected.ok_or_else(|| {
+        input_target_response(
+            "INPUT_NOT_WAITING",
+            "The requested input is not waiting for a response",
+        )
+    })?;
+    Ok(managed::InputTarget {
+        instance_id: instance_id.into(),
+        request_id: request.request_id.clone(),
+    })
+}
 
-    // Build event payload
-    let event = if let Some(payload) = request.payload {
-        payload
-    } else if let Some(message) = request.message {
-        json!({"message": message})
-    } else {
+/// Durable queue acceptance is distinct from acceptance by a workflow wait. The
+/// message is bound to its request here; a retry replays that original binding.
+#[utoipa::path(post,path="/api/runtime/sessions/{sessionId}/events",params(("sessionId"=String,Path)),request_body=SubmitEventRequest,
+    responses((status=200,description="Message retained or enqueue replayed",body=crate::api::dto::common::ApiResponse<DeliveryStatus>),(status=400,description="Invalid envelope"),(status=404,description="Session not found"),(status=409,description="Message identity conflict, or no/several inputs waiting"),(status=503,description="Queue unavailable")),tag="sessions")]
+pub async fn submit_event(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(valkey_conn): State<Option<ConnectionManager>>,
+    Path(session_id): Path<String>,
+    body: Result<Json<SubmitEventRequest>, axum::extract::rejection::JsonRejection>,
+) -> (StatusCode, Json<Value>) {
+    let Ok(Json(request)) = body else {
+        return queue_error_response(QueueError::Invalid);
+    };
+    let event = match (request.message, request.payload) {
+        (Some(message), None) => json!({"message":message}),
+        (None, Some(payload)) => payload,
+        _ => return queue_error_response(QueueError::Invalid),
+    };
+    let Some(mut conn) = valkey_conn else {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"success": false, "message": "Either 'message' or 'payload' is required"})),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"success":false,"code":"QUEUE_UNAVAILABLE","message":"Queue unavailable"})),
         );
     };
-
-    // Push to queue
-    if let Err(e) = session_queue::push_event(&mut valkey, &tenant_id, &session_id, &event).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"success": false, "message": format!("Failed to queue event: {}", e)})),
-        );
+    let scope = match QueueScope::new(&tenant_id, &session_id) {
+        Ok(scope) => scope,
+        Err(error) => return queue_error_response(error),
+    };
+    let route = match managed::session_route(&mut conn, &scope).await {
+        Ok(route) => route,
+        Err(error) => return queue_error_response(error),
+    };
+    // A retried message keeps the target it was first bound to, even after
+    // that request was answered; the queue replays or reports the conflict.
+    let existing = match managed::get(&mut conn, &scope, &request.message_id).await {
+        Ok(existing) => Some(existing),
+        Err(QueueError::NotFound) => None,
+        Err(error) => return queue_error_response(error),
+    };
+    let target = match existing {
+        Some(existing) => {
+            if request.request_id.is_some()
+                && existing.target.as_ref().map(|t| &t.request_id) != request.request_id.as_ref()
+            {
+                return queue_error_response(QueueError::Conflict);
+            }
+            existing.target
+        }
+        None => {
+            let Some(client) = runtime_client else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(
+                        json!({"success":false,"code":"RUNTIME_UNAVAILABLE","message":"Runtime client not configured"}),
+                    ),
+                );
+            };
+            match bind_session_message(
+                &client,
+                &tenant_id,
+                &route.instance_id,
+                request.request_id.as_deref(),
+            )
+            .await
+            {
+                Ok(target) => Some(target),
+                Err(response) => return response,
+            }
+        }
+    };
+    let enqueued = match &target {
+        Some(target) => {
+            managed::enqueue_targeted(
+                &mut conn,
+                &scope,
+                &request.message_id,
+                &request.operation_id,
+                &event,
+                target,
+            )
+            .await
+        }
+        None => {
+            managed::enqueue(
+                &mut conn,
+                &scope,
+                &request.message_id,
+                &request.operation_id,
+                &event,
+            )
+            .await
+        }
+    };
+    match enqueued {
+        Ok(envelope) => (
+            StatusCode::OK,
+            Json(json!({"success":true,"data":DeliveryStatus::from(envelope)})),
+        ),
+        Err(error) => queue_error_response(error),
     }
-
-    (StatusCode::OK, Json(json!({"success": true})))
 }
 
 /// SSE event stream for an existing session (reconnect).
@@ -221,7 +385,6 @@ pub async fn session_event_stream(
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
-    State(engine): State<Arc<ExecutionEngine>>,
     Path(session_id): Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let runtime_client = runtime_client.ok_or_else(|| {
@@ -262,9 +425,7 @@ pub async fn session_event_stream(
     let stream = build_session_event_stream(SessionStreamParams {
         client: runtime_client,
         valkey,
-        engine,
         instance_id: meta.instance_id,
-        workflow_id: meta.workflow_id,
         tenant_id,
         session_id,
     });
@@ -282,6 +443,17 @@ pub async fn session_event_stream(
 /// Get pending input for a session.
 ///
 /// GET /api/runtime/sessions/{sessionId}/pending-input
+#[utoipa::path(
+    get,
+    path = "/api/runtime/sessions/{sessionId}/pending-input",
+    params(("sessionId" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "Authoritative pending requests", body = crate::api::dto::common::ApiResponse<crate::api::services::pending_inputs::PendingInputPage>),
+        (status = 404, description = "Session or request not found"),
+        (status = 503, description = "Discovery unavailable", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+    ),
+    tag = "sessions"
+)]
 pub async fn session_pending_input(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
@@ -291,9 +463,8 @@ pub async fn session_pending_input(
     let client = match runtime_client {
         Some(c) => c,
         None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"success": false, "message": "Runtime client not configured"})),
+            return crate::api::handlers::step_events::workflow_runtime_error_response(
+                crate::api::services::workflow_runtime::WorkflowRuntimeError::RuntimeUnavailable,
             );
         }
     };
@@ -301,9 +472,8 @@ pub async fn session_pending_input(
     let mut valkey = match valkey_conn {
         Some(c) => c,
         None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"success": false, "message": "Valkey not configured"})),
+            return crate::api::handlers::step_events::workflow_runtime_error_response(
+                crate::api::services::workflow_runtime::WorkflowRuntimeError::RuntimeUnavailable,
             );
         }
     };
@@ -311,554 +481,95 @@ pub async fn session_pending_input(
     let meta = match session_queue::get_session_meta(&mut valkey, &tenant_id, &session_id).await {
         Ok(Some(m)) => m,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"success": false, "message": "Session not found"})),
+            return crate::api::handlers::step_events::workflow_runtime_error_response(
+                runtara_core::persistence::inputs::InputError::NotFound.into(),
             );
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"success": false, "message": format!("Failed to read session: {}", e)}),
-                ),
+        Err(_) => {
+            return crate::api::handlers::step_events::workflow_runtime_error_response(
+                crate::api::services::workflow_runtime::WorkflowRuntimeError::RuntimeUnavailable,
             );
         }
     };
 
     let instance_id = meta.instance_id;
 
-    // Query pending input events
-    let input_options = ListEventsOptions::new()
-        .with_limit(100)
-        .with_event_type("custom")
-        .with_subtype("external_input_requested")
-        .with_sort_order(crate::runtime_types::EventSortOrder::Asc);
-
-    let input_events = match client.list_events(&instance_id, Some(input_options)).await {
-        Ok(result) => result.events,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(
-                        json!({"success": false, "message": format!("Instance not found: {}", instance_id)}),
-                    ),
-                );
-            }
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"success": false, "message": format!("Failed to query events: {}", msg)}),
-                ),
-            );
-        }
-    };
-
-    let end_options = ListEventsOptions::new()
-        .with_limit(1000)
-        .with_event_type("custom")
-        .with_subtype("step_debug_end");
-
-    let end_events = match client.list_events(&instance_id, Some(end_options)).await {
-        Ok(result) => result.events,
-        Err(_) => vec![],
-    };
-
-    let completed_tool_ids: std::collections::HashSet<String> = end_events
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("step_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    // A resolved WaitForSignal's step_debug_end carries its signal id inside
-    // the outputs envelope. Standalone waits are matched by SIGNAL id below —
-    // signal ids are per-invocation-site (one child step can wait at several
-    // sites in one instance, embedded or composed), so a completed wait at
-    // one site must not hide another site's open wait on the same step id.
-    let completed_signal_ids: std::collections::HashSet<String> = end_events
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("outputs"))
-                .and_then(|outputs| outputs.get("signal_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    let pending: Vec<Value> = input_events
-        .iter()
-        .filter_map(|event| {
-            let data = event.payload.as_ref()?;
-            let signal_id = data.get("signal_id")?.as_str()?.to_string();
-            let ai_step_id = data.get("ai_agent_step_id").and_then(|v| v.as_str());
-            let tool_name = data.get("tool_name").and_then(|v| v.as_str());
-            let call_number = data
-                .get("call_number")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
-
-            // AI Agent tool calls complete under the synthetic
-            // "{ai_step_id}.tool.{tool_name}.{call_number}" step id;
-            // standalone waits are matched by their per-site signal id.
-            match (ai_step_id, tool_name, call_number) {
-                (Some(step), Some(tool), Some(num)) => {
-                    let check_step_id = format!("{}.tool.{}.{}", step, tool, num);
-                    if completed_tool_ids.contains(&check_step_id) {
-                        return None;
-                    }
-                }
-                _ => {
-                    if completed_signal_ids.contains(&signal_id) {
-                        return None;
-                    }
-                }
-            }
-
-            Some(json!({
-                "signalId": signal_id,
-                "toolName": tool_name,
-                "message": data.get("message")
-                    .or_else(|| data.get("step_name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("External input requested"),
-                "responseSchema": data.get("response_schema"),
-            }))
-        })
-        .collect();
-
-    let count = pending.len();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "success": true,
-            "data": {
-                "instanceId": instance_id,
-                "pendingInputs": pending,
-                "count": count
-            }
-        })),
+    match crate::api::services::pending_inputs::pending_input_page(
+        &client,
+        &tenant_id,
+        &instance_id,
     )
-}
-
-/// Guard that stops an instance when dropped (e.g., client disconnects SSE stream).
-struct InstanceStopGuard {
-    client: Arc<RuntimeClient>,
-    instance_id: String,
-}
-
-impl Drop for InstanceStopGuard {
-    fn drop(&mut self) {
-        let client = self.client.clone();
-        let instance_id = self.instance_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = client.stop_instance(&instance_id).await {
-                debug!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "Failed to stop instance on stream drop (may already be completed)"
-                );
-            } else {
-                debug!(instance_id = %instance_id, "Instance stopped on session stream drop");
-            }
-        });
+    .await
+    {
+        Ok(page) => (StatusCode::OK, Json(json!({"success":true,"data":page}))),
+        Err(error) => {
+            crate::api::handlers::step_events::workflow_runtime_error_response(error.into())
+        }
     }
 }
 
-/// Find the most recent pending signal_id for an instance.
-async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) -> Option<String> {
-    let options = ListEventsOptions::new()
-        .with_limit(10)
-        .with_event_type("custom")
-        .with_subtype("external_input_requested")
-        .with_sort_order(crate::runtime_types::EventSortOrder::Desc);
-
-    let result = client.list_events(instance_id, Some(options)).await.ok()?;
-    result
-        .events
-        .first()
-        .and_then(|ev| ev.payload.as_ref())
-        .and_then(|p| p.get("signal_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-/// Parameters for the session SSE stream.
+/// SSE observes durable session routing. Disconnecting a viewer does not cancel
+/// execution or own delivery; the managed queue worker runs independently.
 struct SessionStreamParams {
     client: Arc<RuntimeClient>,
     valkey: ConnectionManager,
-    engine: Arc<ExecutionEngine>,
     instance_id: String,
-    workflow_id: String,
     tenant_id: String,
     session_id: String,
 }
-
-/// Start a new instance for the session, returning the new instance_id.
-///
-/// The message is NOT passed as input data — it stays in the queue and will be
-/// delivered as a signal when the instance hits WaitForSignal.
-async fn start_new_instance(
-    engine: &Arc<ExecutionEngine>,
-    valkey: &mut ConnectionManager,
-    tenant_id: &str,
-    workflow_id: &str,
-    session_id: &str,
-) -> Option<String> {
-    let inputs = json!({
-        "data": { "sessionId": session_id },
-        "variables": {},
-    });
-
-    match engine
-        .queue(QueueRequest {
-            run_label: None,
-            tenant_id,
-            workflow_id,
-            version: None,
-            inputs,
-            debug: false,
-            correlation_id: None,
-            idempotency_key: None,
-            trigger_source: TriggerSource::Session,
-            instance_id: None,
-        })
-        .await
-    {
-        Ok(result) => {
-            let new_instance_id = result.instance_id.to_string();
-            info!(
-                session_id = %session_id,
-                instance_id = %new_instance_id,
-                "Started new instance for session"
-            );
-            // Update session metadata with new instance_id
-            let _ = session_queue::set_session_meta(
-                valkey,
-                tenant_id,
-                session_id,
-                &new_instance_id,
-                workflow_id,
-            )
-            .await;
-            Some(new_instance_id)
-        }
-        Err(e) => {
-            error!(error = ?e, session_id = %session_id, "Failed to start new instance for session");
-            None
-        }
-    }
-}
-
-/// Build SSE stream for a session.
-///
-/// The stream follows instances across their lifecycle:
-/// 1. Poll events from the current instance
-/// 2. When instance completes, emit `done` and wait for a new message in the queue
-/// 3. When a message arrives, start a new instance and resume polling
-/// 4. Repeat until timeout or client disconnect
 fn build_session_event_stream(
     params: SessionStreamParams,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
-        let SessionStreamParams {
-            client,
-            mut valkey,
-            engine,
-            instance_id: initial_instance_id,
-            workflow_id,
-            tenant_id: org_id,
-            session_id,
-        } = params;
-
-        // Emit session_created event
-        let created = json!({
-            "type": "session_created",
-            "sessionId": session_id,
-            "instanceId": initial_instance_id,
-        });
-        yield Ok(Event::default()
-            .event("session_created")
-            .json_data(&created)
-            .unwrap_or_else(|_| Event::default().event("error").data("serialization error")));
-
-        let mut current_instance_id = initial_instance_id;
-        let mut _stop_guard = InstanceStopGuard {
-            client: client.clone(),
-            instance_id: current_instance_id.clone(),
-        };
-
-        // Wait for instance to register
-        sleep(Duration::from_millis(500)).await;
-
-        let poll_interval = Duration::from_millis(300);
-        let idle_poll_interval = Duration::from_millis(500);
-        let max_duration = Duration::from_secs(600); // 10 minute session timeout
-        let start_time = std::time::Instant::now();
-        let mut session_ended = false;
-
-        while !session_ended && start_time.elapsed() < max_duration {
-            // === INSTANCE LOOP: poll current instance until it terminates ===
-            let mut event_offset: u32 = 0;
-            let mut instance_done = false;
-            let mut waiting_for_input = false;
-
-            while !instance_done && !session_ended && start_time.elapsed() < max_duration {
-                // Check instance status
-                match client.get_instance_info(&current_instance_id).await {
-                    Ok(info) => {
-                        if info.status.is_terminal() {
-                            // Flush remaining events
-                            if let Ok(result) = client.list_events(&current_instance_id, Some(ListEventsOptions {
-                                event_type: Some("custom".to_string()),
-                                sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
-                                limit: Some(100),
-                                offset: Some(event_offset),
-                                ..Default::default()
-                            })).await {
-                                for event in result.events {
-                                    if let Some(payload) = &event.payload {
-                                        let chat_events = parse_debug_event(
-                                            event.subtype.as_deref(),
-                                            payload,
-                                        );
-                                        for chat_event in chat_events {
-                                            yield Ok(make_event(chat_event_type(&chat_event), &chat_event));
-                                        }
-                                    }
-                                    event_offset += 1;
-                                }
-                            }
-
-                            match info.status {
-                                crate::runtime_types::InstanceStatus::Completed => {
-                                    let duration = match (info.started_at, info.finished_at) {
-                                        (Some(s), Some(f)) => Some((f - s).num_milliseconds() as f64 / 1000.0),
-                                        _ => None,
-                                    };
-                                    // Surface the agent's prose reply as an
-                                    // assistant message. Step events truncate
-                                    // large AiAgent outputs, so we lift the
-                                    // response off the workflow's final
-                                    // `outputs` (not truncated) — see
-                                    // `extract_message_from_outputs`.
-                                    if let Some(msg) = extract_message_from_outputs(info.output.as_ref()) {
-                                        yield Ok(make_event("message", &msg));
-                                    }
-                                    yield Ok(make_event("done", &ChatEvent::Done {
-                                        outputs: info.output,
-                                        duration_seconds: duration,
-                                    }));
-                                }
-                                crate::runtime_types::InstanceStatus::Failed => {
-                                    let error_msg = info.error
-                                        .or(info.stderr)
-                                        .unwrap_or_else(|| "Execution failed".to_string());
-                                    yield Ok(make_event("error", &ChatEvent::Error {
-                                        message: error_msg,
-                                    }));
-                                }
-                                _ => {
-                                    yield Ok(make_event("done", &ChatEvent::Done {
-                                        outputs: None,
-                                        duration_seconds: None,
-                                    }));
-                                }
-                            }
-                            instance_done = true;
-                            continue;
-                        }
-
-                        debug!(
-                            instance_id = %current_instance_id,
-                            status = ?info.status,
-                            "Session polling"
-                        );
-                    }
-                    Err(e) => {
-                        if start_time.elapsed() > Duration::from_secs(30) {
-                            error!(error = %e, "Session polling failed after 30s");
-                            yield Ok(make_event("error", &ChatEvent::Error {
-                                message: format!("Failed to get instance status: {}", e),
-                            }));
-                            session_ended = true;
-                            continue;
-                        }
-                    }
-                }
-
-                // Fetch new events
-                let options = ListEventsOptions {
-                    event_type: Some("custom".to_string()),
-                    sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
-                    limit: Some(100),
-                    offset: Some(event_offset),
-                    ..Default::default()
-                };
-
-                match client.list_events(&current_instance_id, Some(options)).await {
-                    Ok(result) => {
-                        for event in result.events {
-                            if let Some(payload) = &event.payload {
-                                if event.subtype.as_deref() == Some("external_input_requested") {
-                                    let has_schema = payload.get("response_schema")
-                                        .map(|v| !v.is_null())
-                                        .unwrap_or(false);
-
-                                    if has_schema {
-                                        waiting_for_input = true;
-                                        let chat_events = parse_debug_event(event.subtype.as_deref(), payload);
-                                        for chat_event in chat_events {
-                                            yield Ok(make_event(chat_event_type(&chat_event), &chat_event));
-                                        }
-                                    } else {
-                                        let signal_id = payload
-                                            .get("signal_id")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-
-                                        match session_queue::pop_event(&mut valkey, &org_id, &session_id).await {
-                                            Ok(Some(queued_event)) => {
-                                                let payload_bytes = serde_json::to_vec(&queued_event).unwrap_or_default();
-                                                if let Err(e) = client.send_custom_signal(&current_instance_id, &signal_id, Some(&payload_bytes)).await {
-                                                    error!(error = %e, "Failed to auto-deliver queued signal");
-                                                    waiting_for_input = true;
-                                                    let chat_events = parse_debug_event(event.subtype.as_deref(), payload);
-                                                    for chat_event in chat_events {
-                                                        yield Ok(make_event(chat_event_type(&chat_event), &chat_event));
-                                                    }
-                                                } else {
-                                                    waiting_for_input = false;
-                                                }
-                                            }
-                                            Ok(None) => {
-                                                waiting_for_input = true;
-                                                let chat_events = parse_debug_event(event.subtype.as_deref(), payload);
-                                                for chat_event in chat_events {
-                                                    yield Ok(make_event(chat_event_type(&chat_event), &chat_event));
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!(error = %e, "Failed to pop event from queue");
-                                                waiting_for_input = true;
-                                                let chat_events = parse_debug_event(event.subtype.as_deref(), payload);
-                                                for chat_event in chat_events {
-                                                    yield Ok(make_event(chat_event_type(&chat_event), &chat_event));
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    let chat_events = parse_debug_event(event.subtype.as_deref(), payload);
-                                    for chat_event in chat_events {
-                                        yield Ok(make_event(chat_event_type(&chat_event), &chat_event));
-                                    }
-                                }
-                            }
-                            event_offset += 1;
-                        }
-
-                        // Poll queue when waiting for input
-                        if waiting_for_input
-                            && let Ok(Some(queued_event)) = session_queue::pop_event(&mut valkey, &org_id, &session_id).await
-                            && let Some(sig) = find_pending_signal_id(&client, &current_instance_id).await
-                        {
-                            let payload_bytes = serde_json::to_vec(&queued_event).unwrap_or_default();
-                            if client.send_custom_signal(&current_instance_id, &sig, Some(&payload_bytes)).await.is_ok() {
-                                waiting_for_input = false;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Instance might not be ready yet
-                    }
-                }
-
-                sleep(poll_interval).await;
+        let SessionStreamParams {client,mut valkey,instance_id,tenant_id,session_id}=params;
+        let created=json!({"sessionId":session_id,"instanceId":instance_id});
+        yield Ok(Event::default().event("session_created").json_data(&created).unwrap_or_else(|_|Event::default().event("error").data("serialization error")));
+        let mut current=instance_id;
+        let mut offset=0;
+        let mut terminal_reported=false;
+        let started=std::time::Instant::now();
+        while started.elapsed()<Duration::from_secs(600) {
+            if let Ok(Some(meta))=session_queue::get_session_meta(&mut valkey,&tenant_id,&session_id).await
+                && meta.instance_id != current {
+                current=meta.instance_id;
+                offset=0;
+                terminal_reported=false;
+                yield Ok(Event::default().event("started").json_data(json!({"instance_id":current})).unwrap_or_default());
             }
-
-            // === IDLE PHASE: instance done, wait for next message in queue ===
-            if instance_done && !session_ended {
-                debug!(session_id = %session_id, "Instance done, waiting for next message");
-
-                loop {
-                    if start_time.elapsed() >= max_duration {
-                        session_ended = true;
-                        break;
-                    }
-
-                    match session_queue::has_events(&mut valkey, &org_id, &session_id).await {
-                        Ok(true) => {
-                            // Message waiting — start a new instance (message stays in queue
-                            // for the queue-drain bridge to deliver on WaitForSignal)
-                            match start_new_instance(
-                                &engine,
-                                &mut valkey,
-                                &org_id,
-                                &workflow_id,
-                                &session_id,
-                            ).await {
-                                Some(new_id) => {
-                                    // Emit instance_started event
-                                    let started = json!({
-                                        "type": "instance_started",
-                                        "instanceId": new_id,
-                                    });
-                                    yield Ok(Event::default()
-                                        .event("instance_started")
-                                        .json_data(&started)
-                                        .unwrap_or_else(|_| Event::default().event("error").data("serialization error")));
-
-                                    current_instance_id = new_id.clone();
-                                    _stop_guard = InstanceStopGuard {
-                                        client: client.clone(),
-                                        instance_id: new_id,
-                                    };
-
-                                    // Wait for new instance to register
-                                    sleep(Duration::from_millis(500)).await;
-                                    break; // Back to instance loop
-                                }
-                                None => {
-                                    yield Ok(make_event("error", &ChatEvent::Error {
-                                        message: "Failed to start new instance for session".to_string(),
-                                    }));
-                                    session_ended = true;
-                                    break;
-                                }
+            let info=match client.get_instance_info(&current).await {
+                Ok(info) if info.tenant_id==tenant_id=>info,
+                Ok(_)=>{ yield Ok(make_event("error",&ChatEvent::Error {message:"Session execution unavailable".into()})); break; }
+                Err(_)=>{ sleep(Duration::from_millis(500)).await; continue; }
+            };
+            let mut more_events=false;
+            match client.list_events(&current,Some(ListEventsOptions {
+                event_type:Some("custom".into()),sort_order:Some(crate::runtime_types::EventSortOrder::Asc),
+                limit:Some(100),offset:Some(offset),..Default::default()
+            })).await {
+                Ok(page)=>{
+                    more_events=page.events.len()==100;
+                    for event in page.events {
+                        if let Some(payload)=event.payload {
+                            for chat_event in parse_debug_event(event.subtype.as_deref(),&payload) {
+                                yield Ok(make_event(chat_event_type(&chat_event),&chat_event));
                             }
                         }
-                        Ok(false) => {
-                            // No message yet, keep waiting
-                            sleep(idle_poll_interval).await;
-                        }
-                        Err(e) => {
-                            error!(error = %e, "Failed to check queue during idle phase");
-                            sleep(idle_poll_interval).await;
-                        }
+                        offset+=1;
                     }
+                }
+                Err(error)=>debug!(instance_id=%current,error=%error,"Session history temporarily unavailable"),
+            }
+            if info.status.is_terminal() && !terminal_reported && !more_events {
+                terminal_reported=true;
+                if info.status==crate::runtime_types::InstanceStatus::Failed {
+                    yield Ok(make_event("error",&ChatEvent::Error {message:info.error.or(info.stderr).unwrap_or_else(||"Execution failed".into())}));
+                } else {
+                    if let Some(message)=extract_message_from_outputs(info.output.as_ref()) { yield Ok(make_event("message",&message)); }
+                    let duration=match (info.started_at,info.finished_at) {(Some(a),Some(b))=>Some((b-a).num_milliseconds() as f64/1000.0),_=>None};
+                    yield Ok(make_event("done",&ChatEvent::Done {outputs:info.output,duration_seconds:duration}));
                 }
             }
+            sleep(Duration::from_millis(500)).await;
         }
-
-        if start_time.elapsed() >= max_duration {
-            yield Ok(make_event("error", &ChatEvent::Error {
-                message: "Session timed out after 10 minutes".to_string(),
-            }));
-        }
-
-        // _stop_guard is dropped here, stopping the current instance.
     }
 }

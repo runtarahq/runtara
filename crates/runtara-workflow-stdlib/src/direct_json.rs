@@ -1441,6 +1441,43 @@ impl DirectJsonManifest {
         .map_err(|err| format!("failed to serialize wait-timeout envelope: {err}"))
     }
 
+    /// Preserve the authoritative reason when a managed request cannot resume.
+    /// Only expiry is a timeout; cancellation and abandonment can happen on
+    /// timed or untimed waits and must never restart their polling loop.
+    pub fn wait_closed_error(
+        &self,
+        step_id: &str,
+        signal_id: &str,
+        reason: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<Vec<u8>, String> {
+        self.require_wait_id(step_id)?;
+        let (code, category) = match reason {
+            "expired" => ("WAIT_TIMEOUT", "timeout"),
+            "abandoned" => ("WAIT_ABANDONED", "permanent"),
+            "invocation_cancelled" => ("WAIT_CANCELLED", "permanent"),
+            _ => ("WAIT_CLOSED", "permanent"),
+        };
+        let mut error = serde_json::json!({
+            "code": code,
+            "message": format!("WaitForSignal step '{step_id}' request '{signal_id}' closed: {reason}"),
+            "category": category,
+            "severity": "error",
+        });
+        if reason == "expired"
+            && let Some(timeout_ms) = timeout_ms
+        {
+            error = serde_json::from_slice(
+                &self.wait_timeout_error_envelope(step_id, signal_id, timeout_ms)?,
+            )
+            .map_err(|error| format!("failed to parse wait timeout: {error}"))?;
+        }
+        error["attributes"] =
+            serde_json::json!({ "closure_reason": reason, "signal_id": signal_id });
+        serde_json::to_vec(&error)
+            .map_err(|error| format!("failed to serialize wait closure: {error}"))
+    }
+
     /// Build generated-code-compatible inputs for a WaitForSignal `onWait` graph.
     pub fn wait_on_wait_variables(
         &self,
@@ -11290,6 +11327,42 @@ mod tests {
             String::from_utf8(error).expect("utf8 error"),
             "WaitForSignal step 'wait' timed out after 500ms waiting for signal 'inst-1/root/wait'"
         );
+    }
+
+    #[test]
+    fn managed_wait_closure_preserves_reason_with_or_without_a_timeout() {
+        let manifest = DirectJsonManifest::parse(&wait_manifest(
+            json!({"id":"wait", "stepType":"WaitForSignal"}),
+        ))
+        .unwrap();
+        for timeout in [None, Some(500)] {
+            for (reason, code) in [
+                ("expired", "WAIT_TIMEOUT"),
+                ("abandoned", "WAIT_ABANDONED"),
+                ("invocation_cancelled", "WAIT_CANCELLED"),
+                ("invocation_settled", "WAIT_CLOSED"),
+                ("instance_terminated", "WAIT_CLOSED"),
+                ("future_reason", "WAIT_CLOSED"),
+            ] {
+                let error: Value = serde_json::from_slice(
+                    &manifest
+                        .wait_closed_error("wait", "instance/wait", reason, timeout)
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(error["code"], code);
+                assert_eq!(
+                    error["category"],
+                    if reason == "expired" {
+                        "timeout"
+                    } else {
+                        "permanent"
+                    }
+                );
+                assert_eq!(error["attributes"]["closure_reason"], reason);
+                assert_eq!(error["attributes"]["signal_id"], "instance/wait");
+            }
+        }
     }
 
     #[test]

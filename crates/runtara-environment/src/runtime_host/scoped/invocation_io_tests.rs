@@ -365,6 +365,183 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
 }
 
 #[tokio::test]
+async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
+    use runtara_core::persistence::inputs::{InputClosure, InputState, request_id};
+
+    let fx = Fixture::new().await;
+    let io = io(&fx).await;
+    let pool = crate::test_support::pool().await;
+    // Isolated to this fixture's instance; concurrent tests use different IDs.
+    // Root lifecycle closure remains available so recovery can settle the wait.
+    let trigger = format!("input_close_fault_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected abandonment failure'; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER {trigger} BEFORE UPDATE ON instance_input_requests FOR EACH ROW WHEN (NEW.instance_id = '{}' AND NEW.closure_reason = 'abandoned') EXECUTE FUNCTION {trigger}()",
+        fx.id
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let owner = fx.owner.clone();
+    let child_io = io.clone();
+    let task = fx
+        .tasks
+        .spawn_managed(
+            move |cancel| async move {
+                let child = owner
+                    .child_fenced(vec![], Arc::new(Keys("child/")), cancel, child_io)
+                    .unwrap();
+                let descriptor =
+                    serde_json::to_vec(&serde_json::json!({"signal_id":"child/wait"})).unwrap();
+                child
+                    .register_input(descriptor.clone(), None)
+                    .await
+                    .unwrap();
+                assert!(child.close_input("child/wait".into()).await.is_err());
+                // Even native callers that catch the returned error cannot resume
+                // managed IO or publish success through the same invocation host.
+                assert!(child.register_input(descriptor, None).await.is_err());
+                assert!(child.poll_input("child/wait".into()).await.is_err());
+                assert!(
+                    child
+                        .complete(b"ignored close failure".to_vec())
+                        .await
+                        .is_err()
+                );
+                InvokeExit::Completed(b"exported success".to_vec())
+            },
+            None,
+            Some(io.clone()),
+        )
+        .unwrap();
+    assert!(matches!(
+        fx.tasks.join(task).await,
+        Err(TaskError::WorkerLost)
+    ));
+    assert!(io.failed());
+    let lease = &io.fence().lease;
+    let retained_lease = fx
+        .persistence
+        .invocation_fences()
+        .unwrap()
+        .get_invocation_lease(&lease.tenant_id, &fx.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!retained_lease.active);
+    let inputs = fx.persistence.input_requests().unwrap();
+    let retained = inputs
+        .get_input(&lease.tenant_id, &fx.id, &request_id("child/wait"))
+        .await
+        .unwrap();
+    assert_eq!(
+        retained.state,
+        InputState::Open,
+        "failed closure rolled back"
+    );
+    assert_eq!(fx.status().await, InstanceStatus::Running);
+    // Restore storage and finish disposal before the physical-exit monitor
+    // runs. The test does not write a terminal Core status itself.
+    sqlx::query(&format!(
+        "DROP TRIGGER {trigger} ON instance_input_requests"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("DROP FUNCTION {trigger}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        fx.tasks.shutdown().await,
+        Err(TaskError::WorkerLost)
+    ));
+    fx.owner.close_after_cleanup().unwrap();
+
+    use crate::container_registry::{ContainerInfo, ContainerRegistry};
+    use crate::runner::{LaunchOptions, MockRunner, Runner};
+    let runner = Arc::new(MockRunner::failing());
+    let handle = runner
+        .try_launch_detached(&LaunchOptions {
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            instance_id: fx.id.clone(),
+            tenant_id: lease.tenant_id.clone(),
+            wasm_path: "/fixture/failed-workflow.wasm".into(),
+            requires_lifecycle_invoke: true,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: serde_json::json!({}),
+            timeout: Duration::from_secs(30),
+            checkpoint_id: None,
+            env: Default::default(),
+            prepersisted_input: None,
+            start_gate: None,
+        })
+        .await
+        .unwrap();
+    let registry = ContainerRegistry::new(pool.clone());
+    registry
+        .register(&ContainerInfo {
+            container_id: handle.handle_id.clone(),
+            launch_id: handle.launch_id.clone(),
+            instance_id: fx.id.clone(),
+            tenant_id: lease.tenant_id.clone(),
+            binary_path: "/fixture/failed-workflow.wasm".into(),
+            started_at: handle.started_at,
+            timeout_seconds: Some(30),
+        })
+        .await
+        .unwrap();
+    crate::handlers::spawn_container_monitor(
+        pool.clone(),
+        runner,
+        handle,
+        fx.persistence.clone(),
+        Duration::from_secs(30),
+        crate::handlers::DrainController::new(),
+        crate::launch_dispatcher::LaunchLifecycleObservers::default(),
+        None,
+        None,
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fx.status().await != InstanceStatus::Failed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("production monitor must settle the failed execution");
+    let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    assert_eq!(root.termination_reason.as_deref(), Some("crashed"));
+    assert!(registry.get(&fx.id).await.unwrap().is_none());
+    let retained = inputs
+        .get_input(&lease.tenant_id, &fx.id, &request_id("child/wait"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        retained.state,
+        InputState::Closed {
+            reason: InputClosure::InstanceTerminated,
+            ..
+        }
+    ));
+    assert_eq!(
+        inputs
+            .list_inputs(&lease.tenant_id, std::slice::from_ref(&fx.id), 0, 10)
+            .await
+            .unwrap()
+            .total_count,
+        0
+    );
+}
+
+#[tokio::test]
 async fn fenced_io_rejects_another_root_and_default_children_do_not_create_leases() {
     let fx = Fixture::new().await;
     let (live, _) = fx.child().await;
@@ -372,6 +549,30 @@ async fn fenced_io_rejects_another_root_and_default_children_do_not_create_lease
         .await
         .unwrap();
     let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+    let unsupported = live
+        .register_input(
+            serde_json::to_vec(&serde_json::json!({"signal_id":"child/wait"})).unwrap(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unsupported,
+        "managed child input requires durable invocation authority"
+    );
+    assert!(live.poll_input("child/wait".into()).await.is_err());
+    assert!(live.close_input("child/wait".into()).await.is_err());
+    assert_eq!(
+        fx.persistence
+            .input_requests()
+            .unwrap()
+            .list_inputs(&root.tenant_id, std::slice::from_ref(&fx.id), 0, 10)
+            .await
+            .unwrap()
+            .total_count,
+        0,
+        "an unfenced child must not fall back to root request ownership"
+    );
     assert!(
         fx.persistence
             .invocation_fences()

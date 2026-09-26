@@ -1907,6 +1907,21 @@ async fn test_start_instance_empty_env() {
 // spawn_container_monitor Timeout Tests
 // ============================================================================
 
+async fn register_monitor_handle(pool: &PgPool, handle: &RunnerHandle) {
+    ContainerRegistry::new(pool.clone())
+        .register(&ContainerInfo {
+            container_id: handle.handle_id.clone(),
+            launch_id: handle.launch_id.clone(),
+            instance_id: handle.instance_id.clone(),
+            tenant_id: handle.tenant_id.clone(),
+            binary_path: "/test/workflow.wasm".into(),
+            started_at: handle.started_at,
+            timeout_seconds: None,
+        })
+        .await
+        .unwrap();
+}
+
 /// Test that spawn_container_monitor enforces execution timeout.
 ///
 /// This test verifies that:
@@ -1966,6 +1981,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
     );
 
     // Spawn the monitor with a very short timeout (100ms)
+    register_monitor_handle(&pool, &handle).await;
     spawn_container_monitor(
         pool.clone(),
         runner.clone(),
@@ -2071,6 +2087,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         .expect("Failed to launch detached");
 
     // Spawn the monitor with a long timeout (10 seconds - should never trigger)
+    register_monitor_handle(&pool, &handle).await;
     spawn_container_monitor(
         pool.clone(),
         runner.clone(),
@@ -2167,6 +2184,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         .expect("Failed to launch detached");
 
     // Spawn the monitor with a 200ms timeout
+    register_monitor_handle(&pool, &handle).await;
     spawn_container_monitor(
         pool.clone(),
         runner.clone(),

@@ -712,7 +712,7 @@ jobs:
         # thirty seconds into the future and race them for its own. The suite is
         # thirteen tests of a few seconds each, so serializing costs almost
         # nothing and removes the whole class.
-        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test -- --test-threads=1
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs -- --test-threads=1
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

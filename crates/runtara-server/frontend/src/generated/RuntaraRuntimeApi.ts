@@ -242,6 +242,16 @@ export type IssueCategory =
   | "invalid_reference_path"
   | "missing_connection";
 
+/** Stable machine-readable reasons for managed submission failures. */
+export type InputSubmissionCode =
+  | "INPUT_NOT_FOUND"
+  | "INPUT_INVALID_REQUEST"
+  | "INPUT_INVALID_PAYLOAD"
+  | "INPUT_INACTIVE"
+  | "INPUT_ALREADY_ANSWERED"
+  | "INPUT_OPERATION_CONFLICT"
+  | "INPUT_UNAVAILABLE";
+
 export type FieldAccessMode = "read_write" | "read" | "write";
 
 export type FeatureKey = "reports" | "database" | "api" | "mcp";
@@ -273,6 +283,24 @@ export type ErrorSeverity = "info" | "warning" | "error" | "critical";
  * - `severity`: `error` for technical, `warning` for expected business outcomes
  */
 export type ErrorCategory = "transient" | "permanent";
+
+export type DeliveryState =
+  | "queued"
+  | "leased"
+  | "retry"
+  | "blocked"
+  | "accepted"
+  | "failed";
+
+export type DeliveryReason =
+  | "no_target"
+  | "ambiguous_target"
+  | "stale_target"
+  | "invalid_payload"
+  | "operation_conflict"
+  | "backend_unavailable"
+  | "explicit_failure"
+  | "launch_rejected";
 
 export type ControlKind =
   | "text"
@@ -766,6 +794,37 @@ export interface ApiKey {
 }
 
 /** Generic API response wrapper */
+export interface ApiResponseDeliveryPage {
+  data: {
+    deliveries: DeliveryStatus[];
+    /** Zero ends the scan. Pages may overlap while deliveries change. */
+    nextCursor: string;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseDeliveryStatus {
+  data: {
+    /**
+     * @format int64
+     * @min 0
+     */
+    enqueuedAtMs: number;
+    instanceId?: string | null;
+    messageId: string;
+    operationId: string;
+    reason?: null | DeliveryReason;
+    receiptId?: string | null;
+    requestId?: string | null;
+    state: DeliveryState;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
 export interface ApiResponseInvocationTrigger {
   /** Invocation trigger model */
   data: {
@@ -855,6 +914,18 @@ export interface ApiResponsePageWorkflowDto {
     totalElements: number;
     /** @format int32 */
     totalPages: number;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponsePendingInputPage {
+  data: {
+    /** @min 0 */
+    count: number;
+    instanceId: string;
+    pendingInputs: PendingInputResponse[];
   };
   message: string;
   success: boolean;
@@ -985,6 +1056,19 @@ export interface ApiResponseVecWorkflowVersionInfoDto {
 }
 
 /** Generic API response wrapper */
+export interface ApiResponseWorkflowActionReceipt {
+  /** Public acknowledgement deliberately omits the accepted response payload. */
+  data: {
+    /** @format date-time */
+    acceptedAt: string;
+    receiptId: string;
+    requestId: string;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
 export interface ApiResponseWorkflowDto {
   data: {
     created: string;
@@ -1039,6 +1123,17 @@ export interface ApiResponseWorkflowDto {
     updated: string;
     /** Default variable values (can be overridden at execution time) */
     variables?: any;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseWorkflowRuntimeActionPage {
+  data: {
+    actions: WorkflowRuntimeAction[];
+    page: WorkflowRuntimeActionPageInfo;
+    workflowId: string;
   };
   message: string;
   success: boolean;
@@ -1947,6 +2042,27 @@ export interface DeleteReportResponse {
   success: boolean;
 }
 
+export interface DeliveryPage {
+  deliveries: DeliveryStatus[];
+  /** Zero ends the scan. Pages may overlap while deliveries change. */
+  nextCursor: string;
+}
+
+export interface DeliveryStatus {
+  /**
+   * @format int64
+   * @min 0
+   */
+  enqueuedAtMs: number;
+  instanceId?: string | null;
+  messageId: string;
+  operationId: string;
+  reason?: null | DeliveryReason;
+  receiptId?: string | null;
+  requestId?: string | null;
+  state: DeliveryState;
+}
+
 /** Disk space information for the data directory */
 export interface DiskInfo {
   /**
@@ -2713,6 +2829,14 @@ export interface IndexDefinition {
   unique?: boolean;
 }
 
+export interface InputSubmissionErrorResponse {
+  /** Stable machine-readable reasons for managed submission failures. */
+  code: InputSubmissionCode;
+  data?: any;
+  message: string;
+  success: boolean;
+}
+
 export interface Instance {
   /**
    * Computed columns (e.g. `score_expression` output). Absent when
@@ -3244,6 +3368,35 @@ export interface PageWorkflowInstanceHistoryDto {
   totalElements: number;
   /** @format int32 */
   totalPages: number;
+}
+
+export interface PendingInputPage {
+  /** @min 0 */
+  count: number;
+  instanceId: string;
+  pendingInputs: PendingInputResponse[];
+}
+
+export interface PendingInputResponse {
+  aiAgentStepId?: string | null;
+  /**
+   * @format int64
+   * @min 0
+   */
+  callNumber?: number | null;
+  /**
+   * @format int64
+   * @min 0
+   */
+  iteration?: number | null;
+  message: string;
+  requestId: string;
+  /** @format date-time */
+  requestedAt: string;
+  responseSchema?: any;
+  /** Diagnostic wait address; submissions use `request_id`. */
+  signalId: string;
+  toolName?: string | null;
 }
 
 /** Aggregated rate limit stats for a time period */
@@ -4770,6 +4923,16 @@ export interface ReportWorkflowActionExecution {
   workflowId: string;
 }
 
+export type ResolveDeliveryRequest =
+  | {
+      action: "fail";
+    }
+  | {
+      action: "select";
+      instanceId: string;
+      requestId: string;
+    };
+
 export interface Schema {
   columns: ColumnDefinition[];
   createdAt: string;
@@ -5339,10 +5502,34 @@ export interface StepTypeInfo {
   name: string;
 }
 
+/** Request body for submitting an event to a session. */
+export interface SubmitEventRequest {
+  /** Simple text message (wrapped as `{"message": value}`) */
+  message?: string | null;
+  messageId: string;
+  operationId: string;
+  /** Structured payload (used directly) */
+  payload?: any;
+  /**
+   * The open input request this message answers. Optional only when exactly
+   * one request is open; the binding is fixed when the message is accepted.
+   */
+  requestId?: string | null;
+}
+
 export interface SubmitReportWorkflowActionRequest {
   blockFilters?: Partial<Record<string, any>>;
   filters?: Partial<Record<string, any>>;
-  payload?: any;
+  instanceId: string;
+  operationId: string;
+  payload: any;
+  requestId: string;
+}
+
+export interface SubmitWorkflowActionRequest {
+  operationId: string;
+  payload: any;
+  requestId: string;
 }
 
 /**
@@ -5898,6 +6085,14 @@ export interface Workflow {
   trackEvents?: boolean | null;
 }
 
+/** Public acknowledgement deliberately omits the accepted response payload. */
+export interface WorkflowActionReceipt {
+  /** @format date-time */
+  acceptedAt: string;
+  receiptId: string;
+  requestId: string;
+}
+
 export interface WorkflowDto {
   created: string;
   /**
@@ -6128,6 +6323,45 @@ export interface WorkflowMetricsHourlyResponse {
   data: WorkflowMetricsHourlyData;
   message: string;
   success: boolean;
+}
+
+export interface WorkflowRuntimeAction {
+  actionId: string;
+  actionKey?: string | null;
+  actionKind: string;
+  context?: any;
+  correlation?: any;
+  id: string;
+  inputSchema?: any;
+  instanceId: string;
+  label: string;
+  message: string;
+  requestId: string;
+  /** @format date-time */
+  requestedAt?: string | null;
+  runtime: any;
+  schemaFormat: string;
+  signalId: string;
+  status: string;
+  targetId: string;
+  targetKind: string;
+  workflowId: string;
+}
+
+export interface WorkflowRuntimeActionPage {
+  actions: WorkflowRuntimeAction[];
+  page: WorkflowRuntimeActionPageInfo;
+  workflowId: string;
+}
+
+export interface WorkflowRuntimeActionPageInfo {
+  hasNextPage: boolean;
+  /** @format int64 */
+  offset: number;
+  /** @format int64 */
+  size: number;
+  /** @format int64 */
+  totalCount: number;
 }
 
 /** Overall workflow statistics */
@@ -7913,6 +8147,29 @@ export class Api<
     /**
      * No description
      *
+     * @tags reports
+     * @name SubmitReportWorkflowAction
+     * @request POST:/api/runtime/reports/{reportId}/blocks/{blockId}/actions/{actionId}/submit
+     */
+    submitReportWorkflowAction: (
+      reportId: string,
+      blockId: string,
+      actionId: string,
+      data: SubmitReportWorkflowActionRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<WorkflowActionReceipt, void | InputSubmissionErrorResponse>({
+        path: `/api/runtime/reports/${reportId}/blocks/${blockId}/actions/${actionId}/submit`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
      * @tags reports-controller
      * @name ExecuteReportWorkflowAction
      * @request POST:/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute
@@ -7948,6 +8205,140 @@ export class Api<
     ) =>
       this.request<EditReportResponse, void>({
         path: `/api/runtime/reports/${reportId}/edit`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags sessions
+     * @name ListSessionDeliveries
+     * @request GET:/api/runtime/sessions/{sessionId}/deliveries
+     */
+    listSessionDeliveries: (
+      sessionId: string,
+      query?: {
+        cursor?: string;
+        /**
+         * @format int32
+         * @min 0
+         */
+        limit?: number;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseDeliveryPage, void>({
+        path: `/api/runtime/sessions/${sessionId}/deliveries`,
+        method: "GET",
+        query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags sessions
+     * @name GetSessionDelivery
+     * @request GET:/api/runtime/sessions/{sessionId}/deliveries/{messageId}
+     */
+    getSessionDelivery: (
+      sessionId: string,
+      messageId: string,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseDeliveryStatus, void>({
+        path: `/api/runtime/sessions/${sessionId}/deliveries/${messageId}`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags sessions
+     * @name ResolveSessionDelivery
+     * @request POST:/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve
+     */
+    resolveSessionDelivery: (
+      sessionId: string,
+      messageId: string,
+      data: ResolveDeliveryRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseDeliveryStatus, void>({
+        path: `/api/runtime/sessions/${sessionId}/deliveries/${messageId}/resolve`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags sessions
+     * @name SubmitEvent
+     * @summary Durable queue acceptance is distinct from acceptance by a workflow wait. The message is bound to its request here; a retry replays that original binding.
+     * @request POST:/api/runtime/sessions/{sessionId}/events
+     */
+    submitEvent: (
+      sessionId: string,
+      data: SubmitEventRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseDeliveryStatus, void>({
+        path: `/api/runtime/sessions/${sessionId}/events`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description GET /api/runtime/sessions/{sessionId}/pending-input
+     *
+     * @tags sessions
+     * @name SessionPendingInput
+     * @summary Get pending input for a session.
+     * @request GET:/api/runtime/sessions/{sessionId}/pending-input
+     */
+    sessionPendingInput: (sessionId: string, params: RequestParams = {}) =>
+      this.request<
+        ApiResponsePendingInputPage,
+        void | InputSubmissionErrorResponse
+      >({
+        path: `/api/runtime/sessions/${sessionId}/pending-input`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags signals
+     * @name SubmitSignal
+     * @summary Accept a response for an authorized managed request, or replay its receipt.
+     * @request POST:/api/runtime/signals/{instanceId}
+     */
+    submitSignal: (
+      instanceId: string,
+      data: SubmitWorkflowActionRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<
+        ApiResponseWorkflowActionReceipt,
+        InputSubmissionErrorResponse
+      >({
+        path: `/api/runtime/signals/${instanceId}`,
         method: "POST",
         body: data,
         type: "application/json",
@@ -8399,7 +8790,7 @@ export class Api<
       }),
 
     /**
-     * @description The workflow executes asynchronously while this endpoint streams execution events (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events. For workflows with WaitForSignal steps (human-in-the-loop), the stream emits a `waiting_for_input` event with a `signal_id`. Use `POST /api/runtime/signals/{instanceId}` to submit the response and resume execution.
+     * @description The workflow executes asynchronously while this endpoint streams execution events (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events. For workflows with WaitForSignal steps (human-in-the-loop), a historical `waiting_for_input` event is presentation only. Discover current requests with `GET /api/runtime/workflows/{workflowId}/instances/{instanceId}/actions`, then submit the chosen request and a stable operation identity through its submit endpoint. Acceptance rechecks current state and does not implicitly resume an explicitly paused execution.
      *
      * @tags Chat
      * @name ChatHandler
@@ -8730,6 +9121,95 @@ export class Api<
         method: "PUT",
         body: data,
         type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags actions
+     * @name ListWorkflowOpenActions
+     * @request GET:/api/runtime/workflows/{workflowId}/actions
+     */
+    listWorkflowOpenActions: (
+      workflowId: string,
+      query?: {
+        /** @format int32 */
+        page?: number | null;
+        /** @format int32 */
+        size?: number | null;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseWorkflowRuntimeActionPage, void>({
+        path: `/api/runtime/workflows/${workflowId}/actions`,
+        method: "GET",
+        query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags actions
+     * @name ListWorkflowInstanceOpenActions
+     * @request GET:/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions
+     */
+    listWorkflowInstanceOpenActions: (
+      workflowId: string,
+      instanceId: string,
+      params: RequestParams = {},
+    ) =>
+      this.request<void, void>({
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}/actions`,
+        method: "GET",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags actions
+     * @name SubmitWorkflowAction
+     * @request POST:/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit
+     */
+    submitWorkflowAction: (
+      workflowId: string,
+      instanceId: string,
+      actionId: string,
+      data: SubmitWorkflowActionRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<
+        ApiResponseWorkflowActionReceipt,
+        InputSubmissionErrorResponse
+      >({
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}/actions/${actionId}/submit`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags step-events
+     * @name GetPendingInput
+     * @summary Get authoritative pending requests, including suspended waits.
+     * @request GET:/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input
+     */
+    getPendingInput: (
+      workflowId: string,
+      instanceId: string,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponsePendingInputPage, void>({
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}/pending-input`,
+        method: "GET",
         format: "json",
         ...params,
       }),

@@ -481,6 +481,24 @@ pub async fn get_report_block_data(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[utoipa::path(
+    post,
+    path = "/api/runtime/reports/{reportId}/blocks/{blockId}/actions/{actionId}/submit",
+    params(
+        ("reportId" = String, Path, description = "Report ID or slug"),
+        ("blockId" = String, Path, description = "Actions block ID"),
+        ("actionId" = String, Path, description = "Opaque managed request ID"),
+    ),
+    request_body = SubmitReportWorkflowActionRequest,
+    responses(
+        (status = 200, description = "Response accepted or original receipt replayed", body = crate::api::services::workflow_runtime::WorkflowActionReceipt),
+        (status = 400, description = "Invalid submission"),
+        (status = 404, description = "Report or input request not found"),
+        (status = 409, description = "Managed input conflict", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+        (status = 503, description = "Input service unavailable", body = crate::api::services::workflow_runtime::InputSubmissionErrorResponse),
+    ),
+    tag = "reports"
+)]
 pub async fn submit_report_workflow_action(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Extension(auth_context): Extension<AuthContext>,
@@ -490,8 +508,18 @@ pub async fn submit_report_workflow_action(
     State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((report_id, block_id, action_id)): Path<(String, String, String)>,
-    Json(request): Json<SubmitReportWorkflowActionRequest>,
+    request: Result<
+        Json<SubmitReportWorkflowActionRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let Json(request) = request.map_err(|_| {
+        crate::api::handlers::step_events::workflow_runtime_error_response(
+            crate::api::services::workflow_runtime::WorkflowRuntimeError::Managed(
+                runtara_core::persistence::inputs::InputError::InvalidRequest,
+            ),
+        )
+    })?;
     let service =
         ReportService::new(pool, manager, connections).with_runtime(engine, runtime_client);
 
@@ -506,7 +534,7 @@ pub async fn submit_report_workflow_action(
         )
         .await
     {
-        Ok(response) => Ok((StatusCode::ACCEPTED, Json(response))),
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
         Err(error) => Err(error_response(error)),
     }
 }
@@ -660,6 +688,9 @@ pub async fn edit_report(
 
 fn error_response(error: ReportServiceError) -> (StatusCode, Json<Value>) {
     match error {
+        ReportServiceError::WorkflowRuntime(error) => {
+            crate::api::handlers::step_events::workflow_runtime_error_response(error)
+        }
         ReportServiceError::NotFound => (
             StatusCode::NOT_FOUND,
             Json(json!({ "success": false, "message": "Report not found" })),

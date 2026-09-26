@@ -164,6 +164,7 @@ describe('chatStore', () => {
       const store = useChatStore.getState();
 
       store.setWaitingForInput({
+        requestId: 'req-1',
         signalId: 'sig-1',
         message: 'What product?',
         toolName: 'ask_user',
@@ -171,6 +172,7 @@ describe('chatStore', () => {
 
       let state = useChatStore.getState();
       expect(state.waitingForInput).toEqual({
+        requestId: 'req-1',
         signalId: 'sig-1',
         message: 'What product?',
         toolName: 'ask_user',
@@ -180,6 +182,17 @@ describe('chatStore', () => {
       state = useChatStore.getState();
       expect(state.waitingForInput).toBeNull();
     });
+  });
+
+  it('clears pending selection and discovery failure when the session changes', () => {
+    const store = useChatStore.getState();
+    store.setSessionId('first');
+    store.setPendingInputs([{ requestId: 'request', signalId: 'signal' }]);
+    store.setPendingInputError('Unavailable');
+    store.setSessionId('second');
+    expect(useChatStore.getState().pendingInputs).toEqual([]);
+    expect(useChatStore.getState().waitingForInput).toBeNull();
+    expect(useChatStore.getState().pendingInputError).toBeNull();
   });
 
   describe('loadHistory', () => {
@@ -248,7 +261,7 @@ describe('chatStore', () => {
       store.setInstanceId('inst-1');
       store.setStatus('streaming');
       store.setError('oops');
-      store.setWaitingForInput({ signalId: 'sig-1' });
+      store.setWaitingForInput({ requestId: 'req-1', signalId: 'sig-1' });
 
       store.resetChat();
 

@@ -107,6 +107,18 @@ pub(crate) async fn apply_transition(
         .bind(matches!(effects.reason, Change::Keep)).bind(reason)
         .bind(matches!(effects.wake, Change::Keep)).bind(wake_now).bind(wake_at).bind(effects.clear_result).bind(matches!(effects.wake_reason, Change::Keep)).bind(wake_reason)
         .execute(&mut **tx).await.db()?;
+    if !matches!(effects.reason, Change::Keep)
+        || effects.status.is_some_and(InstanceStatus::is_terminal)
+    {
+        sqlx::query("DELETE FROM instance_input_parks WHERE instance_id=ANY($1)")
+            .bind(ids)
+            .execute(&mut **tx)
+            .await
+            .db()?;
+    }
+    if effects.status.is_some_and(InstanceStatus::is_terminal) {
+        crate::inputs::close_roots(tx, ids).await.db()?;
+    }
     if let Some(event) = effects.event {
         sqlx::query("INSERT INTO instance_events (instance_id, event_type, created_at) SELECT unnest($1::text[]), $2::instance_event_type, NOW()")
             .bind(ids).bind(crate::encoding::event_type_to_str(event)).execute(&mut **tx).await.db()?;

@@ -78,6 +78,14 @@ pub(super) fn emit_check_signals_and_suspend(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
+    emit_check_signals_and_suspend_with_error(body, indices, return_if_retptr_error);
+}
+
+pub(super) fn emit_check_signals_and_suspend_with_error(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    on_error: impl FnOnce(&mut WasmFunction, &DirectCoreFunctionIndices),
+) {
     super::cooperative_wait::emit_if_safe_boundary(body, indices);
     if indices.omit_runtime {
         // The shared boundary already yielded to parent cancellation. Callable
@@ -88,7 +96,7 @@ pub(super) fn emit_check_signals_and_suspend(
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body, indices);
+    on_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
     // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).

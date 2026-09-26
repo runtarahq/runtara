@@ -26,6 +26,24 @@ use crate::types::{CheckpointResult, CustomSignal, Signal, SignalType, StatusRes
 /// This trait abstracts the communication layer, allowing the SDK to work
 /// with either HTTP-based remote communication or direct embedded calls.
 pub trait SdkBackend: Send + Sync {
+    /// Register a durable managed wait descriptor under this instance's identity.
+    fn register_input(&self, _descriptor: &[u8], _deadline_ms: Option<u64>) -> Result<()> {
+        Err(crate::error::SdkError::Internal(
+            "backend does not support managed inputs".into(),
+        ))
+    }
+    /// Read authoritative state, arbitrating timeout at persistence.
+    fn poll_input(&self, _signal_id: &str) -> Result<crate::types::InputState> {
+        Err(crate::error::SdkError::Internal(
+            "backend does not support managed inputs".into(),
+        ))
+    }
+    /// Abandon a managed wait, retaining an already accepted response.
+    fn close_input(&self, _signal_id: &str) -> Result<crate::types::InputState> {
+        Err(crate::error::SdkError::Internal(
+            "backend does not support managed inputs".into(),
+        ))
+    }
     /// Connect to the backend (no-op for embedded).
     fn connect(&self) -> Result<()>;
 

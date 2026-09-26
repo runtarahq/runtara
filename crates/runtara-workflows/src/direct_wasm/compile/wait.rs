@@ -16,29 +16,29 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
     emit_entry_suspend_on_signal, emit_retptr_error_or_return, load_retptr_list,
-    load_retptr_option_list, push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load,
-    push_retptr_u8_load, push_segment_args, return_if_retptr_error, store_local_i64_at,
+    load_retptr_option_list, load_retptr_tag, push_i64_load_from_ptr, push_retptr_arg,
+    push_retptr_i64_load, push_retptr_u8_load, push_segment_args, return_if_retptr_error,
+    store_local_i64_at,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
 use super::checkpoint::{
-    emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
+    emit_check_signals_and_suspend_with_error, emit_checkpoint_lookup, emit_checkpoint_save,
 };
 use super::debug::{emit_step_breakpoint, emit_step_debug_event, emit_wait_debug_start_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::split::emit_split_append_error_payload_and_continue;
 use super::{
-    DIRECT_DEADLINE_SKEW_TOLERANCE_MS, DIRECT_RESULT_OPTION_TAG_OFFSET,
-    DIRECT_RESULT_OPTION_U64_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_VALUE_OFFSET,
-    DIRECT_RET_U64_OK_OFFSET, DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL,
-    DIRECT_WAIT_DEADLINE_MS_LOCAL, DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
-    DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
-    DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL, DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL,
-    DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL, DIRECT_WAIT_RESUMED_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
-    DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
+    DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_TAG_OFFSET,
+    DIRECT_RESULT_OPTION_U64_VALUE_OFFSET, DIRECT_RET_U64_OK_OFFSET, DIRECT_STEP_ERROR_LEN_LOCAL,
+    DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WAIT_DEADLINE_MS_LOCAL,
+    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL,
+    DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
+    DIRECT_WAIT_RESUMED_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+    DIRECT_WAIT_TIMEOUT_MS_LOCAL, DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectHandledTarget, DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 /// Lower a WaitForSignal target used as an AiAgent tool: emit the external-input
@@ -107,12 +107,19 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::Call(indices.stdlib_wait_event));
     return_if_retptr_error(body, indices);
     load_retptr_list(body, output_ptr_local, output_len_local);
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I64Const(0));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_register_input));
+    return_if_retptr_error(body, indices);
     push_segment_args(body, &static_data.external_input_requested_kind);
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body, indices);
+    // Diagnostic failure cannot undo the already registered managed wait.
 
     // poll_interval = wait-poll-interval-ms(wait_step)
     push_segment_args(body, wait_step_segment);
@@ -120,7 +127,12 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
-    return_if_retptr_error(body, indices);
+    emit_abandon_input_on_error(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    );
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
 
@@ -128,19 +140,57 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
 
-    emit_check_signals_and_suspend(body, indices);
+    emit_check_signals_and_suspend_with_error(body, indices, |body, indices| {
+        emit_abandon_input_on_error(
+            body,
+            indices,
+            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        );
+    });
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_poll_custom_signal));
-    return_if_retptr_error(body, indices);
+    body.instruction(&Instruction::Call(indices.runtime_poll_input));
+    emit_abandon_input_on_error(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    );
     push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::BrIf(1));
+
+    push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    body.instruction(&Instruction::I32Const(2));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load_retptr_option_list(body, output_ptr_local, output_len_local);
+    push_segment_args(body, wait_step_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I64Const(0));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_wait_closed_error));
+    return_if_retptr_error(body, indices);
+    load_retptr_list(body, output_ptr_local, output_len_local);
+    emit_runtime_fail_return(body, indices, output_ptr_local, output_len_local);
+    body.instruction(&Instruction::End);
 
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    return_if_retptr_error(body, indices);
+    emit_abandon_input_on_error(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    );
 
     // A human-in-the-loop AI tool wait has no timeout, so it parks on-signal with
     // NO deadline — the custom-signal waker is the sole wake path.
@@ -159,7 +209,12 @@ pub(super) fn emit_ai_wait_tool_arm(
         body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-        return_if_retptr_error(body, indices);
+        emit_abandon_input_on_error(
+            body,
+            indices,
+            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        );
 
         body.instruction(&Instruction::Br(0));
     }
@@ -412,24 +467,31 @@ pub(super) fn emit_wait_for_signal_plan(
     );
     load_retptr_list(body, output_ptr_local, output_len_local);
 
+    body.instruction(&Instruction::LocalGet(output_ptr_local));
+    body.instruction(&Instruction::LocalGet(output_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_register_input));
+    return_if_retptr_error(body, indices);
     push_segment_args(body, &static_data.external_input_requested_kind);
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_custom_event));
-    return_if_retptr_error(body, indices);
+    // Diagnostic failure cannot undo the already registered managed wait.
 
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
-    emit_retptr_error_or_return(
+    emit_abandon_input_on_error_target(
         body,
         indices,
+        route_ptr_local,
+        route_len_local,
         failure_target,
-        output_ptr_local,
-        output_len_local,
     );
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
@@ -437,21 +499,21 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
 
-    emit_check_signals_and_suspend(body, indices);
+    emit_check_signals_and_suspend_with_error(body, indices, |body, indices| {
+        emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
+    });
 
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_poll_custom_signal));
-    return_if_retptr_error(body, indices);
+    body.instruction(&Instruction::Call(indices.runtime_poll_input));
+    emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
     push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::BrIf(1));
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-    return_if_retptr_error(body, indices);
-
-    emit_wait_timeout_check(
+    emit_wait_closed_check(
         body,
         indices,
         static_data,
@@ -475,6 +537,10 @@ pub(super) fn emit_wait_for_signal_plan(
         failure_target,
         handled_target,
     );
+
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_heartbeat));
+    emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
 
     // Store-freeing Wait, invoke export only: after one poll MISS and the
     // timeout check, EXIT with `suspended(on-signal{signal-id, deadline})`
@@ -531,7 +597,7 @@ pub(super) fn emit_wait_for_signal_plan(
         body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-        return_if_retptr_error(body, indices);
+        emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
 
         body.instruction(&Instruction::Br(0));
     }
@@ -751,7 +817,7 @@ fn emit_wait_on_wait_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_wait_timeout_check(
+fn emit_wait_closed_check(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
@@ -775,75 +841,32 @@ fn emit_wait_timeout_check(
     failure_target: Option<DirectFailureTarget>,
     handled_target: Option<DirectHandledTarget>,
 ) {
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
+    // Poll decides acceptance vs expiry/closure under the persistence lock.
+    // Every closed reason exits, including on waits without a deadline.
+    push_retptr_u8_load(body, DIRECT_RESULT_OPTION_TAG_OFFSET);
+    body.instruction(&Instruction::I32Const(2));
+    body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::If(BlockType::Empty));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
-    return_if_retptr_error(body, indices);
-    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
-    // Add the skew tolerance to `now`, but only on a relaunch — multiplying by
-    // the resumed flag rather than branching on it, so the emitted shape is the
-    // same either way. Added to `now` rather than subtracted from the deadline
-    // for two reasons: both sides stay unsigned epoch milliseconds with nothing
-    // to underflow, and DIRECT_WAIT_DEADLINE_MS_LOCAL stays the TRUE deadline
-    // for the on-signal re-park below, so `sleep_until` is never stamped early.
-    // (Shifting the parked deadline instead would move the next wake earlier by
-    // exactly the tolerance and cancel out the absorption entirely.)
-    //
-    // The tolerance is CLAMPED to half the wait's own timeout, because the
-    // resumed flag alone is not enough of a guard here. A store-freeing Wait has
-    // no park floor — it parks on its FIRST poll miss — so every pass after the
-    // first is a resumed one, and an unclamped tolerance would swallow the whole
-    // remaining window of any timeout near or below it. A wait relaunched off
-    // its deadline (an operator resume, a recovery sweep, another waker) would
-    // then report WAIT_TIMEOUT with time the author asked for still unspent,
-    // which is the same defect as a Delay losing its remaining wait, just
-    // bounded. Halving keeps the absorption proportional: no wait can lose more
-    // than half its window, however short it is, and anything comfortably above
-    // the tolerance is unaffected.
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_RESUMED_LOCAL));
-    body.instruction(&Instruction::I64ExtendI32U);
-    // min(tolerance, timeout / 2), via select on `tolerance < timeout / 2`.
-    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
-    body.instruction(&Instruction::I64Const(1));
-    body.instruction(&Instruction::I64ShrU);
-    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
-    body.instruction(&Instruction::I64Const(1));
-    body.instruction(&Instruction::I64ShrU);
-    body.instruction(&Instruction::I64LtU);
-    body.instruction(&Instruction::Select);
-    body.instruction(&Instruction::I64Mul);
-    body.instruction(&Instruction::I64Add);
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
-    body.instruction(&Instruction::I64GeU);
-    body.instruction(&Instruction::If(BlockType::Empty));
+    load_retptr_option_list(body, error_ptr_local, error_len_local);
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(signal_id_ptr_local));
     body.instruction(&Instruction::LocalGet(signal_id_len_local));
+    body.instruction(&Instruction::LocalGet(error_ptr_local));
+    body.instruction(&Instruction::LocalGet(error_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     push_retptr_arg(body);
-    // Routed handlers get the structured envelope (steps.__error.code etc.);
-    // the plain-string message stays the /failed payload for parity.
-    if error_plan.is_some() {
-        body.instruction(&Instruction::Call(
-            indices.stdlib_wait_timeout_error_envelope,
-        ));
-    } else {
-        body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_error));
-    }
+    body.instruction(&Instruction::Call(indices.stdlib_wait_closed_error));
     return_if_retptr_error(body, indices);
     load_retptr_list(body, error_ptr_local, error_len_local);
     if error_plan.is_some() {
-        // GAP-14: route the WAIT_TIMEOUT error to the step's onError handler.
+        // Route the authoritative closure error to the step's onError handler.
         // The steps context is still the parent's at this point (the wait has
         // stored nothing yet), so the error routes against it directly. The
         // signal id (route scratch) is dead on this terminal path; the error
         // is stashed in the shared step-error locals so the route dispatch
-        // can use the error/output pairs as scratch. The timeout site sits 4
-        // blocks deep ($outer/$poll plus the two timeout Ifs), so rejoining
-        // handlers and split collectors nest by 4.
+        // can use the error/output pairs as scratch. The closure site sits 3
+        // blocks deep ($outer/$poll/$closed), so continuations nest by 3.
         body.instruction(&Instruction::LocalGet(error_ptr_local));
         body.instruction(&Instruction::LocalSet(DIRECT_STEP_ERROR_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(error_len_local));
@@ -870,14 +893,14 @@ fn emit_wait_timeout_check(
             data_len_local,
             workflow_log_kind,
             workflow_error_kind,
-            failure_target.map(|target| target.nested(4)),
-            handled_target.map(|target| target.nested(4)),
+            failure_target.map(|target| target.nested(3)),
+            handled_target.map(|target| target.nested(3)),
         );
     } else if let Some(failure_target) = failure_target {
         emit_split_append_error_payload_and_continue(
             body,
             indices,
-            failure_target.nested(4),
+            failure_target.nested(3),
             error_ptr_local,
             error_len_local,
         );
@@ -885,5 +908,61 @@ fn emit_wait_timeout_check(
         emit_runtime_fail_return(body, indices, error_ptr_local, error_len_local);
     }
     body.instruction(&Instruction::End);
+}
+
+fn emit_abandon_input_on_error(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    signal_ptr: u32,
+    signal_len: u32,
+) {
+    emit_abandon_input_on_error_target(body, indices, signal_ptr, signal_len, None);
+}
+
+/// A registered wait that exits through an error cannot remain actionable if
+/// its caller handles the failure. Close before unwinding, preserving accepted
+/// receipts. Successful suspension never enters this branch.
+fn emit_abandon_input_on_error_target(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    signal_ptr: u32,
+    signal_len: u32,
+    failure_target: Option<DirectFailureTarget>,
+) {
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    load_retptr_list(
+        body,
+        DIRECT_STEP_ERROR_PTR_LOCAL,
+        DIRECT_STEP_ERROR_LEN_LOCAL,
+    );
+    body.instruction(&Instruction::LocalGet(signal_ptr));
+    body.instruction(&Instruction::LocalGet(signal_len));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_close_input));
+    // A composed SDK runtime can return an error instead of the native host's
+    // trap. Neither an onError edge nor an enclosing embedded workflow may
+    // recover while abandonment is uncertain. Abort this Store and let host
+    // lifecycle cleanup settle its outstanding requests.
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::Unreachable);
+    body.instruction(&Instruction::End);
+    if let Some(target) = failure_target {
+        emit_split_append_error_payload_and_continue(
+            body,
+            indices,
+            target.nested(1),
+            DIRECT_STEP_ERROR_PTR_LOCAL,
+            DIRECT_STEP_ERROR_LEN_LOCAL,
+        );
+    } else {
+        emit_runtime_fail_return(
+            body,
+            indices,
+            DIRECT_STEP_ERROR_PTR_LOCAL,
+            DIRECT_STEP_ERROR_LEN_LOCAL,
+        );
+    }
     body.instruction(&Instruction::End);
 }

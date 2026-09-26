@@ -154,35 +154,50 @@ pub async fn recover_registered_with(
     }
     // Legacy registrations may predate the launch queue. Their prior recovery
     // behavior remains; they do not establish cross-version owner liveness.
-    let registered: Option<String> = sqlx::query_scalar(
-        "SELECT container_id FROM container_registry \
+    let registered: Option<(Option<sqlx::types::Json<crate::observed_exit::ObservedExit>>,)> =
+        sqlx::query_as(
+            "SELECT observed_exit FROM container_registry \
          WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3 FOR UPDATE",
-    )
-    .bind(&container.instance_id)
-    .bind(&container.launch_id)
-    .bind(&container.container_id)
-    .fetch_optional(&mut *guard)
-    .await?;
-    if registered.is_none() {
+        )
+        .bind(&container.instance_id)
+        .bind(&container.launch_id)
+        .bind(&container.container_id)
+        .fetch_optional(&mut *guard)
+        .await?;
+    let Some((observed_exit,)) = registered else {
         return Ok(None);
-    }
-    let outcome = match persistence
-        .get_instance_meta(&container.instance_id)
-        .await?
-    {
-        Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
-            let outcome =
-                recover_or_fail_with(pool, persistence, &container.instance_id, policy).await?;
-            if outcome == RecoveryOutcome::Unchanged {
-                return Ok(Some(outcome));
+    };
+    // An observed physical failure is not a lost Environment process. Complete
+    // its retained lifecycle transition before considering normal auto-resume.
+    let outcome = if let Some(sqlx::types::Json(intent)) = observed_exit {
+        if intent.apply(persistence, &container.instance_id).await? {
+            if intent.is_drain() {
+                RecoveryOutcome::Recovered
+            } else {
+                RecoveryOutcome::Failed
             }
-            outcome
+        } else {
+            RecoveryOutcome::Unchanged
         }
-        Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Pending => {
-            // The durable start-gate/queue expiry path owns an unopened run.
-            return Ok(None);
+    } else {
+        match persistence
+            .get_instance_meta(&container.instance_id)
+            .await?
+        {
+            Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {
+                let outcome =
+                    recover_or_fail_with(pool, persistence, &container.instance_id, policy).await?;
+                if outcome == RecoveryOutcome::Unchanged {
+                    return Ok(Some(outcome));
+                }
+                outcome
+            }
+            Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Pending => {
+                // The durable start-gate/queue expiry path owns an unopened run.
+                return Ok(None);
+            }
+            _ => RecoveryOutcome::Unchanged,
         }
-        _ => RecoveryOutcome::Unchanged,
     };
     sqlx::query(
         "DELETE FROM container_registry \

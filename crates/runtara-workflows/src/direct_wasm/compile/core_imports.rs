@@ -33,7 +33,10 @@ pub(super) struct DirectCoreImportIndices {
     runtime_poll_signal: Option<u32>,
     runtime_is_cancelled: Option<u32>,
     runtime_check_signals: Option<u32>,
-    runtime_poll_custom_signal: Option<u32>,
+    runtime_poll_input: Option<u32>,
+    runtime_register_input: Option<u32>,
+    runtime_close_input: Option<u32>,
+    stdlib_wait_closed_error: Option<u32>,
     runtime_now_ms: Option<u32>,
     runtime_get_checkpoint: Option<u32>,
     runtime_checkpoint: Option<u32>,
@@ -86,7 +89,6 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_breakpoint_event: Option<u32>,
     stdlib_wait_signal_id: Option<u32>,
     stdlib_wait_timeout_ms: Option<u32>,
-    stdlib_wait_timeout_error: Option<u32>,
     stdlib_wait_on_wait_variables: Option<u32>,
     stdlib_wait_on_wait_error: Option<u32>,
     stdlib_wait_poll_interval_ms: Option<u32>,
@@ -113,7 +115,6 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_tool_args: Option<u32>,
     stdlib_ai_turn_tool_index: Option<u32>,
     stdlib_ai_turn_add_result: Option<u32>,
-    stdlib_wait_timeout_error_envelope: Option<u32>,
     stdlib_ai_turn_cache_key: Option<u32>,
     stdlib_ai_turn_response_key: Option<u32>,
     stdlib_ai_turn_response_validate: Option<u32>,
@@ -238,12 +239,26 @@ impl DirectCoreImportIndices {
                 "runtime.check-signals",
                 omit_runtime,
             )?,
-            runtime_poll_custom_signal: require_runtime(
-                self.runtime_poll_custom_signal,
-                "runtime.poll-custom-signal",
+            runtime_register_input: require_runtime(
+                self.runtime_register_input,
+                "runtime.register-input",
+                omit_runtime,
+            )?,
+            runtime_poll_input: require_runtime(
+                self.runtime_poll_input,
+                "runtime.poll-input",
                 omit_runtime,
             )?,
             runtime_now_ms: require_runtime(self.runtime_now_ms, "runtime.now-ms", omit_runtime)?,
+            runtime_close_input: require_runtime(
+                self.runtime_close_input,
+                "runtime.close-input",
+                omit_runtime,
+            )?,
+            stdlib_wait_closed_error: require_import(
+                self.stdlib_wait_closed_error,
+                "stdlib.wait-closed-error",
+            )?,
             runtime_get_checkpoint: require_runtime(
                 self.runtime_get_checkpoint,
                 "runtime.get-checkpoint",
@@ -409,10 +424,6 @@ impl DirectCoreImportIndices {
                 self.stdlib_wait_timeout_ms,
                 "stdlib.wait-timeout-ms",
             )?,
-            stdlib_wait_timeout_error: require_import(
-                self.stdlib_wait_timeout_error,
-                "stdlib.wait-timeout-error",
-            )?,
             stdlib_wait_on_wait_variables: require_import(
                 self.stdlib_wait_on_wait_variables,
                 "stdlib.wait-on-wait-variables",
@@ -507,10 +518,6 @@ impl DirectCoreImportIndices {
             stdlib_ai_turn_add_result: require_import(
                 self.stdlib_ai_turn_add_result,
                 "stdlib.ai-turn-add-result",
-            )?,
-            stdlib_wait_timeout_error_envelope: require_import(
-                self.stdlib_wait_timeout_error_envelope,
-                "stdlib.wait-timeout-error-envelope",
             )?,
             stdlib_ai_turn_cache_key: require_import(
                 self.stdlib_ai_turn_cache_key,
@@ -699,7 +706,10 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_poll_signal: u32,
     pub(super) runtime_is_cancelled: u32,
     pub(super) runtime_check_signals: u32,
-    pub(super) runtime_poll_custom_signal: u32,
+    pub(super) runtime_poll_input: u32,
+    pub(super) runtime_register_input: u32,
+    pub(super) runtime_close_input: u32,
+    pub(super) stdlib_wait_closed_error: u32,
     pub(super) runtime_now_ms: u32,
     pub(super) runtime_get_checkpoint: u32,
     pub(super) runtime_checkpoint: u32,
@@ -751,7 +761,6 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_breakpoint_event: u32,
     pub(super) stdlib_wait_signal_id: u32,
     pub(super) stdlib_wait_timeout_ms: u32,
-    pub(super) stdlib_wait_timeout_error: u32,
     pub(super) stdlib_wait_on_wait_variables: u32,
     pub(super) stdlib_wait_on_wait_error: u32,
     pub(super) stdlib_wait_poll_interval_ms: u32,
@@ -778,7 +787,6 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_tool_args: u32,
     pub(super) stdlib_ai_turn_tool_index: u32,
     pub(super) stdlib_ai_turn_add_result: u32,
-    pub(super) stdlib_wait_timeout_error_envelope: u32,
     pub(super) stdlib_ai_turn_cache_key: u32,
     pub(super) stdlib_ai_turn_response_key: u32,
     pub(super) stdlib_ai_turn_response_validate: u32,
@@ -1040,8 +1048,14 @@ pub(super) fn import_core_function(
         import_indices.runtime_is_cancelled = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "check-signals") {
         import_indices.runtime_check_signals = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "poll-custom-signal") {
-        import_indices.runtime_poll_custom_signal = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "register-input") {
+        import_indices.runtime_register_input = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "poll-input") {
+        import_indices.runtime_poll_input = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "close-input") {
+        import_indices.runtime_close_input = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "wait-closed-error") {
+        import_indices.stdlib_wait_closed_error = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "now-ms") {
         import_indices.runtime_now_ms = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "get-checkpoint") {
@@ -1144,8 +1158,6 @@ pub(super) fn import_core_function(
         import_indices.stdlib_wait_signal_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-timeout-ms") {
         import_indices.stdlib_wait_timeout_ms = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "wait-timeout-error") {
-        import_indices.stdlib_wait_timeout_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-variables") {
         import_indices.stdlib_wait_on_wait_variables = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-error") {
@@ -1208,8 +1220,6 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_turn_tool_index = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-add-result") {
         import_indices.stdlib_ai_turn_add_result = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "wait-timeout-error-envelope") {
-        import_indices.stdlib_wait_timeout_error_envelope = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-cache-key") {
         import_indices.stdlib_ai_turn_cache_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-response-key") {

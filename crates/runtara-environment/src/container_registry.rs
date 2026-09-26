@@ -75,6 +75,9 @@ impl ContainerRegistry {
                 binary_path = EXCLUDED.binary_path,
                 started_at = EXCLUDED.started_at,
                 timeout_seconds = EXCLUDED.timeout_seconds,
+                observed_exit = CASE WHEN container_registry.container_id = EXCLUDED.container_id
+                    AND container_registry.launch_id = EXCLUDED.launch_id
+                    THEN container_registry.observed_exit ELSE NULL END,
                 abort_deadline_at = CASE WHEN container_registry.container_id = EXCLUDED.container_id
                     AND container_registry.launch_id = EXCLUDED.launch_id
                     THEN container_registry.abort_deadline_at ELSE NULL END,

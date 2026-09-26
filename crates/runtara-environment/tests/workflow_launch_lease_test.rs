@@ -7,10 +7,12 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use common::TestContext;
+use runtara_core::persistence::Persistence;
 use runtara_environment::launch_queue::{
     EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest, LaunchKind,
     LaunchRepository, LaunchState,
 };
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -281,6 +283,15 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
         .await
         .expect("parking transition must succeed")
         .expect("running generation must park");
+
+    PostgresPersistence::new(context.pool.clone())
+        .schedule_wake(
+            &parked.instance_id,
+            chrono::Utc::now(),
+            runtara_core::domain::WakeReason::Timer,
+        )
+        .await
+        .unwrap();
 
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let wake = {

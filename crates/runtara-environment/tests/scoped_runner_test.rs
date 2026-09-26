@@ -254,6 +254,20 @@ async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
             .unwrap()
             .unwrap();
         assert_eq!(instance.status, InstanceStatus::Completed);
+        let lease = h
+            .persistence
+            .invocation_fences()
+            .unwrap()
+            .get_invocation_lease(&options.tenant_id, &options.instance_id)
+            .await
+            .unwrap();
+        if backend == "legacy" {
+            assert!(lease.is_none());
+        } else {
+            let lease = lease.expect("scoped production runner claims execution authority");
+            assert_eq!(lease.lease.owner, handle.handle_id);
+            assert!(!lease.active, "finished execution must release its lease");
+        }
         let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
         assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
     }
@@ -537,6 +551,16 @@ async fn scoped_runner_parks_and_replays_existing_checkpoints() {
         .unwrap();
     assert_eq!(parked.status, InstanceStatus::Suspended);
     assert!(parked.output.is_none());
+    let prior_lease = h
+        .persistence
+        .invocation_fences()
+        .unwrap()
+        .get_invocation_lease(&options.tenant_id, &options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!prior_lease.active);
+    assert_eq!(prior_lease.lease.owner, handle.handle_id);
     assert_eq!(runner.occupancy().unwrap().held, 0);
     let checkpoints = h
         .persistence
@@ -568,6 +592,17 @@ async fn scoped_runner_parks_and_replays_existing_checkpoints() {
         .unwrap()
         .unwrap();
     assert_eq!(completed.status, InstanceStatus::Completed);
+    let replay_lease = h
+        .persistence
+        .invocation_fences()
+        .unwrap()
+        .get_invocation_lease(&options.tenant_id, &options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!replay_lease.active);
+    assert_eq!(replay_lease.lease.owner, resumed.handle_id);
+    assert!(replay_lease.lease.epoch > prior_lease.lease.epoch);
     let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
     assert_eq!(output["value"].as_f64().unwrap(), expected);
     let replayed = h
@@ -638,6 +673,63 @@ async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_ga
             .unwrap()
             .status,
         InstanceStatus::Completed
+    );
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_releases_lease_when_durable_start_confirmation_rejects() {
+    use runtara_environment::runner::{RunnerError, StartGate, StartGateConfirmation};
+    struct Reject;
+    #[async_trait::async_trait]
+    impl StartGateConfirmation for Reject {
+        async fn confirm(&self) -> Result<(), RunnerError> {
+            Err(RunnerError::StartFailed("rejected test handoff".into()))
+        }
+    }
+    let h = Harness::new().await;
+    let artifact = compile(random_graph(), h.dir.path(), "utils", "scoped");
+    let runner = h.runner(Some(bounds("utils")));
+    let mut options = h.options(&artifact.wasm_path).await;
+    let gate = StartGate::new(Duration::from_secs(10)).with_confirmation(Arc::new(Reject));
+    options.start_gate = Some(gate.clone());
+    h.persistence
+        .mark_instance_running(&options.instance_id, chrono::Utc::now())
+        .await
+        .unwrap();
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    assert!(gate.open());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    let lease = h
+        .persistence
+        .invocation_fences()
+        .unwrap()
+        .get_invocation_lease(&options.tenant_id, &options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.lease.owner, handle.handle_id);
+    assert!(!lease.active);
+    assert!(
+        h.persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        h.persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .output
+            .is_none()
     );
     assert_eq!(runner.occupancy().unwrap().held, 0);
 }
@@ -733,22 +825,14 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
     parent
 }
 
-/// The environment half of a nested park: the runner must record it as a
-/// signal park, and a custom signal must then schedule a wake.
-///
-/// This is the check that a guest-only test cannot make. A nested wait that
-/// parked on a bare `on-resume` still looked correct from inside the guest —
-/// it suspended, and a hand-driven replay resumed and completed — but
-/// `park_invoke_suspend` drops a pure `on-resume` before `park_instance`, so
-/// `termination_reason` never became `waiting_signal`, and
-/// `wake_suspended_on_signal` refuses to relaunch anything else. The signal
-/// row landed and the instance stayed parked forever.
+/// A published workflow child registers without debug tracking, parks its root,
+/// and consumes the immutable managed response after the scheduler claims it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it() {
+async fn a_published_child_wait_accepts_wakes_and_replays_without_debug_events() {
     let h = Harness::new().await;
     let parent = parking_child_parent(h.dir.path(), None);
     let runner = h.runner(None);
-    let options = h.options(&parent.wasm_path).await;
+    let mut options = h.options(&parent.wasm_path).await;
 
     let handle = runner.try_launch_detached(&options).await.unwrap();
     tokio::time::timeout(
@@ -780,14 +864,29 @@ async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it
         parked.sleep_until
     );
 
-    // The signal arrives. `handle_send_custom_signal` writes it and wakes the
-    // instance; the address is the child's own nested route, but the waker is
-    // keyed on the instance, so scheduling a wake is what has to happen here.
-    runtara_environment::handlers::wake_suspended_on_signal(
-        h.persistence.as_ref(),
+    let inputs = h.persistence.input_requests().unwrap();
+    let pending = inputs
+        .list_inputs(
+            &options.tenant_id,
+            std::slice::from_ref(&options.instance_id),
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.total_count, 1);
+    let request = &pending.requests[0];
+    let payload = json!({"approved": true});
+    let receipt = runtara_core::persistence::inputs::submit_input(
+        inputs,
+        &options.tenant_id,
         &options.instance_id,
+        &request.request_id,
+        "published-child-reply",
+        &payload,
     )
-    .await;
+    .await
+    .unwrap();
 
     let woken = h
         .persistence
@@ -797,13 +896,51 @@ async fn a_parked_nested_wait_is_recorded_as_a_signal_park_and_a_signal_wakes_it
         .unwrap();
     assert!(
         woken.sleep_until.is_some(),
-        "a custom signal must schedule a wake for a parked nested wait"
+        "managed acceptance must schedule a wake for a parked nested wait"
     );
     assert!(
         woken.sleep_until.unwrap() <= chrono::Utc::now() + chrono::Duration::seconds(5),
         "the wake must be due now, not at some future deadline: {:?}",
         woken.sleep_until
     );
+    assert!(
+        h.persistence
+            .claim_sleeping_instance(&options.instance_id)
+            .await
+            .unwrap()
+    );
+    options.launch_id = format!("resume-{}", options.instance_id);
+    options.prepersisted_input = None;
+    let resumed = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.wait_for_exit(&resumed, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, InstanceStatus::Completed);
+    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+    assert_eq!(output, json!({"result":{"payload":payload}}));
+    assert_eq!(
+        runtara_core::persistence::inputs::submit_input(
+            inputs,
+            &options.tenant_id,
+            &options.instance_id,
+            &request.request_id,
+            "published-child-reply",
+            &payload
+        )
+        .await
+        .unwrap(),
+        receipt
+    );
+    assert_eq!(runner.occupancy().unwrap().held, 0);
 }
 
 /// The last link: the wake scheduler's own selection must find a parked nested

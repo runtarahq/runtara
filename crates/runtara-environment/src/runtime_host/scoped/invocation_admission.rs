@@ -10,6 +10,7 @@ pub(super) struct InvocationAdmission {
     persistence: Arc<dyn Persistence>,
     lease: InvocationLease,
     path: String,
+    parent: Option<AttemptFence>,
     start_id: String,
     timeout: Duration,
     started: AtomicBool,
@@ -29,6 +30,7 @@ impl InvocationAdmission {
             persistence,
             lease,
             path,
+            parent: None,
             start_id: uuid::Uuid::new_v4().to_string(),
             timeout,
             started: AtomicBool::new(false),
@@ -36,6 +38,11 @@ impl InvocationAdmission {
             attempt: OnceLock::new(),
             io: OnceLock::new(),
         }
+    }
+
+    pub(super) fn with_parent(mut self, parent: Option<AttemptFence>) -> Self {
+        self.parent = parent;
+        self
     }
 
     /// Only successful admission can supply runtime IO. A cancelled tombstone
@@ -54,7 +61,12 @@ impl InvocationAdmission {
         self.persistence
             .invocation_fences()
             .unwrap()
-            .begin_invocation_attempt(&self.lease, &self.path, &self.start_id)
+            .begin_invocation_attempt_with_parent(
+                &self.lease,
+                &self.path,
+                &self.start_id,
+                self.parent.as_ref(),
+            )
             .await
     }
 

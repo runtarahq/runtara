@@ -97,8 +97,8 @@ mod types;
 pub use client::RuntaraSdk;
 pub use error::{Result, SdkError};
 pub use types::{
-    CheckpointResult, CustomSignal, InstanceStatus, RetryConfig, RetryStrategy, Signal, SignalType,
-    StatusResponse,
+    CheckpointResult, CustomSignal, InputState, InstanceStatus, RetryConfig, RetryStrategy, Signal,
+    SignalType, StatusResponse,
 };
 
 // HTTP config export

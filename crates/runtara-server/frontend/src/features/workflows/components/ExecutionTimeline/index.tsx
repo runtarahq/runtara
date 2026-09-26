@@ -1,3 +1,8 @@
+import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
+import {
+  ManagedInputScope,
+  InputRetryPanel,
+} from '@/features/workflows/components/ManagedInputSubmissions';
 import React, { useState, useEffect } from 'react';
 import {
   Play,
@@ -32,18 +37,14 @@ import {
 import { useHierarchicalTimeline } from '@/features/workflows/hooks/useHierarchicalTimeline';
 import { HierarchicalStep } from '@/features/workflows/types/timeline';
 import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
-import { useCustomQuery, useCustomMutation } from '@/shared/hooks/api';
-import { useToken } from '@/shared/hooks';
+import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
   getWorkflowInstance,
   getPendingInput,
-  deliverSignal,
   type PendingInput,
 } from '@/features/workflows/queries';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
-import { useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
 import { isActiveStatus } from '@/shared/utils/status-display';
 import { getRunEventsEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { Spinner } from '@/shared/components/ui/spinner';
@@ -51,6 +52,7 @@ import { Spinner } from '@/shared/components/ui/spinner';
 interface ExecutionTimelineProps {
   workflowId: string;
   instanceId: string;
+  showInputs?: boolean;
 }
 
 // Categorical step-type IDENTITY colors (raw palette classes are intentional
@@ -204,17 +206,25 @@ const formatTimestamp = (ts: number): string => {
 // Indentation per depth level
 const INDENT_PX = 24;
 
-export function ExecutionTimeline({
+export function ExecutionTimeline(props: ExecutionTimelineProps) {
+  return (
+    <ManagedInputScope>
+      <ExecutionTimelineContent {...props} />
+    </ManagedInputScope>
+  );
+}
+
+function ExecutionTimelineContent({
   workflowId,
   instanceId,
+  showInputs = true,
 }: ExecutionTimelineProps) {
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(0);
   const [hoveredStep, setHoveredStep] = useState<string | null>(null);
 
-  const token = useToken();
-  const queryClient = useQueryClient();
+  const submissions = useManagedInputSubmissions();
 
   const {
     visibleSteps,
@@ -238,39 +248,42 @@ export function ExecutionTimeline({
   });
 
   // Poll pending input while instance is active
-  const { data: pendingInputData } = useCustomQuery<PendingInput[]>({
+  const { data: pendingInputData, error: pendingInputError } = useCustomQuery<
+    PendingInput[]
+  >({
     queryKey: queryKeys.workflows.pendingInput(workflowId, instanceId),
     queryFn: (token: string) => getPendingInput(token, workflowId, instanceId),
-    enabled:
-      !!workflowId && !!instanceId && isActiveStatus(instanceData?.status),
+    enabled: !!workflowId && !!instanceId,
+    placeholderData: undefined,
     refetchInterval: () => {
       return isActiveStatus(instanceData?.status) ? 3000 : false;
     },
   });
 
-  const pendingInputs = pendingInputData ?? [];
-
-  // Signal delivery mutation
-  const signalMutation = useCustomMutation({
-    mutationFn: (
-      _token: any,
-      data: { signalId: string; payload: Record<string, any> }
-    ) => {
-      return deliverSignal(token, instanceId!, data);
-    },
-    onSuccess: () => {
-      toast.success('Response submitted successfully');
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.workflows.pendingInput(workflowId, instanceId),
-      });
-    },
-  });
-
+  const forTarget = (requestId: string) =>
+    submissions.inputs.filter(
+      (input) =>
+        input.request.kind === 'execution' &&
+        input.request.workflowId === workflowId &&
+        input.request.instanceId === instanceId &&
+        input.request.requestId === requestId
+    );
+  const pendingInputs = (pendingInputData ?? []).filter(
+    (input) =>
+      !forTarget(input.requestId).some(
+        (submission) => submission.state === 'accepted'
+      )
+  );
   const handleSignalSubmit = (
-    signalId: string,
-    payload: Record<string, any>
+    requestId: string,
+    payload: Record<string, unknown>
   ) => {
-    signalMutation.mutate({ signalId, payload });
+    if (!instanceId || !workflowId) return;
+    void submissions.submit(
+      { kind: 'execution', workflowId, instanceId, requestId, payload },
+      pendingInputs.find((input) => input.requestId === requestId)?.message ||
+        'Workflow response'
+    );
   };
 
   // Reset local state when workflow or instance changes
@@ -304,17 +317,52 @@ export function ExecutionTimeline({
     return { left: `${left}%`, width: `${Math.max(width, 1)}%` };
   };
 
+  const inputCards = showInputs && (
+    <>
+      <InputRetryPanel
+        matches={(request) =>
+          request.kind === 'execution' &&
+          request.instanceId === instanceId &&
+          request.workflowId === workflowId
+        }
+      />
+      {/* Pending Human Input Cards */}
+      {pendingInputError && (
+        <p role="alert" className="text-sm text-destructive">
+          Pending inputs are unavailable: {pendingInputError.message}
+        </p>
+      )}
+      {pendingInputs.length > 0 && (
+        <div className="space-y-3">
+          {pendingInputs.map((pi) => (
+            <HumanInputCard
+              key={pi.requestId}
+              pendingInput={pi}
+              onSubmit={handleSignalSubmit}
+              isSubmitting={forTarget(pi.requestId).some(
+                (input) => input.state === 'submitting'
+              )}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+
   if (isLoadingRoot) {
     return (
-      <div className="px-6 py-16 text-center">
-        <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
-          <Spinner className="size-8 text-purple-600" />
+      <>
+        {inputCards}
+        <div className="px-6 py-16 text-center">
+          <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
+            <Spinner className="size-8 text-purple-600" />
+          </div>
+          <h3 className="mb-2 text-lg font-semibold">Loading Timeline...</h3>
+          <p className="mx-auto max-w-md text-sm text-muted-foreground">
+            Fetching execution data for visualization.
+          </p>
         </div>
-        <h3 className="mb-2 text-lg font-semibold">Loading Timeline...</h3>
-        <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Fetching execution data for visualization.
-        </p>
-      </div>
+      </>
     );
   }
 
@@ -324,15 +372,18 @@ export function ExecutionTimeline({
       'Timeline Events'
     );
     return (
-      <div className="px-6 py-16 text-center">
-        <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
-          <Clock className="size-8 text-purple-600" />
+      <>
+        {inputCards}
+        <div className="px-6 py-16 text-center">
+          <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
+            <Clock className="size-8 text-purple-600" />
+          </div>
+          <h3 className="mb-2 text-lg font-semibold">{emptyState.title}</h3>
+          <p className="mx-auto max-w-md text-sm text-muted-foreground">
+            {emptyState.description}
+          </p>
         </div>
-        <h3 className="mb-2 text-lg font-semibold">{emptyState.title}</h3>
-        <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          {emptyState.description}
-        </p>
-      </div>
+      </>
     );
   }
 
@@ -386,19 +437,7 @@ export function ExecutionTimeline({
         </Card>
       </div>
 
-      {/* Pending Human Input Cards */}
-      {pendingInputs.length > 0 && (
-        <div className="space-y-3">
-          {pendingInputs.map((pi) => (
-            <HumanInputCard
-              key={pi.signalId}
-              pendingInput={pi}
-              onSubmit={handleSignalSubmit}
-              isSubmitting={signalMutation.isPending}
-            />
-          ))}
-        </div>
-      )}
+      {inputCards}
 
       {/* Playback Controls */}
       <Card>
@@ -483,7 +522,7 @@ export function ExecutionTimeline({
               pendingInputs.some(
                 (pi) =>
                   pi.aiAgentStepId === step.stepId ||
-                  step.stepId.includes(pi.toolName)
+                  (!!pi.toolName && step.stepId.includes(pi.toolName))
               );
             const displayStatus = isWaitingForInput ? 'waiting' : step.status;
 
@@ -662,7 +701,7 @@ export function ExecutionTimeline({
               const stepPendingInput = pendingInputs.find(
                 (pi) =>
                   pi.aiAgentStepId === step.stepId ||
-                  step.stepId.includes(pi.toolName)
+                  (!!pi.toolName && step.stepId.includes(pi.toolName))
               );
               const stepDisplayStatus =
                 step.status === 'running' && stepPendingInput

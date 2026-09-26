@@ -20,29 +20,25 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Required preflight for the explicitly feature-gated database suite.
-macro_rules! skip_if_no_db {
-    () => {
-        assert!(
-            std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_ok()
-                || std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_ok(),
-            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL"
-        );
-    };
-}
-
-/// Get a database pool for testing
-async fn get_test_pool() -> PgPool {
-    let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
+/// Prefer CI's explicit database, otherwise retain an isolated test container
+/// for this test's entire lifetime. Missing infrastructure is a hard failure.
+async fn get_test_pool() -> (PgPool, Option<common::TestContext>) {
+    if let Ok(database_url) = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-        .expect("db-integration-tests requires an environment database URL");
-    let pool = PgPool::connect(&database_url)
-        .await
-        .expect("required environment test database must accept connections");
-    runtara_environment::migrations::run(&pool)
-        .await
-        .expect("required combined core/environment migrations must succeed");
-    pool
+    {
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("required environment test database must accept connections");
+        runtara_environment::migrations::run(&pool)
+            .await
+            .expect("required combined core/environment migrations must succeed");
+        (pool, None)
+    } else {
+        let context = common::TestContext::new()
+            .await
+            .expect("isolated wake test database must start");
+        (context.pool.clone(), Some(context))
+    }
 }
 
 /// Create a test image in the database with a unique name
@@ -245,8 +241,7 @@ fn test_wake_scheduler_config_debug() {
 
 #[tokio::test]
 async fn test_create_and_get_instance() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -273,8 +268,7 @@ async fn test_create_and_get_instance() {
 
 #[tokio::test]
 async fn test_update_instance_status() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -311,8 +305,7 @@ async fn test_update_instance_status() {
 
 #[tokio::test]
 async fn test_update_instance_result() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -351,8 +344,7 @@ async fn test_update_instance_result() {
 
 #[tokio::test]
 async fn test_update_instance_result_with_error() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
 
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
@@ -390,8 +382,7 @@ async fn test_update_instance_result_with_error() {
 
 #[tokio::test]
 async fn test_list_instances() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
 
     // Clean up first
     sqlx::query("DELETE FROM instances WHERE tenant_id LIKE 'list-test-%'")
@@ -516,8 +507,7 @@ async fn park_due_instance(pool: &PgPool, tenant_id: &str, image_id: &str) -> St
 /// in separate tests would each pick up the other's instance.
 #[tokio::test]
 async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
 
     let tenant_id = "test-tenant-syn606";
     let image_id = create_test_image(&pool, tenant_id).await;
@@ -601,8 +591,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
 /// A malformed sleeping instance fails rather than retrying without an image.
 #[tokio::test]
 async fn a_wake_without_an_image_fails_without_a_runner_handoff() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
     let tenant_id = "wake-failure-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
     let instance_id = park_due_instance(&pool, tenant_id, &image_id).await;
@@ -727,8 +716,7 @@ impl Runner for GatedRunner {
 /// Draining prevents the wake source from claiming or enqueueing new work.
 #[tokio::test]
 async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
     let tenant_id = "wake-drain-race-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
     let first_id = park_due_instance(&pool, tenant_id, &image_id).await;
@@ -785,8 +773,7 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
 /// boundary and none claimed twice.
 #[tokio::test]
 async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
     let tenant_id = "wake-concurrency-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
@@ -837,7 +824,7 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
 
 #[tokio::test]
 async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline() {
-    let pool = get_test_pool().await;
+    let (pool, _test_db) = get_test_pool().await;
     let image = create_test_image(&pool, "parked-recovery").await;
     let no_deadline = park_due_instance(&pool, "parked-recovery", &image).await;
     let future = park_due_instance(&pool, "parked-recovery", &image).await;

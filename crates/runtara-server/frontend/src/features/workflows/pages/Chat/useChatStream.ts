@@ -1,13 +1,15 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
+import { useChatInputs } from './useChatInputs';
 import { useToken } from '@/shared/hooks/useToken';
 import { useChatStore } from '@/features/workflows/stores/chatStore';
 import {
   createChatSession,
   sendSessionMessage,
   reconnectSession,
-  checkPendingInput,
+  type SessionMessageSubmission,
 } from '@/features/workflows/queries/chat';
 import { parseSSEStream } from '@/features/workflows/utils/sse';
+import { isRefusedSessionMessage } from '@/features/workflows/utils/input-submission';
 import { ChatSSEEvent } from '@/features/workflows/types/chat';
 
 /**
@@ -111,14 +113,7 @@ function handleSSEEvent(event: ChatSSEEvent) {
         store.addSystemMessage(promptMsg);
       }
 
-      store.setWaitingForInput({
-        signalId: event.data.signal_id as string,
-        message: event.data.message as string | undefined,
-        responseSchema: event.data.response_schema as
-          Record<string, unknown> | undefined,
-        toolName: event.data.tool_name as string | undefined,
-      });
-      store.setStatus('waiting_for_input');
+      // The event is history only; managed discovery controls actionable forms.
       break;
     }
 
@@ -126,7 +121,9 @@ function handleSSEEvent(event: ChatSSEEvent) {
       store.finalizeAssistantMessage();
       // In session mode, 'done' means one execution turn finished —
       // the session stays alive for the next user message.
-      store.setStatus('idle');
+      store.setStatus(
+        store.pendingInputs.length ? 'waiting_for_input' : 'idle'
+      );
       break;
 
     case 'error':
@@ -141,7 +138,18 @@ function handleSSEEvent(event: ChatSSEEvent) {
 
 export function useChatStream(workflowId: string) {
   const token = useToken();
+  const { refreshPendingInput, submitInput, uncertainResponses } =
+    useChatInputs(workflowId, token);
   const abortRef = useRef<AbortController | null>(null);
+  const queueIntent = useRef<{
+    sessionId: string;
+    submission: SessionMessageSubmission;
+  } | null>(null);
+  const enqueueing = useRef(false);
+  const [uncertainMessage, setUncertainMessage] = useState<{
+    sessionId: string;
+    message: string;
+  } | null>(null);
 
   /**
    * Shared helper: consumes an SSE Response stream and dispatches events.
@@ -158,6 +166,11 @@ export function useChatStream(workflowId: string) {
         response.body,
         abortController.signal
       )) {
+        if (
+          abortController.signal.aborted ||
+          abortRef.current !== abortController
+        )
+          break;
         handleSSEEvent(event);
       }
 
@@ -251,61 +264,79 @@ export function useChatStream(workflowId: string) {
   const sendMessage = useCallback(
     async (content: string) => {
       const store = useChatStore.getState();
-      const { sessionId, waitingForInput } = store;
-
+      const { sessionId, waitingForInput, pendingInputs, pendingInputError } =
+        store;
+      if (enqueueing.current) return false;
+      const retry =
+        queueIntent.current?.sessionId === sessionId &&
+        queueIntent.current.submission.message === content
+          ? queueIntent.current
+          : null;
+      if (
+        !retry &&
+        (pendingInputError || (pendingInputs.length > 1 && !waitingForInput))
+      ) {
+        store.setError(pendingInputError ?? 'Choose which request to answer.');
+        return false;
+      }
+      if (!retry && waitingForInput) {
+        const accepted = await submitInput(
+          waitingForInput.requestId,
+          {
+            message: content,
+          },
+          waitingForInput.instanceId
+        );
+        if (accepted) store.addUserMessage(content);
+        return accepted;
+      }
       if (!sessionId) {
         store.setError('No active session');
-        return;
+        return false;
       }
-
-      // Add user message — assistant placeholder will be created lazily
-      // when the first 'message' SSE event arrives, so it appears after
-      // any tool_call/tool_result system messages.
-      store.addUserMessage(content);
-      store.setStatus('streaming');
+      const intent = retry ?? {
+        sessionId,
+        submission: {
+          messageId: crypto.randomUUID(),
+          operationId: crypto.randomUUID(),
+          message: content,
+        },
+      };
+      queueIntent.current = intent;
+      enqueueing.current = true;
       store.setError(null);
-
-      // If we're responding to a waiting_for_input, clear it
-      if (waitingForInput) {
-        store.setWaitingForInput(null);
-      }
-
       try {
-        await sendSessionMessage(token, sessionId, content);
+        await sendSessionMessage(token, sessionId, intent.submission);
+        if (queueIntent.current === intent) queueIntent.current = null;
+        setUncertainMessage(null);
+        const current = useChatStore.getState();
+        if (current.sessionId !== sessionId) return false;
+        store.addUserMessage(content);
+        // Enqueue succeeds independently of SSE or workflow progress. Allow
+        // another queued message even when no browser stream is attached.
+        store.setStatus(
+          current.pendingInputs.length ? 'waiting_for_input' : 'idle'
+        );
+        return true;
       } catch (err: unknown) {
-        const message =
-          err instanceof Error ? err.message : 'Failed to send message';
-        store.setError(message);
-        store.finalizeAssistantMessage();
-        store.setStatus('error');
-      }
-    },
-    [token]
-  );
-
-  /**
-   * Restore the waiting_for_input state after a page refresh
-   * by checking the pending-input endpoint.
-   */
-  const restorePendingInput = useCallback(
-    async (sessionId: string) => {
-      try {
-        const pending = await checkPendingInput(token, sessionId);
-        if (pending.hasPendingInput && pending.signalId) {
-          const store = useChatStore.getState();
-          store.setWaitingForInput({
-            signalId: pending.signalId,
-            message: pending.message,
-            responseSchema: pending.responseSchema,
-            toolName: pending.toolName,
-          });
-          store.setStatus('waiting_for_input');
+        if (isRefusedSessionMessage(err)) {
+          // Definitive: nothing (or nothing unambiguous) was waiting, so the
+          // server retained nothing. Retrying the same message cannot help.
+          if (queueIntent.current === intent) queueIntent.current = null;
+          setUncertainMessage(null);
+        } else {
+          setUncertainMessage({ sessionId, message: content });
         }
-      } catch {
-        // Non-critical — the SSE stream may deliver the event anyway
+        if (useChatStore.getState().sessionId === sessionId)
+          store.setError(
+            err instanceof Error ? err.message : 'Failed to send message'
+          );
+        return false;
+      } finally {
+        enqueueing.current = false;
       }
     },
-    [token]
+    [token, submitInput]
   );
 
   const cancelStream = useCallback(() => {
@@ -326,7 +357,10 @@ export function useChatStream(workflowId: string) {
     startSession,
     reconnect,
     sendMessage,
-    restorePendingInput,
+    refreshPendingInput,
+    submitInput,
+    uncertainMessage,
+    uncertainResponses,
     cancelStream,
   };
 }

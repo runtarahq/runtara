@@ -279,6 +279,34 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
             .unwrap()
     );
     let persistence = PostgresPersistence::new(context.pool.clone());
+    let fences = persistence.invocation_fences().unwrap();
+    let old_lease = fences
+        .claim_invocation_lease(
+            &fixture.tenant_id,
+            &fixture.instance_id,
+            &container.container_id,
+            None,
+        )
+        .await
+        .unwrap();
+    let old_attempt = fences
+        .begin_invocation_attempt(&old_lease, "waiting-child", "old-start")
+        .await
+        .unwrap();
+    let inputs = persistence.input_requests().unwrap();
+    let spec = runtara_core::persistence::inputs::InputRequestSpec {
+        signal_id: "waiting-child/input".into(),
+        response_schema: None,
+        metadata: serde_json::json!({}),
+        deadline: None,
+    };
+    inputs
+        .register_input(
+            &runtara_core::persistence::inputs::InputAuthority::Invocation(old_attempt.fence),
+            &spec,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         recover_registered_with(
             &context.pool,
@@ -290,6 +318,39 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
         .unwrap(),
         Some(RecoveryOutcome::Recovered)
     );
+    let revoked = fences
+        .get_invocation_lease(&fixture.tenant_id, &fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revoked.lease, old_lease);
+    assert!(
+        !revoked.active,
+        "orphan recovery must revoke the execution fence before relaunch"
+    );
+    assert_eq!(
+        inputs
+            .list_inputs(
+                &fixture.tenant_id,
+                std::slice::from_ref(&fixture.instance_id),
+                0,
+                10
+            )
+            .await
+            .unwrap()
+            .total_count,
+        1
+    );
+    runtara_core::persistence::inputs::submit_input(
+        inputs,
+        &fixture.tenant_id,
+        &fixture.instance_id,
+        &spec.request_id(),
+        "after-crash",
+        &serde_json::json!({"value":42}),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         instance_result(&context.pool, &fixture.instance_id).await.0,
         "suspended"
@@ -311,6 +372,112 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
         .await
         .unwrap()
         .is_none()
+    );
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+#[tokio::test]
+async fn observed_failure_survives_owner_expiry_without_reopening_its_wait() {
+    use runtara_core::persistence::inputs::{
+        InputAuthority, InputClosure, InputRequestSpec, InputState,
+    };
+    use runtara_environment::{
+        container_registry::ContainerRegistry,
+        recovery::{RecoveryOutcome, RecoveryPolicy, recover_registered_with},
+    };
+    let context = TestContext::new().await.unwrap();
+    let (fixture, running, container) = owned_running_registration(&context).await;
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    let inputs = persistence.input_requests().unwrap();
+    let request = inputs
+        .register_input(
+            &InputAuthority::Root {
+                tenant_id: fixture.tenant_id.clone(),
+                instance_id: fixture.instance_id.clone(),
+            },
+            &InputRequestSpec {
+                signal_id: "abandoned-wait".into(),
+                response_schema: None,
+                metadata: serde_json::json!({}),
+                deadline: None,
+            },
+        )
+        .await
+        .unwrap();
+    // The process died after persisting the exit intent, before terminal cleanup.
+    sqlx::query("UPDATE container_registry SET observed_exit = $2 WHERE instance_id = $1")
+        .bind(&fixture.instance_id)
+        .bind(
+            serde_json::json!({"kind":"crash", "error":"mandatory closure failed", "stderr":null}),
+        )
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    assert!(
+        recover_registered_with(
+            &context.pool,
+            &persistence,
+            &container,
+            RecoveryPolicy::default()
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "a peer cannot take a live owner's registration"
+    );
+    assert_eq!(
+        inputs
+            .get_input(
+                &fixture.tenant_id,
+                &fixture.instance_id,
+                &request.request_id
+            )
+            .await
+            .unwrap()
+            .state,
+        InputState::Open
+    );
+    sqlx::query("UPDATE instance_launches SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE launch_id = $1")
+        .bind(&running.launch_id).execute(&context.pool).await.unwrap();
+    assert_eq!(
+        recover_registered_with(
+            &context.pool,
+            &persistence,
+            &container,
+            RecoveryPolicy::default()
+        )
+        .await
+        .unwrap(),
+        Some(RecoveryOutcome::Failed)
+    );
+    assert!(matches!(
+        inputs
+            .get_input(
+                &fixture.tenant_id,
+                &fixture.instance_id,
+                &request.request_id
+            )
+            .await
+            .unwrap()
+            .state,
+        InputState::Closed {
+            reason: InputClosure::InstanceTerminated,
+            ..
+        }
+    ));
+    let root = persistence
+        .get_instance_meta(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.status, runtara_core::domain::InstanceStatus::Failed);
+    assert!(root.sleep_until.is_none());
+    assert!(
+        ContainerRegistry::new(context.pool.clone())
+            .get(&fixture.instance_id)
+            .await
+            .unwrap()
+            .is_none()
     );
     context.cleanup_tenant(&fixture.tenant_id).await;
 }
@@ -961,6 +1128,14 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
 
     let cancel_fixture = fixture(&context).await;
     set_instance_status(&context.pool, &cancel_fixture.instance_id, "suspended").await;
+    PostgresPersistence::new(context.pool.clone())
+        .schedule_wake(
+            &cancel_fixture.instance_id,
+            chrono::Utc::now(),
+            runtara_core::domain::WakeReason::Timer,
+        )
+        .await
+        .unwrap();
     let cancel_id = Uuid::new_v4().to_string();
     repository
         .enqueue(request(
@@ -1302,6 +1477,14 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
     for turn in 0..12 {
         let fixture = fixture(&context).await;
         set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+        persistence
+            .schedule_wake(
+                &fixture.instance_id,
+                chrono::Utc::now(),
+                runtara_core::domain::WakeReason::Timer,
+            )
+            .await
+            .unwrap();
         let launch_id = Uuid::new_v4().to_string();
         repository
             .enqueue(request(
@@ -1599,4 +1782,299 @@ async fn peer_stop_does_not_claim_delivery_when_owner_never_confirms() {
     assert!(runner.is_running(&handle).await);
     runner.stop(&handle).await.unwrap();
     context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+#[tokio::test]
+async fn pause_invalidates_claimed_and_queued_wakes_without_failing_the_root() {
+    use runtara_core::domain::{InstanceStatus, SignalType, WakeReason};
+    let context = TestContext::new().await.unwrap();
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    for enqueue_first in [false, true] {
+        let fixture = fixture(&context).await;
+        set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+        persistence
+            .schedule_wake(
+                &fixture.instance_id,
+                chrono::Utc::now(),
+                WakeReason::CustomSignal,
+            )
+            .await
+            .unwrap();
+        let launch_id = Uuid::new_v4().to_string();
+        let claim = if enqueue_first {
+            repository
+                .enqueue(request(
+                    &fixture,
+                    &launch_id,
+                    LaunchKind::Wake,
+                    Duration::from_secs(60),
+                ))
+                .await
+                .unwrap();
+            let claim = repository
+                .claim_ready("pause-race", Duration::from_secs(60), 1)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            repository
+                .begin_start(&launch_id, "pause-race", claim.attempt_count)
+                .await
+                .unwrap()
+                .unwrap();
+            Some(claim)
+        } else {
+            None
+        };
+        persistence
+            .insert_signal(&fixture.instance_id, SignalType::Pause, b"")
+            .await
+            .unwrap();
+        let command = persistence
+            .get_pending_signal(&fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .acknowledge_signal(&fixture.instance_id, &command.command_id, SignalType::Pause)
+                .await
+                .unwrap()
+        );
+        if let Some(claim) = claim {
+            assert!(
+                repository
+                    .mark_running(&launch_id, "pause-race", claim.attempt_count)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let launch = repository.get(&launch_id).await.unwrap().unwrap();
+            assert_eq!(launch.state, LaunchState::Suspended);
+            assert_eq!(launch.last_error.as_deref(), Some("wake_invalidated"));
+        } else {
+            assert!(matches!(
+                repository
+                    .enqueue(request(
+                        &fixture,
+                        &launch_id,
+                        LaunchKind::Wake,
+                        Duration::from_secs(60)
+                    ))
+                    .await,
+                Err(LaunchQueueError::ObsoleteWake { .. })
+            ));
+        }
+        let root = persistence
+            .get_instance(&fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.status, InstanceStatus::Suspended);
+        assert!(root.sleep_until.is_none());
+        assert!(root.wake_reason.is_none());
+        assert!(root.error.is_none());
+        // The refused wake released its generation; an explicit resume can
+        // enqueue independently and pass the start gate.
+        let resume_id = Uuid::new_v4().to_string();
+        assert!(matches!(
+            repository
+                .enqueue(request(
+                    &fixture,
+                    &resume_id,
+                    LaunchKind::Resume,
+                    Duration::from_secs(60)
+                ))
+                .await
+                .unwrap(),
+            EnqueueOutcome::Enqueued(_)
+        ));
+        let claim = repository
+            .claim_ready("resume-owner", Duration::from_secs(60), 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        repository
+            .begin_start(&resume_id, "resume-owner", claim.attempt_count)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            repository
+                .mark_running(&resume_id, "resume-owner", claim.attempt_count)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn explicit_resume_authorizes_a_queued_wake_invalidated_by_pause() {
+    use runtara_core::domain::{InstanceStatus, SignalType, WakeReason};
+    let context = TestContext::new().await.unwrap();
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+    persistence
+        .schedule_wake(
+            &fixture.instance_id,
+            chrono::Utc::now(),
+            WakeReason::CustomSignal,
+        )
+        .await
+        .unwrap();
+    let wake_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &wake_id,
+            LaunchKind::Wake,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+    persistence
+        .insert_signal(&fixture.instance_id, SignalType::Pause, b"")
+        .await
+        .unwrap();
+    let pause = persistence
+        .get_pending_signal(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    persistence
+        .acknowledge_signal(&fixture.instance_id, &pause.command_id, SignalType::Pause)
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository
+            .enqueue(request(
+                &fixture,
+                Uuid::new_v4().to_string(),
+                LaunchKind::Resume,
+                Duration::from_secs(60)
+            ))
+            .await
+            .unwrap(),
+        EnqueueOutcome::Existing(_)
+    ));
+    let claim = repository
+        .claim_ready("resume-queued", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    repository
+        .begin_start(&wake_id, "resume-queued", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        repository
+            .mark_running(&wake_id, "resume-queued", claim.attempt_count)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let root = persistence
+        .get_instance(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.status, InstanceStatus::Running);
+    assert_eq!(root.wake_reason, Some(WakeReason::ManualResume));
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn obsolete_wake_cleanup_preserves_explicit_pause() {
+    use runtara_core::domain::{InstanceStatus, SignalType, WakeReason};
+    let context = TestContext::new().await.unwrap();
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    for expire in [false, true] {
+        let fixture = fixture(&context).await;
+        set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+        persistence
+            .schedule_wake(
+                &fixture.instance_id,
+                chrono::Utc::now(),
+                WakeReason::CustomSignal,
+            )
+            .await
+            .unwrap();
+        let wake_id = Uuid::new_v4().to_string();
+        repository
+            .enqueue(request(
+                &fixture,
+                &wake_id,
+                LaunchKind::Wake,
+                if expire {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(60)
+                },
+            ))
+            .await
+            .unwrap();
+        let claim = if expire {
+            None
+        } else {
+            Some(
+                repository
+                    .claim_ready("cleanup-paused", Duration::from_secs(60), 1)
+                    .await
+                    .unwrap()
+                    .pop()
+                    .unwrap(),
+            )
+        };
+        persistence
+            .insert_signal(&fixture.instance_id, SignalType::Pause, b"")
+            .await
+            .unwrap();
+        let command = persistence
+            .get_pending_signal(&fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        persistence
+            .acknowledge_signal(&fixture.instance_id, &command.command_id, SignalType::Pause)
+            .await
+            .unwrap();
+        if let Some(claim) = claim {
+            assert!(
+                repository
+                    .fail_before_runner(
+                        &wake_id,
+                        "cleanup-paused",
+                        claim.attempt_count,
+                        "artifact failure"
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert!(repository.expire_due(10).await.unwrap().is_empty());
+        }
+        let launch = repository.get(&wake_id).await.unwrap().unwrap();
+        assert_eq!(launch.state, LaunchState::Suspended);
+        assert_eq!(launch.last_error.as_deref(), Some("wake_invalidated"));
+        let root = persistence
+            .get_instance(&fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.status, InstanceStatus::Suspended);
+        assert!(root.error.is_none());
+        assert!(root.wake_reason.is_none());
+        assert!(root.sleep_until.is_none());
+    }
+    context.cleanup().await;
 }

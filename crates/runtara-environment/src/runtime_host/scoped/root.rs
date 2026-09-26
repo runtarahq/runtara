@@ -1,6 +1,7 @@
 //! Parent runtime using the same command owner as its isolated children.
 use super::*;
 use runtara_component_host::RootExecutionCoordinator;
+use runtara_component_host::{InvokeExit, isolated_tasks::TeardownDisposition};
 
 /// Root runtime and post-cleanup coordinator for a single supervised run.
 /// Root terminal callbacks require successful coordinator finalization. Use it
@@ -41,6 +42,32 @@ impl ScopedRootRuntime {
 
 #[async_trait::async_trait]
 impl RootExecutionCoordinator for ScopedRootRuntime {
+    fn teardown_disposition(&self, outcome: &InvokeExit) -> Result<TeardownDisposition, String> {
+        let observed = self
+            .owner
+            .observed
+            .lock()
+            .map_err(|_| "child runtime owner poisoned")?;
+        if observed.commands.values().any(|kind| kind == "cancel") {
+            return Ok(TeardownDisposition::Terminal);
+        }
+        let resumable = matches!(outcome, InvokeExit::Suspended(_))
+            || observed
+                .commands
+                .values()
+                .any(|kind| kind == "pause" || kind == "shutdown")
+            || observed.root_breakpoint
+            || observed
+                .breakpoints
+                .iter()
+                .any(|token| !token.is_explicitly_cancelled());
+        Ok(if resumable {
+            TeardownDisposition::Resumable
+        } else {
+            TeardownDisposition::Terminal
+        })
+    }
+
     fn close(&self, cleanup_succeeded: bool) -> Result<(), String> {
         self.owner.close_after_cleanup()?;
         if !cleanup_succeeded {
@@ -121,6 +148,28 @@ impl RuntimeHost for ScopedRootRuntime {
     }
     async fn handle_checkpoint_signal(&self, kind: String, id: String) -> Result<bool, String> {
         self.owner.observe(Some((&kind, &id)), false).await
+    }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        self.owner.ensure_open()?;
+        self.owner.root.register_input(descriptor, deadline).await
+    }
+    async fn poll_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.owner.ensure_open()?;
+        self.owner.root.poll_input(signal).await
+    }
+    async fn close_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.owner.ensure_open()?;
+        self.owner.root.close_input(signal).await
     }
     async fn poll_custom_signal(&self, key: String) -> Result<Option<Vec<u8>>, String> {
         self.owner.ensure_open()?;

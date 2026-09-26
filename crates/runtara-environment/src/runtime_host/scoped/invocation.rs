@@ -58,6 +58,7 @@ pub struct ScopedInvocationFactory {
     authority: Arc<dyn InvocationAuthority>,
     settings: Arc<ScopedRunSettings>,
     durable: Option<(InvocationLease, Duration)>,
+    parent: Option<runtara_core::persistence::invocations::AttemptFence>,
 }
 
 impl ScopedInvocationFactory {
@@ -72,6 +73,7 @@ impl ScopedInvocationFactory {
             authority,
             settings,
             durable: None,
+            parent: None,
         }
     }
 
@@ -100,7 +102,29 @@ impl ScopedInvocationFactory {
         {
             return Err(ExecutionError::InvalidContext);
         }
+        self.owner
+            .root
+            .bind_input_lease(lease.clone())
+            .map_err(|_| ExecutionError::InvalidContext)?;
         self.durable = Some((lease, control_timeout));
+        Ok(self)
+    }
+
+    /// Bind a nested factory to its trusted parent admission. The caller obtains
+    /// this fence from the parent's host IO, never from workflow input. Store
+    /// admission revalidates it atomically before admitting any descendant.
+    pub fn with_parent_attempt(
+        mut self,
+        parent: runtara_core::persistence::invocations::AttemptFence,
+    ) -> Result<Self, ExecutionError> {
+        if self
+            .durable
+            .as_ref()
+            .is_none_or(|(lease, _)| *lease != parent.lease)
+        {
+            return Err(ExecutionError::InvalidContext);
+        }
+        self.parent = Some(parent);
         Ok(self)
     }
 
@@ -142,12 +166,15 @@ impl ScopedInvocationFactory {
         }
         let admission = if io.is_none() && authorized.durable == Some(true) {
             self.durable.as_ref().map(|(lease, timeout)| {
-                Arc::new(InvocationAdmission::new(
-                    self.owner.root.state.persistence.clone(),
-                    lease.clone(),
-                    request.context.path.clone(),
-                    *timeout,
-                ))
+                Arc::new(
+                    InvocationAdmission::new(
+                        self.owner.root.state.persistence.clone(),
+                        lease.clone(),
+                        request.context.path.clone(),
+                        *timeout,
+                    )
+                    .with_parent(self.parent.clone()),
+                )
             })
         } else {
             None

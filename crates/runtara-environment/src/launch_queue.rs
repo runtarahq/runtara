@@ -422,6 +422,13 @@ pub enum LaunchQueueError {
         /// Generation the caller attempted to enqueue.
         launch_id: String,
     },
+    /// A pause or lifecycle transition invalidated an already claimed wake.
+    /// This is a benign refusal, not a reason to fail the logical instance.
+    #[error("launch {launch_id} no longer has an eligible wake")]
+    ObsoleteWake {
+        /// Generation whose wake was invalidated before enqueue.
+        launch_id: String,
+    },
     /// An atomic first-launch request used a resume/wake kind.
     #[error("an initial instance claim must use a start launch")]
     InitialLaunchRequiresStart,
@@ -463,6 +470,29 @@ pub enum LaunchQueueError {
 pub struct LaunchRepository {
     pool: PgPool,
     metrics: Option<crate::pipeline_metrics::PipelineMetrics>,
+}
+
+/// The caller owns the launch row. Lock the root before deciding whether a
+/// pause invalidated this wake; queue cleanup must not fail a paused execution.
+async fn discard_paused_wake(
+    db: &mut sqlx::PgConnection,
+    launch: &LaunchRow,
+) -> Result<bool, sqlx::Error> {
+    if launch.kind != "wake" {
+        return Ok(false);
+    }
+    let target: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status::text, wake_reason FROM instances WHERE instance_id=$1 FOR UPDATE",
+    )
+    .bind(&launch.instance_id)
+    .fetch_optional(&mut *db)
+    .await?;
+    if !target.is_some_and(|(status, reason)| status == "suspended" && reason.is_none()) {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE instance_launches SET state='suspended', lease_owner=NULL, lease_expires_at=NULL, start_gate_deadline_at=NULL, last_error='wake_invalidated', updated_at=NOW() WHERE launch_id=$1")
+        .bind(&launch.launch_id).execute(db).await?;
+    Ok(true)
 }
 
 impl LaunchRepository {
@@ -727,9 +757,9 @@ impl LaunchRepository {
             }
 
             let mut tx = self.pool.begin().await?;
-            let target: Option<(String, String)> = sqlx::query_as(
+            let target: Option<(String, String, Option<String>)> = sqlx::query_as(
                 r#"
-                SELECT tenant_id, status::TEXT
+                SELECT tenant_id, status::TEXT, wake_reason
                 FROM instances
                 WHERE instance_id = $1
                 FOR UPDATE
@@ -739,17 +769,45 @@ impl LaunchRepository {
             .fetch_optional(&mut *tx)
             .await?;
 
-            let Some((tenant_id, status)) = target else {
+            let Some((tenant_id, status, wake_reason)) = target else {
                 return Err(LaunchQueueError::InvalidLaunchTarget {
                     launch_id: request.launch_id.clone(),
                 });
             };
+
+            if request.kind == LaunchKind::Wake && (status != "suspended" || wake_reason.is_none())
+            {
+                return Err(LaunchQueueError::ObsoleteWake {
+                    launch_id: request.launch_id.clone(),
+                });
+            }
 
             if let Some(existing) = sqlx::query_as::<_, LaunchRow>(&active)
                 .bind(&request.instance_id)
                 .fetch_optional(&mut *tx)
                 .await?
             {
+                if request.kind == LaunchKind::Resume
+                    && existing.kind == "wake"
+                    && matches!(
+                        existing.state.as_str(),
+                        "queued" | "preparing" | "leased" | "starting"
+                    )
+                {
+                    if tenant_id != request.tenant_id
+                        || status != "suspended"
+                        || existing.image_id != request.image_id
+                    {
+                        return Err(LaunchQueueError::InvalidLaunchTarget {
+                            launch_id: request.launch_id.clone(),
+                        });
+                    }
+                    // A paused queued wake may still own the launch slot. An
+                    // explicit resume authorizes that handoff; merely returning
+                    // Existing would lose the user's resume to the pause guard.
+                    sqlx::query("UPDATE instances SET wake_reason='manual_resume', sleep_until=NULL WHERE instance_id=$1")
+                        .bind(&request.instance_id).execute(&mut *tx).await?;
+                }
                 tx.commit().await?;
                 return Ok(EnqueueOutcome::Existing(existing.try_into()?));
             }
@@ -1355,6 +1413,11 @@ impl LaunchRepository {
             return Ok(None);
         };
 
+        if discard_paused_wake(&mut tx, &running).await? {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
         let expected_status = match running.kind.as_str() {
             "start" => "pending",
             "resume" | "wake" => "suspended",
@@ -1562,6 +1625,11 @@ impl LaunchRepository {
             return Ok(None);
         };
 
+        if discard_paused_wake(&mut tx, &failed).await? {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
         let updated = sqlx::query(
             r#"
             UPDATE instances
@@ -1684,6 +1752,11 @@ impl LaunchRepository {
             tx.commit().await?;
             return Ok(None);
         };
+
+        if discard_paused_wake(&mut tx, &failed).await? {
+            tx.commit().await?;
+            return Ok(None);
+        }
 
         let updated = sqlx::query(
             r#"
@@ -1853,6 +1926,24 @@ impl LaunchRepository {
             .bind(limit)
             .fetch_all(&mut *tx)
             .await?;
+        if due.is_empty() {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        // Pause may win after the deadline scan selected a wake. Retire that
+        // generation without terminalizing the root. Root locks are ordered to
+        // agree with batched input discovery's root-before-request protocol.
+        let roots: Vec<_> = due.iter().map(|row| &row.instance_id).collect();
+        sqlx::query("SELECT instance_id FROM instances WHERE instance_id=ANY($1) ORDER BY instance_id FOR UPDATE")
+            .bind(&roots).fetch_all(&mut *tx).await?;
+        let mut actionable = Vec::with_capacity(due.len());
+        for row in due {
+            if !discard_paused_wake(&mut tx, &row).await? {
+                actionable.push(row);
+            }
+        }
+        let due = actionable;
         if due.is_empty() {
             tx.commit().await?;
             return Ok(Vec::new());

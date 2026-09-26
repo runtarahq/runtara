@@ -10,6 +10,7 @@ use runtara_component_host::execution_host::ExecutionContext;
 use runtara_component_host::isolated_tasks::IsolatedTasks;
 use runtara_component_host::{InvokeExit, InvokeRunResult, PreparedInvocationLauncher};
 use std::collections::{BTreeMap, BTreeSet};
+mod lease;
 
 /// Operator-reviewed packages and per-root bounds for the opt-in scoped runner.
 /// Approval covers fresh-store semantics and the compiler checkpoint contract.
@@ -117,26 +118,54 @@ pub(super) async fn execute(
     confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
     authority: Arc<CompilerInvocationAuthority>,
     config: &ScopedAgentRunnerConfig,
+    persistence: Arc<dyn Persistence>,
+    physical_owner: &str,
 ) -> InvokeRunResult {
     let started = Instant::now();
+    let claim = match (
+        spec.trusted_tenant.as_deref(),
+        spec.trusted_instance.as_deref(),
+    ) {
+        (Some(tenant), Some(instance)) => {
+            lease::RootLease::claim(
+                persistence,
+                tenant,
+                instance,
+                physical_owner,
+                spec.timeout.min(Duration::from_secs(5)),
+            )
+            .await
+        }
+        _ => Err(anyhow::anyhow!(
+            "scoped root requires trusted tenant and instance"
+        )),
+    };
+    let lease = match claim {
+        Ok(lease) => lease,
+        Err(error) => return failed(started, format!("scoped root admission: {error:#}")),
+    };
     let owner = Arc::new(ScopedRuntimeOwner::new(root));
     let runtime = owner.root_runtime();
     let setup = || -> anyhow::Result<_> {
         let deadline = started
             .checked_add(spec.timeout)
             .ok_or_else(|| anyhow::anyhow!("scoped root deadline overflow"))?;
-        let factory = Arc::new(ScopedInvocationFactory::new(
-            owner,
-            authority,
-            Arc::new(ScopedRunSettings {
-                trusted_instance: spec.trusted_instance.clone(),
-                trusted_tenant: spec.trusted_tenant.clone(),
-                env: spec.env.clone(),
-                deadline,
-                root_cancel: spec.cancel.clone(),
-                limits: spec.limits.clone(),
-            }),
-        ));
+        let factory = Arc::new(
+            ScopedInvocationFactory::new(
+                owner,
+                authority,
+                Arc::new(ScopedRunSettings {
+                    trusted_instance: spec.trusted_instance.clone(),
+                    trusted_tenant: spec.trusted_tenant.clone(),
+                    env: spec.env.clone(),
+                    deadline,
+                    root_cancel: spec.cancel.clone(),
+                    limits: spec.limits.clone(),
+                }),
+            )
+            .with_invocation_lease(lease.token.clone(), lease.timeout)
+            .map_err(|error| anyhow::anyhow!("scoped lease binding: {error:?}"))?,
+        );
         let tasks = Arc::new(
             IsolatedTasks::new(
                 executor.engine().clone(),
@@ -156,18 +185,16 @@ pub(super) async fn execute(
     let execution = match setup() {
         Ok(execution) => execution,
         Err(error) => {
-            return InvokeRunResult {
-                exit: InvokeExit::Trapped {
-                    reason: format!("scoped root setup: {error:#}"),
-                },
-                memory_peak_bytes: 0,
-                duration: started.elapsed(),
-            };
+            let release = lease.release().await;
+            return failed(
+                started,
+                format!("scoped root setup: {error:#}; lease cleanup: {release:?}"),
+            );
         }
     };
     spec.runtime = Some(runtime.clone());
     spec.timeout = spec.timeout.saturating_sub(started.elapsed());
-    executor
+    let mut run = executor
         .execute_invoke_with_coordinator(
             workflow.instance_pre(),
             spec,
@@ -176,7 +203,22 @@ pub(super) async fn execute(
             execution,
             Some(runtime),
         )
-        .await
+        .await;
+    if let Err(error) = lease.release().await {
+        run.exit = InvokeExit::Trapped {
+            reason: format!("scoped root lease cleanup: {error:#}"),
+        };
+    }
+    run.duration = started.elapsed();
+    run
+}
+
+fn failed(started: Instant, reason: String) -> InvokeRunResult {
+    InvokeRunResult {
+        exit: InvokeExit::Trapped { reason },
+        memory_peak_bytes: 0,
+        duration: started.elapsed(),
+    }
 }
 
 #[cfg(test)]

@@ -265,20 +265,26 @@ export async function submitReportWorkflowAction(
     reportId: string;
     blockId: string;
     actionId: string;
+    instanceId: string;
+    operationId: string;
     payload: Record<string, unknown>;
     filters?: Record<string, unknown>;
     blockFilters?: Record<string, unknown>;
   }
-): Promise<void> {
-  await RuntimeREST.instance.post(
+): Promise<unknown> {
+  const result = await RuntimeREST.instance.post(
     `/api/runtime/reports/${encodeURIComponent(request.reportId)}/blocks/${encodeURIComponent(request.blockId)}/actions/${encodeURIComponent(request.actionId)}/submit`,
     {
+      instanceId: request.instanceId,
+      requestId: request.actionId,
+      operationId: request.operationId,
       payload: request.payload,
       filters: request.filters ?? {},
       blockFilters: request.blockFilters ?? {},
     },
     createAuthHeaders(token)
   );
+  return result.data;
 }
 
 export async function runReportWorkflow(

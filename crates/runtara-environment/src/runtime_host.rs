@@ -30,6 +30,7 @@
 //!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
 //!   like `runtara_sdk::is_cancelled()`.
 
+mod inputs;
 pub mod scoped;
 
 #[cfg(all(test, feature = "db-integration-tests"))]
@@ -61,6 +62,7 @@ const DEFAULT_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Persistence-backed runtime host for one workflow instance run.
 pub struct PersistenceRuntimeHost {
+    input_lease: std::sync::OnceLock<runtara_core::persistence::invocations::InvocationLease>,
     state: Arc<InstanceHandlerState>,
     instance_id: String,
     debug_mode: bool,
@@ -92,6 +94,7 @@ impl PersistenceRuntimeHost {
     /// Host for `instance_id` over the environment's shared handler state.
     pub fn new(state: Arc<InstanceHandlerState>, instance_id: String, debug_mode: bool) -> Self {
         Self {
+            input_lease: std::sync::OnceLock::new(),
             state,
             instance_id,
             debug_mode,
@@ -466,6 +469,25 @@ impl RuntimeHost for PersistenceRuntimeHost {
         .await
     }
 
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        self.register_managed_input(descriptor, deadline).await
+    }
+    async fn poll_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.poll_managed_input(signal).await
+    }
+    async fn close_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.close_managed_input(signal).await
+    }
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.escalate_if_cancel_ignored().await;
         let response = handle_poll_signals(

@@ -11,6 +11,162 @@ impl InvocationLauncher for NoChildren {
         Err(ExecutionError::InvalidBinding)
     }
 }
+#[tokio::test]
+async fn native_root_pause_preserves_waiting_child_but_cancel_closes_it() {
+    use runtara_core::persistence::{inputs::*, invocations::AttemptState};
+    for mode in [
+        "pause",
+        "shutdown",
+        "breakpoint",
+        "cancel",
+        "local-then-pause",
+        "pause-then-local",
+    ] {
+        let fx = Fixture::new().await;
+        let root = fx.owner.root_runtime();
+        let tenant = fx
+            .persistence
+            .get_instance(&fx.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let fences = fx.persistence.invocation_fences().unwrap();
+        let lease = fences
+            .claim_invocation_lease(&tenant, &fx.id, "first-run", None)
+            .await
+            .unwrap();
+        let child = fences
+            .begin_invocation_attempt(&lease, "waiting-child", "first-start")
+            .await
+            .unwrap()
+            .fence;
+        let spec = InputRequestSpec {
+            signal_id: "child-wait".into(),
+            response_schema: None,
+            metadata: serde_json::json!({}),
+            deadline: None,
+        };
+        let inputs = fx.persistence.input_requests().unwrap();
+        inputs
+            .register_input(&InputAuthority::Invocation(child.clone()), &spec)
+            .await
+            .unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let cleanup_entered = Arc::new(tokio::sync::Notify::new());
+        let cleanup_release = Arc::new(tokio::sync::Notify::new());
+        let local_cancel = mode == "local-then-pause" || mode == "pause-then-local";
+        let cleanup = local_cancel.then(|| {
+            let (entered, release) = (cleanup_entered.clone(), cleanup_release.clone());
+            runtara_component_host::isolated_tasks::TaskCleanup::new(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(())
+            })
+        });
+        let task = fx
+            .tasks
+            .spawn_managed(
+                move |_| async move {
+                    entered.send(()).unwrap();
+                    std::future::pending().await
+                },
+                cleanup,
+                Some(Arc::new(
+                    InvocationIo::new(fx.persistence.clone(), child, Duration::from_secs(2))
+                        .unwrap(),
+                )),
+            )
+            .unwrap();
+        ready.await.unwrap();
+        if mode == "breakpoint" {
+            root.breakpoint_pause().await.unwrap();
+        } else {
+            let command = match mode {
+                "pause" | "local-then-pause" | "pause-then-local" => CoreSignal::Pause,
+                "shutdown" => CoreSignal::Shutdown,
+                _ => CoreSignal::Cancel,
+            };
+            fx.persistence
+                .insert_signal(&fx.id, command, b"")
+                .await
+                .unwrap();
+            assert!(root.check_signals().await.unwrap());
+        }
+        if mode == "local-then-pause" {
+            fx.tasks.cancel(task).unwrap();
+        }
+        let running = run(&fx, root, COMPLETE).await;
+        if local_cancel {
+            cleanup_entered.notified().await;
+            if mode == "pause-then-local" {
+                fx.tasks.cancel(task).unwrap();
+            }
+            cleanup_release.notify_one();
+        }
+        let result = running.await.unwrap();
+        let request = inputs
+            .get_input(&tenant, &fx.id, &spec.request_id())
+            .await
+            .unwrap();
+        if mode == "cancel" || local_cancel {
+            if local_cancel {
+                assert!(
+                    matches!(result.exit, InvokeExit::Suspended(_)),
+                    "{result:?}"
+                );
+            } else {
+                assert!(matches!(result.exit, InvokeExit::Cancelled), "{result:?}");
+            }
+            assert!(matches!(request.state, InputState::Closed { .. }));
+            continue;
+        }
+        assert!(
+            matches!(result.exit, InvokeExit::Suspended(_)),
+            "{mode}: {result:?}"
+        );
+        assert_eq!(request.state, InputState::Open);
+        fences.revoke_invocation_lease(&lease).await.unwrap();
+        let before_accept = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let receipt = submit_input(
+            inputs,
+            &tenant,
+            &fx.id,
+            &spec.request_id(),
+            "response",
+            &serde_json::json!({"answer":42}),
+        )
+        .await
+        .unwrap();
+        let paused = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        assert_eq!(paused.status, InstanceStatus::Suspended);
+        // Shutdown already schedules recovery; a response must neither replace
+        // that deadline nor create a wake for explicit pause/breakpoint.
+        assert_eq!(paused.sleep_until, before_accept.sleep_until);
+        if mode != "shutdown" {
+            assert!(paused.sleep_until.is_none(), "{mode}");
+        }
+        fx.persistence
+            .update_instance_status(&fx.id, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let next = fences
+            .claim_invocation_lease(&tenant, &fx.id, "resumed-run", Some(lease.epoch))
+            .await
+            .unwrap();
+        let resumed = fences
+            .begin_invocation_attempt(&next, "waiting-child", "resumed-start")
+            .await
+            .unwrap();
+        assert_eq!(resumed.state, AttemptState::Active);
+        let replay = inputs
+            .register_input(&InputAuthority::Invocation(resumed.fence), &spec)
+            .await
+            .unwrap();
+        assert_eq!(replay.state, InputState::Accepted { receipt });
+    }
+}
+
 fn root_wat(exit: &str) -> String {
     format!(
         r#"(component
@@ -124,7 +280,7 @@ async fn root_and_children_acknowledge_commands_only_after_teardown() {
         fx.tasks
             .spawn_scoped(
                 |_| async { InvokeExit::Completed(vec![]) },
-                Box::pin(async move {
+                runtara_component_host::isolated_tasks::TaskCleanup::new(async move {
                     entered2.notify_one();
                     release2.notified().await;
                     Ok(())
@@ -239,7 +395,9 @@ async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_confli
             fx.tasks
                 .spawn_scoped(
                     |_| async { InvokeExit::Completed(vec![]) },
-                    Box::pin(async { Err(TaskError::WorkerLost) }),
+                    runtara_component_host::isolated_tasks::TaskCleanup::new(async {
+                        Err(TaskError::WorkerLost)
+                    }),
                 )
                 .unwrap();
         }

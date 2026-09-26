@@ -1,3 +1,8 @@
+import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
+import {
+  ManagedInputScope,
+  InputRetryPanel,
+} from '@/features/workflows/components/ManagedInputSubmissions';
 import { useNavigate, useParams } from 'react-router';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -35,12 +40,9 @@ import {
   getWorkflowInstance,
   getStepSummaries,
   getPendingInput,
-  deliverSignal,
   type PendingInput,
 } from '@/features/workflows/queries';
 import { useRef, useState, useMemo, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useCustomMutation } from '@/shared/hooks/api';
 import { useToken } from '@/shared/hooks';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
 import { PauseButton } from '@/features/workflows/components/PauseButton';
@@ -61,6 +63,7 @@ import {
   getTerminationTypeDisplay,
   getStatusDisplay,
   isActiveStatus,
+  isFinishedStatus,
 } from '@/shared/utils/status-display';
 import {
   getRunEventsEmptyState,
@@ -78,6 +81,14 @@ import {
 const LIST_PAGE_SIZE = 20;
 
 export function WorkflowHistory() {
+  return (
+    <ManagedInputScope>
+      <WorkflowHistoryContent />
+    </ManagedInputScope>
+  );
+}
+
+function WorkflowHistoryContent() {
   const { workflowId, instanceId } = useParams();
   const navigate = useNavigate();
   const isInitialLoadRef = useRef(true);
@@ -89,7 +100,7 @@ export function WorkflowHistory() {
   const [listPageIndex, setListPageIndex] = useState(0);
 
   const token = useToken();
-  const queryClient = useQueryClient();
+  const submissions = useManagedInputSubmissions();
 
   const { data, isLoading, isError } = useCustomQuery({
     queryKey: queryKeys.workflows.instance(workflowId ?? '', instanceId ?? ''),
@@ -101,46 +112,50 @@ export function WorkflowHistory() {
   });
 
   // Poll pending input while instance is Running
-  const { data: pendingInputData } = useCustomQuery<PendingInput[]>({
+  const { data: pendingInputData, error: pendingInputError } = useCustomQuery<
+    PendingInput[]
+  >({
     queryKey: queryKeys.workflows.pendingInput(
       workflowId ?? '',
       instanceId ?? ''
     ),
     queryFn: (token: string) =>
       getPendingInput(token, workflowId!, instanceId!),
-    enabled: !!workflowId && !!instanceId && isActiveStatus(data?.status),
+    enabled: !!workflowId && !!instanceId,
+    placeholderData: undefined,
     refetchInterval: () => {
       return isActiveStatus(data?.status) ? 3000 : false;
     },
   });
 
-  const pendingInputs = pendingInputData ?? [];
-
-  // Signal delivery mutation
-  const signalMutation = useCustomMutation({
-    mutationFn: (
-      _token: any,
-      payload: { signalId: string; payload: Record<string, any> }
-    ) => {
-      if (!instanceId) return Promise.reject(new Error('Missing instanceId'));
-      return deliverSignal(token, instanceId, payload);
-    },
-    onSuccess: () => {
-      toast.success('Response submitted successfully');
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.workflows.pendingInput(
-          workflowId ?? '',
-          instanceId ?? ''
-        ),
-      });
-    },
-  });
-
+  const forTarget = (requestId: string) =>
+    submissions.inputs.filter(
+      (input) =>
+        input.request.kind === 'execution' &&
+        input.request.workflowId === workflowId &&
+        input.request.instanceId === instanceId &&
+        input.request.requestId === requestId
+    );
+  // Pending-input polling stops once the run ends, so its last result can be
+  // stale: a finished run has no actionable inputs, whatever was fetched last.
+  const pendingInputs = isFinishedStatus(data?.status)
+    ? []
+    : (pendingInputData ?? []).filter(
+        (input) =>
+          !forTarget(input.requestId).some(
+            (submission) => submission.state === 'accepted'
+          )
+      );
   const handleSignalSubmit = (
-    signalId: string,
-    payload: Record<string, any>
+    requestId: string,
+    payload: Record<string, unknown>
   ) => {
-    signalMutation.mutate({ signalId, payload });
+    if (!instanceId || !workflowId) return;
+    void submissions.submit(
+      { kind: 'execution', workflowId, instanceId, requestId, payload },
+      pendingInputs.find((input) => input.requestId === requestId)?.message ||
+        'Workflow response'
+    );
   };
 
   // Briefly swap the copy button's icon to a checkmark for feedback.
@@ -432,15 +447,29 @@ export function WorkflowHistory() {
         )}
       </div>
 
+      <InputRetryPanel
+        matches={(request) =>
+          request.kind === 'execution' &&
+          request.instanceId === instanceId &&
+          request.workflowId === workflowId
+        }
+      />
       {/* Pending Human Input Cards */}
+      {pendingInputError && (
+        <p role="alert" className="text-sm text-destructive">
+          Pending inputs are unavailable: {pendingInputError.message}
+        </p>
+      )}
       {pendingInputs.length > 0 && (
         <div className="mb-6 space-y-3">
           {pendingInputs.map((pi) => (
             <HumanInputCard
-              key={pi.signalId}
+              key={pi.requestId}
               pendingInput={pi}
               onSubmit={handleSignalSubmit}
-              isSubmitting={signalMutation.isPending}
+              isSubmitting={forTarget(pi.requestId).some(
+                (input) => input.state === 'submitting'
+              )}
             />
           ))}
         </div>
@@ -879,6 +908,7 @@ export function WorkflowHistory() {
               <ReplayView workflowId={workflowId!} instanceId={instanceId!} />
             ) : eventsViewMode === 'timeline' ? (
               <ExecutionTimeline
+                showInputs={false}
                 workflowId={workflowId!}
                 instanceId={instanceId!}
               />

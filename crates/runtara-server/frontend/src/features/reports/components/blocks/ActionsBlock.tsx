@@ -1,11 +1,7 @@
-import { useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
 import { CheckCircle2, CircleDot, Wrench } from 'lucide-react';
 import { Badge } from '@/shared/components/ui/badge';
-import { useCustomMutation } from '@/shared/hooks/api';
-import { queryKeys } from '@/shared/queries/query-keys';
 import { ActionForm } from '@/features/workflows/components/ActionForm';
-import { submitReportWorkflowAction } from '../../queries';
 import {
   ReportBlockDefinition,
   ReportBlockResult,
@@ -34,49 +30,19 @@ export function ActionsBlock({
   blockFilters,
   onSubmitted,
 }: ActionsBlockProps) {
-  const queryClient = useQueryClient();
-  const [submittingActionId, setSubmittingActionId] = useState<string | null>(
-    null
-  );
-  const [submittedActionIds, setSubmittedActionIds] = useState<Set<string>>(
-    () => new Set()
-  );
-  const mutation = useCustomMutation<
-    void,
-    {
-      actionId: string;
-      payload: Record<string, unknown>;
-    }
-  >({
-    mutationFn: (token, request) =>
-      submitReportWorkflowAction(token, {
-        reportId,
-        blockId: block.id,
-        actionId: request.actionId,
-        payload: request.payload,
-        filters,
-        blockFilters,
-      }),
-    onSuccess: async (_data, variables) => {
-      setSubmittedActionIds((current) => {
-        const next = new Set(current);
-        next.add(variables.actionId);
-        return next;
-      });
-      await queryClient.invalidateQueries({
-        queryKey: queryKeys.reports.byId(reportId),
-      });
-      await onSubmitted?.();
-    },
-    onSettled: () => setSubmittingActionId(null),
-  });
-
+  const submissions = useManagedInputSubmissions();
+  const forTarget = (action: ReportWorkflowAction) =>
+    submissions.inputs.filter(
+      (input) =>
+        input.request.kind === 'report' &&
+        input.request.reportId === reportId &&
+        input.request.blockId === block.id &&
+        input.request.instanceId === action.instanceId &&
+        input.request.requestId === action.actionId
+    );
   const data = (result.data ?? {}) as ActionsData;
-  const allActions = data.actions ?? data.rows ?? [];
-  const actions = useMemo(
-    () =>
-      allActions.filter((action) => !submittedActionIds.has(action.actionId)),
-    [allActions, submittedActionIds]
+  const actions = (data.actions ?? data.rows ?? []).filter(
+    (action) => !forTarget(action).some((input) => input.state === 'accepted')
   );
 
   if (actions.length === 0) {
@@ -90,8 +56,9 @@ export function ActionsBlock({
   return (
     <div className="space-y-3">
       {actions.map((action) => {
-        const isSubmitting =
-          mutation.isPending && submittingActionId === action.actionId;
+        const isSubmitting = forTarget(action).some(
+          (input) => input.state === 'submitting'
+        );
         return (
           <div
             key={`${action.instanceId}-${action.actionId}`}
@@ -127,11 +94,26 @@ export function ActionsBlock({
                 disabled={isSubmitting}
                 submitLabel={block.actions?.submit?.label ?? 'Submit Action'}
                 onSubmit={(payload) => {
-                  setSubmittingActionId(action.actionId);
-                  mutation.mutate({
-                    actionId: action.actionId,
-                    payload,
-                  });
+                  void submissions
+                    .submit(
+                      {
+                        kind: 'report',
+                        reportId,
+                        blockId: block.id,
+                        instanceId: action.instanceId,
+                        requestId: action.actionId,
+                        payload,
+                        filters,
+                        blockFilters,
+                      },
+                      action.label
+                    )
+                    .then((confirmed) => {
+                      if (confirmed)
+                        void Promise.resolve()
+                          .then(() => onSubmitted?.())
+                          .catch(() => {});
+                    });
                 }}
               />
             </div>

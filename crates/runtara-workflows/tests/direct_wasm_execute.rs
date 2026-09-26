@@ -33,6 +33,8 @@ mod outbound_fixture;
 
 mod cooperative_measurement;
 mod cooperative_workflow_cancellation;
+#[path = "support/managed_inputs.rs"]
+mod direct_managed_inputs;
 mod isolated_agent_execution;
 #[path = "../../runtara-component-host/tests/support/object_model.rs"]
 mod sql_fixture;
@@ -429,9 +431,10 @@ struct CapturedRun {
     /// Raw-SQL request paths the workflow sent (one per attempt — retries
     /// included), in order.
     sql_requests: Vec<String>,
-    /// Number of custom-signal polls the mock answered with a signal — a
-    /// replayed wait re-polls, so this is > the number of waits after a resume.
-    custom_signal_polls: u32,
+    /// Accepted managed response reads, including replay after a park.
+    accepted_input_polls: u32,
+    managed_inputs: Arc<direct_managed_inputs::ManagedInputs>,
+    input_requests: Vec<runtara_core::persistence::inputs::InputRequest>,
     slow_item_arrivals: Vec<Instant>,
     status_success: bool,
     stderr: String,
@@ -470,16 +473,59 @@ struct ServerState {
     sql_responses: Mutex<Vec<Result<Value, DatabaseError>>>,
     /// Native SQL operation names received, in order — retry counting.
     sql_requests: Mutex<Vec<String>>,
-    /// Payloads served for custom-signal polls (`GET signals/{id}`), modeling
-    /// the pending-signal row. Served **non-destructively** (peeked, never
-    /// removed) so a replayed `WaitForSignal` re-reads the same signal — the
-    /// core `get_custom_signal` is likewise a non-destructive read.
-    /// The first entry answers every poll; empty → no signal (the wait keeps
-    /// polling), so a test that arms no signal would hang by design.
-    custom_signals: Mutex<Vec<Value>>,
-    /// Count of custom-signal polls served with a signal — lets a test assert
-    /// the wait re-polled on replay.
-    custom_signal_polls: Mutex<u32>,
+    /// One validated response per newly registered wait, consumed in order.
+    input_responses: Mutex<Vec<Value>>,
+    managed_inputs: Arc<direct_managed_inputs::ManagedInputs>,
+    /// Accepted-state reads include receipt replay on subsequent invocations.
+    accepted_input_polls: Mutex<u32>,
+}
+
+impl ServerState {
+    async fn register_managed_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+        host_now_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let signal =
+            serde_json::from_slice::<Value>(&descriptor).map_err(|e| e.to_string())?["signal_id"]
+                .as_str()
+                .ok_or("missing signal id")?
+                .to_owned();
+        self.managed_inputs
+            .register(descriptor, deadline, host_now_ms)
+            .await?;
+        if self.managed_inputs.request(&signal).await.state
+            == runtara_core::persistence::inputs::InputState::Open
+        {
+            let response = {
+                let mut responses = self.input_responses.lock().unwrap();
+                if responses.is_empty() {
+                    None
+                } else {
+                    Some(responses.remove(0))
+                }
+            };
+            if let Some(response) = response {
+                self.managed_inputs.respond(&signal, &response).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn poll_managed_input(
+        &self,
+        signal: &str,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        let state = self.managed_inputs.poll(signal).await?;
+        if matches!(
+            state,
+            runtara_component_host::runtime_host::RuntimeInputState::Accepted(_)
+        ) {
+            *self.accepted_input_polls.lock().unwrap() += 1;
+        }
+        Ok(state)
+    }
 }
 
 fn workspace_root() -> PathBuf {
@@ -943,31 +989,43 @@ fn route(
                     serde_json::json!({"signal": null, "custom_signal": null}),
                 );
             }
-            // Custom-signal poll (`GET signals/{signal_id}`). The signal id is a
-            // single percent-encoded path segment, so it lands here as
-            // `signals/<encoded>`; a fixture has one wait per id, so we ignore
-            // the exact id and serve the armed payload. Non-destructive: peek
-            // the front and leave it, so a replayed wait re-reads it.
             ("GET", ep) if ep.starts_with("signals/") => {
-                let custom = server_state
-                    .custom_signals
-                    .lock()
-                    .expect("custom_signals lock")
-                    .first()
-                    .cloned();
-                let custom_signal = custom.map(|payload| {
-                    *server_state
-                        .custom_signal_polls
-                        .lock()
-                        .expect("custom_signal_polls lock") += 1;
-                    let payload_b64 = base64::engine::general_purpose::STANDARD
-                        .encode(serde_json::to_vec(&payload).expect("payload serializes"));
-                    serde_json::json!({"signal_id": "retained-test-value", "checkpoint_id": "wait", "payload": payload_b64})
+                panic!("managed wait attempted raw HTTP signal polling: {ep}");
+            }
+            ("POST", ep @ ("inputs/register" | "inputs/poll" | "inputs/close")) => {
+                let request: Value = serde_json::from_slice(body).expect("managed request body");
+                let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    if ep == "inputs/register" {
+                        server_state
+                            .register_managed_input(
+                                serde_json::to_vec(&request["descriptor"]).unwrap(),
+                                request["deadline_ms"].as_u64(),
+                                request["requested_at_ms"].as_u64(),
+                            )
+                            .await?;
+                        return Ok(serde_json::json!({"success":true}));
+                    }
+                    let signal = request["signal_id"].as_str().ok_or("missing signal id")?;
+                    let state = if ep == "inputs/poll" {
+                        server_state.poll_managed_input(signal).await?
+                    } else {
+                        server_state.managed_inputs.close(signal).await?
+                    };
+                    use runtara_component_host::runtime_host::RuntimeInputState;
+                    Ok::<_, String>(match state {
+                        RuntimeInputState::Open => serde_json::json!({"state":"open"}),
+                        RuntimeInputState::Accepted(payload) => {
+                            serde_json::json!({"state":"accepted","value":payload})
+                        }
+                        RuntimeInputState::Closed(reason) => {
+                            serde_json::json!({"state":"closed","value":reason})
+                        }
+                    })
                 });
-                return (
-                    200,
-                    serde_json::json!({"signal": null, "custom_signal": custom_signal}),
-                );
+                return match result {
+                    Ok(response) => (200, response),
+                    Err(error) => (409, serde_json::json!({"error":error})),
+                };
             }
             ("POST", "sleep") => {
                 capture_sleep(body, sink, server_state);
@@ -1299,19 +1357,18 @@ fn run_direct_workflow_with_llm_script(
     )
 }
 
-/// Run a `WaitForSignal` workflow against the mock, arming a non-destructive
-/// custom-signal payload the wait(s) will consume. `preloaded_checkpoints`
-/// simulates a drain/resume: pass a prior run's captured checkpoints to replay
-/// the instance from the entry point with its durable state already present.
+/// Run managed waits with one scripted response per fresh registration.
+/// Replay passes the prior managed store and checkpoints, with no new replies.
 fn run_wait_workflow(
     components_dir: &Path,
     workflow_id: &str,
     graph_json: &str,
     workflow_input: &[u8],
     preloaded_checkpoints: Vec<(String, Vec<u8>)>,
-    custom_signals: Vec<Value>,
+    input_responses: Vec<Value>,
+    managed_inputs: Option<Arc<direct_managed_inputs::ManagedInputs>>,
 ) -> CapturedRun {
-    run_direct_workflow_capture_full_sql(
+    run_direct_workflow_capture_attempt(
         components_dir,
         workflow_id,
         graph_json,
@@ -1321,7 +1378,8 @@ fn run_wait_workflow(
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        custom_signals,
+        input_responses,
+        managed_inputs,
     )
 }
 
@@ -1386,7 +1444,7 @@ fn run_direct_workflow_capture_full_sql(
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
     sql_script: Vec<Result<Value, DatabaseError>>,
-    custom_signals: Vec<Value>,
+    input_responses: Vec<Value>,
 ) -> CapturedRun {
     let first = run_direct_workflow_capture_attempt(
         components_dir,
@@ -1398,7 +1456,8 @@ fn run_direct_workflow_capture_full_sql(
         llm_script.clone(),
         extra_env.clone(),
         sql_script.clone(),
-        custom_signals.clone(),
+        input_responses.clone(),
+        None,
     );
     // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
     // TCP listeners) a run occasionally dies before reaching the mock runtime
@@ -1426,7 +1485,8 @@ fn run_direct_workflow_capture_full_sql(
         llm_script,
         extra_env,
         sql_script,
-        custom_signals,
+        input_responses,
+        None,
     )
 }
 
@@ -1441,7 +1501,8 @@ fn run_direct_workflow_capture_attempt(
     llm_script: Vec<Value>,
     extra_env: Vec<(String, String)>,
     sql_script: Vec<Result<Value, DatabaseError>>,
-    custom_signals: Vec<Value>,
+    input_responses: Vec<Value>,
+    managed_inputs: Option<Arc<direct_managed_inputs::ManagedInputs>>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -1480,8 +1541,10 @@ fn run_direct_workflow_capture_attempt(
         connection_metadata_requests: Mutex::new(Vec::new()),
         sql_responses: Mutex::new(sql_script),
         sql_requests: Mutex::new(Vec::new()),
-        custom_signals: Mutex::new(custom_signals),
-        custom_signal_polls: Mutex::new(0),
+        input_responses: Mutex::new(input_responses),
+        managed_inputs: managed_inputs
+            .unwrap_or_else(|| Arc::new(direct_managed_inputs::ManagedInputs::new(workflow_id))),
+        accepted_input_polls: Mutex::new(0),
         slow_item_arrivals: Mutex::new(Vec::new()),
     });
     let server_state_for_assertions = server_state.clone();
@@ -1568,10 +1631,10 @@ fn run_direct_workflow_capture_attempt(
         .lock()
         .expect("sql_requests lock")
         .clone();
-    let custom_signal_polls = *server_state_for_assertions
-        .custom_signal_polls
+    let accepted_input_polls = *server_state_for_assertions
+        .accepted_input_polls
         .lock()
-        .expect("custom_signal_polls lock");
+        .expect("accepted_input_polls lock");
     let slow_item_arrivals = server_state_for_assertions
         .slow_item_arrivals
         .lock()
@@ -1586,7 +1649,11 @@ fn run_direct_workflow_capture_attempt(
         llm_requests,
         connection_metadata_requests,
         sql_requests,
-        custom_signal_polls,
+        accepted_input_polls,
+        managed_inputs: server_state_for_assertions.managed_inputs.clone(),
+        input_requests: tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(server_state_for_assertions.managed_inputs.requests()),
         slow_item_arrivals,
         status_success,
         stderr,
@@ -1710,23 +1777,29 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(false)
     }
     async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        // Mirror GET signals/{id}: peek the front NON-destructively (a
-        // replayed wait re-reads the same signal) and count answered polls.
-        let custom = self
-            .state
-            .custom_signals
-            .lock()
-            .expect("custom_signals lock")
-            .first()
-            .cloned();
-        Ok(custom.map(|payload| {
-            *self
-                .state
-                .custom_signal_polls
-                .lock()
-                .expect("custom_signal_polls lock") += 1;
-            serde_json::to_vec(&payload).expect("payload serializes")
-        }))
+        Err("compiled managed waits must not poll raw signals".into())
+    }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        let now = self.now_ms()?;
+        self.state
+            .register_managed_input(descriptor, deadline, Some(now))
+            .await
+    }
+    async fn poll_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.state.poll_managed_input(&signal).await
+    }
+    async fn close_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.state.managed_inputs.close(&signal).await
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         // The HTTP SDK routes get_checkpoint through POST /checkpoint with
@@ -2443,11 +2516,9 @@ struct PersistingRuntimeHost {
     sleep_ids: Mutex<Vec<String>>,
     /// Ids written via `checkpoint` (agent/split/embed outputs), in order.
     checkpoint_writes: Mutex<Vec<String>>,
-    /// Pending custom signals by exact id — mirrors the production
-    /// `pending_custom_signals` table (upsert + NON-destructive read).
-    signals: Mutex<HashMap<String, Vec<u8>>>,
-    /// Every id handed to `poll-custom-signal`, in order (with repeats).
-    polled_signal_ids: Mutex<Vec<String>>,
+    managed_inputs: direct_managed_inputs::ManagedInputs,
+    /// Every managed wait address polled, in order (with repeats).
+    polled_input_ids: Mutex<Vec<String>>,
     completed: Mutex<Option<Vec<u8>>>,
     failed: Mutex<Option<Vec<u8>>>,
     complete_calls: std::sync::atomic::AtomicU32,
@@ -2464,8 +2535,8 @@ impl PersistingRuntimeHost {
             checkpoints: Mutex::new(HashMap::new()),
             sleep_ids: Mutex::new(Vec::new()),
             checkpoint_writes: Mutex::new(Vec::new()),
-            signals: Mutex::new(HashMap::new()),
-            polled_signal_ids: Mutex::new(Vec::new()),
+            managed_inputs: Default::default(),
+            polled_input_ids: Mutex::new(Vec::new()),
             completed: Mutex::new(None),
             failed: Mutex::new(None),
             complete_calls: std::sync::atomic::AtomicU32::new(0),
@@ -2473,13 +2544,11 @@ impl PersistingRuntimeHost {
         }
     }
 
-    /// Pre-deliver a custom signal to an exact id, as a sender posting to
-    /// `POST /signals/{instance}` would.
-    fn deliver_signal(&self, signal_id: &str, payload: &[u8]) {
-        self.signals
-            .lock()
-            .unwrap()
-            .insert(signal_id.to_string(), payload.to_vec());
+    /// Script a caller response, submitted through managed acceptance after
+    /// the compiled wait registers its authoritative request.
+    fn respond_when_registered(&self, signal_id: &str, payload: &[u8]) {
+        self.managed_inputs
+            .respond_when_registered(signal_id, payload);
     }
 }
 
@@ -2526,13 +2595,34 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             .suspend_requested
             .load(std::sync::atomic::Ordering::SeqCst))
     }
-    async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        self.polled_signal_ids
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Err("compiled managed waits must not poll raw signals".into())
+    }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        let now = self.now_ms()?;
+        self.managed_inputs
+            .register(descriptor, deadline, Some(now))
+            .await
+    }
+    async fn poll_input(
+        &self,
+        signal_id: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.polled_input_ids
             .lock()
             .unwrap()
-            .push(checkpoint_id.clone());
-        // Exact-id, non-destructive read — the production semantics.
-        Ok(self.signals.lock().unwrap().get(&checkpoint_id).cloned())
+            .push(signal_id.clone());
+        self.managed_inputs.poll(&signal_id).await
+    }
+    async fn close_input(
+        &self,
+        signal_id: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.managed_inputs.close(&signal_id).await
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         Ok(self
@@ -4135,6 +4225,76 @@ fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
 }
 
 #[test]
+fn direct_wasm_execute_repeated_ai_wait_tools_use_distinct_managed_requests_without_tracking() {
+    let components = direct_e2e_components_dir();
+    let mut graph: Value = serde_json::from_str(&ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai"]
+        .as_object_mut()
+        .unwrap()
+        .remove("breakpoint");
+    graph["steps"]["echo_tool"] = serde_json::json!({
+        "id":"echo_tool", "stepType":"WaitForSignal", "name":"echo",
+        "responseSchema":{"answer":{"type":"string","required":true}}
+    });
+    let result = run_direct_workflow_capture_full_sql(
+        &components,
+        "repeated-ai-managed-waits",
+        &graph.to_string(),
+        b"{}",
+        false,
+        Vec::new(),
+        vec![
+            llm_tool_call("echo", "{}"),
+            llm_tool_call("echo", "{}"),
+            llm_ok("done"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        vec![
+            serde_json::json!({"answer":"first"}),
+            serde_json::json!({"answer":"second"}),
+        ],
+    );
+    assert!(
+        result.status_success,
+        "stderr={} error={:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        result.output_json,
+        Some(serde_json::json!({"answer":"done"}))
+    );
+    assert_eq!(result.input_requests.len(), 2);
+    let first = &result.input_requests[0];
+    let second = &result.input_requests[1];
+    assert_ne!(first.request_id, second.request_id);
+    assert_ne!(first.spec.signal_id, second.spec.signal_id);
+    let mut answers: Vec<_> = result
+        .input_requests
+        .iter()
+        .map(|request| {
+            let runtara_core::persistence::inputs::InputState::Accepted { receipt } =
+                &request.state
+            else {
+                panic!("each tool invocation must retain its own accepted response")
+            };
+            serde_json::from_slice::<Value>(&receipt.payload).unwrap()["answer"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    answers.sort();
+    assert_eq!(answers, ["first", "second"]);
+    assert_eq!(result.llm_requests.len(), 3);
+    let final_request = result.llm_requests[2].to_string();
+    assert!(
+        final_request.contains("first") && final_request.contains("second"),
+        "both managed responses must reach the AI conversation"
+    );
+}
+
+#[test]
 fn direct_wasm_execute_ai_agent_loop_breakpoint_pauses_before_first_llm_call() {
     let components_dir = direct_e2e_components_dir();
 
@@ -4912,12 +5072,26 @@ fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
     // GAP-14: the 1ms wait deadline expires (the mock runtime never delivers
     // a signal) and the WAIT_TIMEOUT envelope routes to the onError handler,
     // which completes the workflow reading steps.__error.*.
-    let output = run_direct_workflow(
+    let captured = run_direct_workflow_capture(
         &components_dir,
         "wait-timeout-on-error",
         WAIT_TIMEOUT_ON_ERROR,
         br#"{}"#,
+        false,
     );
+    assert!(captured.status_success, "{}", captured.stderr);
+    assert_eq!(captured.input_requests.len(), 1);
+    assert!(
+        matches!(
+            captured.input_requests[0].state,
+            runtara_core::persistence::inputs::InputState::Closed {
+                reason: runtara_core::persistence::inputs::InputClosure::Expired,
+                ..
+            }
+        ),
+        "handled timeout must leave the request authoritatively closed"
+    );
+    let output = captured.output_json.expect("onError recovered");
 
     assert_eq!(
         output.get("handled").and_then(Value::as_bool),
@@ -5152,6 +5326,7 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         b"{}",
         Vec::new(),
         vec![signal.clone()],
+        None,
     );
     assert!(
         first.status_success,
@@ -5163,7 +5338,7 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         Some(serde_json::json!({ "approved": true })),
     );
     assert!(
-        first.custom_signal_polls >= 1,
+        first.accepted_input_polls >= 1,
         "run 1 wait must have read the delivered signal"
     );
 
@@ -5219,7 +5394,8 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         WAIT_DELAY_FINISH,
         b"{}",
         preloaded,
-        vec![signal.clone()],
+        Vec::new(),
+        Some(first.managed_inputs.clone()),
     );
     assert!(
         second.status_success,
@@ -5232,7 +5408,7 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         "resume must reproduce the delivered-signal result (no spurious WAIT_TIMEOUT)"
     );
     assert!(
-        second.custom_signal_polls >= 1,
+        second.accepted_input_polls >= 1,
         "resume must re-poll and re-read the retained signal"
     );
     // The deadlines were read from their checkpoints, not recomputed and re-saved.
@@ -5240,6 +5416,11 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         second.checkpoints.iter().all(|cp| cp.state.len() != 8),
         "resume must hit the preloaded deadline checkpoint, not re-save one: {:?}",
         second.checkpoints
+    );
+    assert_eq!(first.input_requests.len(), 1);
+    assert_eq!(
+        second.input_requests, first.input_requests,
+        "replay preserves original requests and receipts"
     );
 }
 
@@ -5259,7 +5440,8 @@ fn direct_wasm_execute_wait_wait_finish_resumes_after_drain() {
         WAIT_WAIT_FINISH,
         b"{}",
         Vec::new(),
-        vec![signal.clone()],
+        vec![signal.clone(), signal.clone()],
+        None,
     );
     assert!(
         first.status_success,
@@ -5271,9 +5453,9 @@ fn direct_wasm_execute_wait_wait_finish_resumes_after_drain() {
         Some(serde_json::json!({ "first": true, "second": true })),
     );
     assert!(
-        first.custom_signal_polls >= 2,
+        first.accepted_input_polls >= 2,
         "both waits must read a signal on run 1; polls: {}",
-        first.custom_signal_polls
+        first.accepted_input_polls
     );
 
     // Resume: replay from the entry point with the signals still retained. Both
@@ -5283,8 +5465,14 @@ fn direct_wasm_execute_wait_wait_finish_resumes_after_drain() {
         workflow_id,
         WAIT_WAIT_FINISH,
         b"{}",
+        first
+            .checkpoints
+            .iter()
+            .filter(|cp| !cp.state.is_empty())
+            .map(|cp| (cp.checkpoint_id.clone(), cp.state.clone()))
+            .collect(),
         Vec::new(),
-        vec![signal.clone()],
+        Some(first.managed_inputs.clone()),
     );
     assert!(
         second.status_success,
@@ -5295,6 +5483,11 @@ fn direct_wasm_execute_wait_wait_finish_resumes_after_drain() {
         second.output_json,
         Some(serde_json::json!({ "first": true, "second": true })),
         "resume must reproduce both delivered-signal results"
+    );
+    assert_eq!(first.input_requests.len(), 2);
+    assert_eq!(
+        second.input_requests, first.input_requests,
+        "replay preserves original requests and receipts"
     );
 }
 
@@ -7601,10 +7794,7 @@ struct CheckpointingRuntimeHost {
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     completed: Mutex<Option<Vec<u8>>>,
     sleeps: Mutex<Vec<String>>,
-    /// Externally-delivered custom signals keyed by checkpoint (signal) id —
-    /// the wake-scheduler-side signal store. `poll_custom_signal` reads it
-    /// non-destructively (a replayed wait re-reads the same signal).
-    custom_signals: Mutex<HashMap<String, Vec<u8>>>,
+    managed_inputs: direct_managed_inputs::ManagedInputs,
     /// Milliseconds added to the wall clock for every `now-ms` the guest asks
     /// for. The wake-scheduler stand-in advances this to a park's deadline so a
     /// 1-hour Delay can be woken without waiting an hour: a resumed park
@@ -7615,10 +7805,8 @@ struct CheckpointingRuntimeHost {
     /// `clock_offset_ms` entirely. Lets a test place the guest at a precise
     /// distance from a deadline and hold it there.
     pinned_clock_ms: Mutex<Option<u64>>,
-    /// Fallback payload returned for ANY polled id — for the blocking control,
-    /// whose deterministic signal id (workflow-id-scoped) isn't known ahead of
-    /// the run.
-    any_signal: Mutex<Option<Vec<u8>>>,
+    /// One caller response accepted after the next wait registers.
+    next_input_response: Mutex<Option<Value>>,
     /// When set, `durable-sleep-checkpoint` reports this message instead of
     /// returning cleanly — the shape of a sleep whose request the client
     /// deadline outlasted.
@@ -7642,10 +7830,10 @@ impl CheckpointingRuntimeHost {
             checkpoints: Mutex::new(HashMap::new()),
             completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
-            custom_signals: Mutex::new(HashMap::new()),
+            managed_inputs: direct_managed_inputs::ManagedInputs::new("store-freeing-delay"),
             clock_offset_ms: Mutex::new(0),
             pinned_clock_ms: Mutex::new(None),
-            any_signal: Mutex::new(None),
+            next_input_response: Mutex::new(None),
             sleep_error: Mutex::new(None),
             failed: Mutex::new(None),
             pending_signal: std::sync::atomic::AtomicBool::new(false),
@@ -7659,11 +7847,14 @@ impl CheckpointingRuntimeHost {
         *self.sleep_error.lock().unwrap() = Some(message.to_string());
     }
 
-    fn deliver_signal(&self, checkpoint_id: &str, payload: &[u8]) {
-        self.custom_signals
-            .lock()
+    fn accept_response(&self, signal: &str, payload: &[u8]) {
+        tokio::runtime::Runtime::new()
             .unwrap()
-            .insert(checkpoint_id.to_string(), payload.to_vec());
+            .block_on(
+                self.managed_inputs
+                    .respond(signal, &serde_json::from_slice(payload).unwrap()),
+            )
+            .unwrap();
     }
 
     /// PIN the guest's clock exactly `remaining_ms` short of `deadline_ms` — an
@@ -7691,18 +7882,19 @@ impl CheckpointingRuntimeHost {
         *offset = (*offset).max(deadline_ms.saturating_sub(wall).saturating_add(1));
     }
 
-    /// Whether a custom signal is armed for `checkpoint_id` — what the
-    /// wake-scheduler stand-in consults before relaunching an on-signal park.
-    fn has_signal(&self, checkpoint_id: &str) -> bool {
-        self.custom_signals
-            .lock()
+    /// The scheduler may wake a no-deadline wait only after durable acceptance.
+    fn has_accepted_response(&self, signal: &str) -> bool {
+        let request = tokio::runtime::Runtime::new()
             .unwrap()
-            .contains_key(checkpoint_id)
-            || self.any_signal.lock().unwrap().is_some()
+            .block_on(self.managed_inputs.request(signal));
+        matches!(
+            request.state,
+            runtara_core::persistence::inputs::InputState::Accepted { .. }
+        )
     }
 
-    fn deliver_signal_any(&self, payload: &[u8]) {
-        *self.any_signal.lock().unwrap() = Some(payload.to_vec());
+    fn respond_to_next_request(&self, payload: &[u8]) {
+        *self.next_input_response.lock().unwrap() = Some(serde_json::from_slice(payload).unwrap());
     }
 
     fn request_signal(&self) {
@@ -7767,13 +7959,40 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
             .pending_signal
             .load(std::sync::atomic::Ordering::SeqCst))
     }
-    async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        // Non-destructive read (mirrors the wait-replay fix): a resumed wait
-        // re-reads the same delivered signal. Falls back to the any-id payload.
-        if let Some(payload) = self.custom_signals.lock().unwrap().get(&checkpoint_id) {
-            return Ok(Some(payload.clone()));
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Err("compiled managed waits must not poll raw signals".into())
+    }
+    async fn register_input(
+        &self,
+        descriptor: Vec<u8>,
+        deadline: Option<u64>,
+    ) -> Result<(), String> {
+        let signal =
+            serde_json::from_slice::<Value>(&descriptor).map_err(|e| e.to_string())?["signal_id"]
+                .as_str()
+                .ok_or("missing signal id")?
+                .to_owned();
+        let now = self.now_ms()?;
+        self.managed_inputs
+            .register(descriptor, deadline, Some(now))
+            .await?;
+        let response = self.next_input_response.lock().unwrap().take();
+        if let Some(response) = response {
+            self.managed_inputs.respond(&signal, &response).await?;
         }
-        Ok(self.any_signal.lock().unwrap().clone())
+        Ok(())
+    }
+    async fn poll_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.managed_inputs.poll(&signal).await
+    }
+    async fn close_input(
+        &self,
+        signal: String,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeInputState, String> {
+        self.managed_inputs.close(&signal).await
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         Ok(self
@@ -7972,8 +8191,12 @@ fn drive_wake_scheduler(
             match wake {
                 WorkflowWake::At(ms) => host.advance_clock_past(*ms),
                 WorkflowWake::OnSignal(wait) => {
-                    if let Some(ms) = wait.deadline_ms {
-                        host.advance_clock_past(ms);
+                    if !host.has_accepted_response(&wait.checkpoint_id)
+                        && let Some(ms) = wait.deadline_ms
+                    {
+                        // Managed expiry uses persistence time, independently of
+                        // the virtual guest clock used by delay fixtures.
+                        thread::sleep(Duration::from_millis(ms.saturating_sub(now_ms()) + 1));
                     }
                 }
                 WorkflowWake::OnResume => {}
@@ -7982,7 +8205,7 @@ fn drive_wake_scheduler(
         let wakeable = wakes.iter().any(|wake| match wake {
             WorkflowWake::At(_) => true,
             WorkflowWake::OnSignal(wait) => {
-                wait.deadline_ms.is_some() || host.has_signal(&wait.checkpoint_id)
+                wait.deadline_ms.is_some() || host.has_accepted_response(&wait.checkpoint_id)
             }
             WorkflowWake::OnResume => false,
         });
@@ -9019,139 +9242,108 @@ fn direct_wasm_execute_cli_run_wait_timeout_gets_no_skew_tolerance() {
     );
 }
 
-/// A resumed Wait absorbs the host/database clock split the same way a resumed
-/// Delay does: woken a shade early it serves its timeout instead of re-parking,
-/// but woken with real time still owed it re-parks on the SAME deadline.
-///
-/// A Wait's deadline lands in the same `sleep_until` column, stamped from the
-/// same host clock, and is woken by the same database-clock scan as a parked
-/// Delay, so it arrives early for the same reason. This fixture's timeout is far
-/// wider than the tolerance, so the half-window clamp is not binding here —
-/// `..._is_clamped_to_half_the_window` covers that.
+/// Guest clock skew cannot close a managed wait: persistence owns expiry.
+/// Even a replay whose local clock is beyond the deadline can still accept a
+/// response while the authoritative request is open.
 #[test]
-fn direct_wasm_execute_invoke_wait_timeout_tolerance_is_armed_only_on_resume() {
+fn direct_wasm_execute_invoke_wait_guest_clock_cannot_expire_an_open_request() {
     let components_dir = direct_e2e_components_dir();
     let input = br#"{}"#.to_vec();
     let artifact = compile_invoke_abi_artifact(
         &components_dir,
-        "wait-timeout-tolerance",
+        "wait-persistence-clock",
         &timed_wait_fixture(60_000),
     );
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
-
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let deadline = match &first {
+    let (signal, deadline) = match first {
         runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
-            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => wait
-                .deadline_ms
-                .expect("a timed wait parks carrying its deadline"),
-            other => panic!("a timed wait must park on-signal, got {other:?}"),
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => {
+                (wait.checkpoint_id.clone(), wait.deadline_ms.unwrap())
+            }
+            other => panic!("expected input wake, got {other:?}"),
         },
-        other => panic!("a first reach with no signal must park, got {other:?}"),
+        other => panic!("first request must park, got {other:?}"),
     };
-
-    // Outside the tolerance: real wait owed, so re-park on the SAME deadline.
-    // The deadline must not absorb the tolerance — if it did, the next wake
-    // would move earlier by exactly the tolerance and absorb nothing.
-    host.pin_clock_before(deadline, 2_000);
-    let outside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    match &outside {
-        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
-            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => assert_eq!(
-                wait.deadline_ms,
-                Some(deadline),
-                "a re-park must carry the same absolute deadline"
-            ),
-            other => panic!("expected an on-signal wake, got {other:?}"),
-        },
-        other => panic!("2s of owed wait must still re-park, got {other:?}"),
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let original = runtime.block_on(host.managed_inputs.request(&signal));
+    // Both an early wake and a guest clock beyond expiry retain the request.
+    for guest_now in [deadline - 500, deadline + 1_000] {
+        *host.pinned_clock_ms.lock().unwrap() = Some(guest_now);
+        let resumed = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+        assert!(
+            matches!(resumed, runtara_component_host::InvokeExit::Suspended(ref wakes)
+            if matches!(&wakes[..], [runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait)]
+                if wait.deadline_ms == Some(deadline) && wait.checkpoint_id == signal)),
+            "open request must retain its wake, got {resumed:?}"
+        );
+        assert_eq!(
+            runtime.block_on(host.managed_inputs.request(&signal)),
+            original
+        );
     }
-
-    // Inside the tolerance: the database clock fired the wake a shade early.
-    // Serve the timeout rather than spinning another relaunch. Asserted as an
-    // actual WAIT_TIMEOUT failure (the fixture has no onError) rather than a
-    // bare "not suspended", which a trap or a silent completion would satisfy
-    // too — and a broken local index on this path would produce exactly that.
-    host.pin_clock_before(deadline, 500);
-    let inside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let error = match inside {
-        runtara_component_host::InvokeExit::Failed(error) => error,
-        other => panic!(
-            "a resumed wait inside the tolerance must resolve its timeout, not \
-             re-park; got {other:?}"
-        ),
-    };
+    host.accept_response(&signal, br#"{"approved":true}"#);
+    let accepted = run_invoke_once(&artifact.wasm_path, host.clone(), input);
     assert!(
-        error.message.contains("timed out"),
-        "the resumed wait must fail with its WAIT_TIMEOUT error, got {error:?}"
+        matches!(accepted, runtara_component_host::InvokeExit::Completed(_)),
+        "accepted response wins despite guest clock skew, got {accepted:?}"
     );
+    assert!(matches!(
+        runtime.block_on(host.managed_inputs.request(&signal)).state,
+        runtara_core::persistence::inputs::InputState::Accepted { .. }
+    ));
 }
 
-/// The tolerance is clamped to HALF the wait's own timeout, so a short window
-/// cannot be swallowed whole.
-///
-/// The resumed flag alone does not bound this. A store-freeing Wait has no park
-/// floor — it parks on its FIRST poll miss — so every pass after the first is a
-/// resumed one, and a flat 1s tolerance would consume the entire remaining
-/// window of any timeout near or below it. A wait relaunched off its deadline
-/// (an operator resume, a recovery sweep, another waker) would then report
-/// WAIT_TIMEOUT with time the author asked for still unspent: the same defect as
-/// a Delay losing its remaining wait, merely bounded.
-///
-/// 400ms timeout → 200ms of tolerance. Relaunching 300ms early is INSIDE the
-/// unclamped 1s tolerance and outside the clamped one, so this fails if the
-/// clamp is dropped.
+/// A guest clock behind persistence must not keep an expired wait actionable.
+/// The real store arbitrates expiry, and the compiled wait reports WAIT_TIMEOUT.
 #[test]
-fn direct_wasm_execute_invoke_wait_timeout_tolerance_is_clamped_to_half_the_window() {
+fn direct_wasm_execute_invoke_wait_observes_persistence_expiry_with_guest_clock_behind() {
     let components_dir = direct_e2e_components_dir();
     let input = br#"{}"#.to_vec();
     let artifact = compile_invoke_abi_artifact(
         &components_dir,
-        "wait-timeout-clamp",
-        &timed_wait_fixture(400),
+        "wait-persistence-expiry",
+        &timed_wait_fixture(5_000),
     );
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
-
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let deadline = match &first {
+    let (signal, deadline) = match first {
         runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
-            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => wait
-                .deadline_ms
-                .expect("a timed wait parks carrying its deadline"),
-            other => panic!("a timed wait must park on-signal, got {other:?}"),
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => {
+                (wait.checkpoint_id.clone(), wait.deadline_ms.unwrap())
+            }
+            other => panic!("expected input wake, got {other:?}"),
         },
-        other => panic!(
-            "a 400ms timeout must still PARK on its first reach rather than \
-             resolve immediately, got {other:?}"
-        ),
+        other => panic!("first request must park, got {other:?}"),
     };
-
-    // 300ms short of a 400ms window: three quarters of the wait still owed.
-    host.pin_clock_before(deadline, 300);
-    let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    match &exit {
-        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
-            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => assert_eq!(
-                wait.deadline_ms,
-                Some(deadline),
-                "the clamped re-park must keep the same absolute deadline"
-            ),
-            other => panic!("expected an on-signal wake, got {other:?}"),
-        },
-        other => panic!(
-            "an unclamped 1s tolerance would swallow this 400ms window whole; \
-             the clamp must hold it to 200ms and re-park. Got {other:?}"
-        ),
-    }
-
-    // 50ms short — inside the clamped 200ms — still resolves, so the clamp
-    // narrows the tolerance rather than disabling it.
     host.pin_clock_before(deadline, 50);
-    let served = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let early = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     assert!(
-        matches!(served, runtara_component_host::InvokeExit::Failed(ref e)
-            if e.message.contains("timed out")),
-        "inside the CLAMPED tolerance the timeout must still be served, got {served:?}"
+        matches!(early, runtara_component_host::InvokeExit::Suspended(_)),
+        "guest tolerance cannot expire the managed request early, got {early:?}"
+    );
+    thread::sleep(Duration::from_millis(deadline.saturating_sub(now_ms()) + 1));
+    let expired = run_invoke_once(&artifact.wasm_path, host.clone(), input);
+    assert!(
+        matches!(expired, runtara_component_host::InvokeExit::Failed(ref error)
+        if error.message.contains("timed out")),
+        "persistence expiry must surface as WAIT_TIMEOUT, got {expired:?}"
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(matches!(
+        runtime.block_on(host.managed_inputs.request(&signal)).state,
+        runtara_core::persistence::inputs::InputState::Closed {
+            reason: runtara_core::persistence::inputs::InputClosure::Expired,
+            ..
+        }
+    ));
+    assert!(
+        runtime
+            .block_on(
+                host.managed_inputs
+                    .respond(&signal, &serde_json::json!({"approved":true}))
+            )
+            .is_err()
     );
 }
 
@@ -9183,7 +9375,7 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
             // The custom-signal waker: arm the signal the park is waiting on.
             for wake in wakes {
                 if let runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) = wake {
-                    host.deliver_signal(&wait.checkpoint_id, br#"{"approved": true}"#);
+                    host.accept_response(&wait.checkpoint_id, br#"{"approved": true}"#);
                 }
             }
         },
@@ -9224,7 +9416,7 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
     let present_host = Arc::new(CheckpointingRuntimeHost::new(&input));
     // The deterministic signal id is workflow-id-scoped, so pre-deliver for ANY
     // polled id.
-    present_host.deliver_signal_any(br#"{"approved": true}"#);
+    present_host.respond_to_next_request(br#"{"approved": true}"#);
     let present_exit = run_invoke_once(&present.wasm_path, present_host.clone(), input.clone());
     let present_output = match present_exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
@@ -10453,9 +10645,8 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
     )
     .expect("parent composes the waiting child");
 
-    // Deliver a DIFFERENT payload to each site's scoped id — exactly what a
-    // sender does after discovering the ids from the two
-    // `external_input_requested` events.
+    // Script distinct managed responses for the two scoped waits. Registration
+    // and acceptance must work with event tracking disabled.
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
     let site1 = &expected_key(
         "wait",
@@ -10471,8 +10662,8 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
         serde_json::json!([]),
         serde_json::json!([["child", "sig-parent-wf", [], ["call2"]]]),
     );
-    host.deliver_signal(site1, br#"{"decision":"approve-first"}"#);
-    host.deliver_signal(site2, br#"{"decision":"approve-second"}"#);
+    host.respond_when_registered(site1, br#"{"decision":"approve-first"}"#);
+    host.respond_when_registered(site2, br#"{"decision":"approve-second"}"#);
 
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -10494,7 +10685,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
         "each invocation site must receive ITS payload, not the other's"
     );
     let polled: std::collections::BTreeSet<String> = host
-        .polled_signal_ids
+        .polled_input_ids
         .lock()
         .unwrap()
         .iter()
@@ -10504,6 +10695,15 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
         polled.contains(site1) && polled.contains(site2),
         "each site must poll its own scoped id; polled: {polled:?}"
     );
+    for site in [site1, site2] {
+        let request = runtime.block_on(host.managed_inputs.request(site));
+        assert_eq!(request.spec.signal_id, *site);
+        assert!(request.spec.deadline.is_some());
+        assert!(matches!(
+            request.state,
+            runtara_core::persistence::inputs::InputState::Accepted { .. }
+        ));
+    }
     // The wait's timeout deadline is checkpointed UNDER the signal id — the
     // per-site ids keep the two deadlines from sharing one row.
     let writes = host.checkpoint_writes.lock().unwrap().clone();
@@ -10627,8 +10827,8 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
         serde_json::json!([]),
         serde_json::json!([["child", "sig-embed-parent", [], ["embed2"]]]),
     );
-    host.deliver_signal(site1, br#"{"decision":"embed-first"}"#);
-    host.deliver_signal(site2, br#"{"decision":"embed-second"}"#);
+    host.respond_when_registered(site1, br#"{"decision":"embed-first"}"#);
+    host.respond_when_registered(site2, br#"{"decision":"embed-second"}"#);
 
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -10650,7 +10850,7 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
         "each embed site must receive ITS payload, not the other's"
     );
     let polled: std::collections::BTreeSet<String> = host
-        .polled_signal_ids
+        .polled_input_ids
         .lock()
         .unwrap()
         .iter()
@@ -10660,6 +10860,15 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
         polled.contains(site1) && polled.contains(site2),
         "each embed site must poll its own scoped id; polled: {polled:?}"
     );
+    for site in [site1, site2] {
+        let request = runtime.block_on(host.managed_inputs.request(site));
+        assert_eq!(request.spec.signal_id, *site);
+        assert!(request.spec.deadline.is_some());
+        assert!(matches!(
+            request.state,
+            runtara_core::persistence::inputs::InputState::Accepted { .. }
+        ));
+    }
     // Deadline checkpoints keyed by the embed-scoped ids too.
     let writes = host.checkpoint_writes.lock().unwrap().clone();
     assert!(
@@ -10815,7 +11024,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
         .lock()
         .unwrap()
         .insert(site.to_string(), deadline_ms.to_le_bytes().to_vec());
-    host.deliver_signal(site, br#"{"decision":"approved-after-drain"}"#);
+    host.respond_when_registered(site, br#"{"decision":"approved-after-drain"}"#);
 
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -11049,13 +11258,23 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
         1,
         "the wait's deadline was checkpointed under the scoped id before suspending"
     );
+    let paused_request = runtime.block_on(host.managed_inputs.request(site));
+    assert_eq!(
+        paused_request.state,
+        runtara_core::persistence::inputs::InputState::Open
+    );
 
     // RESUME: pause lifted, the signal arrived while suspended. Replay
     // re-invokes the child, re-derives the same scoped id, HITs the stored
     // deadline and finds the signal.
+    runtime
+        .block_on(host.managed_inputs.respond(
+            site,
+            &serde_json::json!({"decision":"approved-after-pause"}),
+        ))
+        .unwrap();
     host.suspend_requested
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    host.deliver_signal(site, br#"{"decision":"approved-after-pause"}"#);
     let second = run_once(host.clone());
     let output = match second.exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
@@ -11071,6 +11290,14 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
         1,
         "the resumed wait must HIT the stored deadline, not re-write it"
     );
+    let accepted_request = runtime.block_on(host.managed_inputs.request(site));
+    assert_eq!(accepted_request.request_id, paused_request.request_id);
+    assert_eq!(accepted_request.spec, paused_request.spec);
+    assert_eq!(accepted_request.created_at, paused_request.created_at);
+    assert!(matches!(
+        accepted_request.state,
+        runtara_core::persistence::inputs::InputState::Accepted { .. }
+    ));
     assert_eq!(
         host.complete_calls
             .load(std::sync::atomic::Ordering::SeqCst),
@@ -11310,9 +11537,14 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
     );
     assert!(host.failed.lock().unwrap().is_none());
 
+    runtime
+        .block_on(
+            host.managed_inputs
+                .respond(site, &serde_json::json!({"decision":"nested-approved"})),
+        )
+        .unwrap();
     host.suspend_requested
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    host.deliver_signal(site, br#"{"decision":"nested-approved"}"#);
     let second = run_once(host.clone());
     let output = match second.exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
@@ -12188,7 +12420,8 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_wait() {
         graph,
         b"{}",
         Vec::new(),
-        vec![signal.clone()],
+        vec![signal],
+        None,
     );
     assert!(
         first.status_success,
@@ -12209,7 +12442,8 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_wait() {
         graph,
         b"{}",
         Vec::new(),
-        vec![signal],
+        Vec::new(),
+        Some(first.managed_inputs.clone()),
     );
     assert!(
         second.status_success,
@@ -12220,6 +12454,11 @@ fn direct_wasm_execute_parallel_branches_with_inbranch_wait() {
         second.output_json,
         Some(serde_json::json!({ "b": true, "c": "C2" })),
         "resume reproduces the delivered-signal result"
+    );
+    assert_eq!(first.input_requests.len(), 1);
+    assert_eq!(
+        second.input_requests, first.input_requests,
+        "replay preserves original requests and receipts"
     );
 }
 
@@ -12382,6 +12621,7 @@ fn direct_wasm_execute_parallel_branches_sibling_completes_before_wait() {
         b"{}",
         Vec::new(),
         Vec::new(),
+        None,
     );
     let checkpoint_ids: Vec<&String> = run.checkpoints.iter().map(|c| &c.checkpoint_id).collect();
     let has_c3 = run

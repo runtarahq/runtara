@@ -294,10 +294,8 @@ async fn nested_ai_wait_resume_preserves_both_decisions_and_original_signal() ->
         }
         assert_eq!(server.requests.lock().unwrap().len(), 2);
     }
-    host.custom_signals
-        .lock()
-        .unwrap()
-        .insert(key.unwrap(), br#"{"approved":true}"#.to_vec());
+    host.managed_inputs
+        .respond_when_registered(&key.unwrap(), br#"{"approved":true}"#);
     let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
     server.check().await?;
     let InvokeExit::Completed(bytes) = exit else {

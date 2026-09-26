@@ -202,6 +202,107 @@ fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
 }
 
 impl RuntimeClient {
+    /// Complete tenant/workflow association set for managed request pagination.
+    pub async fn workflow_input_instances(
+        &self,
+        tenant: &str,
+        workflow: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
+        self.client.workflow_input_instances(tenant, workflow).await
+    }
+
+    /// Return authorized roots with actionable managed inputs in one batch.
+    pub async fn instances_with_open_inputs(
+        &self,
+        tenant: &str,
+        instances: &[String],
+    ) -> runtara_core::persistence::inputs::InputResult<std::collections::BTreeSet<String>> {
+        self.client
+            .instances_with_open_inputs(tenant, instances)
+            .await
+    }
+
+    /// Authoritative tenant-scoped request discovery.
+    pub async fn list_input_requests(
+        &self,
+        tenant: &str,
+        instances: &[String],
+        offset: u64,
+        limit: u32,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputRequestPage,
+    > {
+        self.client
+            .list_input_requests(tenant, instances, offset, limit)
+            .await
+    }
+
+    /// Retained request lookup for submission and receipt replay.
+    pub async fn get_input_request(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputRequest,
+    > {
+        self.client
+            .get_input_request(tenant, instance, request)
+            .await
+    }
+
+    /// Submit through the same validated acceptance path for all transports.
+    pub async fn submit_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        self.client
+            .submit_input_response(tenant, instance, request, operation, payload)
+            .await
+    }
+
+    /// Replay a trusted adapter's original caller intent after current authorization.
+    pub(crate) async fn replay_contextual_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        Option<runtara_core::persistence::inputs::InputReceipt>,
+    > {
+        self.client
+            .replay_contextual_input_response(tenant, instance, request, operation, context)
+            .await
+    }
+
+    /// Commit trusted retry context with the validated effective response.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn submit_contextual_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &serde_json::Value,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        self.client
+            .submit_contextual_input_response(
+                tenant, instance, request, operation, payload, context,
+            )
+            .await
+    }
+
     /// Create a client over the embedded environment's shared handler state.
     pub fn new(state: Arc<EnvironmentHandlerState>, config: RuntimeClientConfig) -> Self {
         Self {
@@ -581,7 +682,10 @@ impl RuntimeClient {
 
         sdk.get_instance_status(instance_id)
             .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+            .map_err(|error| match error {
+                EnvironmentError::InstanceNotFound(id) => RuntimeError::InstanceNotFound(id),
+                other => RuntimeError::SdkError(other.to_string()),
+            })
     }
 
     /// Cancel using the same signal and bounded grace as public Stop.

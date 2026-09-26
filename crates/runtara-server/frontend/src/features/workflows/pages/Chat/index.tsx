@@ -11,6 +11,7 @@ import { fetchChatHistory } from '@/features/workflows/queries/chat';
 import { useToken } from '@/shared/hooks/useToken';
 import { useChatStore } from '@/features/workflows/stores/chatStore';
 import { useChatStream } from './useChatStream';
+import { SessionDeliveries } from './SessionDeliveries';
 import { ChatMessageList } from '@/features/workflows/components/ChatMessageList';
 import { ChatInput } from '@/features/workflows/components/ChatInput';
 import { toast } from 'sonner';
@@ -52,16 +53,21 @@ export function ChatPage() {
   const messages = useChatStore((s) => s.messages);
   const status = useChatStore((s) => s.status);
   const waitingForInput = useChatStore((s) => s.waitingForInput);
+  const pendingInputs = useChatStore((s) => s.pendingInputs);
+  const pendingInputError = useChatStore((s) => s.pendingInputError);
   const error = useChatStore((s) => s.error);
   const storeInstanceId = useChatStore((s) => s.instanceId);
+  const sessionId = useChatStore((s) => s.sessionId);
 
   // Chat stream actions
   const {
     startSession,
     reconnect,
     sendMessage,
-    restorePendingInput,
+    submitInput,
     cancelStream,
+    uncertainMessage,
+    uncertainResponses,
   } = useChatStream(workflowId ?? '');
 
   // Guard against StrictMode double-mount and dependency-triggered re-runs
@@ -78,6 +84,7 @@ export function ChatPage() {
     initRef.current = true;
 
     const store = useChatStore.getState();
+    let disposed = false;
 
     if (instanceId) {
       store.resumeChat(workflowId, workflowName, instanceId);
@@ -89,25 +96,8 @@ export function ChatPage() {
         fetchChatHistory(token, workflowId, instanceId),
       ])
         .then(([instanceData, historyMessages]) => {
+          if (disposed) return;
           store.loadHistory(historyMessages);
-
-          // Check if the last event was a waiting_for_input
-          const lastSystemMsg = historyMessages
-            .filter((m) => m.role === 'system')
-            .pop();
-          const waitEvent = lastSystemMsg?.events.find(
-            (e) => e.type === 'waiting_for_input'
-          );
-          if (waitEvent) {
-            store.setWaitingForInput({
-              signalId: waitEvent.data.signal_id as string,
-              message: waitEvent.data.message as string | undefined,
-              responseSchema: waitEvent.data.response_schema as
-                Record<string, unknown> | undefined,
-              toolName: waitEvent.data.tool_name as string | undefined,
-            });
-            store.setStatus('waiting_for_input');
-          }
 
           // Extract sessionId from instance inputs and reconnect
           const sessionId = instanceData?.inputs?.data?.sessionId as
@@ -115,11 +105,10 @@ export function ChatPage() {
           if (sessionId) {
             store.setSessionId(sessionId);
             reconnect(sessionId);
-            restorePendingInput(sessionId);
           }
         })
         .catch(() => {
-          toast.error('Failed to load chat history');
+          if (!disposed) toast.error('Failed to load chat history');
         });
     } else {
       store.initChat(workflowId, workflowName);
@@ -128,6 +117,7 @@ export function ChatPage() {
     }
 
     return () => {
+      disposed = true;
       initRef.current = false;
       cancelStream();
       useChatStore.getState().resetChat();
@@ -164,9 +154,9 @@ export function ChatPage() {
       </div>
 
       {/* Error banner */}
-      {error && (
+      {(error || pendingInputError) && (
         <div className="mx-4 mt-2 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
+          {error || pendingInputError}
         </div>
       )}
 
@@ -189,6 +179,42 @@ export function ChatPage() {
         <>
           {/* Message list */}
           <ChatMessageList messages={messages} />
+          <SessionDeliveries token={token} />
+          {uncertainResponses?.map((response) => (
+            <div
+              key={response.operationId}
+              className="space-y-2 border-t px-4 py-2 text-sm"
+            >
+              <p>
+                Response to {response.request.message || 'input request'} is
+                unconfirmed.
+              </p>
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  void submitInput(
+                    response.request.requestId,
+                    response.payload,
+                    response.instanceId,
+                    response.operationId
+                  )
+                }
+              >
+                Retry original response
+              </Button>
+            </div>
+          ))}
+          {uncertainMessage?.sessionId === sessionId && uncertainMessage && (
+            <div className="space-y-2 border-t px-4 py-2 text-sm">
+              <p>Message receipt is unconfirmed: {uncertainMessage.message}</p>
+              <Button
+                variant="secondary"
+                onClick={() => void sendMessage(uncertainMessage.message)}
+              >
+                Retry this message
+              </Button>
+            </div>
+          )}
 
           {/* Input */}
           <ChatInput
@@ -196,8 +222,12 @@ export function ChatPage() {
             onSignalResponse={sendMessage}
             status={status}
             waitingForInput={waitingForInput}
-            instanceId={storeInstanceId}
-            token={token}
+            pendingInputs={pendingInputs}
+            onSelectInput={(input) =>
+              useChatStore.getState().setWaitingForInput(input)
+            }
+            onSubmitInput={submitInput}
+            key={sessionId ?? storeInstanceId ?? 'new-session'}
           />
         </>
       )}

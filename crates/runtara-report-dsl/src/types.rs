@@ -2177,7 +2177,12 @@ pub struct ReportBlockOnlyDataRequest {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubmitReportWorkflowActionRequest {
-    #[serde(default)]
+    #[serde(rename = "instanceId")]
+    pub instance_id: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
     pub payload: Value,
     #[serde(default)]
     pub filters: HashMap<String, Value>,

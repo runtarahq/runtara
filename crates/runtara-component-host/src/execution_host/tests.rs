@@ -13,6 +13,62 @@ use wasmtime::{
 
 const INTERFACE: &str = include_str!("interface.wat");
 
+#[tokio::test]
+async fn store_drop_preserves_owner_teardown_disposition() {
+    struct WaitingLauncher(
+        Arc<Mutex<Option<TeardownDisposition>>>,
+        Arc<tokio::sync::Notify>,
+    );
+    impl InvocationLauncher for WaitingLauncher {
+        fn prepare(&self, _: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
+            let observed = self.0.clone();
+            let entered = self.1.clone();
+            Ok(PreparedInvocation {
+                run: Box::new(move |_| {
+                    Box::pin(async move {
+                        entered.notify_one();
+                        std::future::pending().await
+                    })
+                }),
+                cleanup: Some(TaskCleanup::with_disposition(
+                    move |disposition| async move {
+                        *observed.lock().unwrap() = Some(disposition);
+                        Ok(())
+                    },
+                )),
+                lifecycle: None,
+            })
+        }
+    }
+    let mut fx = Fixture::new(1);
+    let disposition = Arc::new(Mutex::new(None));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    fx.context = ExecutionContext::new(
+        fx.context.tasks.clone(),
+        Arc::new(WaitingLauncher(disposition.clone(), entered.clone())),
+        1,
+    )
+    .unwrap();
+    let (mut store, instance) = fx.proxy().await;
+    let start: Start = func(&mut store, &instance, "start");
+    let _handle = start
+        .call_async(&mut store, args(Entry::Workflow, vec![]))
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+    entered.notified().await;
+    drop(store);
+    fx.context
+        .shutdown_with(TeardownDisposition::Resumable)
+        .await
+        .unwrap();
+    assert_eq!(
+        *disposition.lock().unwrap(),
+        Some(TeardownDisposition::Resumable)
+    );
+}
+
 struct State {
     table: ResourceTable,
     context: Option<Arc<ExecutionContext>>,
@@ -526,7 +582,7 @@ async fn scoped_wire_join_waits_for_cleanup_and_surfaces_cleanup_failure() {
             Ok(PreparedInvocation {
                 lifecycle: None,
                 run: Box::new(|_| Box::pin(async { InvokeExit::Completed(vec![42]) })),
-                cleanup: Some(Box::pin(async move {
+                cleanup: Some(crate::isolated_tasks::TaskCleanup::new(async move {
                     cleaned.store(true, Ordering::Release);
                     if fail {
                         Err(TaskError::WorkerLost)

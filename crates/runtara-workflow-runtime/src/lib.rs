@@ -204,6 +204,19 @@ pub fn check_signals() -> Result<bool, String> {
     }
 }
 
+pub fn register_input(descriptor: &[u8], deadline_ms: Option<u64>) -> Result<(), String> {
+    with_sdk(|sdk| {
+        sdk.register_input(descriptor, deadline_ms)
+            .map_err(sdk_error)
+    })
+}
+pub fn poll_input(signal_id: &str) -> Result<runtara_sdk::InputState, String> {
+    with_sdk(|sdk| sdk.poll_input(signal_id).map_err(sdk_error))
+}
+pub fn close_input(signal_id: &str) -> Result<runtara_sdk::InputState, String> {
+    with_sdk(|sdk| sdk.close_input(signal_id).map_err(sdk_error))
+}
+
 pub fn poll_custom_signal(checkpoint_id: &str) -> Result<Option<Vec<u8>>, String> {
     with_sdk_mut(|sdk| sdk.poll_custom_signal(checkpoint_id).map_err(sdk_error))
 }
@@ -269,7 +282,7 @@ pub fn durable_sleep_checkpoint(checkpoint_id: &str, state: &[u8], ms: u64) -> R
 #[cfg(target_arch = "wasm32")]
 mod component {
     use super::bindings::exports::runtara::workflow_runtime::runtime::{
-        CheckpointResult, CustomSignalInfo, Guest, SignalInfo,
+        CheckpointResult, CustomSignalInfo, Guest, InputState, SignalInfo,
     };
 
     struct Component;
@@ -300,7 +313,25 @@ mod component {
         }
     }
 
+    fn input_state(state: runtara_sdk::InputState) -> InputState {
+        match state {
+            runtara_sdk::InputState::Open => InputState::Open,
+            runtara_sdk::InputState::Accepted(payload) => InputState::Accepted(payload),
+            runtara_sdk::InputState::Closed(reason) => InputState::Closed(reason),
+        }
+    }
+
     impl Guest for Component {
+        fn register_input(descriptor: Vec<u8>, deadline_ms: Option<u64>) -> Result<(), String> {
+            super::register_input(&descriptor, deadline_ms)
+        }
+        fn poll_input(signal_id: String) -> Result<InputState, String> {
+            super::poll_input(&signal_id).map(input_state)
+        }
+        fn close_input(signal_id: String) -> Result<InputState, String> {
+            super::close_input(&signal_id).map(input_state)
+        }
+
         fn load_input() -> Result<Vec<u8>, String> {
             super::load_input()
         }

@@ -24,6 +24,128 @@ impl Drop for Dropped {
 }
 
 #[tokio::test]
+async fn automatic_owner_drop_stops_execution_but_defers_settlement() {
+    let tasks = registry(1, 1024);
+    let (entered, ready) = oneshot::channel();
+    let (dropped, stopped) = oneshot::channel();
+    struct Stop(Option<oneshot::Sender<()>>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+    let (cleaned, mut cleanup) = oneshot::channel();
+    let id = tasks
+        .spawn_scoped(
+            move |_| async move {
+                let _stop = Stop(Some(dropped));
+                entered.send(()).unwrap();
+                std::future::pending().await
+            },
+            TaskCleanup::with_disposition(move |disposition| async move {
+                cleaned.send(disposition).unwrap();
+                Ok(())
+            }),
+        )
+        .unwrap();
+    ready.await.unwrap();
+    tasks.owner_dropped(id).unwrap();
+    stopped.await.unwrap();
+    assert!(matches!(
+        cleanup.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(
+        tasks
+            .task(id)
+            .unwrap()
+            .control
+            .requested
+            .load(Ordering::Acquire)
+    );
+    tasks
+        .shutdown_with(TeardownDisposition::Resumable)
+        .await
+        .unwrap();
+    assert_eq!(cleanup.await.unwrap(), TeardownDisposition::Resumable);
+}
+
+#[tokio::test]
+async fn explicit_cancel_overrides_owner_disposition_in_either_order() {
+    for local_first in [false, true] {
+        let tasks = registry(1, 1024);
+        let (entered, ready) = oneshot::channel();
+        let (cleaned, cleanup) = oneshot::channel();
+        let id = tasks
+            .spawn_scoped(
+                move |_| async move {
+                    entered.send(()).unwrap();
+                    std::future::pending().await
+                },
+                TaskCleanup::with_disposition(move |disposition| async move {
+                    cleaned.send(disposition).unwrap();
+                    Ok(())
+                }),
+            )
+            .unwrap();
+        ready.await.unwrap();
+        let control = &tasks.task(id).unwrap().control;
+        if local_first {
+            tasks.cancel(id).unwrap();
+        }
+        control.cancel(OWNER_RESUMABLE);
+        if !local_first {
+            tasks.cancel(id).unwrap();
+        }
+        let token = TaskCancellation(control.clone());
+        assert!(token.is_explicitly_cancelled());
+        assert!(!token.is_resumable_teardown());
+        tasks
+            .shutdown_with(TeardownDisposition::Resumable)
+            .await
+            .unwrap();
+        assert_eq!(cleanup.await.unwrap(), TeardownDisposition::Terminal);
+    }
+}
+
+#[tokio::test]
+async fn resumable_teardown_reaches_nested_cleanup() {
+    let parents = registry(1, 1024);
+    let children = Arc::new(registry(1, 1024));
+    let (entered, ready) = oneshot::channel();
+    let (cleaned, cleanup) = oneshot::channel();
+    let child_tasks = children.clone();
+    parents
+        .spawn_scoped(
+            move |_| async move {
+                child_tasks
+                    .spawn_scoped(
+                        move |_| async move {
+                            entered.send(()).unwrap();
+                            std::future::pending().await
+                        },
+                        TaskCleanup::with_disposition(move |disposition| async move {
+                            cleaned.send(disposition).unwrap();
+                            Ok(())
+                        }),
+                    )
+                    .unwrap();
+                std::future::pending().await
+            },
+            TaskCleanup::with_disposition(move |disposition| async move {
+                children.shutdown_with(disposition).await
+            }),
+        )
+        .unwrap();
+    ready.await.unwrap();
+    parents
+        .shutdown_with(TeardownDisposition::Resumable)
+        .await
+        .unwrap();
+    assert_eq!(cleanup.await.unwrap(), TeardownDisposition::Resumable);
+}
+
+#[tokio::test]
 async fn cancellation_before_first_poll_never_calls_factory() {
     let tasks = registry(1, 1024);
     let started = Arc::new(AtomicBool::new(false));
@@ -316,7 +438,7 @@ async fn assert_wasm_is_stopped(initializer: bool, nested: bool) {
                     run_children.spawn(child_factory).unwrap();
                     std::future::pending().await
                 },
-                Box::pin(async move { cleanup_children.shutdown().await }),
+                TaskCleanup::new(async move { cleanup_children.shutdown().await }),
             )
             .unwrap();
         (parents, id)
@@ -352,7 +474,7 @@ async fn scoped_cancel_waits_for_cleanup_before_publishing() {
     let id = tasks
         .spawn_scoped(
             |_| async { std::future::pending().await },
-            Box::pin(async move {
+            TaskCleanup::new(async move {
                 cleanup_started.send(()).unwrap();
                 finish.await.unwrap();
                 Ok(())
@@ -391,7 +513,7 @@ async fn scoped_prestart_cancel_runs_cleanup_without_running_factory() {
                 run_flag.store(true, Ordering::Release);
                 async { InvokeExit::Completed(vec![]) }
             },
-            Box::pin(async move {
+            TaskCleanup::new(async move {
                 cleanup_flag.store(true, Ordering::Release);
                 Ok(())
             }),
@@ -428,7 +550,7 @@ async fn scoped_parent_panic_reaps_grandchildren_before_returning_trap() {
                 rx.await.unwrap();
                 panic!("parent failed with an active child");
             },
-            Box::pin(async move { cleanup_children.shutdown().await }),
+            TaskCleanup::new(async move { cleanup_children.shutdown().await }),
         )
         .unwrap();
     let result = parents.join(id).await.unwrap();
@@ -448,7 +570,7 @@ async fn failed_or_panicking_cleanup_never_publishes_a_guest_outcome() {
         let id = tasks
             .spawn_scoped(
                 |_| async { InvokeExit::Completed(vec![1]) },
-                Box::pin(async move {
+                TaskCleanup::new(async move {
                     assert!(!panic, "cleanup panic");
                     Err(TaskError::WorkerLost)
                 }),
@@ -472,7 +594,7 @@ async fn repeated_and_concurrent_shutdown_cannot_forget_failed_cleanup() {
     let id = tasks
         .spawn_scoped(
             |_| async { InvokeExit::Completed(vec![1]) },
-            Box::pin(async { Err(TaskError::WorkerLost) }),
+            TaskCleanup::new(async { Err(TaskError::WorkerLost) }),
         )
         .unwrap();
     assert!(matches!(tasks.join(id).await, Err(TaskError::WorkerLost)));
@@ -612,7 +734,7 @@ async fn managed_cancel_drops_pending_admission_then_retains_capacity_through_se
     let id = tasks
         .spawn_managed(
             |_| async { panic!("cancelled admission must not run") },
-            Some(Box::pin(async move {
+            Some(TaskCleanup::new(async move {
                 flag.store(true, Ordering::Release);
                 Ok(())
             })),
@@ -685,7 +807,7 @@ async fn managed_failures_never_publish_a_result_or_hide_failed_cleanup() {
             promote_failure: matches!(case, "cleanup" | "promote"),
             ..Default::default()
         });
-        let cleanup: TaskCleanup = Box::pin(async move {
+        let cleanup: TaskCleanup = TaskCleanup::new(async move {
             if case == "cleanup" {
                 Err(TaskError::WorkerLost)
             } else {

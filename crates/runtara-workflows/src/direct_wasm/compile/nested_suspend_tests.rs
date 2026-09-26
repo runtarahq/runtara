@@ -157,7 +157,7 @@ fn components() -> String {
 /// Count how many times the child's own wait step polled, which is how many
 /// times the parent actually invoked it.
 fn child_invocations(host: &Host) -> usize {
-    host.custom_signal_polls.load(Ordering::SeqCst)
+    host.input_polls.load(Ordering::SeqCst)
 }
 
 #[tokio::test]
@@ -169,7 +169,7 @@ async fn a_suspending_child_suspends_the_parent_instead_of_failing_it() -> anyho
 
     let host = Arc::new(Host::new());
     // Let the child miss its signal once, then hand it a lifecycle suspend.
-    host.suspend_after_custom_poll.store(1, Ordering::SeqCst);
+    host.suspend_after_input_poll.store(1, Ordering::SeqCst);
 
     let exit = invoke(&parent, host.clone()).await?;
 
@@ -207,8 +207,8 @@ async fn a_root_cancel_racing_a_child_suspend_parks_for_the_environment() -> any
     let host = Arc::new(Host::new());
     // Both become true at the same poll: the child would suspend, and the root
     // has asked to stop.
-    host.suspend_after_custom_poll.store(1, Ordering::SeqCst);
-    host.cancel_after_custom_poll.store(1, Ordering::SeqCst);
+    host.suspend_after_input_poll.store(1, Ordering::SeqCst);
+    host.cancel_after_input_poll.store(1, Ordering::SeqCst);
 
     let exit = invoke(&parent, host.clone()).await?;
 
@@ -251,7 +251,7 @@ async fn a_parked_waiting_child_resumes_and_completes_on_replay() -> anyhow::Res
     // Same host across both invocations, so the checkpoints a durable run wrote
     // before parking are the ones replay reads back.
     let host = Arc::new(Host::new());
-    host.suspend_after_custom_poll.store(1, Ordering::SeqCst);
+    host.suspend_after_input_poll.store(1, Ordering::SeqCst);
 
     let first = invoke(&parent, host.clone()).await?;
     assert!(
@@ -261,29 +261,31 @@ async fn a_parked_waiting_child_resumes_and_completes_on_replay() -> anyhow::Res
 
     // The signal the child was waiting for arrives while the run is parked, and
     // the lifecycle suspend is over.
-    host.suspend_after_custom_poll
+    host.suspend_after_input_poll
         .store(usize::MAX, Ordering::SeqCst);
     let route = host
-        .custom_signal_keys
+        .input_keys
         .lock()
         .unwrap()
         .first()
         .cloned()
         .expect("the child polled for its signal before parking");
-    host.custom_signals
-        .lock()
-        .unwrap()
-        .insert(route.clone(), b"{\"arrived\":true}".to_vec());
+    host.managed_inputs
+        .respond(&route, &json!({"arrived":true}))
+        .await
+        .unwrap();
 
+    let accepted = host.managed_inputs.requests().await;
     let second = invoke(&parent, host.clone()).await?;
     assert!(
         matches!(second, InvokeExit::Completed(_)),
         "replay must re-enter the child's wait and finish: {second:?}"
     );
+    assert_eq!(host.managed_inputs.requests().await, accepted);
     // A nested wait's route carries its whole call path, so rebuilding the same
     // one after a park is what lets a waker reach this child rather than some
     // other instance's wait.
-    let keys = host.custom_signal_keys.lock().unwrap();
+    let keys = host.input_keys.lock().unwrap();
     assert!(
         keys.iter().all(|key| *key == route),
         "replay must rebuild the same nested route: {keys:?}"
@@ -324,23 +326,23 @@ async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> any
         "a parked nested wait must carry an on-signal wake, got {wakes:?}"
     );
     assert_eq!(
-        host.custom_signal_polls.load(Ordering::SeqCst),
+        host.input_polls.load(Ordering::SeqCst),
         1,
         "the child should park after its first miss, not spin"
     );
 
     // And the park is resumable: the signal lands, replay re-enters the wait.
     let route = host
-        .custom_signal_keys
+        .input_keys
         .lock()
         .unwrap()
         .first()
         .cloned()
         .expect("the child polled before parking");
-    host.custom_signals
-        .lock()
-        .unwrap()
-        .insert(route, b"{\"arrived\":true}".to_vec());
+    host.managed_inputs
+        .respond(&route, &json!({"arrived":true}))
+        .await
+        .unwrap();
     let second = invoke(&parent, host.clone()).await?;
     assert!(
         matches!(second, InvokeExit::Completed(_)),
@@ -353,14 +355,46 @@ async fn an_untimed_nested_wait_parks_itself_without_holding_the_parent() -> any
 async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let components = components();
-    let staging = suspending_child_with_timeout(dir.path(), &components, Some(150))?;
+    // Long enough that registration and the first poll cannot straddle expiry
+    // on a busy runner; the deadline itself is read back from persistence.
+    const TIMEOUT_MS: u64 = 2_000;
+    let staging = suspending_child_with_timeout(dir.path(), &components, Some(TIMEOUT_MS))?;
     let parent = parent_of(dir.path(), &components, &staging)?;
 
+    // Finish Wasmtime compilation before starting the persistence deadline.
+    // Loading can take longer than the entire wait budget on a busy CI runner.
+    // Reuse this prepared component for replay, with a fresh store each time.
+    let executor = executor();
+    let pre = executor.load_instance_pre(&parent.wasm_path).await?;
     let host = Arc::new(Host::new());
+    let invoke_prepared = || {
+        executor.execute_invoke(
+            &pre,
+            WorkflowRunSpec {
+                trusted_instance: None,
+                trusted_tenant: Some("fixture".into()),
+                env: HashMap::new(),
+                stderr: None,
+                timeout: Duration::from_secs(5),
+                cancel: None,
+                limits: Default::default(),
+                runtime: Some(host.clone()),
+            },
+            b"{}".to_vec(),
+        )
+    };
     // Pin the clock so the parked deadline is exactly checkable.
-    host.clock_override.store(1_000, Ordering::SeqCst);
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+    let epoch = now_ms() + 5_000;
+    host.clock_override.store(epoch, Ordering::SeqCst);
 
-    let first = invoke(&parent, host.clone()).await?;
+    let first = invoke_prepared().await.exit;
+    let after_first = now_ms();
 
     // The capability result type has no wake channel, so the child carries its
     // absolute deadline out through the sentinel's category field and the owner
@@ -381,18 +415,43 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     );
     assert_eq!(
         wait.deadline_ms,
-        Some(1_150),
+        Some(epoch + TIMEOUT_MS),
         "the park must carry the child's own deadline"
     );
 
-    // Relaunch past the deadline: the wait must now take its timeout path
-    // rather than parking again forever.
-    host.clock_override.store(2_000, Ordering::SeqCst);
-    let second = invoke(&parent, host.clone()).await?;
+    // The guest clock runs 5s ahead of persistence. Registration rebases the
+    // remaining budget onto persistence time, so skew cannot pre-expire the
+    // wait nor stretch it by the skew.
+    let stored = host
+        .managed_inputs
+        .request(&wait.checkpoint_id)
+        .await
+        .spec
+        .deadline
+        .expect("a timed wait stores its deadline")
+        .timestamp_millis() as u64;
     assert!(
-        !matches!(second, InvokeExit::Suspended(_)),
-        "an expired nested wait must stop parking and resolve: {second:?}"
+        stored >= epoch - 5_000 + TIMEOUT_MS && stored <= after_first + TIMEOUT_MS,
+        "the stored deadline must be the remaining budget on persistence time, \
+         not the guest's skewed clock: stored {stored}, guest deadline {}",
+        epoch + TIMEOUT_MS
     );
+
+    // Persistence owns expiry, even while the guest clock remains before it.
+    let remaining = (stored + 1).saturating_sub(now_ms());
+    tokio::time::sleep(Duration::from_millis(remaining)).await;
+    let second = invoke_prepared().await.exit;
+    assert!(
+        matches!(&second, InvokeExit::Failed(error) if error.code == "WAIT_TIMEOUT"),
+        "an expired nested wait must fail with WAIT_TIMEOUT: {second:?}"
+    );
+    assert!(matches!(
+        host.managed_inputs.request(&wait.checkpoint_id).await.state,
+        runtara_core::persistence::inputs::InputState::Closed {
+            reason: runtara_core::persistence::inputs::InputClosure::Expired,
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -417,16 +476,16 @@ async fn a_cancel_reaching_an_already_parked_child_stops_it_resuming() -> anyhow
     // guest itself has to refuse to carry on. The signal it was waiting for is
     // now available, so only the cancel can stop it finishing.
     let route = host
-        .custom_signal_keys
+        .input_keys
         .lock()
         .unwrap()
         .first()
         .cloned()
         .expect("the child polled before parking");
-    host.custom_signals
-        .lock()
-        .unwrap()
-        .insert(route, b"{\"arrived\":true}".to_vec());
+    host.managed_inputs
+        .respond(&route, &json!({"arrived":true}))
+        .await
+        .unwrap();
     host.cancel.store(true, Ordering::SeqCst);
 
     let second = invoke(&parent, host.clone()).await?;

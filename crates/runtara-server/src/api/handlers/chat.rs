@@ -137,9 +137,12 @@ pub(crate) enum ChatEvent {
 /// The workflow executes asynchronously while this endpoint streams execution events
 /// (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events.
 ///
-/// For workflows with WaitForSignal steps (human-in-the-loop), the stream emits a
-/// `waiting_for_input` event with a `signal_id`. Use `POST /api/runtime/signals/{instanceId}`
-/// to submit the response and resume execution.
+/// For workflows with WaitForSignal steps (human-in-the-loop), a historical
+/// `waiting_for_input` event is presentation only. Discover current requests with
+/// `GET /api/runtime/workflows/{workflowId}/instances/{instanceId}/actions`, then
+/// submit the chosen request and a stable operation identity through its submit
+/// endpoint. Acceptance rechecks current state and does not implicitly resume an
+/// explicitly paused execution.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/{id}/chat",

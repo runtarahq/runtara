@@ -364,6 +364,19 @@ impl RuntaraSdk {
         Ok(None)
     }
 
+    /// Register a managed wait without optional event telemetry.
+    pub fn register_input(&self, descriptor: &[u8], deadline_ms: Option<u64>) -> Result<()> {
+        self.backend.register_input(descriptor, deadline_ms)
+    }
+    /// Read authoritative managed input state and arbitrate deadline expiry.
+    pub fn poll_input(&self, signal_id: &str) -> Result<crate::types::InputState> {
+        self.backend.poll_input(signal_id)
+    }
+    /// Abandon a wait without replacing an accepted response.
+    pub fn close_input(&self, signal_id: &str) -> Result<crate::types::InputState> {
+        self.backend.close_input(signal_id)
+    }
+
     /// Read the retained custom signal at a checkpoint address without consuming
     /// it. The returned signal ID identifies the value, not the address.
     pub fn get_custom_signal(

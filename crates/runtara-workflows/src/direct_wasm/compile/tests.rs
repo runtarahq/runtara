@@ -9049,7 +9049,7 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
     let mut build_source_index = None;
     let mut wait_signal_id_index = None;
     let mut wait_timeout_index = None;
-    let mut wait_timeout_error_index = None;
+    let mut wait_closed_error_index = None;
     let mut wait_poll_interval_index = None;
     let mut wait_event_index = None;
     let mut wait_output_index = None;
@@ -9059,7 +9059,8 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
     let mut runtime_fail_index = None;
     let mut runtime_custom_event_index = None;
     let mut runtime_check_signals_index = None;
-    let mut runtime_poll_custom_signal_index = None;
+    let mut runtime_poll_input_index = None;
+    let mut runtime_register_input_index = None;
     let mut runtime_heartbeat_index = None;
     let mut runtime_blocking_sleep_index = None;
     let mut run_calls = Vec::new();
@@ -9082,8 +9083,8 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-timeout-ms") => {
                                 wait_timeout_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-timeout-error") => {
-                                wait_timeout_error_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-closed-error") => {
+                                wait_closed_error_index = Some(next_function_index)
                             }
                             (
                                 "cm32p2|runtara:workflow-stdlib/json@0.1",
@@ -9113,10 +9114,12 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             ("cm32p2|runtara:workflow-runtime/runtime@0.4", "check-signals") => {
                                 runtime_check_signals_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "poll-custom-signal",
-                            ) => runtime_poll_custom_signal_index = Some(next_function_index),
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "poll-input") => {
+                                runtime_poll_input_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "register-input") => {
+                                runtime_register_input_index = Some(next_function_index)
+                            }
                             ("cm32p2|runtara:workflow-runtime/runtime@0.4", "heartbeat") => {
                                 runtime_heartbeat_index = Some(next_function_index)
                             }
@@ -9152,10 +9155,11 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
         wait_timeout_index.expect("wait-timeout-ms import"),
         runtime_now_ms_index.expect("now-ms import"),
         wait_event_index.expect("wait-event import"),
+        runtime_register_input_index.expect("register-input import"),
         runtime_custom_event_index.expect("custom-event import"),
         wait_poll_interval_index.expect("wait-poll-interval-ms import"),
         runtime_check_signals_index.expect("check-signals import"),
-        runtime_poll_custom_signal_index.expect("poll-custom-signal import"),
+        runtime_poll_input_index.expect("poll-input import"),
         runtime_heartbeat_index.expect("heartbeat import"),
         runtime_blocking_sleep_index.expect("blocking-sleep import"),
         wait_output_index.expect("wait-output import"),
@@ -9177,8 +9181,8 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
         "WaitForSignal lowering calls should preserve generated-code order: {positions:?}"
     );
     assert!(
-        run_calls.contains(&wait_timeout_error_index.expect("wait-timeout-error import")),
-        "WaitForSignal timeout lowering should format generated-compatible timeout errors"
+        run_calls.contains(&wait_closed_error_index.expect("wait-closed-error import")),
+        "WaitForSignal closure lowering should retain the authoritative reason"
     );
     assert!(
         run_calls.contains(&runtime_fail_index.expect("fail import")),

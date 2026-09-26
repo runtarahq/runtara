@@ -60,7 +60,7 @@ impl InvocationLauncher for Launcher {
         Ok(PreparedInvocation {
             lifecycle: None,
             run,
-            cleanup: Some(Box::pin(async move {
+            cleanup: Some(crate::isolated_tasks::TaskCleanup::new(async move {
                 signals.cleanup_entered.notify_one();
                 if hold {
                     signals.cleanup_release.notified().await;

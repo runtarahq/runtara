@@ -397,6 +397,13 @@ pub async fn lease_takeover(p: &dyn Persistence) {
     p.update_instance_status(&id, InstanceStatus::Suspended, None)
         .await
         .unwrap();
+    assert!(
+        !f.get_invocation_lease("fence-tenant", &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
     assert_eq!(
         f.cancel_invocation_attempt(&current.fence).await.unwrap(),
         AttemptState::Cancelled
@@ -407,6 +414,27 @@ pub async fn lease_takeover(p: &dyn Persistence) {
         FenceRejection::InactiveRoot,
     );
     assert!(p.load_checkpoint(&id, "old").await.unwrap().is_none());
+    p.update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    rejected(
+        f.invocation_checkpoint(&current.fence, &write("old", b"bad"))
+            .await,
+        FenceRejection::LeaseMismatch,
+    );
+    let resumed = f
+        .claim_invocation_lease("fence-tenant", &id, "resumed", Some(next.epoch))
+        .await
+        .unwrap();
+    assert!(resumed.epoch > next.epoch);
+    // Logical cancellation survives execution-lease replacement.
+    assert_eq!(
+        f.begin_invocation_attempt(&resumed, "child", "resumed-start")
+            .await
+            .unwrap()
+            .state,
+        AttemptState::Cancelled
+    );
 }
 
 /// Races have one durable winner, including the completion checkpoint bytes.

@@ -57,7 +57,7 @@ impl InvocationRetry {
 }
 
 /// Current host owner of an isolated root execution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationLease {
     /// Tenant resolved by trusted execution admission.
     pub tenant_id: String,
@@ -70,7 +70,7 @@ pub struct InvocationLease {
 }
 
 /// Durable owner facts for crash recovery before an exact revocation/CAS claim.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationLeaseState {
     /// Current owner and its epoch.
     pub lease: InvocationLease,
@@ -79,7 +79,7 @@ pub struct InvocationLeaseState {
 }
 
 /// Exact execution attempt; neither a bare step ID nor guest-selected authority.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttemptFence {
     /// Lease under which the attempt was admitted.
     pub lease: InvocationLease,
@@ -92,7 +92,7 @@ pub struct AttemptFence {
 }
 
 /// Arbitration state. Settled does not mean success and contains no result cache.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttemptState {
     /// Writes and settlement may still win.
     Active,
@@ -103,7 +103,7 @@ pub enum AttemptState {
 }
 
 /// Stored attempt and its arbitration state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationAttempt {
     /// Exact authority to pass to subsequent operations.
     pub fence: AttemptFence,
@@ -121,7 +121,7 @@ pub struct InvocationCheckpoint {
 }
 
 /// Result of a fenced checkpoint read-or-insert.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationCheckpointResult {
     /// A checkpoint existed before this call; its first committed bytes win.
     pub found: bool,
@@ -131,7 +131,7 @@ pub struct InvocationCheckpointResult {
 
 /// Settlement result, including existing checkpoint bytes when another commit
 /// already established the logical replay value. Callers must honor that value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationSettlement {
     /// Winner of cancellation/completion arbitration.
     pub state: AttemptState,
@@ -211,7 +211,12 @@ pub trait InvocationFences: Send + Sync {
         expected_epoch: Option<i64>,
     ) -> FenceResult<InvocationLease>;
     /// Revoke exactly this owner, idempotently. Works after root termination.
+    /// Leaving Running also revokes execution ownership atomically. Resuming
+    /// requires a new lease; logical active/cancelled attempts remain durable.
     async fn revoke_invocation_lease(&self, lease: &InvocationLease) -> FenceResult<()>;
+    /// Inspect an already admitted attempt under a currently active root lease.
+    /// This grants no new admission and does not change its stored ancestry.
+    async fn inspect_invocation_attempt(&self, fence: &AttemptFence) -> FenceResult<AttemptState>;
     /// Admit a queued durable invocation before constructing a Store. Retrying
     /// the same start ID in this lease returns its original attempt. A different
     /// start may follow settlement, or reclaim an abandoned older lease, using
@@ -223,6 +228,24 @@ pub trait InvocationFences: Send + Sync {
         path: &str,
         start_id: &str,
     ) -> FenceResult<InvocationAttempt>;
+    /// Admit a nested invocation under a trusted active parent. The parent must
+    /// belong to this exact root lease; ancestry is immutable for a logical path
+    /// and is never inferred from textual path prefixes. `None` admits a root
+    /// child with the same semantics as `begin_invocation_attempt`.
+    async fn begin_invocation_attempt_with_parent(
+        &self,
+        lease: &InvocationLease,
+        path: &str,
+        start_id: &str,
+        parent: Option<&AttemptFence>,
+    ) -> FenceResult<InvocationAttempt> {
+        if parent.is_some() {
+            return Err(InvocationFenceError::Storage(
+                "nested invocation admission is not implemented".into(),
+            ));
+        }
+        self.begin_invocation_attempt(lease, path, start_id).await
+    }
     /// Record exact-attempt cancellation, including while its root is parked.
     /// Completion wins over late cancel. An old generation cannot affect a new
     /// one. Command ID deduplication belongs to the execution-control layer.

@@ -12,6 +12,8 @@
 //! [`runtara_core::instance_handlers`], map the error to a status. Core owns
 //! the semantics and knows nothing about HTTP.
 
+mod inputs;
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -861,6 +863,18 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
         // Instance input
         .route("/api/v1/instances/{instance_id}/input", get(input_handler))
         // Health check
+        .route(
+            "/api/v1/instances/{instance_id}/inputs/register",
+            post(inputs::register),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/inputs/poll",
+            post(inputs::poll),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/inputs/close",
+            post(inputs::close),
+        )
         .route("/health", get(health_handler))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state)

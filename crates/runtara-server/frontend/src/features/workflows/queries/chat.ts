@@ -1,5 +1,35 @@
 import { ChatMessage, ChatSSEEvent } from '@/features/workflows/types/chat';
 import { getRuntimeBaseUrl } from '@/shared/queries/utils';
+import type {
+  DeliveryStatus,
+  DeliveryPage,
+  ResolveDeliveryRequest,
+} from '@/generated/RuntaraRuntimeApi';
+import { InputSubmissionError } from '../utils/input-submission';
+
+export type { DeliveryStatus };
+export interface SessionMessageSubmission {
+  messageId: string;
+  operationId: string;
+  message: string;
+}
+
+async function deliveryResponse<T>(response: Response): Promise<T> {
+  const body = (await response.json()) as {
+    success?: boolean;
+    data?: T;
+    code?: string;
+    message?: string;
+  };
+  if (!response.ok || !body.success || !body.data) {
+    throw new InputSubmissionError(
+      body.message ?? 'Delivery could not be confirmed',
+      body.code,
+      response.status
+    );
+  }
+  return body.data;
+}
 
 // ---------------------------------------------------------------------------
 // Session-based chat API
@@ -54,9 +84,9 @@ export async function createChatSession(
 export async function sendSessionMessage(
   token: string,
   sessionId: string,
-  message: string,
+  submission: SessionMessageSubmission,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const url = `${getRuntimeBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/events`;
 
   const response = await fetch(url, {
@@ -65,14 +95,59 @@ export async function sendSessionMessage(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(submission),
     signal,
   });
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(`Failed to send message: ${errorText}`);
+  const status = await deliveryResponse<DeliveryStatus>(response);
+  if (
+    status.messageId !== submission.messageId ||
+    status.operationId !== submission.operationId ||
+    !['queued', 'leased', 'retry', 'blocked', 'accepted', 'failed'].includes(
+      status.state
+    )
+  ) {
+    throw new InputSubmissionError(
+      'Queue acknowledgement could not be confirmed'
+    );
   }
+  return status;
+}
+
+export async function listSessionDeliveries(
+  token: string,
+  sessionId: string,
+  cursor = '0',
+  signal?: AbortSignal
+): Promise<DeliveryPage> {
+  const response = await fetch(
+    `${getRuntimeBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/deliveries?cursor=${encodeURIComponent(cursor)}&limit=50`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    }
+  );
+  return deliveryResponse<DeliveryPage>(response);
+}
+
+export async function resolveSessionDelivery(
+  token: string,
+  sessionId: string,
+  messageId: string,
+  resolution: ResolveDeliveryRequest
+): Promise<DeliveryStatus> {
+  const response = await fetch(
+    `${getRuntimeBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/deliveries/${encodeURIComponent(messageId)}/resolve`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(resolution),
+    }
+  );
+  return deliveryResponse<DeliveryStatus>(response);
 }
 
 /**
@@ -103,13 +178,8 @@ export async function reconnectSession(
   return response;
 }
 
-export interface PendingInputResponse {
-  hasPendingInput: boolean;
-  signalId?: string;
-  message?: string;
-  responseSchema?: Record<string, unknown>;
-  toolName?: string;
-}
+export type PendingInputResponse =
+  import('@/generated/RuntaraRuntimeApi').PendingInputPage;
 
 /**
  * Check if a session has a pending input request (used after page refresh
@@ -117,12 +187,14 @@ export interface PendingInputResponse {
  */
 export async function checkPendingInput(
   token: string,
-  sessionId: string
+  sessionId: string,
+  signal?: AbortSignal
 ): Promise<PendingInputResponse> {
   const url = `${getRuntimeBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/pending-input`;
 
   const response = await fetch(url, {
     method: 'GET',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
@@ -133,7 +205,15 @@ export async function checkPendingInput(
     throw new Error(`Failed to check pending input: ${response.statusText}`);
   }
 
-  return response.json();
+  const result = await response.json();
+  if (
+    !result.success ||
+    !result.data ||
+    !Array.isArray(result.data.pendingInputs)
+  ) {
+    throw new Error('Invalid pending input response');
+  }
+  return result.data;
 }
 
 /**
