@@ -10,13 +10,13 @@
 #         · aud == connection app_id, iss == Bot Framework, nbf/exp enforced
 #         · serviceurl claim == activity serviceUrl
 #     → single-tenant activity-tenant gate (channelData.tenant.id)
-#     → ack-fast 200, then (in a spawned task) reserve dedup + route to the
-#       Channel trigger's workflow via the session machinery.
+#     → store in channel_intake (durable dedup), 200, then (in a spawned task)
+#       route to the Channel trigger's workflow via the session machinery.
 #
 # Assertions:
 #   A. A validly-signed activity → 200 AND exactly one workflow instance starts.
 #   B. A byte-identical redelivery (same activity id) → 200 but NO second
-#      instance (dedup: reserve_activity + deterministic instance id).
+#      instance (dedup: channel_intake identity + derived instance id).
 #   C. A DIFFERENT activity id → 200 AND a second instance (proves B is real
 #      dedup, not a blanket drop).
 #   D. A forged JWT (signed by a different key) → 403 AND no new instance.

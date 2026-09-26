@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::runtime_types::ListEventsOptions;
-use dashmap::DashMap;
+use axum::http::StatusCode;
+use dashmap::{DashMap, mapref::entry::Entry};
 use redis::aio::ConnectionManager;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -21,15 +22,20 @@ use runtara_connections::ConnectionsFacade;
 
 use super::channel::{Channel, TelegramChannel};
 use super::collector;
+use super::intake::{Accepted, IntakeStore, PinnedWorkflow, ReplyBinding};
 
 mod inputs;
 use inputs::{InputProgress, ManagedChannelInputs, ReplyTarget, UNDELIVERED_NOTICE};
 
+/// How often pending channel messages are retried and old ones purged.
+const INTAKE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
 const AMBIGUOUS_NOTICE: &str =
     "Several inputs are waiting. Answer the intended one in the workflow view.";
 
-/// A normalized inbound message from any channel.
-#[derive(Debug, Clone)]
+/// A normalized inbound message from any channel. Serialized into the durable
+/// intake row, so a message accepted before a crash can be dispatched again.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InboundMessage {
     /// Plain text content (used for WaitForSignal delivery and session queue).
     pub text: String,
@@ -47,13 +53,21 @@ pub struct InboundMessage {
     /// `data.target` (Teams: opaque endpoint ref + conversation identifiers).
     /// `None` for channels that don't produce one.
     pub target: Option<Value>,
-    /// Provider activity/message id, used as the idempotency key for the
-    /// deterministic instance id (redelivery dedup). `None` when unavailable.
+    /// Provider activity/message id, the durable dedup identity of the
+    /// delivery. `None` when unavailable (the payload hash is used instead).
     pub activity_id: Option<String>,
+    /// The durable intake row this message was accepted as. Launches use it as
+    /// their instance id; handling it marks the row processed.
+    #[serde(skip)]
+    pub intake_id: Option<Uuid>,
+    /// The workflow version current when the message was accepted. Launches
+    /// use it even if a newer version is published before they run.
+    #[serde(skip)]
+    pub workflow: Option<PinnedWorkflow>,
 }
 
 /// A normalized attachment from any channel.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     /// Filename (e.g. "invoice.pdf").
     pub name: String,
@@ -80,10 +94,36 @@ pub struct Attachment {
 /// - per_message: random UUID (no session continuity)
 type SessionKey = (String, String, String);
 
+/// The active Channel trigger and connection a message is routed through.
+struct Route {
+    tenant_id: String,
+    trigger_id: String,
+    workflow_id: String,
+    workflow_version: i32,
+    session_mode: String,
+    integration_id: String,
+    params: Value,
+}
+
+enum RouteError {
+    /// Configuration cannot route this connection; retrying will not help.
+    Unroutable(anyhow::Error),
+    /// Storage was unavailable; the provider should retry.
+    Unavailable(anyhow::Error),
+}
+
+impl std::fmt::Display for RouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unroutable(e) | Self::Unavailable(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Routes incoming channel messages to the right session.
 ///
-/// Looks up connection + trigger from DB to determine org_id, workflow_id,
-/// and bot credentials. Each active conversation gets its own session actor.
+/// Every verified message is first stored in durable intake; only then is the
+/// webhook acknowledged. Each active conversation gets its own session actor.
 pub struct ChannelRouter {
     sessions: Arc<DashMap<SessionKey, mpsc::Sender<InboundMessage>>>,
     client: Arc<RuntimeClient>,
@@ -91,6 +131,10 @@ pub struct ChannelRouter {
     connections: Arc<ConnectionsFacade>,
     engine: Arc<ExecutionEngine>,
     valkey: ConnectionManager,
+    intake: IntakeStore,
+    /// Rows accepted before this instant belong to an earlier process and are
+    /// dispatched again by `recover_pending`.
+    started_at: chrono::DateTime<chrono::Utc>,
     http_client: reqwest::Client,
     /// Hardened egress client (no redirects + DNS guard) for credentialed
     /// channel replies (Teams).
@@ -113,6 +157,8 @@ impl ChannelRouter {
         Self {
             sessions: Arc::new(DashMap::new()),
             client,
+            intake: IntakeStore::new(pool.clone()),
+            started_at: chrono::Utc::now(),
             pool,
             connections,
             engine,
@@ -151,38 +197,6 @@ impl ChannelRouter {
     pub fn remove_teams_service_url(&self, connection_id: &str, conversation_id: &str) {
         self.teams_service_urls
             .remove(&(connection_id.to_string(), conversation_id.to_string()));
-    }
-
-    /// Reserve an inbound activity for processing, deduplicating at-least-once
-    /// redeliveries. Returns `true` when this delivery is fresh and should be
-    /// processed, `false` when it is a duplicate. Fails open on Valkey errors.
-    pub async fn reserve_activity(&self, connection_id: &str, activity_id: &str) -> bool {
-        // 4-hour window: covers Teams' ~15s retry, a valid Bot Framework token's
-        // ~1h life, AND slower out-of-band redeliveries. The key is one small
-        // Valkey entry per activity, so a generous TTL is cheap insurance
-        // against a duplicate session; it comfortably outlives any legitimate
-        // redelivery of the same activity id.
-        const DEDUP_TTL_SECS: i64 = 4 * 3600;
-        let identity = Self::activity_identity(connection_id, activity_id);
-        let mut valkey = self.valkey.clone();
-        session_queue::reserve_activity_dedup(&mut valkey, &identity, DEDUP_TTL_SECS).await
-    }
-
-    /// Release a dedup reservation after processing FAILED, so a redelivery of
-    /// the same activity is not silently dropped as a duplicate. Best-effort.
-    pub async fn release_activity(&self, connection_id: &str, activity_id: &str) {
-        let identity = Self::activity_identity(connection_id, activity_id);
-        let mut valkey = self.valkey.clone();
-        session_queue::release_activity_dedup(&mut valkey, &identity).await;
-    }
-
-    /// The dedup identity for an inbound activity. Reserve and release MUST
-    /// agree on this format.
-    fn activity_identity(connection_id: &str, activity_id: &str) -> String {
-        format!(
-            "{}:{connection_id}:{activity_id}",
-            crate::config::tenant_id()
-        )
     }
 
     /// Validate the webhook secret from the request header against the
@@ -228,44 +242,32 @@ impl ChannelRouter {
         }
     }
 
-    /// Handle an inbound message from a platform conversation.
-    ///
-    /// Looks up the connection to get org_id + bot token, then finds
-    /// the Channel trigger to get workflow_id. Creates or routes to
-    /// an existing session.
-    pub async fn handle_message(
-        &self,
-        connection_id: &str,
-        msg: &InboundMessage,
-    ) -> anyhow::Result<()> {
-        let conv_id = &msg.conv_id;
-        let sender_id = &msg.sender_id;
-        // Look up connection from DB.
+    /// Look up the connection and its active Channel trigger.
+    async fn resolve_route(&self, connection_id: &str) -> Result<Route, RouteError> {
         let conn = self
             .connections
             .get_channel_connection(connection_id)
             .await
-            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+            .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?
+            .ok_or_else(|| {
+                RouteError::Unroutable(anyhow::anyhow!("Connection not found: {}", connection_id))
+            })?;
 
-        let tenant_id = conn
-            .tenant_id
-            .ok_or_else(|| anyhow::anyhow!("Connection has no tenant_id"))?;
-
-        let expected_tenant = crate::config::tenant_id();
-        if tenant_id != expected_tenant {
-            anyhow::bail!("Connection tenant mismatch");
+        let tenant_id = conn.tenant_id.ok_or_else(|| {
+            RouteError::Unroutable(anyhow::anyhow!("Connection has no tenant_id"))
+        })?;
+        if tenant_id != crate::config::tenant_id() {
+            return Err(RouteError::Unroutable(anyhow::anyhow!(
+                "Connection tenant mismatch"
+            )));
         }
 
-        // Find the Channel trigger for this connection.
-        let trigger_repo = TriggerRepository::new(self.pool.clone());
-        let triggers = trigger_repo
+        let triggers = TriggerRepository::new(self.pool.clone())
             .list(Some(&tenant_id))
             .await
-            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
-
+            .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?;
         let trigger = triggers
-            .iter()
+            .into_iter()
             .find(|t| {
                 t.trigger_type == TriggerType::Channel
                     && t.active
@@ -276,16 +278,12 @@ impl ChannelRouter {
                         == Some(connection_id)
             })
             .ok_or_else(|| {
-                anyhow::anyhow!(
+                RouteError::Unroutable(anyhow::anyhow!(
                     "No active Channel trigger found for connection {}",
                     connection_id
-                )
+                ))
             })?;
 
-        let trigger_id = trigger.id.clone();
-        let workflow_id = trigger.workflow_id.clone();
-
-        // Determine session mode from trigger configuration.
         let session_mode = trigger
             .configuration
             .as_ref()
@@ -293,34 +291,392 @@ impl ChannelRouter {
             .and_then(|v| v.as_str())
             .unwrap_or("per_sender")
             .to_string();
+        let params = conn.connection_parameters.ok_or_else(|| {
+            RouteError::Unroutable(anyhow::anyhow!("Connection has no parameters"))
+        })?;
+        let workflow_version =
+            crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone())
+                .get_current_or_latest_version(&tenant_id, &trigger.workflow_id)
+                .await
+                .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    RouteError::Unroutable(anyhow::anyhow!(
+                        "Workflow {} has no versions",
+                        trigger.workflow_id
+                    ))
+                })?;
 
-        let discriminator = match session_mode.as_str() {
-            "per_trigger" => "shared".to_string(),
-            "per_message" => Uuid::new_v4().to_string(),
-            _ => sender_id.to_string(), // per_sender (default)
+        Ok(Route {
+            tenant_id,
+            trigger_id: trigger.id,
+            workflow_version,
+            workflow_id: trigger.workflow_id,
+            session_mode,
+            integration_id: conn.integration_id.unwrap_or_default(),
+            params,
+        })
+    }
+
+    /// Receive a verified inbound message: store it durably, then hand it to
+    /// its session. The returned status is the webhook response. It is 2xx
+    /// only once the message is stored (or already was, for a redelivery), so
+    /// a provider retries anything this process could lose.
+    ///
+    /// `detach` hands off in a background task, for providers with a short
+    /// acknowledgement deadline (Teams). Storage already happened, so a
+    /// failure after the ack is retried by the intake sweep rather than lost.
+    pub async fn receive(
+        self: &Arc<Self>,
+        connection_id: &str,
+        mut msg: InboundMessage,
+        detach: bool,
+    ) -> StatusCode {
+        let route = match self.resolve_route(connection_id).await {
+            Ok(route) => route,
+            Err(RouteError::Unroutable(e)) => {
+                // Not retryable: the provider would redeliver into the same
+                // configuration. Acknowledge and drop, as before.
+                warn!(connection_id = %connection_id, error = %e, "Dropping unroutable channel message");
+                return StatusCode::OK;
+            }
+            Err(RouteError::Unavailable(e)) => {
+                warn!(connection_id = %connection_id, error = %e, "Channel routing unavailable");
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
         };
 
-        let key = (connection_id.to_string(), trigger_id, discriminator);
-
-        // Try sending to an existing session (not applicable for per_message).
-        if session_mode != "per_message"
-            && let Some(tx) = self.sessions.get(&key)
+        let workflow = PinnedWorkflow {
+            id: route.workflow_id.clone(),
+            version: route.workflow_version,
+        };
+        match self
+            .intake
+            .accept(
+                &route.tenant_id,
+                connection_id,
+                &route.trigger_id,
+                &workflow,
+                &msg,
+            )
+            .await
         {
-            if tx.send(msg.clone()).await.is_ok() {
-                return Ok(());
+            Ok(Accepted::New(intake_id)) => {
+                msg.intake_id = Some(intake_id);
+                msg.workflow = Some(workflow);
             }
-            drop(tx);
-            self.sessions.remove(&key);
+            Ok(Accepted::Duplicate) => {
+                debug!(connection_id = %connection_id, "Dropping duplicate channel delivery");
+                return StatusCode::OK;
+            }
+            Err(e) => {
+                warn!(connection_id = %connection_id, error = %e, "Unable to store channel message");
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
         }
 
-        // Build the channel adapter from connection credentials.
-        let integration_id = conn.integration_id.as_deref().unwrap_or("");
-        let params = conn
-            .connection_parameters
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Connection has no parameters"))?;
+        if detach {
+            let router = self.clone();
+            let connection_id = connection_id.to_string();
+            tokio::spawn(async move {
+                router.dispatch_logged(&connection_id, route, msg).await;
+            });
+        } else {
+            self.dispatch_logged(connection_id, route, msg).await;
+        }
+        StatusCode::OK
+    }
 
-        let channel: Arc<dyn Channel> = match integration_id {
+    /// Background intake worker: dispatch the previous process's pending
+    /// messages at once, then keep retrying due pending messages and deleting
+    /// handled ones past retention. Runs for the life of the process.
+    pub async fn run_intake_worker(self: Arc<Self>) {
+        self.recover_pending().await;
+        let mut tick = tokio::time::interval(INTAKE_SWEEP_INTERVAL);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            self.sweep_intake().await;
+            match self
+                .intake
+                .purge(crate::config::tenant_id(), super::intake::RETENTION, 1000)
+                .await
+            {
+                Ok(0) => {}
+                Ok(deleted) => debug!(deleted, "Purged handled channel intake"),
+                Err(e) => warn!(error = %e, "Unable to purge channel intake"),
+            }
+        }
+    }
+
+    /// Make messages a previous process accepted but did not finish due now,
+    /// and dispatch them.
+    pub async fn recover_pending(self: &Arc<Self>) {
+        match self
+            .intake
+            .release_orphans(crate::config::tenant_id(), self.started_at)
+            .await
+        {
+            Ok(0) => {}
+            Ok(count) => info!(count, "Recovering pending channel messages"),
+            Err(e) => warn!(error = %e, "Unable to release pending channel intake"),
+        }
+        self.sweep_intake().await;
+    }
+
+    /// Dispatch every pending message whose next attempt is due. A message
+    /// whose launch failed transiently is retried here, with backoff.
+    pub async fn sweep_intake(self: &Arc<Self>) {
+        const BATCH: i64 = 100;
+        loop {
+            let claimed = match self
+                .intake
+                .claim_due(crate::config::tenant_id(), BATCH)
+                .await
+            {
+                Ok(claimed) => claimed,
+                Err(e) => {
+                    warn!(error = %e, "Unable to claim pending channel intake");
+                    return;
+                }
+            };
+            let full = claimed.len() as i64 == BATCH;
+            for row in claimed {
+                if let Some(binding) = &row.reply {
+                    self.recover_reply(row.intake_id, binding).await;
+                    continue;
+                }
+                match self.resolve_route(&row.connection_id).await {
+                    Ok(route) => {
+                        self.dispatch_logged(&row.connection_id, route, row.message)
+                            .await
+                    }
+                    Err(RouteError::Unroutable(e)) => {
+                        if let Err(e) = self.intake.mark_failed(row.intake_id, &e.to_string()).await
+                        {
+                            warn!(intake_id = %row.intake_id, error = %e, "Unable to fail unroutable channel intake");
+                        }
+                    }
+                    // Left pending; claimed again after its backoff.
+                    Err(RouteError::Unavailable(e)) => {
+                        warn!(intake_id = %row.intake_id, error = %e, "Channel intake left pending");
+                    }
+                }
+            }
+            if !full {
+                return;
+            }
+        }
+    }
+
+    /// Finish a reply whose session ended before it reached the managed queue.
+    /// It goes to the request it was bound to, exactly as the session would
+    /// have handed it off, and never starts a run. Errors leave it pending.
+    async fn recover_reply(&self, intake_id: Uuid, binding: &ReplyBinding) {
+        let outcome = async {
+            let tenant = crate::config::tenant_id();
+            let scope = QueueScope::new(tenant, &binding.session_id)?;
+            let message_id = intake_id.to_string();
+            let mut valkey = self.valkey.clone();
+            // Already handed off before the session ended.
+            match managed::get(&mut valkey, &scope, &message_id).await {
+                Ok(_) => return anyhow::Ok("reply"),
+                Err(managed::QueueError::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+            let page = self
+                .client
+                .list_input_requests(
+                    tenant,
+                    std::slice::from_ref(&binding.instance_id),
+                    0,
+                    u32::MAX,
+                )
+                .await?;
+            let Some(request) = page
+                .requests
+                .iter()
+                .find(|request| request.request_id == binding.request_id)
+            else {
+                // Its request closed; never re-aim a reply at another one.
+                return Ok("undelivered");
+            };
+            if inputs::is_structured(request) {
+                // Field collection lived in the ended session; the reply alone
+                // is not a response to the structured request.
+                return Ok("interrupted");
+            }
+            managed::enqueue_targeted(
+                &mut valkey,
+                &scope,
+                &message_id,
+                &message_id,
+                &binding.payload,
+                &InputTarget {
+                    instance_id: binding.instance_id.clone(),
+                    request_id: binding.request_id.clone(),
+                },
+            )
+            .await?;
+            Ok("reply")
+        }
+        .await;
+        match outcome {
+            Ok(outcome) => {
+                self.intake
+                    .settle(Some(intake_id), outcome, Some(&binding.instance_id))
+                    .await
+            }
+            Err(e) => warn!(%intake_id, error = %e, "Channel reply recovery left pending"),
+        }
+    }
+
+    async fn dispatch_logged(
+        self: &Arc<Self>,
+        connection_id: &str,
+        route: Route,
+        msg: InboundMessage,
+    ) {
+        let intake_id = msg.intake_id;
+        if let Err(e) = self.dispatch(connection_id, route, msg).await {
+            warn!(connection_id = %connection_id, error = %e, "Failed to handle channel message");
+            if let Some(intake_id) = intake_id
+                && let Err(e) = self.intake.mark_failed(intake_id, &e.to_string()).await
+            {
+                warn!(%intake_id, error = %e, "Unable to fail channel intake");
+            }
+        }
+    }
+
+    /// Route a stored message to its conversation's session, starting one if
+    /// needed. Errors are permanent for this message (bad connection data).
+    async fn dispatch(
+        self: &Arc<Self>,
+        connection_id: &str,
+        route: Route,
+        mut msg: InboundMessage,
+    ) -> anyhow::Result<()> {
+        // Teams replies need the serviceUrl of the conversation. It is part of
+        // the verified activity, so a recovered message restores it too.
+        if route.integration_id == "teams_bot"
+            && let Some(url) = msg
+                .original_message
+                .get("serviceUrl")
+                .and_then(Value::as_str)
+        {
+            self.set_teams_service_url(connection_id, &msg.conv_id, url);
+        }
+
+        let discriminator = match route.session_mode.as_str() {
+            "per_trigger" => "shared".to_string(),
+            "per_message" => Uuid::new_v4().to_string(),
+            _ => msg.sender_id.clone(), // per_sender (default)
+        };
+        let key = (
+            connection_id.to_string(),
+            route.trigger_id.clone(),
+            discriminator,
+        );
+
+        // Built up front: a session must never be registered and then abandoned.
+        let channel = self.channel_adapter(connection_id, &route)?;
+
+        let (tx, rx) = loop {
+            let existing = self.sessions.get(&key).map(|tx| tx.clone());
+            if let Some(tx) = existing {
+                match tx.send(msg).await {
+                    Ok(()) => return Ok(()),
+                    Err(mpsc::error::SendError(returned)) => {
+                        // The actor ended. Replace it, unless another message
+                        // already did.
+                        msg = returned;
+                        self.sessions.remove_if(&key, |_, v| v.same_channel(&tx));
+                        continue;
+                    }
+                }
+            }
+            // Atomic check-and-insert: two concurrent first messages from one
+            // sender must share a session, not start two.
+            let (tx, rx) = mpsc::channel::<InboundMessage>(32);
+            match self.sessions.entry(key.clone()) {
+                Entry::Occupied(_) => continue,
+                Entry::Vacant(slot) => {
+                    slot.insert(tx.clone());
+                    break (tx, rx);
+                }
+            }
+        };
+
+        // The first message goes into the execution inputs, not the mpsc
+        // channel, which carries only subsequent messages in the session.
+        let router = self.clone();
+        let conv_id = msg.conv_id.clone();
+        tokio::spawn(async move {
+            let mut rx = rx;
+            info!(
+                conv_id = %conv_id,
+                workflow_id = %route.workflow_id,
+                session_mode = %route.session_mode,
+                "Channel session starting"
+            );
+            if let Err(e) = session_loop(
+                channel,
+                &conv_id,
+                msg,
+                &mut rx,
+                router.client.clone(),
+                router.engine.clone(),
+                router.valkey.clone(),
+                router.intake.clone(),
+                &route.tenant_id,
+                &route.workflow_id,
+                &route.session_mode,
+                &key.0,
+            )
+            .await
+            {
+                warn!(conv_id = %conv_id, error = %e, "Channel session ended with error");
+            } else {
+                info!(conv_id = %conv_id, "Channel session ended normally");
+            }
+            router.sessions.remove_if(&key, |_, v| v.same_channel(&tx));
+            drop(tx);
+            // Messages routed here after the loop stopped reading were never
+            // handled. Route them again rather than dropping them.
+            rx.close();
+            while let Ok(pending) = rx.try_recv() {
+                router.redispatch(key.0.clone(), pending);
+            }
+        });
+
+        Ok(())
+    }
+
+    fn redispatch(self: &Arc<Self>, connection_id: String, msg: InboundMessage) {
+        let router = self.clone();
+        tokio::spawn(async move {
+            match router.resolve_route(&connection_id).await {
+                Ok(route) => {
+                    let dispatch: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                        Box::pin(router.dispatch_logged(&connection_id, route, msg));
+                    dispatch.await
+                }
+                // Left pending: the next startup dispatches it again.
+                Err(e) => {
+                    warn!(connection_id = %connection_id, error = %e, "Unable to reroute channel message")
+                }
+            }
+        });
+    }
+
+    /// Build the reply adapter from connection credentials.
+    fn channel_adapter(
+        &self,
+        connection_id: &str,
+        route: &Route,
+    ) -> anyhow::Result<Arc<dyn Channel>> {
+        let params = &route.params;
+        Ok(match route.integration_id.as_str() {
             "telegram_bot" => {
                 let bot_token = params["bot_token"]
                     .as_str()
@@ -346,7 +702,7 @@ impl ChannelRouter {
                 // an Arc clone of the LIVE serviceUrl map (not a snapshot) so a
                 // serviceUrl that arrives after session start still resolves.
                 Arc::new(super::channel::TeamsChannel::new(
-                    tenant_id.clone(),
+                    route.tenant_id.clone(),
                     connection_id.to_string(),
                     params.clone(),
                     self.connections.clone(),
@@ -370,51 +726,7 @@ impl ChannelRouter {
                 ))
             }
             other => anyhow::bail!("Unsupported channel connection type: {}", other),
-        };
-
-        // Create session. Don't push the first message to the mpsc channel —
-        // it's already included in the execution inputs via initial_message.
-        // The mpsc channel is only for subsequent messages in the session.
-        let (tx, rx) = mpsc::channel::<InboundMessage>(32);
-        self.sessions.insert(key.clone(), tx);
-
-        let client = self.client.clone();
-        let engine = self.engine.clone();
-        let valkey = self.valkey.clone();
-        let sessions = self.sessions.clone();
-        let conv_id = conv_id.to_string();
-        let initial_message = msg.clone();
-
-        tokio::spawn(async move {
-            info!(
-                conv_id = %conv_id,
-                workflow_id = %workflow_id,
-                session_mode = %session_mode,
-                "Channel session starting"
-            );
-            if let Err(e) = session_loop(
-                channel,
-                &conv_id,
-                initial_message,
-                rx,
-                client,
-                engine,
-                valkey,
-                &tenant_id,
-                &workflow_id,
-                &session_mode,
-                &key.0,
-            )
-            .await
-            {
-                warn!(conv_id = %conv_id, error = %e, "Channel session ended with error");
-            } else {
-                info!(conv_id = %conv_id, "Channel session ended normally");
-            }
-            sessions.remove(&key);
-        });
-
-        Ok(())
+        })
     }
 }
 
@@ -427,10 +739,11 @@ async fn session_loop(
     channel: Arc<dyn Channel>,
     conv_id: &str,
     initial_message: InboundMessage,
-    mut user_rx: mpsc::Receiver<InboundMessage>,
+    user_rx: &mut mpsc::Receiver<InboundMessage>,
     client: Arc<RuntimeClient>,
     engine: Arc<ExecutionEngine>,
     mut valkey: ConnectionManager,
+    intake: IntakeStore,
     org_id: &str,
     workflow_id: &str,
     session_mode: &str,
@@ -463,46 +776,46 @@ async fn session_loop(
     }
     let inputs = json!({ "data": data, "variables": {} });
 
-    // Deterministic instance id from the provider activity id: if the same
-    // activity is redelivered after the Valkey dedup window is lost, the
-    // environment dedups the start by instance id and won't double-fire. The
-    // namespace is parameterized by channel so activity ids from different
-    // channels can never collide into the same instance id.
-    let deterministic_instance_id = initial_message.activity_id.as_deref().map(|activity_id| {
-        Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!(
-                "channel-activity:{}:{org_id}:{activity_id}",
-                initial_message.channel
-            )
-            .as_bytes(),
-        )
-    });
-
-    let result = engine
+    // The intake id is the launch identity: dispatching the same stored
+    // message again (after a crash) is deduplicated by the execution engine.
+    // The workflow version was fixed when the message was accepted.
+    let (launch_workflow, launch_version) = match &initial_message.workflow {
+        Some(pinned) => (pinned.id.as_str(), Some(pinned.version)),
+        None => (workflow_id, None),
+    };
+    let result = match engine
         .queue(QueueRequest {
             run_label: None,
             tenant_id: org_id,
-            workflow_id,
-            version: None,
+            workflow_id: launch_workflow,
+            version: launch_version,
             inputs,
             debug: false,
             correlation_id: None,
             idempotency_key: None,
             trigger_source: TriggerSource::Webhook,
-            instance_id: deterministic_instance_id,
+            instance_id: initial_message.intake_id,
         })
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to queue execution: {:?}", e))?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            fail_launch(&intake, initial_message.intake_id, &e).await;
+            anyhow::bail!("Failed to queue execution: {:?}", e);
+        }
+    };
 
     let mut instance_id = result.instance_id.to_string();
+    intake
+        .settle(initial_message.intake_id, "launched", Some(&instance_id))
+        .await;
 
     let _ = session_queue::set_session_meta(
         &mut valkey,
         org_id,
         &session_id,
         &instance_id,
-        workflow_id,
+        launch_workflow,
     )
     .await;
 
@@ -511,6 +824,7 @@ async fn session_loop(
         conn: valkey.clone(),
         scope: QueueScope::new(org_id, &session_id)?,
         prompted: Default::default(),
+        intake: Some(intake.clone()),
     };
 
     info!(
@@ -637,7 +951,7 @@ async fn session_loop(
                     }
                     // Input discovery is mandatory even with no debug events or
                     // when event history retrieval fails.
-                    let notice = match managed_inputs.poll(&instance_id, &channel, &conv_id, &mut user_rx).await {
+                    let notice = match managed_inputs.poll(&instance_id, &channel, &conv_id, user_rx).await {
                         Ok(InputProgress::Ambiguous) => Some(AMBIGUOUS_NOTICE),
                         // Each dropped reply is reported, even if it repeats.
                         Ok(InputProgress::Undelivered) => {
@@ -676,7 +990,24 @@ async fn session_loop(
                     // whichever request happens to open next.
                     let refusal = match managed_inputs.reply_target(&instance_id).await {
                         Ok(ReplyTarget::Request(request)) => {
-                            match session_queue::push_event(&mut valkey, org_id, &session_id, Some(&instance_id), Some(&request), &event).await {
+                            // Record the binding first: after a crash, recovery
+                            // delivers this reply to the same request instead of
+                            // launching a run from it. The row stays pending
+                            // until the reply reaches the managed queue.
+                            let bound = match inbound.intake_id {
+                                Some(intake_id) => intake.bind_reply(intake_id, &ReplyBinding {
+                                    session_id: session_id.clone(),
+                                    instance_id: instance_id.clone(),
+                                    request_id: request.clone(),
+                                    payload: event.clone(),
+                                }).await.map_err(anyhow::Error::from),
+                                None => Ok(()),
+                            };
+                            let buffered = match bound {
+                                Ok(()) => session_queue::push_event(&mut valkey, org_id, &session_id, Some(&instance_id), Some(&request), inbound.intake_id, &event).await.map_err(anyhow::Error::from),
+                                Err(e) => Err(e),
+                            };
+                            match buffered {
                                 Ok(()) => None,
                                 Err(e) => {
                                     warn!(error = %e, "Failed to buffer channel reply");
@@ -693,6 +1024,8 @@ async fn session_loop(
                     };
                     if let Some(message) = refusal {
                         let _ = channel.send_text(&conv_id, message).await;
+                        // The sender was told; the message is handled.
+                        intake.settle(inbound.intake_id, "refused", Some(&instance_id)).await;
                     }
                 }
             }
@@ -761,6 +1094,19 @@ async fn session_loop(
                             let queued_target = queued_msg.as_ref()
                                 .and_then(|m| m.get("target"))
                                 .cloned();
+                            let queued_intake = queued_msg.as_ref()
+                                .and_then(|m| m.get("intakeId"))
+                                .and_then(Value::as_str)
+                                .and_then(|id| Uuid::parse_str(id).ok());
+                            let queued_workflow = queued_msg.as_ref()
+                                .and_then(|m| Some(PinnedWorkflow {
+                                    id: m.get("workflowId")?.as_str()?.to_string(),
+                                    version: i32::try_from(m.get("workflowVersion")?.as_i64()?).ok()?,
+                                }));
+                            let (launch_workflow, launch_version) = match &queued_workflow {
+                                Some(pinned) => (pinned.id.as_str(), Some(pinned.version)),
+                                None => (workflow_id, None),
+                            };
                             let mut requeue_data = json!({
                                 "sessionId": &session_id,
                                 "channel": &initial_message.channel,
@@ -776,19 +1122,20 @@ async fn session_loop(
                             match engine.queue(QueueRequest {
                                 run_label: None,
                                 tenant_id: org_id,
-                                workflow_id,
-                                version: None,
+                                workflow_id: launch_workflow,
+                                version: launch_version,
                                 inputs,
                                 debug: false,
                                 correlation_id: None,
                                 idempotency_key: None,
                                 trigger_source: TriggerSource::Webhook,
-                                instance_id: None,
+                                instance_id: queued_intake,
                             }).await {
                                 Ok(result) => {
                                     instance_id = result.instance_id.to_string();
+                                    intake.settle(queued_intake, "launched", Some(&instance_id)).await;
                                     let _ = session_queue::set_session_meta(
-                                        &mut valkey, org_id, &session_id, &instance_id, workflow_id,
+                                        &mut valkey, org_id, &session_id, &instance_id, launch_workflow,
                                     ).await;
                                     info!(instance_id = %instance_id, "New instance for channel session");
                                     sleep(Duration::from_millis(500)).await;
@@ -796,6 +1143,7 @@ async fn session_loop(
                                 }
                                 Err(e) => {
                                     error!(error = ?e, "Failed to start new instance");
+                                    fail_launch(&intake, queued_intake, &e).await;
                                     let _ = channel.send_text(&conv_id, "Error: failed to start new conversation instance").await;
                                     session_ended = true;
                                     break;
@@ -818,7 +1166,18 @@ async fn session_loop(
                         if let Some(target) = &inbound.target {
                             event["target"] = target.clone();
                         }
-                        let _ = session_queue::push_event(&mut valkey, org_id, &session_id, None, None, &event).await;
+                        // The row stays pending until the run it starts is
+                        // queued; a crash before then dispatches it again.
+                        if let Some(intake_id) = inbound.intake_id {
+                            event["intakeId"] = json!(intake_id);
+                        }
+                        if let Some(pinned) = &inbound.workflow {
+                            event["workflowId"] = json!(pinned.id);
+                            event["workflowVersion"] = json!(pinned.version);
+                        }
+                        if let Err(error) = session_queue::push_event(&mut valkey, org_id, &session_id, None, None, None, &event).await {
+                            warn!(error = %error, "Unable to buffer channel startup message");
+                        }
                     }
                 }
             }
@@ -847,6 +1206,29 @@ async fn session_loop(
     }
 
     Ok(())
+}
+
+/// A launch that can never succeed (invalid input, missing workflow) must not
+/// be dispatched again at every startup. Anything else stays pending.
+async fn fail_launch(
+    intake: &IntakeStore,
+    intake_id: Option<Uuid>,
+    error: &crate::workers::execution_engine::ExecutionError,
+) {
+    use crate::workers::execution_engine::ExecutionError as E;
+    let permanent = matches!(
+        error,
+        E::ValidationError(_)
+            | E::WorkflowValidationError { .. }
+            | E::NotFound(_)
+            | E::WorkflowNotFound(_)
+            | E::WorkflowNotRunnable { .. }
+    );
+    if let (true, Some(intake_id)) = (permanent, intake_id)
+        && let Err(e) = intake.mark_failed(intake_id, &format!("{error:?}")).await
+    {
+        warn!(%intake_id, error = %e, "Unable to fail channel intake");
+    }
 }
 
 async fn flush_events(

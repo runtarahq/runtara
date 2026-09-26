@@ -1,82 +1,131 @@
-# Instance-input reliability follow-ups
+# Channel input reliability: follow-up spec
 
-Deferred on 2026-09-25 at the user's request to re-center the current fix.
-These are separate work proposals, not release requirements for
-[stale pending-input correctness](instance-events-fix.md). Do not implement them
-as part of that fix solely because some foundation code already exists.
+Gaps that remained after the managed input-request fix (#267, `decf5c86`).
+Sections 1 and 2 are implemented; section 3 is open. Each section states the
+defect, the required behaviour, and what proves it.
+Paths are relative to `crates/runtara-server/src/`.
 
-## Provider intake durability
+## 1. Durable provider intake — implemented
 
-Persist authenticated provider intake and deduplication before acknowledgement,
-with stable routing across configuration changes. Cover Slack, Teams, Telegram,
-and Mailgun at the HTTP boundary. Verify inbound retry/deadline guarantees from
-official documentation; do not infer them from outbound API guidance.
+Inbound messages were acknowledged before anything durable was written, and a
+Valkey dedup key then blocked the provider's redelivery.
 
-The previous design proposes a connection-scoped inbox and idempotent handoff to
-a session queue, retaining destination deduplication while unresolved intake can
-retry. This needs a separate architecture review and explicit retention policy.
-It is more than replacing event-based pending-input discovery in channels.
+Now (`channels/intake.rs`, migration `20260926000000_channel_intake.sql`):
 
-## Startup handoff and launch recovery
+- Each handler resolves the route, inserts the message into `channel_intake`
+  keyed on `(tenant, connection, identity)`, and only then returns 200. A
+  storage failure returns 503 so the provider retries. A duplicate identity is
+  acknowledged and dropped. Teams stores before its ack; session handoff still
+  runs in the background.
+- Identity comes from the native handlers (Slack `event_id`, Telegram
+  `update_id`, Teams activity `id`, Mailgun `Message-Id`), falling back to a
+  payload hash. Moving extraction into channel agents is tracked in
+  [trusted-improvements.md](trusted-improvements.md).
+- A row stays `pending` until the session launches an execution, buffers or
+  refuses the reply, or consumes it for field collection. Rows that can never
+  succeed (no route, invalid input) become `failed`.
+- `ChannelRouter::run_intake_worker` runs for the life of the process. At
+  startup it dispatches rows an earlier process left pending. Every 30s it
+  claims pending rows whose `next_attempt_at` has passed and dispatches them
+  again, so a transient launch failure is retried without a restart. A new row
+  gets a 2-minute handoff grace; each claim then backs off 30s doubling to an
+  hour, and a row claimed 12 times is failed.
+- Handled (`processed`/`failed`) rows are deleted 7 days after their last
+  update, in batches from the same worker. That exceeds the providers'
+  redelivery windows (Telegram's is the longest, about a day). A redelivery
+  after deletion still maps to the same instance id and is deduplicated by the
+  execution engine. Pending rows are never purged.
+- An actor that exits with messages still in its channel routes them again.
+- The Valkey dedup key is removed.
 
-Separate startup input from managed response delivery, with frozen launch inputs,
-pinned version, one launch identity, and a distinct source-handoff outcome. Test
-lost source acknowledgements and ensure startup is never delivered again to the
-first wait. Complete the source/worker/compiled-workflow handoff as its own change.
+Proven by `channels/intake_tests.rs`, run for all four providers through the
+HTTP routes: storage failure → 5xx then a successful retry; acknowledged
+message whose launch is lost → launched once after a restart; transient launch
+failure → left alone during the grace, then launched once by the sweep;
+redelivery → one intake row and one execution; a reply left by an ended
+session → handed to its own request once, never launched. Retention and attempt
+exhaustion are tested against the store.
 
-Extracted draft work includes `StartupIntent`, `DeliveryMode`,
-`HandedOff`, startup branches in `managed.lua`,
-`api/services/session_queue/delivery/startup.rs`, and associated delivery status
-fields. This draft is not verified or approved for release. Do not finish its
-contracts and tests merely to declare the narrower fix complete. Replacement-run
-launch intents, route snapshots and launch-recovery tests are extracted as well.
-Shared response binding, receipt recovery and read-only initial-source observation
-remain in the active fix.
+- A reply records the request it was bound to (session, instance, request,
+  payload) before it is buffered, and is buffered under its intake id. Its row
+  stays pending until the reply reaches the managed queue, whose delivery
+  worker needs no session. If the session ends first, the sweep hands the reply
+  to that request under the same id (deduplicated if the handoff already
+  happened), and never launches a run from it. A reply whose request closed is
+  marked `undelivered`; one to a structured request is `interrupted`, since
+  field collection lived in the ended session.
 
-## Restartable structured collectors
+### Remaining
 
-Persist field progress, schema/target, processed reply identities, validation
-attempts, prompt intents, and the final response operation. Prove restart between
-fields and lost final acknowledgement without retaining an actor. Expose
-consumed-for-collection outcomes separately from accepted workflow responses.
+- The 7-day retention and provider retry assumptions are not yet checked
+  against each provider's official webhook documentation.
 
-The current fix still must validate target state and final submission, retain an
-uncertain submitted response, and avoid responding on collection cancellation.
-It does not promise continuation of an unfinished conversation after process loss.
+## 2. Startup launch identity — implemented
 
-## Delivery operations and diagnostics
+- Every channel launch uses the intake id as its instance id, including
+  messages that start a run from an idle session. The intake id is derived from
+  the provider identity, so even a redelivery after its row is removed maps to
+  the same instance and is deduplicated by the execution engine.
+- An idle-session message stays pending until its run is queued, so a crash
+  between taking it from the startup buffer and queueing launches it after
+  restart.
+- The session-map check and insert are atomic (`DashMap::entry`): concurrent
+  first messages from one sender share one session.
 
-Consider channel owner dashboards, provider-specific resolution, generalized
-worker fairness/load tests, expanded completed-message retention policies, and
-exactly-once optional diagnostic events separately. Tests required to establish
-safe behavior of retained response delivery still belong to the current fix.
-Do not defer an actual data-loss, ownership, or stale-target regression behind
-this category.
+Still true, and must stay so: a startup message is never delivered as a
+response to the new execution's first wait. Startup and reply buffers are
+separate, and managed delivery is bound to a specific request.
 
-Control-agent implementation and MinIO replacement are separate tasks as well.
+- The workflow and its current version are fixed when the message is
+  accepted (`channel_intake.workflow_id`, `workflow_version`). Every launch
+  from the row, including retries, restarts, and idle-session launches, uses
+  that version even if a newer one is published first.
 
-## Preservation and separation
+Prior art: unverified draft on local branch
+`codex/instance-input-delivery-followup` (`509e2600`). Do not merge it; its
+replacement-launch behaviour conflicts with "a stale managed reply never
+launches a new execution".
 
-The local branch `codex/instance-input-delivery-followup` is checked out at
-`/private/tmp/runtara-input-delivery-followup`. It is stacked on a snapshot of the
-unfinished correctness fix because the delivery draft depends on new request and
-queue types that are not on the original branch's HEAD yet. Prerequisite commit `71b32eae` is the base; top commit `509e2600` restores the
-pre-extraction deferred draft and includes `docs/instance-events-delivery-branch.md`
-with resumption instructions. The follow-up branch is not pushed. At extraction,
-the active worktree and its index were left uncommitted; the correctness fix is
-now prepared separately for PR review.
+## 3. Restartable structured collectors
 
-Resume by reviewing the top commit against its parent, then porting only the
-needed follow-up changes onto the completed correctness fix. Do not merge the
-prerequisite snapshot as if it were a verified release, or blindly cherry-pick
-replacement-launch behavior: stale managed replies still must not launch a new
-execution. The preserved draft needs design and verification work before use.
+### Defect
 
-The active queue no longer has startup mode or replacement-launch transitions.
-Its focused tests cover terminal targets, ambiguity, initial registration delay,
-and receipt replay. Unrelated root `Cargo.toml` build overrides and local
-`docs/control-agent.md` / `docs/report-demo.html` are excluded from the branch.
+- Field progress (`collected`), validation retry counts and processed replies
+  exist only in the session actor (`channels/collector.rs:16`, `:41`). The
+  `prompted` set is in memory too (`channels/session/inputs.rs:32`).
+- Buffered replies are acknowledged when read (`channels/collector.rs:86`),
+  before progress is persisted. After a restart, collection restarts at the
+  first field and already-given answers are lost.
+- If the process dies after collection completes but before the final response
+  is enqueued, the payload is lost. After the enqueue, delivery is already
+  idempotent: a stable operation id, and core returns the stored receipt.
 
-The complete prior checkpoint and expanded plan are preserved in
-[historical implementation notes](instance-events-implementation-notes.md).
-Those notes provide implementation context, not another active checklist.
+### Requirements
+
+- Persist per-request collection state: the target request and schema,
+  collected fields, validation attempts, processed reply ids, issued prompts,
+  and the final response operation id.
+- Acknowledge a reply only after its effect on the collection state is
+  persisted.
+- Report "consumed for collection" separately from "accepted as the workflow
+  response".
+- Cancelling a collection does not submit a response.
+
+### Acceptance
+
+- Restart between fields resumes at the next unanswered field without
+  re-prompting answered ones.
+- Restart after the final field and before enqueue → exactly one response is
+  submitted.
+- Replaying a processed reply id has no effect.
+
+## Verified
+
+- **Reply before request registration.** A reply that arrives before its
+  execution has registered and prompted an input request is refused with a
+  "nothing is waiting" notice. It is never buffered for, or bound to, a later
+  request, and it cannot launch a second execution (it arrives on the reply
+  path, not the startup path). Covered by
+  `a_reply_needs_a_prompted_open_request_when_it_arrives`
+  (`channels/session/input_tests.rs`), for both "not registered" and
+  "registered but not yet prompted".

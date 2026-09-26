@@ -200,74 +200,40 @@ async fn handle_message_activity(
     let activity_id = payload.get("id").and_then(|v| v.as_str());
     let sender_id = from_id.unwrap_or(conversation_id).to_string();
 
-    // Ack-fast: Teams retries the webhook if it does not receive a 2xx within
-    // ~15s, and every DB lookup + workflow enqueue happens below. Move all of
-    // that OFF the response path and return 200 now; the redelivery dedup then
-    // runs INSIDE the task (SET NX still serializes concurrent redeliveries).
-    let router = router.clone();
-    let connection_id = connection_id.to_string();
-    let conversation_id = conversation_id.to_string();
-    let service_url = service_url.map(str::to_string);
-    let activity_id = activity_id.map(str::to_string);
-    let payload = payload.clone();
-
-    tokio::spawn(async move {
-        if let Some(activity_id) = activity_id.as_deref()
-            && !router.reserve_activity(&connection_id, activity_id).await
-        {
-            debug!(
-                connection_id = %connection_id,
-                activity_id = %activity_id,
-                "Dropping duplicate Teams activity"
-            );
-            return;
-        }
-
-        // The serviceUrl is stored only now: after full JWT validation, which
-        // includes the serviceurl-claim cross-check where the token carries one.
-        if let Some(svc_url) = service_url.as_deref() {
-            router.set_teams_service_url(&connection_id, &conversation_id, svc_url);
-        }
-
-        // Curated, credential-free reply target (opaque signed endpoint ref +
-        // conversation identifiers) for the workflow's data.target.
-        let target = service_url.as_deref().and_then(|svc_url| {
-            build_conversation_target(&connection_id, &conversation_id, svc_url, &payload)
-        });
-
-        let msg = InboundMessage {
-            text: clean_text,
-            sender_id,
-            conv_id: conversation_id.clone(),
-            channel: "teams".into(),
-            attachments: vec![],
-            original_message: payload,
-            target,
-            activity_id: activity_id.clone(),
-        };
-
-        debug!(
-            connection_id = %connection_id,
-            conversation = %conversation_id,
-            "Teams message received"
-        );
-
-        if let Err(e) = router.handle_message(&connection_id, &msg).await {
-            warn!(
-                connection_id = %connection_id,
-                error = %e,
-                "Failed to handle Teams message"
-            );
-            // Release the reservation: with ack-fast we already returned 200,
-            // so a message we failed to handle must not be tombstoned against a
-            // future redelivery.
-            if let Some(activity_id) = activity_id.as_deref() {
-                router.release_activity(&connection_id, activity_id).await;
-            }
-        }
+    // Curated, credential-free reply target (opaque signed endpoint ref +
+    // conversation identifiers) for the workflow's data.target. The serviceUrl
+    // itself is stored by dispatch, only for a message that was stored: this
+    // point is after full JWT validation, including the serviceurl-claim check.
+    let target = service_url.and_then(|svc_url| {
+        build_conversation_target(connection_id, conversation_id, svc_url, payload)
     });
 
-    StatusCode::OK.into_response()
+    let msg = InboundMessage {
+        text: clean_text,
+        sender_id,
+        conv_id: conversation_id.to_string(),
+        channel: "teams".into(),
+        attachments: vec![],
+        original_message: payload.clone(),
+        target,
+        activity_id: activity_id.map(str::to_string),
+        intake_id: None,
+        workflow: None,
+    };
+
+    debug!(
+        connection_id = %connection_id,
+        conversation = %conversation_id,
+        "Teams message received"
+    );
+
+    // Teams retries if it sees no 2xx within ~15s. Storing the message is a
+    // single insert, so it happens before the ack; session handoff runs in the
+    // background, and a failure there is recovered from the stored row.
+    router
+        .receive(connection_id, msg, true)
+        .await
+        .into_response()
 }
 
 /// Strip Teams @mention markup from `text`, preferring the activity's

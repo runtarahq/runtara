@@ -32,6 +32,8 @@ fn message(text: &str) -> InboundMessage {
         original_message: json!({}),
         target: None,
         activity_id: None,
+        intake_id: None,
+        workflow: None,
     }
 }
 async fn fixture() -> (Arc<InMemoryPersistence>, ManagedChannelInputs, String) {
@@ -65,6 +67,7 @@ async fn fixture() -> (Arc<InMemoryPersistence>, ManagedChannelInputs, String) {
         conn,
         scope: QueueScope::new("tenant", &Uuid::new_v4().to_string()).unwrap(),
         prompted: Default::default(),
+        intake: None,
     };
     (persistence, context, instance)
 }
@@ -308,6 +311,7 @@ async fn collector_checks_closure_before_prompt_and_after_receiving_a_field() {
             "conversation",
             &mut rx,
             None,
+            None,
             || async {
                 anyhow::ensure!(
                     checks.fetch_add(1, Ordering::SeqCst) < close_at,
@@ -336,6 +340,7 @@ async fn collector_stops_when_request_closes_without_another_inbound_message() {
             &channel,
             "conversation",
             &mut rx,
+            None,
             None,
             || async {
                 anyhow::ensure!(checks.fetch_add(1, Ordering::SeqCst) < 2, "request closed");
@@ -382,6 +387,7 @@ async fn buffer(
         context.scope.session_id(),
         Some(instance),
         for_request,
+        None,
         &json!({"message":text}),
     )
     .await
@@ -908,6 +914,7 @@ async fn startup_messages_and_execution_replies_never_block_each_other() {
         &mut context.conn,
         context.scope.tenant_id(),
         context.scope.session_id(),
+        None,
         None,
         None,
         &json!({"message":"start another run"}),

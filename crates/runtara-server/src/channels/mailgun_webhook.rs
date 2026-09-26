@@ -101,14 +101,6 @@ pub async fn mailgun_webhook(
         return StatusCode::OK.into_response();
     };
 
-    // Deduplicate at-least-once redeliveries.
-    if let Some(dedup_id) = msg.activity_id.as_deref()
-        && !router.reserve_activity(&connection_id, dedup_id).await
-    {
-        debug!(connection_id = %connection_id, "Dropping duplicate Mailgun delivery");
-        return StatusCode::OK.into_response();
-    }
-
     debug!(
         connection_id = %connection_id,
         sender = %msg.sender_id,
@@ -116,15 +108,11 @@ pub async fn mailgun_webhook(
         "Mailgun email processed"
     );
 
-    if let Err(e) = router.handle_message(&connection_id, &msg).await {
-        warn!(
-            connection_id = %connection_id,
-            error = %e,
-            "Failed to handle Mailgun email"
-        );
-    }
-
-    StatusCode::OK.into_response()
+    // Stored before the 200; a redelivered Message-Id is acknowledged and dropped.
+    router
+        .receive(&connection_id, msg, false)
+        .await
+        .into_response()
 }
 
 /// Keep nested JSON in originalMessage; project only fields needed for routing,
@@ -208,6 +196,8 @@ fn normalize_mailgun_message(
             .get("Message-Id")
             .or_else(|| fields.get("token"))
             .cloned(),
+        intake_id: None,
+        workflow: None,
     })
 }
 
