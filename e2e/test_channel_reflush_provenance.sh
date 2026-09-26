@@ -2,8 +2,8 @@
 # E2E Test: channel-session re-flush provenance guard.
 #
 # Proves the fix: a DUPLICATE session that lands on a foreign-owned instance
-# (a redelivered activity whose Valkey dedup key was lost) does NOT re-dispatch
-# the owning session's reply transcript.
+# (a redelivered activity whose durable intake row was removed) does NOT
+# re-dispatch the owning session's reply transcript.
 #
 # Observable: a deterministically-FAILING workflow makes session_loop send the
 # "Sorry, something went wrong" text to the channel. That reply egresses through
@@ -11,7 +11,8 @@
 # it once; a foreign (redelivery) session must send it ZERO times.
 #
 # Path exercised: inbound Teams webhook (RS256 JWT vs a mock authority) -> ack ->
-# reserve_activity (Layer-1 dedup) -> session_loop -> deterministic instance id ->
+# channel_intake insert (Layer-1 dedup) -> session_loop -> instance id derived
+# from the intake identity ->
 # queue()/trigger stream -> Environment start-or-attach (the backstop) -> the
 # teams.send-message step fails permanently (empty target) -> instance Failed ->
 # session_loop terminal branch sends "Sorry" via TeamsChannel -> mock connector.
@@ -19,7 +20,7 @@
 # Cases:
 #   A. With SESSION_TOKEN_SECRET absent, first delivery of activity A
 #      -> 1 instance, 1 "Sorry" reply (owner); HTTP 200 alone is insufficient.
-#   B. RESIDUAL WINDOW: delete the Valkey dedup key, redeliver the SAME activity A
+#   B. RESIDUAL WINDOW: delete the intake row, redeliver the SAME activity A
 #      -> still 1 instance (Environment dedups the deterministic id) AND still
 #      1 "Sorry" reply total (the foreign session SUPPRESSED — the fix).
 #   C. A different activity B -> 2 instances, 2 "Sorry" replies (owned sessions
@@ -369,11 +370,11 @@ sleep 2
 [ "$(reply_count)" -eq 1 ] || { print_error "Expected exactly 1 reply, got $(reply_count)"; exit 1; }
 echo "  1 instance, 1 'Sorry' reply ✓"
 
-# --- Case B: RESIDUAL WINDOW — DEL dedup key, redeliver same activity -----
-print_step "Case B: delete Valkey dedup key + redeliver SAME activity A → foreign session suppresses..."
-DEDUP_KEY="channel_activity_dedup:${TENANT}:${CONN_ID}:activity-A"
-docker exec "${VALKEY_CONTAINER}" valkey-cli DEL "${DEDUP_KEY}" >/dev/null 2>&1 \
-    || { print_error "Failed to DEL dedup key ${DEDUP_KEY}"; exit 1; }
+# --- Case B: RESIDUAL WINDOW — remove intake row, redeliver same activity --
+print_step "Case B: delete the intake row + redeliver SAME activity A → foreign session suppresses..."
+DELETED=$(psql_quiet -d "${TEST_DB_SERVER}" -tAc \
+    "WITH d AS (DELETE FROM channel_intake WHERE connection_id = '${CONN_ID}' AND identity = 'id:activity-A' RETURNING 1) SELECT count(*) FROM d")
+[ "${DELETED}" = "1" ] || { print_error "Expected to delete 1 intake row, deleted ${DELETED}"; exit 1; }
 CODE=$(post_activity "activity-A")
 [ "${CODE}" != "200" ] && { print_error "Expected 200 on redelivery, got ${CODE}"; exit 1; }
 # Let the redelivery's session spawn, poll, classify foreign, and (correctly) do nothing.
@@ -430,8 +431,8 @@ def session_preamble(path, data=None):
                 event_type = line.removeprefix("event:").strip()
             elif line.startswith("data:") and event_type == "session_created":
                 event = json.loads(line.removeprefix("data:").strip())
-                assert set(event) == {"type", "sessionId", "instanceId"}, "Unexpected session preamble fields"
-                assert event["type"] == "session_created"
+                # The SSE event name carries the type; the data is identifiers only.
+                assert set(event) == {"sessionId", "instanceId"}, "Unexpected session preamble fields"
                 uuid.UUID(event["sessionId"])
                 uuid.UUID(event["instanceId"])
                 if data is not None:

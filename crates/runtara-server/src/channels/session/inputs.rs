@@ -30,6 +30,8 @@ pub(super) struct ManagedChannelInputs {
     pub(super) conn: ConnectionManager,
     pub(super) scope: QueueScope,
     pub(super) prompted: HashSet<(String, String)>,
+    /// Marks live replies consumed by field collection as handled.
+    pub(super) intake: Option<super::super::intake::IntakeStore>,
 }
 impl ManagedChannelInputs {
     /// Bind an arriving reply to the request it answers, before anything else
@@ -91,6 +93,7 @@ impl ManagedChannelInputs {
                 // The request this reply answered closed (or the reply predates
                 // request binding). Never re-aim it at a newer request.
                 session_queue::acknowledge_event(&mut self.conn, &source).await?;
+                self.settle(&source, "undelivered", instance).await;
                 return Ok(InputProgress::Undelivered);
             };
             if !is_structured(&request) {
@@ -182,7 +185,24 @@ impl ManagedChannelInputs {
             target,
         )
         .await?;
-        session_queue::acknowledge_event(&mut self.conn, source).await
+        session_queue::acknowledge_event(&mut self.conn, source).await?;
+        // Durable in the managed queue now; the delivery worker owns it.
+        self.settle(source, "reply", &target.instance_id).await;
+        Ok(())
+    }
+
+    /// Mark the intake row of a buffered channel reply handled. Its buffered
+    /// message id is the intake id.
+    async fn settle(&self, source: &session_queue::PeekedEvent, outcome: &str, instance: &str) {
+        if let Some(intake) = &self.intake {
+            intake
+                .settle(
+                    Uuid::parse_str(&source.event.message_id).ok(),
+                    outcome,
+                    Some(instance),
+                )
+                .await;
+        }
     }
 
     /// Settle one buffered reply of an execution that ended or is being left:
@@ -210,6 +230,7 @@ impl ManagedChannelInputs {
             self.handoff(&source).await?;
         } else {
             session_queue::acknowledge_event(&mut self.conn, &source).await?;
+            self.settle(&source, "undelivered", instance).await;
             let _ = channel.send_text(conversation, UNDELIVERED_NOTICE).await;
         }
         Ok(false)
@@ -269,6 +290,7 @@ impl ManagedChannelInputs {
             channel.as_ref(),
             conversation,
             replies,
+            self.intake.as_ref(),
             Some(collector::BufferedReplies {
                 conn: &mut self.conn,
                 scope: &scope,
@@ -318,7 +340,7 @@ impl ManagedChannelInputs {
 pub(super) const UNDELIVERED_NOTICE: &str =
     "Your reply was not delivered: the input it answered is no longer waiting.";
 
-fn is_structured(request: &InputRequest) -> bool {
+pub(super) fn is_structured(request: &InputRequest) -> bool {
     request
         .spec
         .response_schema

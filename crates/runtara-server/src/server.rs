@@ -2367,26 +2367,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 execution_engine.clone(),
                 vc.clone(),
             ));
+            // Dispatches messages a previous process acknowledged but did not
+            // finish, retries pending ones, and purges handled ones.
+            tokio::spawn(channel_router.clone().run_intake_worker());
             println!("✓ Channel router initialized");
 
-            Router::new()
-                .route(
-                    "/api/runtime/events/webhook/telegram/{connection_id}",
-                    post(channels::webhook::telegram_webhook),
-                )
-                .route(
-                    "/api/runtime/events/webhook/slack/{connection_id}",
-                    post(channels::slack_webhook::slack_webhook),
-                )
-                .route(
-                    "/api/runtime/events/webhook/teams/{connection_id}",
-                    post(channels::teams_webhook::teams_webhook),
-                )
-                .route(
-                    "/api/runtime/events/webhook/mailgun/{connection_id}",
-                    post(channels::mailgun_webhook::mailgun_webhook),
-                )
-                .with_state(channel_router)
+            channels::routes(channel_router)
                 // Defense in depth: these public, unauthenticated channel-ingest
                 // routes buffer the whole body (Bytes extractor) before auth, so
                 // cap it. Bot Framework / chat activities are a few KB; the
