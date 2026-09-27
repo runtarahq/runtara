@@ -99,6 +99,9 @@ struct Host {
 }
 impl Host {
     fn new() -> Self {
+        // Before `started`: a host network filter's once-per-process
+        // first-flow stall must not be charged to any budget measured here.
+        outbound_fixture::warm_up_process_network();
         Self {
             database: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
