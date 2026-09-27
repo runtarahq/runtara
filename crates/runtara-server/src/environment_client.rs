@@ -299,6 +299,32 @@ impl EnvironmentClient {
         })
     }
 
+    /// Control's narrow read of one run of `tenant`; payloads over their
+    /// caps are left out. `None` for a missing or foreign run.
+    pub async fn control_instance(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Option<runtara_environment::control_reads::ControlInstance>> {
+        Ok(self
+            .instances()
+            .control_instance(tenant, instance_id, output_cap, error_cap)
+            .await?)
+    }
+
+    /// Control's payload-free page of runs, plus the unpaged total.
+    pub async fn control_instances(
+        &self,
+        options: &instance_repository::ListInstancesOptions,
+    ) -> Result<(
+        Vec<runtara_environment::control_reads::ControlInstance>,
+        i64,
+    )> {
+        Ok(self.instances().control_instances(options).await?)
+    }
+
     /// Count a tenant's instances in the given statuses.
     #[instrument(skip(self), level = "debug")]
     pub async fn count_instances_by_status(

@@ -292,6 +292,7 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
             .unwrap_or_default();
         Ok(
             runtara_component_host::precompile::CompiledWorkflowPackage {
+                control_importers: Default::default(),
                 root: Component::new(
                     &engine,
                     format!(
@@ -518,6 +519,7 @@ async fn one_stale_trusted_pin_fails_only_its_own_agent_calls() -> anyhow::Resul
             ),
         )?;
         let package = runtara_component_host::precompile::CompiledWorkflowPackage {
+            control_importers: Default::default(),
             root,
             artifacts: members
                 .iter()

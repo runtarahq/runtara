@@ -715,6 +715,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach the host executor of the approved control agent.
+    pub fn with_control_executor(
+        self,
+        executor: Arc<runtara_component_host::control_executor::ControlExecutor>,
+    ) -> Result<Self> {
+        self.executor
+            .set_control_executor(executor)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach the approved built-in trusted capability executor.
     pub fn with_trusted_executor(
         self,
@@ -1624,8 +1635,8 @@ impl Runner for EmbeddedWasmRunner {
                     .await
                 } else {
                     executor
-                        .execute_invoke_with_start_confirmation(
-                            workflow.instance_pre(),
+                        .execute_prepared_invoke_with_start_confirmation(
+                            &workflow,
                             spec,
                             input,
                             start_confirmation.clone(),

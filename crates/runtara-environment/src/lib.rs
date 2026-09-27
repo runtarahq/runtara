@@ -220,6 +220,12 @@ pub mod container_registry;
 /// The instance columns Environment owns, and the only place it writes them.
 pub mod instance_repository;
 
+/// Approved history of host-executed built-in artifacts.
+pub mod approved_builtins;
+
+/// Narrow, capped instance reads for the control service.
+pub mod control_reads;
+
 /// In-process WASM execution backend.
 pub mod runner;
 

@@ -328,6 +328,7 @@ fn compiled_package(
 ) -> crate::precompile::CompiledWorkflowPackage {
     crate::precompile::CompiledWorkflowPackage {
         invocations: None,
+        control_importers: Default::default(),
         root: Component::new(
             fx.executor.engine(),
             r#"(component

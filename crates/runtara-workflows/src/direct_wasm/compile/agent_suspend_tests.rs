@@ -292,10 +292,10 @@ async fn launch(
     control: Option<Arc<ControlExecutor>>,
 ) -> anyhow::Result<InvokeRunResult> {
     let local = workflow_executor(control)?;
-    let pre = local.load_instance_pre(&compiled.wasm_path).await?;
+    let prepared = local.prepare_path(&compiled.wasm_path).await?;
     Ok(local
-        .execute_invoke(
-            &pre,
+        .execute_prepared_invoke(
+            &prepared,
             WorkflowRunSpec {
                 trusted_instance: Some("parent-1".into()),
                 trusted_tenant: Some("fixture".into()),
@@ -388,6 +388,28 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
     assert_eq!(
         entries[0].wasm.as_ref().map(|wasm| wasm.sha256.as_str()),
         Some(sha256_hex(&fs::read(&control_wasm)?).as_str())
+    );
+
+    // Decision D2: the root pins exactly the bundled control bytes, and the
+    // one composed component importing control is those bytes verbatim.
+    let pin = crate::direct_wasm::bundled_builtin_pin(&components_dir(), "control")
+        .expect("the bundle ships control");
+    let pins: Vec<_> = imports
+        .iter()
+        .filter(|name| name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX))
+        .collect();
+    assert_eq!(pins, [&pin], "{imports:?}");
+    assert!(
+        crate::direct_wasm::trusted_artifact_pins(&fs::read(&compiled.wasm_path)?)?.contains(&pin),
+        "readiness records the control pin with the trusted ones"
+    );
+    let audit = runtara_component_host::precompile::audit_control_importers(&fs::read(
+        &compiled.wasm_path,
+    )?)?;
+    assert_eq!(
+        audit.importers,
+        std::collections::BTreeSet::from([sha256_hex(&fs::read(&control_wasm)?)]),
+        "wac keeps the nested control bytes verbatim"
     );
 
     // The dispatcher registry loads the same bytes through the agent linker
@@ -520,6 +542,7 @@ fn control_executor(fake: Arc<FakeControl>) -> anyhow::Result<Arc<ControlExecuto
         &fs::read(dir.join("runtara_agent_control.meta.json"))?,
     )?;
     control.set_host(fake)?;
+    control.set_approved_pins([control.pin().to_owned()]);
     Ok(Arc::new(control))
 }
 

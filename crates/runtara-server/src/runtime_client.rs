@@ -237,6 +237,37 @@ impl RuntimeClient {
             .await
     }
 
+    /// Control's narrow, capped read of one run of `tenant`.
+    pub async fn control_instance(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Option<runtara_environment::control_reads::ControlInstance>, RuntimeError> {
+        self.client
+            .control_instance(tenant, instance_id, output_cap, error_cap)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Control's payload-free page of runs, plus the unpaged total.
+    pub async fn control_instances(
+        &self,
+        options: &runtara_environment::instance_repository::ListInstancesOptions,
+    ) -> Result<
+        (
+            Vec<runtara_environment::control_reads::ControlInstance>,
+            i64,
+        ),
+        RuntimeError,
+    > {
+        self.client
+            .control_instances(options)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     /// Retained request lookup for submission and receipt replay.
     pub async fn get_input_request(
         &self,

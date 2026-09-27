@@ -182,6 +182,10 @@ impl InstanceRepository {
         Self { pool }
     }
 
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// What the instance was launched from, or `None` if it has no binding.
     ///
     /// One row, one query: `instance_images.instance_id` is that table's

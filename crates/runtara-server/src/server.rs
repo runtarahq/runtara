@@ -1332,9 +1332,42 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )))?;
     }
 
+    let installed_trusted_pins: Vec<String> = trusted_executor
+        .as_ref()
+        .map(|executor| executor.artifact_pins().map(str::to_owned).collect())
+        .unwrap_or_default();
+
+    // Control runs only the dispatcher bundle's control bytes, on every tier
+    // (decision D5). Boot approves those and the compile bundle's, which may
+    // differ; the service binds to the runtime once it exists.
+    let native_control = Arc::new(api::services::control::NativeControl::new(Some(
+        tenant_id.clone(),
+    )));
+    let control_boot = match component_dispatcher
+        .as_ref()
+        .and_then(|dispatcher| dispatcher.control_executor())
+    {
+        Some(executor) => {
+            executor.set_host(native_control.clone())?;
+            let mut approve = vec![executor.pin().to_owned()];
+            if let Some(pin) = config::direct_wasm_components_dir().and_then(|dir| {
+                runtara_workflows::direct_wasm::bundled_builtin_pin(
+                    &dir,
+                    runtara_dsl::agent_meta::CONTROL_AGENT_ID,
+                )
+            }) && !approve.contains(&pin)
+            {
+                approve.push(pin);
+            }
+            Some(embedded_runtara::ControlBoot { executor, approve })
+        }
+        None => None,
+    };
+
     // Start embedded Runtara servers (using dedicated database)
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
         trusted_executor,
+        control_boot,
         connection_resolver,
         database,
         outbound_http,
@@ -1349,6 +1382,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         Ok(Some(runtara)) => {
             println!("✓ Embedded runtara-core started on {}", runtara.core_addr());
             println!("✓ Embedded runtara-environment started (in-process)");
+            // An artifact pinning a control version outside the approved
+            // history is not ready, exactly like an uninstalled trusted pin.
+            api::repositories::workflows::set_installed_trusted_pins(
+                installed_trusted_pins
+                    .iter()
+                    .cloned()
+                    .chain(runtara.approved_builtins().pins().map(str::to_owned)),
+            );
             Some(runtara)
         }
         Ok(None) => {
@@ -1383,6 +1424,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     println!("✓ Runtime client initialized");
+    if let Some(runtime_client) = &runtime_client {
+        native_control.install(runtime_client.clone());
+    }
 
     // Install before any Valkey worker is started. Environment commits its
     // launch lifecycle transitions in a separate database, so the adapter

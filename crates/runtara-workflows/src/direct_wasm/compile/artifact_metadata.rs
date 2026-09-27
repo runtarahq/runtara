@@ -551,6 +551,17 @@ pub fn check_agent_component_imports(
     let imports = component_root_imports(wasm).map_err(|error| {
         DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
     })?;
+    // Control is granted only to the component the host executor can run:
+    // one that exports `runtara:control/execution`.
+    let mut grants = grants;
+    if grants.control {
+        grants.control = component_root_exports(wasm)
+            .map_err(|error| {
+                DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
+            })?
+            .iter()
+            .any(|export| export == runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME);
+    }
     for import in imports {
         let allowed = match kind {
             AgentImportKind::Agent => {
@@ -717,6 +728,29 @@ fn component_root_imports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError
         }
     }
     Ok(imports)
+}
+
+/// Every export name at the component's ROOT.
+fn component_root_exports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError> {
+    let parse_error = |err: wasmparser::BinaryReaderError| {
+        DirectCompileError::Component(format!("failed to parse agent component: {err}"))
+    };
+    let mut exports = Vec::new();
+    let mut depth = 0usize;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload.map_err(parse_error)? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
+            wasmparser::Payload::ComponentExportSection(reader) if depth == 0 => {
+                for export in reader {
+                    exports.push(export.map_err(parse_error)?.name.0.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(exports)
 }
 
 fn resolve_component_dependency(
@@ -954,10 +988,19 @@ mod tests {
 
     /// A component whose root imports are exactly `imports` (empty instances).
     fn component_importing(imports: &[&str]) -> Vec<u8> {
-        let body: String = imports
+        component_importing_exporting(imports, &[])
+    }
+
+    fn component_importing_exporting(imports: &[&str], exports: &[&str]) -> Vec<u8> {
+        let mut body: String = imports
             .iter()
             .map(|name| format!("(import \"{name}\" (instance))"))
             .collect();
+        for (index, name) in exports.iter().enumerate() {
+            body.push_str(&format!(
+                "(instance $e{index}) (export \"{name}\" (instance $e{index}))"
+            ));
+        }
         wat::parse_str(format!("(component {body})")).expect("fixture component parses")
     }
 
@@ -1182,6 +1225,21 @@ mod tests {
         imports: &[&str],
         suspends: bool,
     ) -> Result<(), DirectCompileError> {
+        let exports: &[&str] = if agent_id == "control" {
+            &[runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME]
+        } else {
+            &[]
+        };
+        resolve_declared_agent_exporting(agent_id, location, imports, exports, suspends)
+    }
+
+    fn resolve_declared_agent_exporting(
+        agent_id: &str,
+        location: FixtureDir,
+        imports: &[&str],
+        exports: &[&str],
+        suspends: bool,
+    ) -> Result<(), DirectCompileError> {
         let primary = tempfile::tempdir().expect("primary tempdir");
         let staging = tempfile::tempdir().expect("staging tempdir");
         let target = match location {
@@ -1191,7 +1249,7 @@ mod tests {
         let component = crate::direct_wasm::component::agent_component(agent_id);
         fs::write(
             target.join(&component.bundle_wasm_filename),
-            component_importing(imports),
+            component_importing_exporting(imports, exports),
         )
         .expect("write component");
         fs::write(
@@ -1308,6 +1366,22 @@ mod tests {
                 "{import}"
             );
         }
+        // Only a component the host executor can run gets control: one that
+        // exports `runtara:control/execution`.
+        let error = resolve_declared_agent_exporting(
+            "control",
+            FixtureDir::Primary,
+            &[runtara_workflow_wit::CONTROL_API_INTERFACE_NAME],
+            &[],
+            true,
+        )
+        .expect_err("a control agent without the execution export gets no control");
+        assert!(
+            error
+                .to_string()
+                .contains(runtara_workflow_wit::CONTROL_API_INTERFACE_NAME),
+            "{error}"
+        );
     }
 
     #[test]

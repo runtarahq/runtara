@@ -647,6 +647,121 @@ pub unsafe fn deserialize_trusted_precompiled_package(
     unsafe { compiled_package::deserialize(engine, success.serialized_component()) }
 }
 
+/// What [`audit_control_importers`] found in a workflow component.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ControlAudit {
+    /// Hex sha256 of every nested component that imports `runtara:control/`,
+    /// over its exact embedded bytes.
+    pub importers: std::collections::BTreeSet<String>,
+    /// Whether the audited component itself imports `runtara:control/`.
+    pub root_imports_control: bool,
+}
+
+/// Whether an export name is an agent interface (so its component is an
+/// agent, not workflow logic).
+fn is_agent_export(name: &str) -> bool {
+    name.contains("/capabilities@")
+        || name.contains("/suspendable@")
+        || name.starts_with(runtara_workflow_wit::CONTROL_INTERFACE_PREFIX)
+}
+
+/// Audit which composed components can reach `runtara:control` (decision D2).
+///
+/// The host cannot tell which composed component made a call, so the bytes of
+/// every nested component that imports `runtara:control/` are hashed here,
+/// before compilation, for the host to compare with its approved history at
+/// load and on every call. Fails closed on what cannot be audited or trusted:
+/// a root that imports a component or core module (its bytes are not here),
+/// and an agent (a component exporting an agent interface) that imports
+/// `runtara:workflow-operation/`, which only compiled workflow logic may bind.
+pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
+    use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
+
+    struct Frame {
+        range: std::ops::Range<usize>,
+        component: bool,
+        control: bool,
+        operation: bool,
+        agent: bool,
+    }
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut nested: Option<std::ops::Range<usize>> = None;
+    let mut audit = ControlAudit::default();
+    for payload in Parser::new(0).parse_all(component) {
+        match payload.context("parse workflow component for the control audit")? {
+            Payload::Version { encoding, .. } => {
+                let range = nested.take().unwrap_or(0..component.len());
+                ensure!(
+                    !frames.is_empty() || encoding == Encoding::Component,
+                    "workflow artifact is not a component"
+                );
+                frames.push(Frame {
+                    range,
+                    component: encoding == Encoding::Component,
+                    control: false,
+                    operation: false,
+                    agent: false,
+                });
+            }
+            Payload::ModuleSection {
+                unchecked_range, ..
+            }
+            | Payload::ComponentSection {
+                unchecked_range, ..
+            } => nested = Some(unchecked_range),
+            Payload::ComponentImportSection(imports) => {
+                let root = frames.len() == 1;
+                let frame = frames.last_mut().context("import outside a component")?;
+                for import in imports {
+                    let import = import?;
+                    let name = import.name.0;
+                    ensure!(
+                        !(root
+                            && matches!(
+                                import.ty,
+                                ComponentTypeRef::Component(_) | ComponentTypeRef::Module(_)
+                            )),
+                        "workflow component imports `{name}` as a component or module, whose \
+                         bytes cannot be audited"
+                    );
+                    frame.control |=
+                        name.starts_with(runtara_workflow_wit::CONTROL_INTERFACE_PREFIX);
+                    frame.operation |= name.starts_with("runtara:workflow-operation/");
+                }
+            }
+            Payload::ComponentExportSection(exports) => {
+                let frame = frames.last_mut().context("export outside a component")?;
+                for export in exports {
+                    frame.agent |= is_agent_export(export?.name.0);
+                }
+            }
+            Payload::End(_) => {
+                let frame = frames.pop().context("unbalanced component nesting")?;
+                if frames.is_empty() {
+                    audit.root_imports_control = frame.control;
+                } else if frame.component {
+                    ensure!(
+                        !(frame.agent && frame.operation),
+                        "a composed agent imports runtara:workflow-operation, which only \
+                         compiled workflow logic may bind"
+                    );
+                    if frame.control {
+                        let bytes = component
+                            .get(frame.range)
+                            .context("nested component range out of bounds")?;
+                        audit
+                            .importers
+                            .insert(format!("{:x}", Sha256::digest(bytes)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ensure!(frames.is_empty(), "truncated workflow component");
+    Ok(audit)
+}
+
 fn read_bounded_artifact(path: &Path) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("open workflow artifact {}", path.display()))?;

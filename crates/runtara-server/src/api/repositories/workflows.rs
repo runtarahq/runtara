@@ -3007,6 +3007,35 @@ mod tests {
         set_installed_trusted_pins(previous);
     }
 
+    /// An artifact is ready only while its control pin is in the approved
+    /// history the server installed beside its trusted pins: a revoked or
+    /// never-approved control version makes it not ready.
+    #[test]
+    fn an_unapproved_control_pin_makes_the_artifact_not_ready() {
+        let _installed = INSTALLED_PINS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = installed_trusted_pins();
+        let control = |digit: char| {
+            runtara_dsl::agent_meta::builtin_artifact_import(
+                runtara_dsl::agent_meta::CONTROL_AGENT_ID,
+                &digit.to_string().repeat(64),
+                &"b".repeat(64),
+            )
+        };
+        set_installed_trusted_pins(["trusted".to_owned(), control('a')]);
+        assert!(trusted_pins_installed(Some(&[control('a')])));
+        assert!(!trusted_pins_installed(Some(&[control('c')])));
+        assert_eq!(
+            uninstalled_trusted_pins(&[control('c')]),
+            vec![control('c')]
+        );
+        // Revoked at the next boot: the approved history no longer has it.
+        set_installed_trusted_pins(["trusted".to_owned()]);
+        assert!(!trusted_pins_installed(Some(&[control('a')])));
+        set_installed_trusted_pins(previous);
+    }
+
     #[test]
     fn stepless_workflow_diagnostic_is_an_authoring_error() {
         // What a user running an unfinished workflow produces. It describes the

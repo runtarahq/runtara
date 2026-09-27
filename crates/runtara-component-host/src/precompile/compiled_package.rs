@@ -18,6 +18,10 @@ pub struct CompiledWorkflowPackage {
     pub artifacts: BTreeMap<String, Component>,
     pub bindings: Vec<Binding>,
     pub invocations: Option<InvocationManifest>,
+    /// Audited composed components of the root that import `runtara:control/`
+    /// (see [`super::audit_control_importers`]). Empty when there are none,
+    /// or when the bytes did not come through the worker.
+    pub control_importers: BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -36,6 +40,9 @@ struct Index {
     bindings: Vec<Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     invocations: Option<InvocationManifest>,
+    /// [`super::ControlAudit::importers`] of the root.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    control_importers: BTreeSet<String>,
 }
 
 pub(super) fn is_bundle(bytes: &[u8]) -> bool {
@@ -51,39 +58,76 @@ pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
         artifacts: MAX_PRECOMPILE_COMPONENT_BYTES / 8,
         bindings: MAX_PRECOMPILE_COMPONENT_BYTES / 8,
     };
-    let Some(package) = parse(source, limits)? else {
-        return engine
+    let package = parse(source, limits)?;
+    // The control audit reads source bytes, which only this worker has; the
+    // native index carries its result to the host (decision D2).
+    let audit = super::audit_control_importers(package.as_ref().map_or(source, |p| p.root))?;
+    let Some(package) = package else {
+        let root = engine
             .precompile_component(source)
-            .map_err(|error| anyhow::anyhow!("precompile workflow component: {error:#}"));
+            .map_err(|error| anyhow::anyhow!("precompile workflow component: {error:#}"))?;
+        if audit.importers.is_empty() {
+            return Ok(root);
+        }
+        return encode(root, Vec::new(), Vec::new(), None, audit.importers);
     };
-    let root = engine.precompile_component(package.root)?;
+    let mut members = Vec::new();
+    for (digest, source) in package.artifacts() {
+        let child = super::audit_control_importers(source)?;
+        ensure!(
+            child.importers.is_empty() && !child.root_imports_control,
+            "an isolated dependency imports runtara:control"
+        );
+        members.push((digest.clone(), engine.precompile_component(source)?));
+    }
+    encode(
+        engine.precompile_component(package.root)?,
+        members,
+        package.bindings().values().cloned().collect(),
+        package.invocations().cloned(),
+        audit.importers,
+    )
+}
+
+fn encode(
+    root: Vec<u8>,
+    members: Vec<(String, Vec<u8>)>,
+    bindings: Vec<Binding>,
+    invocations: Option<InvocationManifest>,
+    control_importers: BTreeSet<String>,
+) -> Result<Vec<u8>> {
     let root_length = root.len();
     ensure!(
         root_length <= MAX_PRECOMPILED_COMPONENT_BYTES,
         "precompiled root exceeds output limit"
     );
     let mut offset = root_length;
-    let mut members = Vec::new();
+    let mut index_members = Vec::new();
     let mut bodies = vec![root];
-    for (digest, source) in package.artifacts() {
-        let body = engine.precompile_component(source)?;
+    for (digest, body) in members {
         let end = offset
             .checked_add(body.len())
             .filter(|end| *end <= MAX_PRECOMPILED_COMPONENT_BYTES)
             .ok_or_else(|| anyhow::anyhow!("precompiled package exceeds output limit"))?;
-        members.push(Member {
-            digest: digest.clone(),
+        index_members.push(Member {
+            digest,
             offset,
             length: body.len(),
         });
         bodies.push(body);
         offset = end;
     }
+    let magic = if invocations.is_some() {
+        MAGIC_V2
+    } else {
+        MAGIC
+    };
     let index = serde_json::to_vec(&Index {
         root_length,
-        members,
-        bindings: package.bindings().values().cloned().collect(),
-        invocations: package.invocations().cloned(),
+        members: index_members,
+        bindings,
+        invocations,
+        control_importers,
     })?;
     ensure!(
         index.len() <= MAX_PRECOMPILE_COMPONENT_BYTES,
@@ -95,11 +139,7 @@ pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
         .filter(|n| *n <= MAX_PRECOMPILED_COMPONENT_BYTES)
         .ok_or_else(|| anyhow::anyhow!("precompiled package frame exceeds output limit"))?;
     let mut encoded = Vec::with_capacity(total);
-    encoded.extend_from_slice(if package.invocations().is_some() {
-        MAGIC_V2
-    } else {
-        MAGIC
-    });
+    encoded.extend_from_slice(magic);
     encoded.extend_from_slice(&u32::try_from(index.len())?.to_le_bytes());
     encoded.extend_from_slice(&index);
     for body in bodies {
@@ -113,6 +153,7 @@ struct View<'a> {
     members: BTreeMap<String, &'a [u8]>,
     bindings: Vec<Binding>,
     invocations: Option<InvocationManifest>,
+    control_importers: BTreeSet<String>,
 }
 
 fn decode(bytes: &[u8]) -> Result<View<'_>> {
@@ -202,6 +243,7 @@ fn decode(bytes: &[u8]) -> Result<View<'_>> {
         members,
         bindings: index.bindings,
         invocations: index.invocations,
+        control_importers: index.control_importers,
     })
 }
 
@@ -214,6 +256,7 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
             artifacts: BTreeMap::new(),
             bindings: Vec::new(),
             invocations: None,
+            control_importers: BTreeSet::new(),
         });
     }
     let view = decode(bytes)?;
@@ -229,6 +272,7 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
         artifacts,
         bindings: view.bindings,
         invocations: view.invocations,
+        control_importers: view.control_importers,
     })
 }
 

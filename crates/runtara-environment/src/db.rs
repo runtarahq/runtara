@@ -145,7 +145,7 @@ pub fn escape_like_literal(value: &str) -> String {
 }
 
 /// One predicate builder for both the page and its unpaged count.
-fn push_instance_filters(
+pub(crate) fn push_instance_filters(
     query: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     options: &ListInstancesOptions,
 ) {

@@ -92,6 +92,8 @@ pub struct ComponentDispatcherService {
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     engine: Arc<Engine>,
     trusted: Arc<crate::trusted::TrustedExecutor>,
+    /// Host executor over this bundle's control agent bytes, when present.
+    control: Option<Arc<crate::control_executor::ControlExecutor>>,
     agents: HashMap<String, Arc<LoadedAgent>>,
     /// Snapshot of every loaded agent's metadata. Shared (`Arc`) so the
     /// server-side `AgentsService` + workflow validation paths can hold the
@@ -142,6 +144,7 @@ impl ComponentDispatcherService {
         let linker = build_linker(&engine)?;
 
         let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
+        let mut control = None;
         let mut agents = HashMap::new();
         let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
 
@@ -199,6 +202,14 @@ impl ComponentDispatcherService {
 
             let bytes = std::fs::read(&path)?;
             trusted.register(&info, &bytes, &meta_bytes)?;
+            if agent_id == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
+                // The very bytes loaded here are the ones hashed and run.
+                control = Some(Arc::new(crate::control_executor::ControlExecutor::new(
+                    Arc::clone(&engine),
+                    &bytes,
+                    &meta_bytes,
+                )?));
+            }
             let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 
             agent_info.insert(agent_id.clone(), info);
@@ -220,6 +231,7 @@ impl ComponentDispatcherService {
 
         Ok(Self {
             trusted: Arc::new(trusted),
+            control,
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
@@ -244,6 +256,12 @@ impl ComponentDispatcherService {
     /// Executor backed only by this operator-installed built-in bundle.
     pub fn trusted_executor(&self) -> Arc<crate::trusted::TrustedExecutor> {
         Arc::clone(&self.trusted)
+    }
+
+    /// Host executor over this bundle's control agent, when it ships one.
+    /// The embedding installs its approved history and control service.
+    pub fn control_executor(&self) -> Option<Arc<crate::control_executor::ControlExecutor>> {
+        self.control.clone()
     }
 
     /// All loaded agent ids.
@@ -296,6 +314,10 @@ impl ComponentDispatcherService {
             );
         }
         let input_bytes = serde_json::to_vec(&input_value)?;
+
+        if canonical_agent_id(&req.agent_id) == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
+            return self.test_control(&req, input_bytes).await;
+        }
 
         let ctx = Arc::new(CallContext::for_test(&req.tenant_id));
         // Capture the same active deadline that protects the component call.
@@ -391,6 +413,78 @@ impl ComponentDispatcherService {
                     retryable: e.retryable,
                 }),
                 execution_time_ms: elapsed_ms,
+            },
+        })
+    }
+}
+
+impl ComponentDispatcherService {
+    /// A test invocation of a control capability runs on the host control
+    /// executor, never on the plain agent instance (whose `api` is `denied`).
+    /// It has the tenant but no calling instance or operation, so reads work
+    /// tenant-wide while identity calls and caller-relative filters answer
+    /// `requires-instance`; a suspension cannot be kept here.
+    async fn test_control(
+        &self,
+        req: &TestCapabilityRequest,
+        input: Vec<u8>,
+    ) -> Result<TestResult> {
+        let started = Instant::now();
+        let result = match &self.control {
+            Some(executor) => {
+                executor
+                    .invoke(
+                        crate::control_host::ControlAuthority {
+                            tenant: req.tenant_id.clone(),
+                            caller: None,
+                            operation: None,
+                        },
+                        &req.capability_id,
+                        input,
+                        None,
+                        tokio::time::Instant::now() + self.test_timeout,
+                    )
+                    .await
+            }
+            None => Err(crate::control_host::denied_error_info(
+                "this bundle has no control agent",
+            )),
+        };
+        let execution_time_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let error = |e: ErrorInfo| TestError {
+            code: e.code,
+            message: e.message,
+            category: e.category,
+            severity: e.severity,
+            retryable: e.retryable,
+        };
+        Ok(match result {
+            Ok(crate::operation_scope_host::SuspendableOutcome::Completed(output)) => TestResult {
+                success: true,
+                output: serde_json::from_slice(&output).ok(),
+                error: None,
+                execution_time_ms,
+            },
+            Ok(crate::operation_scope_host::SuspendableOutcome::Suspended(_)) => TestResult {
+                success: false,
+                output: None,
+                error: Some(TestError {
+                    code: runtara_agent_suspension::SUSPENSION_UNSUPPORTED.into(),
+                    message: format!(
+                        "{} suspends and can only run as a durable workflow step",
+                        req.capability_id
+                    ),
+                    category: "permanent".into(),
+                    severity: "error".into(),
+                    retryable: false,
+                }),
+                execution_time_ms,
+            },
+            Err(e) => TestResult {
+                success: false,
+                output: None,
+                error: Some(error(e)),
+                execution_time_ms,
             },
         })
     }

@@ -1,0 +1,393 @@
+#!/bin/bash
+# E2E Test: the control agent on an isolated live server.
+#
+# Stages (select with STAGES, a comma-separated list; default: every stage
+# this build implements):
+#
+#   1  READS    a workflow calls control:get, control:query and
+#              control:list-pending-signals on other runs of the tenant and
+#              gets their state, output and open requests; failures carry
+#              CONTROL_* codes. The control bytes are pinned and approved at
+#              boot; after an operator revokes that approval and the server
+#              restarts, control calls are denied and the pinned workflow no
+#              longer becomes ready.
+#
+# Later stages (mutations, start, ownership, waits) are added by their slices.
+#
+# Usage:  STAGES=1 ./e2e/test_control_agent.sh
+#
+# Prereqs: Postgres + docker (isolated Valkey), a built runtara-server, and
+# prebuilt components (scripts/build-agent-components.sh).
+
+set -euo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+print_step()    { echo -e "${GREEN}[STEP]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+STAGES="${STAGES:-1}"
+IMPLEMENTED_STAGES="1"
+for stage in ${STAGES//,/ }; do
+    case ",${IMPLEMENTED_STAGES}," in
+        *",${stage},"*) ;;
+        *) print_error "Stage ${stage} is not implemented yet (implemented: ${IMPLEMENTED_STAGES})"; exit 2 ;;
+    esac
+done
+stage_enabled() { case ",${STAGES}," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+
+POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+POSTGRES_USER="${POSTGRES_USER:-smo_worker}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD-GueUkDKea0CjKP4Rn5Bk0FDV}"
+
+TEST_DB_SERVER="${TEST_DB_SERVER:-control_e2e_server_$$}"
+TEST_DB_RUNTIME="${TEST_DB_RUNTIME:-control_e2e_runtime_$$}"
+TEST_PORT_PUBLIC="${TEST_PORT_PUBLIC:-17750}"
+TEST_CORE_PORT="${TEST_CORE_PORT:-18751}"
+TEST_ENV_PORT="${TEST_ENV_PORT:-18752}"
+TEST_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT:-18753}"
+TEST_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT:-18754}"
+TEST_VALKEY_PORT="${TEST_VALKEY_PORT:-16395}"
+TEST_DATA_DIR="$(mktemp -d -t runtara_control_e2e_XXXXXX)"
+TEST_LOG="${TEST_DATA_DIR}/server.log"
+BUNDLE_DIR="${TEST_DATA_DIR}/components"
+SERVER_PID=""
+VALKEY_CONTAINER=""
+TENANT="control_e2e_$$"
+
+RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${PROJECT_ROOT}/target/debug/runtara-server}"
+COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
+SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
+
+if [ -n "${POSTGRES_PASSWORD}" ]; then
+    CREDENTIALS="${POSTGRES_USER}:${POSTGRES_PASSWORD}"
+else
+    CREDENTIALS="${POSTGRES_USER}"
+fi
+SERVER_DB_URL="postgresql://${CREDENTIALS}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+RUNTIME_DB_URL="postgresql://${CREDENTIALS}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}"
+API="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/runtime"
+
+psql_quiet() {
+    PGPASSWORD="${POSTGRES_PASSWORD}" psql -X -U "${POSTGRES_USER}" -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -tA "$@"
+}
+api_post() {
+    curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"
+}
+
+stop_server() {
+    if [ -n "${SERVER_PID}" ]; then
+        kill "${SERVER_PID}" 2>/dev/null || true
+        wait "${SERVER_PID}" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+}
+
+cleanup() {
+    local code=$?
+    stop_server
+    [ -n "${VALKEY_CONTAINER}" ] && docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
+    psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER} WITH (FORCE)" >/dev/null 2>&1 || true
+    psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME} WITH (FORCE)" >/dev/null 2>&1 || true
+    [ ${code} -ne 0 ] && [ -f "${TEST_LOG}" ] && { echo "--- server log tail ---"; tail -60 "${TEST_LOG}"; }
+    rm -rf "${TEST_DATA_DIR}"
+    exit ${code}
+}
+trap cleanup EXIT
+
+start_server() {
+    (
+        # dotenvy walks parent directories; start outside the repository.
+        cd "${TEST_DATA_DIR}"
+        RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
+        OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
+        RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
+        TENANT_ID="${TENANT}" \
+        SERVER_HOST=127.0.0.1 \
+        SERVER_PORT="${TEST_PORT_PUBLIC}" \
+        RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
+        RUNTARA_ENVIRONMENT_PORT="${TEST_ENV_PORT}" \
+        RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
+        RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
+        RUNTARA_AGENT_COMPONENTS_DIR="${BUNDLE_DIR}" \
+        DATA_DIR="${TEST_DATA_DIR}" \
+        RUNTARA_DEV_MODE=false \
+        RUST_LOG="${RUST_LOG_OVERRIDE:-warn,runtara_server=info,runtara_environment=info,runtara_component_host=info}" \
+        AUTH_PROVIDER=local \
+        VALKEY_HOST=127.0.0.1 \
+        VALKEY_PORT="${TEST_VALKEY_PORT}" \
+        OTEL_SDK_DISABLED=true \
+        SQLX_OFFLINE="${SQLX_OFFLINE}" \
+        exec "${RUNTARA_SERVER_BIN}"
+    ) >>"${TEST_LOG}" 2>&1 &
+    SERVER_PID=$!
+
+    for _ in {1..90}; do
+        if curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2"; then
+            return 0
+        fi
+        sleep 1
+        if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            print_error "Server exited during boot."; exit 1
+        fi
+    done
+    print_error "Server did not become healthy."; exit 1
+}
+
+instance_status() { curl -sS "${API}/workflows/instances/$1" | jq -r '.data.status // .status // empty'; }
+instance_row() {
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT COALESCE(status::text,''), COALESCE(convert_from(output, 'UTF8'),''), COALESCE(error,'') FROM instances WHERE instance_id = '$1'"
+}
+instance_output() {
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT COALESCE(convert_from(output, 'UTF8'),'null') FROM instances WHERE instance_id = '$1'"
+}
+compiled_pins() {
+    psql_quiet -d "${TEST_DB_SERVER}" -c \
+        "SELECT COALESCE(array_to_string(trusted_pins, ','),'') FROM workflow_compilations
+         WHERE tenant_id = '${TENANT}' AND workflow_id = '$1' AND version = $2"
+}
+request_state() {
+    psql_quiet -d "${TEST_DB_SERVER}" -c \
+        "SELECT state || '|' || COALESCE(terminal_reason, '') FROM execution_requests WHERE tenant_id = '${TENANT}' AND instance_id = '$1'"
+}
+
+wait_status() {
+    local id="$1" want="$2" limit="$3" st deadline
+    deadline=$(( $(date +%s) + limit ))
+    while [ "$(date +%s)" -lt "${deadline}" ]; do
+        st=$(instance_status "${id}")
+        case "${st}" in "${want}") echo "${st}"; return 0 ;; completed|failed|cancelled) echo "${st}"; return 0 ;; esac
+        sleep 1
+    done
+    echo "timeout"
+}
+
+# Create a workflow, save `graph`, compile it, and echo "id version".
+make_workflow() {
+    local name="$1" graph="$2" resp wf_id version
+    resp=$(api_post /workflows/create "{\"name\": \"${name}\", \"description\": \"control e2e\"}")
+    wf_id=$(echo "${resp}" | jq -r '.data.id // empty')
+    [ -n "${wf_id}" ] || { print_error "Workflow create failed: ${resp}"; exit 1; }
+    resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${graph}}")
+    [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Update failed: ${resp}"; exit 1; }
+    version=$(curl -sS "${API}/workflows/${wf_id}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+    resp=$(api_post "/workflows/${wf_id}/versions/${version}/compile" '{}' 900)
+    [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Compile of ${name} failed: ${resp}"; exit 1; }
+    echo "${wf_id} ${version}"
+}
+
+# Launch with `data`, retrying while the version is (re)compiling.
+launch() {
+    local wf_id="$1" data="${2:-}" resp id
+    [ -n "${data}" ] || data='{}'
+    for _ in {1..90}; do
+        resp=$(api_post "/workflows/${wf_id}/execute" "{\"inputs\": {\"data\": ${data}, \"variables\": {}}}")
+        id=$(echo "${resp}" | jq -r '.data.instanceId // empty')
+        if [ -n "${id}" ]; then echo "${id}"; return 0; fi
+        sleep 2
+    done
+    print_error "Execute never launched: ${resp}"; exit 1
+}
+
+# test_capability of the control agent; echoes the response.
+test_control() {
+    api_post "/agents/control/capabilities/$1/test" "{\"input\": $2}"
+}
+# The test endpoint reports errors as "CODE: message".
+error_code() { jq -r '(.error // "") | split(":") | first'; }
+
+control_step() {
+    jq -n --arg id "$1" --arg cap "$2" --argjson mapping "$3" '{
+        id: $id, stepType: "Agent", agentId: "control", capabilityId: $cap,
+        maxRetries: 0, inputMapping: $mapping
+    }'
+}
+
+echo "==============================================================="
+echo "E2E: control agent (stages: ${STAGES})"
+echo "==============================================================="
+
+[ -x "${RUNTARA_SERVER_BIN}" ] || { print_error "Missing server bin ${RUNTARA_SERVER_BIN} (cargo build -p runtara-server --bin runtara-server)"; exit 1; }
+[ -f "${COMPONENTS_DIR}/runtara_agent_control.wasm" ] || { print_error "Missing control component — run scripts/build-agent-components.sh"; exit 1; }
+psql_quiet -d postgres -c "SELECT 1" >/dev/null 2>&1 || { print_error "Cannot reach Postgres at ${POSTGRES_HOST}:${POSTGRES_PORT}"; exit 1; }
+docker info >/dev/null 2>&1 || { print_error "docker required (isolated Valkey)"; exit 1; }
+
+print_step "Staging a private component bundle..."
+mkdir -p "${BUNDLE_DIR}"
+cp "${COMPONENTS_DIR}"/*.wasm "${COMPONENTS_DIR}"/*.meta.json "${BUNDLE_DIR}/"
+
+print_step "Starting isolated Valkey on :${TEST_VALKEY_PORT}..."
+VALKEY_CONTAINER=$(docker run -d --rm -p "${TEST_VALKEY_PORT}:6379" valkey/valkey:8-alpine)
+for _ in {1..20}; do (echo > /dev/tcp/127.0.0.1/${TEST_VALKEY_PORT}) 2>/dev/null && break; sleep 0.5; done
+
+print_step "Creating databases..."
+psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
+psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
+
+print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
+start_server
+
+if stage_enabled 1; then
+    # -----------------------------------------------------------------------
+    # Stage 1: reads.
+    # -----------------------------------------------------------------------
+    print_step "Stage 1: boot approved the installed control bytes..."
+    APPROVED=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT pin FROM approved_builtin_artifacts WHERE agent_id = 'control' AND revoked_at IS NULL")
+    case "${APPROVED}" in runtara:builtin-artifacts/control-h*) ;; *) print_error "No approved control pin: '${APPROVED}'"; exit 1 ;; esac
+    echo "  approved: ${APPROVED}"
+
+    print_step "Creating the runs control will read..."
+    DONE_GRAPH=$(jq -n '{
+        name: "control-done", durable: true, entryPoint: "finish",
+        steps: { finish: { id: "finish", stepType: "Finish",
+                           inputMapping: { total: { valueType: "immediate", value: 42 } } } },
+        executionPlan: [], variables: {}, inputSchema: {}, outputSchema: {}
+    }')
+    read -r DONE_WF _ <<< "$(make_workflow control-done "${DONE_GRAPH}")"
+    DONE=$(launch "${DONE_WF}")
+    [ "$(wait_status "${DONE}" completed 120)" = "completed" ] || { print_error "Target run did not complete: $(instance_row "${DONE}")"; exit 1; }
+
+    WAIT_GRAPH=$(jq -n '{
+        name: "control-waiting", durable: true, entryPoint: "approve",
+        steps: { approve: { id: "approve", stepType: "WaitForSignal", name: "Approve",
+                            pollIntervalMs: 500,
+                            responseSchema: { approved: { type: "boolean", required: true } },
+                            action: { key: "finance" } },
+                 finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [ { fromStep: "approve", toStep: "finish" } ],
+        variables: {}, inputSchema: {}, outputSchema: {}
+    }')
+    read -r WAIT_WF _ <<< "$(make_workflow control-waiting "${WAIT_GRAPH}")"
+    WAITING=$(launch "${WAIT_WF}")
+    [ "$(wait_status "${WAITING}" suspended 120)" = "suspended" ] || { print_error "Waiting run did not park: $(instance_row "${WAITING}")"; exit 1; }
+    echo "  done=${DONE} waiting=${WAITING}"
+
+    print_step "A workflow reads both runs through control..."
+    GET_STEP=$(control_step get get '{"instanceId": {"valueType": "reference", "value": "data.done"}}')
+    QUERY_STEP=$(control_step query query '{
+        "workflowId": {"valueType": "reference", "value": "data.doneWorkflow"},
+        "statuses": {"valueType": "immediate", "value": ["completed"]},
+        "pageSize": {"valueType": "immediate", "value": 10}}')
+    SIGNALS_STEP=$(control_step signals list-pending-signals \
+        '{"instanceId": {"valueType": "reference", "value": "data.waiting"}}')
+    READER_GRAPH=$(jq -n --argjson get "${GET_STEP}" --argjson query "${QUERY_STEP}" \
+        --argjson signals "${SIGNALS_STEP}" \
+        '{
+            name: "control-reader", durable: true, entryPoint: "get",
+            steps: { get: $get, query: $query, signals: $signals,
+                     finish: { id: "finish", stepType: "Finish", inputMapping: {
+                         get: { valueType: "reference", value: "steps.get.outputs" },
+                         query: { valueType: "reference", value: "steps.query.outputs" },
+                         signals: { valueType: "reference", value: "steps.signals.outputs" } } } },
+            executionPlan: [ { fromStep: "get", toStep: "query" }, { fromStep: "query", toStep: "signals" },
+                             { fromStep: "signals", toStep: "finish" } ],
+            variables: {}, outputSchema: {},
+            inputSchema: { done: { type: "string", required: true },
+                           doneWorkflow: { type: "string", required: true },
+                           waiting: { type: "string", required: true } }
+        }')
+    read -r READER_WF READER_V <<< "$(make_workflow control-reader "${READER_GRAPH}")"
+    PINS=$(compiled_pins "${READER_WF}" "${READER_V}")
+    echo "${PINS}" | grep -q "${APPROVED}" || { print_error "The reader does not record the approved control pin: ${PINS}"; exit 1; }
+    DATA=$(jq -nc --arg done "${DONE}" --arg wf "${DONE_WF}" --arg waiting "${WAITING}" \
+        '{done: $done, doneWorkflow: $wf, waiting: $waiting}')
+    READER=$(launch "${READER_WF}" "${DATA}")
+    [ "$(wait_status "${READER}" completed 120)" = "completed" ] || { print_error "Reader failed: $(instance_row "${READER}")"; exit 1; }
+    OUT=$(instance_output "${READER}")
+    echo "  output: $(echo "${OUT}" | head -c 600)"
+    [ "$(echo "${OUT}" | jq -r '.get.instance.status')" = "completed" ] || { print_error "get status wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.get.instance.instanceId')" = "${DONE}" ] || { print_error "get read another run"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.get.instance.workflowId')" = "${DONE_WF}" ] || { print_error "get workflowId wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -c '.get.output')" = '{"total":42}' ] || { print_error "get output wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.query.total')" = "1" ] || { print_error "query total wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.query.items[0].instanceId')" = "${DONE}" ] || { print_error "query item wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.signals.items | length')" = "1" ] || { print_error "expected one pending signal"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.signals.items[0].signalId')" = "approve" ] || { print_error "signalId wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.signals.items[0].actionKey')" = "finance" ] || { print_error "actionKey wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.signals.items[0].instanceId')" = "${WAITING}" ] || { print_error "signal instance wrong"; exit 1; }
+    print_success "get, query and list-pending-signals read other runs of the tenant ✓"
+
+    print_step "Failures carry CONTROL_* codes..."
+    PROBE_STEP=$(control_step get get '{"instanceId": {"valueType": "reference", "value": "data.target"}}')
+    PROBE_GRAPH=$(jq -n --argjson get "${PROBE_STEP}" \
+        '{
+            name: "control-probe", durable: true, entryPoint: "get",
+            steps: { get: $get, finish: { id: "finish", stepType: "Finish" } },
+            executionPlan: [ { fromStep: "get", toStep: "finish" } ],
+            variables: {}, outputSchema: {},
+            inputSchema: { target: { type: "string", required: true } }
+        }')
+    read -r PROBE_WF _ <<< "$(make_workflow control-probe "${PROBE_GRAPH}")"
+    PROBE=$(launch "${PROBE_WF}" '{"target": "no-such-run"}')
+    [ "$(wait_status "${PROBE}" failed 120)" = "failed" ] || { print_error "Missing target should fail: $(instance_row "${PROBE}")"; exit 1; }
+    instance_row "${PROBE}" | grep -q "CONTROL_NOT_FOUND" || { print_error "Expected CONTROL_NOT_FOUND: $(instance_row "${PROBE}")"; exit 1; }
+    QUERY_PROBE_STEP=$(control_step query query '{
+        "pageSize": {"valueType": "reference", "value": "data.pageSize"},
+        "callerChildren": {"valueType": "reference", "value": "data.callerChildren"}}')
+    QUERY_GRAPH=$(jq -n --argjson query "${QUERY_PROBE_STEP}" \
+        '{
+            name: "control-query-probe", durable: true, entryPoint: "query",
+            steps: { query: $query, finish: { id: "finish", stepType: "Finish" } },
+            executionPlan: [ { fromStep: "query", toStep: "finish" } ],
+            variables: {}, outputSchema: {},
+            inputSchema: { pageSize: { type: "integer", required: true },
+                           callerChildren: { type: "boolean", required: true } }
+        }')
+    read -r QUERY_WF _ <<< "$(make_workflow control-query-probe "${QUERY_GRAPH}")"
+    for probe in '{"pageSize": 101, "callerChildren": false}|CONTROL_INVALID' \
+                 '{"pageSize": 10, "callerChildren": true}|CONTROL_UNSUPPORTED'; do
+        data="${probe%%|*}"; want="${probe##*|}"
+        RUN=$(launch "${QUERY_WF}" "${data}")
+        [ "$(wait_status "${RUN}" failed 120)" = "failed" ] || { print_error "${data} should fail: $(instance_row "${RUN}")"; exit 1; }
+        instance_row "${RUN}" | grep -q "${want}" || { print_error "Expected ${want}: $(instance_row "${RUN}")"; exit 1; }
+    done
+    CODE=$(test_control query '{"callerChildren": true}' | error_code)
+    [ "${CODE}" = "CONTROL_REQUIRES_INSTANCE" ] || { print_error "Test invocation without a run: expected CONTROL_REQUIRES_INSTANCE, got '${CODE}'"; exit 1; }
+    RESP=$(test_control get "{\"instanceId\": \"${DONE}\"}")
+    echo "${RESP}" | grep -q '"total":42' || { print_error "Tenant-scoped test read failed: ${RESP}"; exit 1; }
+    print_success "NOT_FOUND, INVALID and UNSUPPORTED from runs; REQUIRES_INSTANCE from a test invocation ✓"
+
+    print_step "Revoking the approved control digest and restarting..."
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "UPDATE approved_builtin_artifacts SET revoked_at = now(), revoked_reason = 'e2e' WHERE pin = '${APPROVED}'" >/dev/null
+    stop_server
+    start_server
+    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts WHERE pin = '${APPROVED}' AND revoked_at IS NOT NULL")" = "1" ] \
+        || { print_error "Boot undid the revocation"; exit 1; }
+    CODE=$(test_control get "{\"instanceId\": \"${DONE}\"}" | error_code)
+    [ "${CODE}" = "CONTROL_DENIED" ] || { print_error "Revoked control should be denied, got '${CODE}'"; exit 1; }
+    RESP=$(api_post "/workflows/${READER_WF}/execute" "{\"inputs\": {\"data\": ${DATA}, \"variables\": {}}}")
+    INST=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+    if [ -n "${INST}" ]; then
+        ST=""
+        for _ in {1..60}; do
+            ST=$(request_state "${INST}")
+            case "${ST}" in terminal*) break ;; esac
+            case "$(instance_status "${INST}")" in completed) print_error "A revoked control artifact ran to completion"; exit 1 ;; failed) ST="failed"; break ;; esac
+            sleep 2
+        done
+        case "${ST}" in terminal*|failed) ;; *) print_error "The pinned reader should not run after revocation, got '${ST}'"; exit 1 ;; esac
+        echo "  reader launch after revocation: ${ST}"
+        [ -z "$(instance_row "${INST}")" ] || { print_error "A run started on a revoked control artifact: $(instance_row "${INST}")"; exit 1; }
+    else
+        echo "  reader launch refused: $(echo "${RESP}" | head -c 300)"
+    fi
+    # Not ready: the recompile pins the same revoked bytes, and that is recorded
+    # as a terminal failure carrying the pin.
+    COMPILED=$(psql_quiet -d "${TEST_DB_SERVER}" -c \
+        "SELECT compilation_status || '|' || COALESCE(array_to_string(trusted_pins, ','),'')
+         FROM workflow_compilations WHERE tenant_id = '${TENANT}' AND workflow_id = '${READER_WF}' AND version = ${READER_V}")
+    echo "  reader compilation: $(echo "${COMPILED}" | cut -c1-120)"
+    case "${COMPILED}" in failed*"${APPROVED}"*) ;; *) print_error "The revoked pin should leave the reader not ready: ${COMPILED}"; exit 1 ;; esac
+    print_success "Revoked digest: control calls denied, the pinned workflow no longer runs ✓"
+fi
+
+echo
+print_success "Control agent stages ${STAGES} passed."

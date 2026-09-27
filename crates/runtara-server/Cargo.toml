@@ -29,7 +29,9 @@ path = "src/bin/dump_openapi.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
-component-integration-tests = []
+# The composed control test drives the environment runner with its
+# in-process test precompiler.
+component-integration-tests = ["runtara-environment/db-integration-tests"]
 valkey-integration-tests = []
 valkey-tls-integration-tests = ["valkey-integration-tests"]
 
@@ -61,6 +63,16 @@ required-features = ["db-integration-tests"]
 name = "managed_actions"
 path = "tests/managed_actions.rs"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "control_service"
+path = "tests/control_service.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "control_component"
+path = "tests/control_component.rs"
+required-features = ["db-integration-tests", "component-integration-tests"]
 
 [[test]]
 name = "report_input_retries"
@@ -133,6 +145,7 @@ runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }
+runtara-control-contract = { path = "../runtara-control-contract" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }

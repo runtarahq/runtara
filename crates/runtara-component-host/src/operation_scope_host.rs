@@ -111,6 +111,17 @@ impl OperationScopeState {
     pub(crate) fn registered_waits(&self) -> &[String] {
         &self.registered_waits
     }
+
+    /// Record the instance waits of `wakes`, once each.
+    pub(crate) fn record_waits(&mut self, wakes: &[SuspensionWake]) {
+        for wake in wakes {
+            if let SuspensionWake::Instances(id) = wake
+                && !self.registered_waits.contains(id)
+            {
+                self.registered_waits.push(id.clone());
+            }
+        }
+    }
 }
 
 /// `op_hash` of a call site: hex sha256 of its canonical checkpoint key.
@@ -229,12 +240,7 @@ pub(crate) fn add_operation_scope_to_linker(
                 }
                 let data = store.data_mut();
                 data.operation.current = None;
-                data.operation
-                    .registered_waits
-                    .extend(wakes.into_iter().filter_map(|wake| match wake {
-                        SuspensionWake::Instances(id) => Some(id),
-                        SuspensionWake::At(_) => None,
-                    }));
+                data.operation.record_waits(&wakes);
                 Ok((Ok(()),))
             })
         },

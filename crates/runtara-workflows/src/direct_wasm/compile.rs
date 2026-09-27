@@ -64,7 +64,9 @@ mod step_context;
 mod step_error;
 mod switch_route;
 mod trusted;
-pub use trusted::{bundled_trusted_pin, staged_dependency_is_stale, trusted_artifact_pins};
+pub use trusted::{
+    bundled_builtin_pin, bundled_trusted_pin, staged_dependency_is_stale, trusted_artifact_pins,
+};
 mod wait;
 mod while_loop;
 

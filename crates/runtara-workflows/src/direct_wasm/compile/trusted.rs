@@ -33,8 +33,36 @@ pub(super) fn pin_trusted_dependencies(
         // version requirements explicitly before appending the child package.
         let component_bytes = std::fs::read(&dep.wasm_path)?;
         for pin in artifact_pins(&component_bytes)? {
+            if pin.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX) {
+                return Err(DirectCompileError::Component(format!(
+                    "agent `{agent_id}` carries a built-in artifact pin; only the root may"
+                )));
+            }
             require_bundled_trusted_version(components_dir, agent_id, &dep.wasm_path, &pin)?;
             pins.insert(pin);
+        }
+        // The host runs control only for the exact control bytes a workflow
+        // composed, from the primary components dir (decision D2).
+        if runtara_dsl::agent_meta::canonical_agent_id(agent_id)
+            == runtara_dsl::agent_meta::CONTROL_AGENT_ID
+        {
+            let artifact = dep.metadata.wasm.as_ref().ok_or_else(|| {
+                DirectCompileError::Component("missing control artifact identity".into())
+            })?;
+            if dep.wasm_path.parent() != Some(components_dir)
+                || super::sha256_hex(&component_bytes) != artifact.sha256
+            {
+                return Err(DirectCompileError::Component(
+                    "the control agent must be the one in the components dir, unchanged during \
+                     composition"
+                        .into(),
+                ));
+            }
+            pins.insert(runtara_dsl::agent_meta::builtin_artifact_import(
+                agent_id,
+                &artifact.sha256,
+                &meta.file.sha256,
+            ));
         }
         let info: serde_json::Value = serde_json::from_slice(&bytes)?;
         if info
@@ -143,8 +171,23 @@ pub fn bundled_trusted_pin(components_dir: &std::path::Path, agent: &str) -> Opt
     ))
 }
 
-/// The approved trusted built-in versions an artifact pins: its top-level
-/// `runtara:trusted-artifacts/*` imports. An isolated package's catalog is a
+/// The `runtara:builtin-artifacts/*` pin of host-executed built-in `agent`
+/// (the control agent) in `components_dir`, or `None` when the bundle does
+/// not ship it. This is the pin a workflow compiled against that bundle
+/// records, and the one a server approves at boot.
+pub fn bundled_builtin_pin(components_dir: &std::path::Path, agent: &str) -> Option<String> {
+    let component = crate::direct_wasm::component::agent_component(agent);
+    let wasm = std::fs::read(components_dir.join(&component.bundle_wasm_filename)).ok()?;
+    let meta = std::fs::read(components_dir.join(&component.bundle_meta_filename)).ok()?;
+    Some(runtara_dsl::agent_meta::builtin_artifact_import(
+        agent,
+        &super::sha256_hex(&wasm),
+        &super::sha256_hex(&meta),
+    ))
+}
+
+/// The approved built-in versions an artifact pins: its top-level
+/// `runtara:trusted-artifacts/*` and `runtara:builtin-artifacts/*` imports. An isolated package's catalog is a
 /// trailing custom section, so the root's pins are read the same way.
 pub fn trusted_artifact_pins(
     wasm: &[u8],
@@ -172,7 +215,12 @@ fn artifact_pins(wasm: &[u8]) -> Result<std::collections::BTreeSet<String>, Dire
                 for import in imports {
                     let import =
                         import.map_err(|e| DirectCompileError::Component(e.to_string()))?;
-                    if import.name.0.starts_with("runtara:trusted-artifacts/") {
+                    if import.name.0.starts_with("runtara:trusted-artifacts/")
+                        || import
+                            .name
+                            .0
+                            .starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX)
+                    {
                         pins.insert(import.name.0.to_owned());
                     }
                 }

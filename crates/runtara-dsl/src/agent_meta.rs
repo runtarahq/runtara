@@ -3120,9 +3120,33 @@ pub fn trusted_artifact_import_agent_id(import: &str) -> Option<&str> {
     parse_trusted_artifact_import(import).map(|(agent, _)| agent)
 }
 
+/// Prefix of every [`builtin_artifact_import`] name.
+pub const BUILTIN_ARTIFACTS_PREFIX: &str = "runtara:builtin-artifacts/";
+
+/// Content-bound import that pins the exact built-in bytes a workflow composed
+/// for a host-executed built-in (the control agent). The host runs a call only
+/// while this pin, and every composed copy it audited, is in its approved
+/// history.
+pub fn builtin_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
+    format!(
+        "{BUILTIN_ARTIFACTS_PREFIX}{}-h{wasm_sha256}-h{metadata_sha256}@0.1.0",
+        canonical_agent_id(agent_id)
+    )
+}
+
+/// `(agent id, component sha256)` of a [`builtin_artifact_import`] name, or
+/// `None` when `import` is not such a name.
+pub fn parse_builtin_artifact_import(import: &str) -> Option<(&str, &str)> {
+    parse_artifact_import(BUILTIN_ARTIFACTS_PREFIX, import)
+}
+
 fn parse_trusted_artifact_import(import: &str) -> Option<(&str, &str)> {
+    parse_artifact_import("runtara:trusted-artifacts/", import)
+}
+
+fn parse_artifact_import<'a>(prefix: &str, import: &'a str) -> Option<(&'a str, &'a str)> {
     let (rest, metadata) = import
-        .strip_prefix("runtara:trusted-artifacts/")?
+        .strip_prefix(prefix)?
         .strip_suffix("@0.1.0")?
         .rsplit_once("-h")?;
     let (agent, wasm) = rest.rsplit_once("-h")?;
@@ -3165,6 +3189,20 @@ mod tests {
             assert_eq!(trusted_artifact_import_wasm_sha256(name), None, "{name}");
             assert_eq!(trusted_artifact_import_agent_id(name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn builtin_artifact_imports_are_distinct_from_trusted_pins() {
+        let wasm = "a".repeat(64);
+        let import = builtin_artifact_import(CONTROL_AGENT_ID, &wasm, &"b".repeat(64));
+        assert!(import.starts_with("runtara:builtin-artifacts/control-h"));
+        assert_eq!(
+            parse_builtin_artifact_import(&import),
+            Some((CONTROL_AGENT_ID, wasm.as_str()))
+        );
+        assert_eq!(trusted_artifact_import_agent_id(&import), None);
+        let trusted = trusted_artifact_import(CONTROL_AGENT_ID, &wasm, &"b".repeat(64));
+        assert_eq!(parse_builtin_artifact_import(&trusted), None);
     }
 
     #[test]

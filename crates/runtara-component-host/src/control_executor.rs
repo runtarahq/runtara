@@ -8,10 +8,19 @@
 //! bytes (never the composed copy, never tenant bytes) in a fresh restricted
 //! store where `runtara:control/api` is real, and passes the caller
 //! operation's continuation. The authority comes from the calling workflow's
-//! store. Approval of the loaded bytes (decision D2) is enforced by the
-//! embedding before it constructs the executor.
+//! store.
+//!
+//! Decision D2: the host checks the composed bytes at load and approval on
+//! every call. A workflow may forward only through a [`ControlBinding`] — its
+//! one `runtara:builtin-artifacts/control-…` pin plus the sha256 of every
+//! composed component that imports `runtara:control/`, audited from the
+//! source bytes by the precompile worker — and every call re-checks the
+//! binding and the executor's own bytes against the approved history the
+//! embedding installed with [`ControlExecutor::set_approved_pins`].
 
-use std::sync::{Arc, OnceLock};
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -24,21 +33,79 @@ use crate::control_host::{ControlApiCall, ControlAuthority, ControlHost, control
 use crate::host_state::HostState;
 use crate::operation_scope_host::SuspendableOutcome;
 
-const MAX_INPUT: usize = 1024 * 1024;
-const MAX_OUTPUT: usize = 4 * 1024 * 1024;
+const MAX_INPUT: usize = runtara_control_contract::MAX_INPUT_BYTES;
+const MAX_OUTPUT: usize = runtara_control_contract::MAX_OUTCOME_BYTES;
+const MAX_STATE: usize = runtara_agent_suspension::MAX_CONTINUATION_BYTES;
 const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-const TIME_LIMIT: Duration = Duration::from_secs(90);
+const TIME_LIMIT: Duration =
+    Duration::from_millis(runtara_control_contract::EXECUTION_TIME_LIMIT_MS);
+
+/// Bundle file names of the control agent.
+pub const CONTROL_WASM_FILENAME: &str = "runtara_agent_control.wasm";
+/// Sidecar of [`CONTROL_WASM_FILENAME`].
+pub const CONTROL_META_FILENAME: &str = "runtara_agent_control.meta.json";
+
+/// What a prepared workflow artifact may forward control calls with: its
+/// content pin and the audited composed importers of `runtara:control/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlBinding {
+    /// The root's `runtara:builtin-artifacts/control-…` import.
+    pub pin: String,
+    /// Hex sha256 of each composed component importing `runtara:control/`.
+    pub importers: BTreeSet<String>,
+}
+
+/// Logs routing identity and outcome only, never inputs or outputs.
+struct InvocationAudit<'a> {
+    tenant: &'a str,
+    caller: Option<&'a str>,
+    capability: &'a str,
+    started: std::time::Instant,
+    outcome: &'static str,
+}
+
+impl Drop for InvocationAudit<'_> {
+    fn drop(&mut self) {
+        tracing::info!(
+            tenant = self.tenant,
+            caller = self.caller,
+            capability = self.capability,
+            duration_ms = self.started.elapsed().as_millis() as u64,
+            outcome = self.outcome,
+            "control capability completed"
+        );
+    }
+}
 
 /// Host executor for the approved control agent.
 pub struct ControlExecutor {
     engine: Arc<Engine>,
     pre: InstancePre<HostState>,
     digest: String,
+    pin: String,
     host: OnceLock<Arc<dyn ControlHost>>,
     permits: Arc<Semaphore>,
+    /// Approved `runtara:builtin-artifacts/control-…` pins. Empty until the
+    /// embedding installs its approved history, so every call is `denied`.
+    approved: RwLock<Arc<BTreeSet<String>>>,
 }
 
 impl ControlExecutor {
+    /// Load `runtara_agent_control.{wasm,meta.json}` from an installed
+    /// component bundle, or `None` when the bundle has no control agent.
+    pub fn from_bundle(engine: Arc<Engine>, dir: &Path) -> Result<Option<Self>> {
+        let wasm_path = dir.join(CONTROL_WASM_FILENAME);
+        if !wasm_path.exists() {
+            return Ok(None);
+        }
+        let wasm =
+            std::fs::read(&wasm_path).with_context(|| format!("read {}", wasm_path.display()))?;
+        let meta_path = dir.join(CONTROL_META_FILENAME);
+        let meta =
+            std::fs::read(&meta_path).with_context(|| format!("read {}", meta_path.display()))?;
+        Self::new(engine, &wasm, &meta).map(Some)
+    }
+
     /// Load the control agent from exactly the bytes the embedding approved.
     /// `meta` is its sidecar; both are part of the digest.
     pub fn new(engine: Arc<Engine>, wasm: &[u8], meta: &[u8]) -> Result<Self> {
@@ -57,14 +124,68 @@ impl ControlExecutor {
             engine,
             pre,
             digest: format!("{:x}", hash.finalize()),
+            pin: control_pin(wasm, meta),
             host: OnceLock::new(),
             permits: Arc::new(Semaphore::new(16)),
+            approved: RwLock::new(Arc::new(BTreeSet::new())),
         })
     }
 
     /// sha256 over the loaded wasm and sidecar bytes.
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    /// The `runtara:builtin-artifacts/control-…` pin of the loaded bytes.
+    pub fn pin(&self) -> &str {
+        &self.pin
+    }
+
+    /// Replace the approved history (non-revoked pins). The embedding loads
+    /// it from durable storage at boot, before any run can wake.
+    pub fn set_approved_pins(&self, pins: impl IntoIterator<Item = String>) {
+        let pins = Arc::new(pins.into_iter().collect());
+        *self
+            .approved
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pins;
+    }
+
+    /// The approved history currently in force.
+    pub fn approved_pins(&self) -> Arc<BTreeSet<String>> {
+        Arc::clone(
+            &self
+                .approved
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Whether `binding` may forward control calls: its pin is approved, and
+    /// every audited importer is the component of an approved pin.
+    pub fn check_binding(&self, binding: &ControlBinding) -> Result<(), String> {
+        let approved = self.approved_pins();
+        if !approved.contains(&binding.pin) {
+            return Err("the workflow's control artifact is not approved".into());
+        }
+        if binding.importers.is_empty() {
+            return Err("no audited component imports control".into());
+        }
+        let components: BTreeSet<&str> = approved
+            .iter()
+            .filter_map(|pin| runtara_dsl::agent_meta::parse_builtin_artifact_import(pin))
+            .map(|(_, wasm)| wasm)
+            .collect();
+        if let Some(foreign) = binding
+            .importers
+            .iter()
+            .find(|digest| !components.contains(digest.as_str()))
+        {
+            return Err(format!(
+                "composed component {foreign} imports control but is not an approved control agent"
+            ));
+        }
+        Ok(())
     }
 
     /// Configure the native control service. Until then every call is
@@ -87,7 +208,29 @@ impl ControlExecutor {
         continuation: Option<Vec<u8>>,
         deadline: tokio::time::Instant,
     ) -> Result<SuspendableOutcome, crate::ErrorInfo> {
+        let tenant = authority.tenant.clone();
+        let caller = authority.caller.clone();
+        let mut audit = InvocationAudit {
+            tenant: &tenant,
+            caller: caller.as_deref(),
+            capability,
+            started: std::time::Instant::now(),
+            outcome: "denied",
+        };
+        // Decision D2: the executor's own bytes are re-checked on every call,
+        // so a revoked version stops running without a restart of the store.
+        if !self.approved_pins().contains(&self.pin) {
+            return Err(crate::control_host::denied_error_info(
+                "the installed control agent is not approved",
+            ));
+        }
+        if authority.tenant.is_empty() {
+            return Err(crate::control_host::denied_error_info(
+                "control calls need a tenant",
+            ));
+        }
         if input.len() > MAX_INPUT {
+            audit.outcome = "failure";
             return Err(control_error_info(
                 "CONTROL_TOO_LARGE",
                 "control input exceeds 1 MiB",
@@ -99,6 +242,7 @@ impl ControlExecutor {
                 "the control service is not configured",
             )
         })?;
+        audit.outcome = "cancelled";
         let deadline = deadline.min(tokio::time::Instant::now() + TIME_LIMIT);
         let timeout = || control_error_info("CONTROL_TIMEOUT", "control execution timed out");
         let mut tasks = tokio::task::JoinSet::new();
@@ -141,6 +285,7 @@ impl ControlExecutor {
         .unwrap_or_else(|_| Err(timeout()));
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+        audit.outcome = if result.is_ok() { "success" } else { "failure" };
         result
     }
 
@@ -191,14 +336,16 @@ impl ControlExecutor {
         drop(store);
         match result {
             Ok(Ok(outcome)) => {
-                let size = match &outcome {
-                    SuspendableOutcome::Completed(output) => output.len(),
-                    SuspendableOutcome::Suspended(suspension) => suspension.state.len(),
+                let within = match &outcome {
+                    SuspendableOutcome::Completed(output) => output.len() <= MAX_OUTPUT,
+                    SuspendableOutcome::Suspended(suspension) => {
+                        suspension.state.len() <= MAX_STATE
+                    }
                 };
-                if size > MAX_OUTPUT {
+                if !within {
                     return Err(control_error_info(
                         "CONTROL_TOO_LARGE",
-                        "control output exceeds its limit",
+                        "control output or continuation exceeds its limit",
                     ));
                 }
                 Ok(outcome)
@@ -221,12 +368,57 @@ fn control_linker(engine: &Engine) -> Result<Linker<HostState>> {
     Ok(linker)
 }
 
+/// The `runtara:builtin-artifacts/control-…` pin of control bytes.
+pub fn control_pin(wasm: &[u8], meta: &[u8]) -> String {
+    runtara_dsl::agent_meta::builtin_artifact_import(
+        runtara_dsl::agent_meta::CONTROL_AGENT_ID,
+        &format!("{:x}", Sha256::digest(wasm)),
+        &format!("{:x}", Sha256::digest(meta)),
+    )
+}
+
 /// What a workflow store knows for a forwarded control call.
 #[derive(Clone)]
 pub(crate) struct ControlCall {
     pub(crate) executor: Arc<ControlExecutor>,
     pub(crate) tenant: String,
     pub(crate) caller: Option<String>,
+    /// The prepared artifact's audited binding; `None` (not prepared with
+    /// the control audit) is always `denied`.
+    pub(crate) binding: Option<Arc<ControlBinding>>,
+}
+
+/// Forward one call for a workflow store: re-check the binding (decision
+/// D2), then run it with the store's authority.
+async fn forward(
+    call: ControlCall,
+    operation: Option<String>,
+    continuation: Option<Vec<u8>>,
+    deadline: tokio::time::Instant,
+    capability: String,
+    input: Vec<u8>,
+) -> Result<SuspendableOutcome, crate::ErrorInfo> {
+    let Some(binding) = call.binding.as_ref() else {
+        return Err(crate::control_host::denied_error_info(
+            "this workflow artifact was not prepared with a control audit",
+        ));
+    };
+    call.executor
+        .check_binding(binding)
+        .map_err(|reason| crate::control_host::denied_error_info(&reason))?;
+    call.executor
+        .invoke(
+            ControlAuthority {
+                tenant: call.tenant,
+                caller: call.caller,
+                operation,
+            },
+            &capability,
+            input,
+            continuation,
+            deadline,
+        )
+        .await
 }
 
 /// Bind `runtara:control/executor` for workflow stores: forward to the host
@@ -244,7 +436,7 @@ pub(crate) fn add_control_executor_to_linker(
                     let state = access.get();
                     let operation = state.operation.current().cloned();
                     let deadline = state.database_deadline();
-                    state.control.clone().map(|call| {
+                    state.control_executor.clone().map(|call| {
                         (
                             call,
                             operation.as_ref().map(|op| op.op_hash.clone()),
@@ -256,24 +448,20 @@ pub(crate) fn add_control_executor_to_linker(
                 Box::pin(async move {
                     let result = match prepared {
                         Some((call, operation, continuation, deadline)) => {
-                            call.executor
-                                .invoke(
-                                    ControlAuthority {
-                                        tenant: call.tenant,
-                                        caller: call.caller,
-                                        operation,
-                                    },
-                                    &capability,
-                                    input,
-                                    continuation,
-                                    deadline,
-                                )
+                            forward(call, operation, continuation, deadline, capability, input)
                                 .await
                         }
                         None => Err(crate::control_host::denied_error_info(
                             "no control executor is configured for this run",
                         )),
                     };
+                    // The host records the waits the approved executor
+                    // returned, so a park attaches exactly those.
+                    if let Ok(SuspendableOutcome::Suspended(suspension)) = &result {
+                        accessor.with(|mut access| {
+                            access.get().operation.record_waits(&suspension.wakes);
+                        });
+                    }
                     Ok((result,))
                 })
             },

@@ -50,6 +50,11 @@ path = "tests/trusted.rs"
 required-features = ["component-integration-tests"]
 
 [[test]]
+name = "control_agent"
+path = "tests/control_agent.rs"
+required-features = ["component-integration-tests"]
+
+[[test]]
 name = "object_model_database"
 path = "tests/object_model_database.rs"
 required-features = ["component-integration-tests", "db-integration-tests"]
@@ -63,6 +68,7 @@ required-features = ["component-integration-tests"]
 runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 runtara-agent-suspension = { path = "../runtara-agent-suspension" }
+runtara-control-contract = { path = "../runtara-control-contract" }
 runtara-agent-wit = { path = "../runtara-agent-wit" }
 # Used as the canonical AgentInfo shape for sidecar meta.json files. The host
 # parses each agent's meta.json into AgentInfo and serves it back to the

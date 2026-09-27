@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `control` agent reads runs of the tenant from a workflow**, on every
+  pricing tier and whatever the agent allowlist says. `get` returns one run's
+  state with its output inlined up to 1 MiB and its error up to 64 KiB
+  (larger values are flagged omitted, with their size); `query` pages runs by
+  creation or finish time (page size 1-100); `list-pending-signals` lists open
+  WaitForSignal requests of a run or a workflow. Failures carry `CONTROL_*`
+  codes. Control runs only the installed control bytes in fresh host stores:
+  a compiled workflow pins those bytes (`runtara:builtin-artifacts/control-…`),
+  the host audits every composed component that imports `runtara:control`
+  when the artifact is prepared, and every call re-checks both against the
+  approved history. The server approves its bundles' control bytes at boot
+  (runtime table `approved_builtin_artifacts`, migration
+  `20260927000000`); an operator revokes a version by setting `revoked_at`,
+  which takes effect at the next boot, after which calls are denied and
+  workflows pinning it no longer become ready. Composed artifacts that import
+  a component or core module, or whose agents import
+  `runtara:workflow-operation`, are now refused at preparation.
+
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
   self-signed or private-CA certificate with full verification;
