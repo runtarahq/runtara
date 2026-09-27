@@ -55,10 +55,19 @@
 #              resumes; non-durable, untimed and onError waits are E028,
 #              E029 and E131.
 #
+#   6  UPGRADE while a parent is parked on control:wait, its compiled package
+#              is aged past RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS=1 and the control
+#              agent bundle is swapped for a version-bumped one (its digest
+#              differs; asserted); the restart's cleanup pass removes a stale
+#              unused image but keeps the parent's package, the old control
+#              pin stays approved beside the new one, and the parent resumes to
+#              both results through the approved history. The original bundle
+#              is restored afterwards.
+#
 # Stage 1 ends by revoking the control approval, so it runs after every
 # other stage.
 #
-# Usage:  STAGES=1,2,3,4,5 ./e2e/test_control_agent.sh
+# Usage:  STAGES=1,2,3,4,5,6 ./e2e/test_control_agent.sh
 #
 # Prereqs: Postgres + docker (isolated Valkey), a built runtara-server, and
 # prebuilt components (scripts/build-agent-components.sh).
@@ -73,8 +82,8 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-STAGES="${STAGES:-1,2,3,4,5}"
-IMPLEMENTED_STAGES="1,2,3,4,5"
+STAGES="${STAGES:-1,2,3,4,5,6}"
+IMPLEMENTED_STAGES="1,2,3,4,5,6"
 for stage in ${STAGES//,/ }; do
     case ",${IMPLEMENTED_STAGES}," in
         *",${stage},"*) ;;
@@ -936,9 +945,10 @@ if stage_enabled 4; then
     print_success "The held child was cancelled in admission, never ran, and reads cancelled ✓"
 fi
 
-if stage_enabled 5; then
+if stage_enabled 5 || stage_enabled 6; then
     # -----------------------------------------------------------------------
-    # Stage 5: parallel approvals through control:wait.
+    # Stage 5: parallel approvals through control:wait (its workflows and
+    # helpers also serve stage 6).
     # -----------------------------------------------------------------------
     labelled() {
         psql_quiet -d "${TEST_DB_SERVER}" -c \
@@ -1043,7 +1053,9 @@ if stage_enabled 5; then
     read -r ANY_WF _ <<< "$(make_workflow control-approvals-any "$(approvals_graph control-approvals-any leave_running any false)")"
     read -r TIMED_WF _ <<< "$(make_workflow control-approvals-timed "$(approvals_graph control-approvals-timed cancel all true)")"
     APPROVER_DATA=$(jq -nc --arg a "${APPROVER_WF}" '{approver: $a}')
+fi
 
+if stage_enabled 5; then
     for order in finance-first legal-first; do
         print_step "Stage 5: parallel approvals, answered ${order}..."
         read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${ALL_WF}" "${APPROVER_DATA}")"
@@ -1169,6 +1181,106 @@ if stage_enabled 5; then
         variables: {}, inputSchema: {}, outputSchema: {} }')
     expect_code E131 "${ON_ERROR}"
     print_success "Non-durable (E028), untimed (E029) and onError (E131) waits are refused ✓"
+fi
+
+if stage_enabled 6; then
+    # -----------------------------------------------------------------------
+    # Stage 6: package retention and a control upgrade while parked.
+    # -----------------------------------------------------------------------
+    control_pin_of() {
+        echo "runtara:builtin-artifacts/control-h$(shasum -a 256 "$1/runtara_agent_control.wasm" | awk '{print $1}')-h$(shasum -a 256 "$1/runtara_agent_control.meta.json" | awk '{print $1}')@0.1.0"
+    }
+    # The same control agent with a forced version bump: a `version` custom
+    # section on the component and a `version` field in its sidecar. The
+    # crate version is not embedded in either, so an unmodified rebuild of the
+    # same source would carry the same digest.
+    bump_control_bundle() {
+        python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+bundle, version = sys.argv[1], sys.argv[2]
+def leb(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7f; n >>= 7
+        if n: out.append(b | 0x80)
+        else: out.append(b); return bytes(out)
+path = f"{bundle}/runtara_agent_control.wasm"
+name, payload = b"runtara-version", version.encode()
+body = leb(len(name)) + name + payload
+with open(path, "ab") as f:
+    f.write(b"\x00" + leb(len(body)) + body)
+path = f"{bundle}/runtara_agent_control.meta.json"
+meta = json.load(open(path))
+meta["version"] = version
+json.dump(meta, open(path, "w"), indent=2)
+PYEOF
+    }
+
+    for _ in {1..120}; do [ "$(busy_runs)" = "0" ] && break; sleep 1; done
+    print_step "Stage 6: a parent parks on its approvals..."
+    read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${ALL_WF}" "${APPROVER_DATA}")"
+    parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
+    OLD_PIN=$(control_pin_of "${BUNDLE_DIR}")
+    read -r PARENT_IMAGE PARENT_PACKAGE <<< "$(psql_quiet -d "${TEST_DB_RUNTIME}" -F ' ' -c \
+        "SELECT ii.image_id, img.binary_path FROM instance_images ii JOIN images img USING (image_id)
+         WHERE ii.instance_id = '${PARENT}'")"
+    [ -n "${PARENT_PACKAGE:-}" ] && [ -f "${PARENT_PACKAGE}" ] || { print_error "No package bound to ${PARENT}"; exit 1; }
+    # Age the parent's package and binding past any max age, so only the
+    # parked-run guard keeps it; add a stale image nothing runs on.
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "UPDATE images SET updated_at = now() - interval '30 days' WHERE image_id = '${PARENT_IMAGE}';
+         UPDATE instance_images SET created_at = now() - interval '30 days' WHERE image_id = '${PARENT_IMAGE}'" >/dev/null
+    IMAGES_DIR=$(dirname "$(dirname "${PARENT_PACKAGE}")")
+    STALE_IMAGE="stage6-stale-$$"
+    mkdir -p "${IMAGES_DIR}/${STALE_IMAGE}" && cp "${PARENT_PACKAGE}" "${IMAGES_DIR}/${STALE_IMAGE}/binary"
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "INSERT INTO images (image_id, tenant_id, name, binary_path, created_at, updated_at)
+         VALUES ('${STALE_IMAGE}', '${TENANT}', 'stage6-stale', '${IMAGES_DIR}/${STALE_IMAGE}/binary',
+                 now() - interval '30 days', now() - interval '30 days')" >/dev/null
+
+    print_step "Stage 6: swapping in a version-bumped control bundle while parked..."
+    ORIGINAL_BUNDLE="${TEST_DATA_DIR}/components-original"
+    rm -rf "${ORIGINAL_BUNDLE}" && cp -R "${BUNDLE_DIR}" "${ORIGINAL_BUNDLE}"
+    stop_server
+    bump_control_bundle "${BUNDLE_DIR}" "999.0.0-stage6"
+    NEW_PIN=$(control_pin_of "${BUNDLE_DIR}")
+    [ "${NEW_PIN}" != "${OLD_PIN}" ] || { print_error "The bumped bundle kept the control digest ${OLD_PIN}"; exit 1; }
+    [ "$(shasum -a 256 < "${BUNDLE_DIR}/runtara_agent_control.wasm")" != "$(shasum -a 256 < "${ORIGINAL_BUNDLE}/runtara_agent_control.wasm")" ] \
+        || { print_error "The bumped control component has the same bytes"; exit 1; }
+    echo "  old: ${OLD_PIN}"
+    echo "  new: ${NEW_PIN}"
+    SERVER_EXTRA_ENV="RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS=1" start_server
+
+    # The boot's eager cleanup pass removes the stale image...
+    for _ in {1..60}; do
+        [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id = '${STALE_IMAGE}'")" = "0" ] && break
+        sleep 1
+    done
+    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id = '${STALE_IMAGE}'")" = "0" ] \
+        || { print_error "The cleanup pass did not run: the stale image is still registered"; exit 1; }
+    # ...and keeps the parked parent's package.
+    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id = '${PARENT_IMAGE}'")" = "1" ] \
+        || { print_error "Image cleanup deleted the parked parent's image ${PARENT_IMAGE}"; exit 1; }
+    [ -f "${PARENT_PACKAGE}" ] || { print_error "Image cleanup deleted the parked parent's package"; exit 1; }
+    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts
+          WHERE pin IN ('${OLD_PIN}', '${NEW_PIN}') AND revoked_at IS NULL")" = "2" ] \
+        || { print_error "Both control versions should be approved after the upgrade"; exit 1; }
+    [ "$(instance_status "${PARENT}")" = "suspended" ] || { print_error "The parent did not stay parked: $(instance_row "${PARENT}")"; exit 1; }
+
+    answer "${FINANCE}" true
+    answer "${LEGAL}" true
+    [ "$(wait_status "${PARENT}" completed 180)" = "completed" ] || { print_error "The parent did not resume after the upgrade: $(instance_row "${PARENT}")"; exit 1; }
+    OUT=$(instance_output "${PARENT}")
+    [ "$(echo "${OUT}" | jq -r '.result.resolution + "|" + (.result.finished | length | tostring)')" = "satisfied|2" ] \
+        || { print_error "Unexpected result after the upgrade: ${OUT}"; exit 1; }
+    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT image_id FROM instance_images WHERE instance_id = '${PARENT}'")" = "${PARENT_IMAGE}" ] \
+        || { print_error "The parent was rebound to another image"; exit 1; }
+    print_success "The parked parent's package survived cleanup and it resumed across the control upgrade ✓"
+
+    print_step "Stage 6: restoring the original bundle..."
+    stop_server
+    rm -rf "${BUNDLE_DIR}" && mv "${ORIGINAL_BUNDLE}" "${BUNDLE_DIR}"
+    start_server
 fi
 
 if stage_enabled 1; then

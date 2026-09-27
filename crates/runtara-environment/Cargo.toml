@@ -121,6 +121,11 @@ path = "tests/image_registry_test.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "image_cleanup_db_test"
+path = "tests/image_cleanup_db_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "launch_queue_test"
 path = "tests/launch_queue_test.rs"
 required-features = ["db-integration-tests"]

@@ -697,7 +697,8 @@ impl WorkflowExecutor {
 
     /// The control binding of a root, checked at load (decision D2): a root
     /// that imports `runtara:control/executor` must pin exactly one control
-    /// artifact, have audited importers, and both must be approved now.
+    /// artifact, have audited importers, and both must be in the approved
+    /// history. A pin revoked since still loads; its calls are `denied`.
     fn control_binding(
         &self,
         component: &Component,
@@ -736,7 +737,7 @@ impl WorkflowExecutor {
             .get()
             .context("the workflow calls control but no control executor is configured")?;
         executor
-            .check_binding(&binding)
+            .check_loadable_binding(&binding)
             .map_err(|reason| anyhow::anyhow!("control artifact refused: {reason}"))?;
         Ok(Some(Arc::new(binding)))
     }
@@ -1894,3 +1895,7 @@ mod control_tests;
 #[cfg(test)]
 #[path = "workflow/raw_http_tests.rs"]
 mod raw_http_tests;
+
+#[cfg(test)]
+#[path = "workflow/frozen_abi_tests.rs"]
+mod frozen_abi_tests;

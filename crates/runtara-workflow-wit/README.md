@@ -14,6 +14,19 @@ This crate intentionally separates workflow semantics from runtime lifecycle:
 Both are composed statically with workflow-logic and agent components into one
 final `workflow.wasm`.
 
+## ABI rule
+
+Parked runs wake on the artifact they were built from, across host, control
+agent and trusted agent upgrades:
+
+- Every shipped host version stays linked: lifecycle 0.1/0.2, runtime 0.3/0.4,
+  connection-resolver 0.1/0.2, `runtara:control`, `runtara:workflow-operation`
+  and `runtara:agent-suspension` 0.1.0, and built-in/trusted artifact pins.
+  A pin since revoked or no longer shipped fails at the call, not at load.
+- Approved `approved_builtin_artifacts` rows are only revoked, never deleted.
+- Released WIT is never edited, only versioned. The frozen 0.1.0 guests in
+  `runtara-component-host/src/workflow/frozen_abi/` must keep linking.
+
 Runtime 0.4.0 adds read-only `poll-signal` for cooperative cancellation. It
 returns an existing lifecycle command without acknowledging it or changing
 instance status. Guest code retains the command while cancelling and cleaning

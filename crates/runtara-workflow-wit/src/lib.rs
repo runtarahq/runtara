@@ -1,6 +1,32 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Canonical WIT contracts for direct-emitted workflow components.
+//!
+//! # ABI rule
+//!
+//! A parked run wakes on the artifact it was built from, possibly after the
+//! host, the control agent or a trusted agent was upgraded. So:
+//!
+//! - **Every shipped host version stays linked.** The host runs lifecycle
+//!   0.1.0 and 0.2.0 exports and binds runtime 0.3.0 and 0.4.0,
+//!   connection-resolver 0.1.0 and 0.2.0, and `runtara:control`,
+//!   `runtara:workflow-operation` and `runtara:agent-suspension` 0.1.0,
+//!   beside whatever is current. Built-in (`runtara:builtin-artifacts/…`)
+//!   and trusted (`runtara:trusted-artifacts/…`) pins keep linking as empty
+//!   instance imports: a pin the host has since revoked or no longer ships
+//!   fails at the call, never at load. Only a control pin that was never
+//!   approved is refused at load.
+//! - **Approved rows are only revoked.** `approved_builtin_artifacts` rows are
+//!   never deleted or rewritten, so an artifact pinning an older approved
+//!   control version still loads after an upgrade.
+//! - **Released WIT is never edited, only versioned.** Wasmtime lifts records,
+//!   variants and enums exactly, so adding a case or field in place breaks
+//!   every artifact built against the old shape. A change is a new package
+//!   version, linked beside the old one.
+//!
+//! `runtara-component-host`'s `workflow/frozen_abi_tests.rs` holds guests
+//! compiled against the released 0.1.0 control, operation and suspension
+//! WIT; they must keep linking.
 
 #[cfg(feature = "isolation-package")]
 pub mod isolation_package;

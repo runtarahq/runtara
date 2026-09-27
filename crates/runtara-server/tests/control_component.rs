@@ -2,7 +2,8 @@
 //! composed WASM (pinned, audited) -> environment runner -> host control
 //! executor -> native control service -> runtime persistence. The composed
 //! control copy must be the installed bytes verbatim (decision D2), and a
-//! revoked history refuses the same artifact at load.
+//! history without its pin refuses the same artifact at load (a pin revoked
+//! since still loads; its calls are denied).
 //!
 //! Requires staged components (`scripts/build-agent-components.sh`) and an
 //! isolated `TEST_RUNTARA_DATABASE_URL`.
@@ -295,7 +296,7 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
     assert_eq!(read["output"], json!({"total": 42}));
     assert_eq!(read["outputOmitted"], false);
 
-    // Revoked at the next boot: the same artifact no longer loads.
+    // Outside the approved history (never approved): it no longer loads.
     control.set_approved_pins(Vec::<String>::new());
     let error = harness
         .launch(
@@ -304,7 +305,7 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
             json!({"target": target}),
         )
         .await
-        .expect_err("a revoked control artifact is refused at load")
+        .expect_err("an unapproved control artifact is refused at load")
         .to_string();
     assert!(error.contains("not approved"), "{error}");
     Ok(())
@@ -452,20 +453,7 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
     use runtara_server::workers::execution_engine::ExecutionEngine;
     use runtara_server::workers::execution_outbox::{ExecutionOutbox, ExecutionOutboxRelay};
 
-    // SAFETY: set before the process configuration is read, once.
-    unsafe {
-        std::env::set_var("MAX_CONCURRENT_EXECUTIONS", "8");
-        std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
-        if std::env::var("TENANT_ID").is_err() {
-            std::env::set_var("TENANT_ID", "control-component-tests");
-        }
-        if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
-            std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
-        }
-    }
-    if runtara_server::config::try_get().is_none() {
-        runtara_server::config::init(runtara_server::config::Config::from_env()?);
-    }
+    init_config_once();
 
     let harness = Harness::new().await?;
     let tenant = harness.tenant.clone();
@@ -842,19 +830,7 @@ async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Re
     use runtara_server::api::repositories::workflows::{
         WorkflowRepository, set_installed_trusted_pins, workflow_definition_checksum,
     };
-    if runtara_server::config::try_get().is_none() {
-        // SAFETY: set before the process configuration is read, once.
-        unsafe {
-            std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
-            if std::env::var("TENANT_ID").is_err() {
-                std::env::set_var("TENANT_ID", "control-component-tests");
-            }
-            if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
-                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
-            }
-        }
-        runtara_server::config::init(runtara_server::config::Config::from_env()?);
-    }
+    init_config_once();
     let harness = Harness::new().await?;
     let server_url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
         .expect("an isolated server database is required");
@@ -925,4 +901,28 @@ async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Re
     );
     set_installed_trusted_pins(Vec::<String>::new());
     Ok(())
+}
+
+/// Tests in this binary run concurrently and share one process configuration,
+/// so it is initialised exactly once, whichever test gets there first.
+fn init_config_once() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // SAFETY: set before the process configuration is read, once.
+        unsafe {
+            std::env::set_var("MAX_CONCURRENT_EXECUTIONS", "8");
+            std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
+            if std::env::var("TENANT_ID").is_err() {
+                std::env::set_var("TENANT_ID", "control-component-tests");
+            }
+            if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
+                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
+            }
+        }
+        if runtara_server::config::try_get().is_none() {
+            runtara_server::config::init(
+                runtara_server::config::Config::from_env().expect("test configuration"),
+            );
+        }
+    });
 }

@@ -17,6 +17,13 @@
 //! source bytes by the precompile worker — and every call re-checks the
 //! binding and the executor's own bytes against the approved history the
 //! embedding installed with [`ControlExecutor::set_approved_pins`].
+//!
+//! Load accepts any pin in the history, revoked ones included
+//! ([`ControlExecutor::set_revoked_pins`]): a parked run pinned to a
+//! revoked control version still loads, and its control call fails with
+//! `denied`. A pin that was never approved is refused at load. A run pinned
+//! to an older, still approved version keeps working after an upgrade: the
+//! executor runs the installed bytes for it.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -88,6 +95,9 @@ pub struct ControlExecutor {
     /// Approved `runtara:builtin-artifacts/control-…` pins. Empty until the
     /// embedding installs its approved history, so every call is `denied`.
     approved: RwLock<Arc<BTreeSet<String>>>,
+    /// Pins the history approved once and then revoked: they still load,
+    /// and every call through them is `denied`.
+    revoked: RwLock<Arc<BTreeSet<String>>>,
 }
 
 impl ControlExecutor {
@@ -128,6 +138,7 @@ impl ControlExecutor {
             host: OnceLock::new(),
             permits: Arc::new(Semaphore::new(16)),
             approved: RwLock::new(Arc::new(BTreeSet::new())),
+            revoked: RwLock::new(Arc::new(BTreeSet::new())),
         })
     }
 
@@ -161,10 +172,41 @@ impl ControlExecutor {
         )
     }
 
+    /// Replace the revoked part of the history. Revoked pins still load
+    /// ([`Self::check_loadable_binding`]) but never pass [`Self::check_binding`].
+    pub fn set_revoked_pins(&self, pins: impl IntoIterator<Item = String>) {
+        let pins = Arc::new(pins.into_iter().collect());
+        *self
+            .revoked
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pins;
+    }
+
     /// Whether `binding` may forward control calls: its pin is approved, and
     /// every audited importer is the component of an approved pin.
     pub fn check_binding(&self, binding: &ControlBinding) -> Result<(), String> {
-        let approved = self.approved_pins();
+        Self::check_against(&self.approved_pins(), binding)
+    }
+
+    /// Whether an artifact with `binding` may load: like [`Self::check_binding`]
+    /// over the whole history, revoked pins included, so a revocation fails
+    /// the call rather than the load of a parked run.
+    pub fn check_loadable_binding(&self, binding: &ControlBinding) -> Result<(), String> {
+        let revoked = Arc::clone(
+            &self
+                .revoked
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if revoked.is_empty() {
+            return self.check_binding(binding);
+        }
+        let mut history = (*self.approved_pins()).clone();
+        history.extend(revoked.iter().cloned());
+        Self::check_against(&history, binding)
+    }
+
+    fn check_against(approved: &BTreeSet<String>, binding: &ControlBinding) -> Result<(), String> {
         if !approved.contains(&binding.pin) {
             return Err("the workflow's control artifact is not approved".into());
         }
@@ -361,7 +403,7 @@ impl ControlExecutor {
 
 /// The agent linker, with `runtara:control/api` real and the executor
 /// `denied` (a control call never nests another).
-fn control_linker(engine: &Engine) -> Result<Linker<HostState>> {
+pub(crate) fn control_linker(engine: &Engine) -> Result<Linker<HostState>> {
     let mut linker = crate::registry::build_base_linker(engine)?;
     crate::control_host::add_control_api_to_linker(&mut linker)?;
     crate::control_host::add_denied_control_executor_to_linker(&mut linker)?;

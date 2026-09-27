@@ -8,6 +8,10 @@
 //! component bundles at boot; revocation (setting `revoked_at`) is manual and
 //! takes effect at the next boot, when [`ApprovedBuiltins::load`] runs before
 //! any wake or recovery. Rows are never deleted.
+//!
+//! A revoked pin stays in the history the executor loads against: a parked
+//! run pinned to it still loads after the next boot, and its control call
+//! fails with `denied` instead.
 
 use std::collections::BTreeSet;
 
@@ -15,10 +19,12 @@ use sqlx::PgPool;
 
 use crate::error::{Error, Result};
 
-/// The non-revoked approved pins, loaded once at boot.
+/// The approved history, loaded once at boot: the non-revoked pins, and
+/// the pins revoked since.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApprovedBuiltins {
     pins: BTreeSet<String>,
+    revoked: BTreeSet<String>,
 }
 
 impl ApprovedBuiltins {
@@ -62,16 +68,22 @@ impl ApprovedBuiltins {
         Ok(revoked == 1)
     }
 
-    /// Load the approved, non-revoked pins.
+    /// Load the history: approved pins, split by revocation.
     pub async fn load(pool: &PgPool) -> Result<Self> {
-        let pins: Vec<String> = sqlx::query_scalar(
-            "SELECT pin FROM approved_builtin_artifacts WHERE revoked_at IS NULL ORDER BY pin",
+        let rows: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT pin, revoked_at IS NOT NULL FROM approved_builtin_artifacts ORDER BY pin",
         )
         .fetch_all(pool)
         .await?;
-        Ok(Self {
-            pins: pins.into_iter().collect(),
-        })
+        let mut history = Self::default();
+        for (pin, revoked) in rows {
+            if revoked {
+                history.revoked.insert(pin);
+            } else {
+                history.pins.insert(pin);
+            }
+        }
+        Ok(history)
     }
 
     /// The approved pins.
@@ -84,9 +96,15 @@ impl ApprovedBuiltins {
         self.pins.contains(pin)
     }
 
+    /// Whether `pin` was approved and then revoked.
+    pub fn is_revoked(&self, pin: &str) -> bool {
+        self.revoked.contains(pin)
+    }
+
     /// Boot step, before the environment wakes or recovers any run: approve
     /// the installed control bytes (`approve`), load the history and install
-    /// it on `executor`. A pin revoked earlier stays revoked.
+    /// it on `executor` (approved pins, and revoked ones, which still load).
+    /// A pin revoked earlier stays revoked.
     pub async fn install(
         pool: &PgPool,
         executor: &runtara_component_host::control_executor::ControlExecutor,
@@ -95,6 +113,7 @@ impl ApprovedBuiltins {
         Self::approve(pool, approve).await?;
         let approved = Self::load(pool).await?;
         executor.set_approved_pins(approved.pins.iter().cloned());
+        executor.set_revoked_pins(approved.revoked.iter().cloned());
         if !approved.contains(executor.pin()) {
             tracing::warn!(
                 pin = executor.pin(),
@@ -135,6 +154,7 @@ mod db_tests {
             .unwrap();
         let approved = ApprovedBuiltins::load(&pool).await.unwrap();
         assert!(!approved.contains(&a) && approved.contains(&b));
+        assert!(approved.is_revoked(&a) && !approved.is_revoked(&b));
 
         for statement in [
             "DELETE FROM approved_builtin_artifacts WHERE pin = $1",

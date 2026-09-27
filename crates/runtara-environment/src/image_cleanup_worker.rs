@@ -17,6 +17,11 @@
 //!    instances referencing them and no launch generation (`instance_launches`)
 //!    holding them. Both the database record and disk files are removed.
 //!    The `ON DELETE CASCADE` on `instance_images.image_id` handles join table cleanup.
+//!    A parked run is non-terminal, so the image it wakes on stays however
+//!    old it is and whatever the workflow was recompiled to since. Launch
+//!    rows live as long as their instance row, so a terminal child pinned by
+//!    a live parent keeps its image while retention keeps the child. Both
+//!    are excluded by the query, so they never fill the batch.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

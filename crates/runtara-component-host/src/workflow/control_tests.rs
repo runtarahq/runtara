@@ -384,3 +384,51 @@ async fn the_worker_audit_reaches_the_prepared_artifact() -> anyhow::Result<()> 
     assert!(!native.serialized_component().starts_with(b"RTRNP"));
     Ok(())
 }
+
+/// Upgrades: a root pinned to an older control version loads through the
+/// approved history and runs on the installed bytes; once that version is
+/// revoked it still loads (a parked run must wake) and its calls are denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_pin_runs_via_the_history_and_a_revoked_one_fails_the_call() -> anyhow::Result<()>
+{
+    let fx = Fixture::new()?;
+    let old_pin = control_pin(&agent(), META);
+    let upgraded_fields = agent_fields().replace("\\22ok\\22", "\\22OK\\22");
+    let upgraded = wat::parse_str(format!("(component {upgraded_fields})"))?;
+    let control = Arc::new(ControlExecutor::new(fx.engine.clone(), &upgraded, META)?);
+    control.set_host(fx.host.clone())?;
+    assert_ne!(control.pin(), old_pin, "the upgrade has its own digest");
+    let executor = WorkflowExecutor::new(fx.engine.clone())?;
+    executor.set_control_executor(control.clone())?;
+    let old_root = fx.write("old-root.wasm", &root());
+
+    // Installed digests only: the old pin is unknown and refused at load.
+    control.set_approved_pins([control.pin().to_owned()]);
+    let error = match executor.prepare_path(&old_root).await {
+        Ok(_) => panic!("an unknown pin must not load"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("not approved"), "{error}");
+
+    // The history keeps the old pin: it loads and the installed bytes answer.
+    control.set_approved_pins([control.pin().to_owned(), old_pin.clone()]);
+    let prepared = executor.prepare_path(&old_root).await?;
+    let result =
+        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"ok".to_vec())).await;
+    match &result.exit {
+        InvokeExit::Completed(bytes) => assert_eq!(bytes, b"\"OK\""),
+        other => panic!("{other:?}"),
+    }
+
+    // Revoked at the next boot: the parked run still loads, the call fails.
+    control.set_approved_pins([control.pin().to_owned()]);
+    control.set_revoked_pins([old_pin]);
+    let reloaded = WorkflowExecutor::new(fx.engine.clone())?;
+    reloaded.set_control_executor(control)?;
+    let prepared = reloaded.prepare_path(&old_root).await?;
+    let result =
+        bounded(reloaded.execute_prepared_invoke(&prepared, run_spec(), b"poll".to_vec())).await;
+    assert_eq!(failed_code(&result), "CONTROL_DENIED");
+    assert!(fx.host.polls.lock().unwrap().is_empty());
+    Ok(())
+}

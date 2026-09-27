@@ -1,0 +1,155 @@
+;; Frozen ABI fixture: a guest compiled against the released 0.1.0 WIT
+;; (wit-component dummy guest, printed by wasm-tools 1.249.0). Never edit or
+;; regenerate this file: it must keep linking for as long as the host runs
+;; artifacts built against 0.1.0. See runtara-workflow-wit's ABI rule.
+(component
+  (type $ty-runtara:agent-suspension/types@0.1.0 (;0;)
+    (instance
+      (type (;0;) (variant (case "at" u64) (case "instances" string)))
+      (export (;1;) "wake" (type (eq 0)))
+    )
+  )
+  (import "runtara:agent-suspension/types@0.1.0" (instance $runtara:agent-suspension/types@0.1.0 (;0;) (type $ty-runtara:agent-suspension/types@0.1.0)))
+  (alias export $runtara:agent-suspension/types@0.1.0 "wake" (type $wake (;1;)))
+  (type $ty-runtara:workflow-operation/scope@0.1.0 (;2;)
+    (instance
+      (alias outer 1 $wake (type (;0;)))
+      (export (;1;) "wake" (type (eq 0)))
+      (type (;2;) (result (error string)))
+      (type (;3;) (func (param "checkpoint-key" string) (param "attempt" u32) (param "load" bool) (result 2)))
+      (export (;0;) "enter" (func (type 3)))
+      (type (;4;) (list u8))
+      (type (;5;) (list 1))
+      (type (;6;) (func (param "state" 4) (param "wakes" 5) (result 2)))
+      (export (;1;) "suspend" (func (type 6)))
+      (type (;7;) (func (param "failed" bool)))
+      (export (;2;) "exit" (func (type 7)))
+      (type (;8;) (func (param "checkpoint-key" string)))
+      (export (;3;) "release" (func (type 8)))
+    )
+  )
+  (import "runtara:workflow-operation/scope@0.1.0" (instance $runtara:workflow-operation/scope@0.1.0 (;1;) (type $ty-runtara:workflow-operation/scope@0.1.0)))
+  (core module $main (;0;)
+    (type (;0;) (func (param i32 i32 i32 i32 i32)))
+    (type (;1;) (func (param i32)))
+    (type (;2;) (func (param i32 i32)))
+    (type (;3;) (func (param i32 i32 i32 i32) (result i32)))
+    (type (;4;) (func))
+    (import "cm32p2|runtara:workflow-operation/scope@0.1" "enter" (func (;0;) (type 0)))
+    (import "cm32p2|runtara:workflow-operation/scope@0.1" "suspend" (func (;1;) (type 0)))
+    (import "cm32p2|runtara:workflow-operation/scope@0.1" "exit" (func (;2;) (type 1)))
+    (import "cm32p2|runtara:workflow-operation/scope@0.1" "release" (func (;3;) (type 2)))
+    (memory (;0;) 0)
+    (export "cm32p2_memory" (memory 0))
+    (export "cm32p2_realloc" (func 4))
+    (export "cm32p2_initialize" (func 5))
+    (func (;4;) (type 3) (param i32 i32 i32 i32) (result i32)
+      unreachable
+    )
+    (func (;5;) (type 4))
+    (@producers
+      (processed-by "wit-component" "0.249.0")
+    )
+  )
+  (core module $wit-component-shim-module (;1;)
+    (type (;0;) (func (param i32 i32 i32 i32 i32)))
+    (type (;1;) (func (param i32 i32 i32 i32 i32)))
+    (type (;2;) (func (param i32 i32)))
+    (table (;0;) 3 3 funcref)
+    (export "0" (func 0))
+    (export "1" (func 1))
+    (export "2" (func 2))
+    (export "$imports" (table 0))
+    (func (;0;) (type 0) (param i32 i32 i32 i32 i32)
+      local.get 0
+      local.get 1
+      local.get 2
+      local.get 3
+      local.get 4
+      i32.const 0
+      call_indirect (type 0)
+    )
+    (func (;1;) (type 1) (param i32 i32 i32 i32 i32)
+      local.get 0
+      local.get 1
+      local.get 2
+      local.get 3
+      local.get 4
+      i32.const 1
+      call_indirect (type 1)
+    )
+    (func (;2;) (type 2) (param i32 i32)
+      local.get 0
+      local.get 1
+      i32.const 2
+      call_indirect (type 2)
+    )
+    (@producers
+      (processed-by "wit-component" "0.249.0")
+    )
+  )
+  (core module $wit-component-fixup (;2;)
+    (type (;0;) (func (param i32 i32 i32 i32 i32)))
+    (type (;1;) (func (param i32 i32 i32 i32 i32)))
+    (type (;2;) (func (param i32 i32)))
+    (import "" "0" (func (;0;) (type 0)))
+    (import "" "1" (func (;1;) (type 1)))
+    (import "" "2" (func (;2;) (type 2)))
+    (import "" "$imports" (table (;0;) 3 3 funcref))
+    (elem (;0;) (i32.const 0) func 0 1 2)
+    (@producers
+      (processed-by "wit-component" "0.249.0")
+    )
+  )
+  (core instance $wit-component-shim-instance (;0;) (instantiate $wit-component-shim-module))
+  (alias core export $wit-component-shim-instance "0" (core func $indirect-cm32p2|runtara:workflow-operation/scope@0.1-enter (;0;)))
+  (alias core export $wit-component-shim-instance "1" (core func $indirect-cm32p2|runtara:workflow-operation/scope@0.1-suspend (;1;)))
+  (alias export $runtara:workflow-operation/scope@0.1.0 "exit" (func $exit (;0;)))
+  (core func $exit (;2;) (canon lower (func $exit)))
+  (alias core export $wit-component-shim-instance "2" (core func $indirect-cm32p2|runtara:workflow-operation/scope@0.1-release (;3;)))
+  (core instance $cm32p2|runtara:workflow-operation/scope@0.1 (;1;)
+    (export "enter" (func $indirect-cm32p2|runtara:workflow-operation/scope@0.1-enter))
+    (export "suspend" (func $indirect-cm32p2|runtara:workflow-operation/scope@0.1-suspend))
+    (export "exit" (func $exit))
+    (export "release" (func $indirect-cm32p2|runtara:workflow-operation/scope@0.1-release))
+  )
+  (core instance $main (;2;) (instantiate $main
+      (with "cm32p2|runtara:workflow-operation/scope@0.1" (instance $cm32p2|runtara:workflow-operation/scope@0.1))
+    )
+  )
+  (alias core export $main "cm32p2_memory" (core memory $memory (;0;)))
+  (alias core export $wit-component-shim-instance "$imports" (core table $"shim table" (;0;)))
+  (alias export $runtara:workflow-operation/scope@0.1.0 "enter" (func $enter (;1;)))
+  (alias core export $main "cm32p2_realloc" (core func $realloc (;4;)))
+  (core func $"#core-func5 indirect-cm32p2|runtara:workflow-operation/scope@0.1-enter" (@name "indirect-cm32p2|runtara:workflow-operation/scope@0.1-enter") (;5;) (canon lower (func $enter) (memory $memory) (realloc $realloc) string-encoding=utf8))
+  (alias export $runtara:workflow-operation/scope@0.1.0 "suspend" (func $suspend (;2;)))
+  (core func $"#core-func6 indirect-cm32p2|runtara:workflow-operation/scope@0.1-suspend" (@name "indirect-cm32p2|runtara:workflow-operation/scope@0.1-suspend") (;6;) (canon lower (func $suspend) (memory $memory) (realloc $realloc) string-encoding=utf8))
+  (alias export $runtara:workflow-operation/scope@0.1.0 "release" (func $release (;3;)))
+  (core func $"#core-func7 indirect-cm32p2|runtara:workflow-operation/scope@0.1-release" (@name "indirect-cm32p2|runtara:workflow-operation/scope@0.1-release") (;7;) (canon lower (func $release) (memory $memory) string-encoding=utf8))
+  (core instance $fixup-args (;3;)
+    (export "$imports" (table $"shim table"))
+    (export "0" (func $"#core-func5 indirect-cm32p2|runtara:workflow-operation/scope@0.1-enter"))
+    (export "1" (func $"#core-func6 indirect-cm32p2|runtara:workflow-operation/scope@0.1-suspend"))
+    (export "2" (func $"#core-func7 indirect-cm32p2|runtara:workflow-operation/scope@0.1-release"))
+  )
+  (core instance $fixup (;4;) (instantiate $wit-component-fixup
+      (with "" (instance $fixup-args))
+    )
+  )
+  (alias core export $main "cm32p2_initialize" (core func $start (;8;)))
+  (core module $start-shim-module (;3;)
+    (type (;0;) (func))
+    (import "" "" (func (;0;) (type 0)))
+    (start 0)
+  )
+  (core instance $start-shim-args (;5;)
+    (export "" (func $start))
+  )
+  (core instance $start-shim-instance (;6;) (instantiate $start-shim-module
+      (with "" (instance $start-shim-args))
+    )
+  )
+  (@producers
+    (processed-by "wit-component" "0.249.0")
+  )
+)
