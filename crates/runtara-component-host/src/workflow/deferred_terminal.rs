@@ -184,6 +184,28 @@ impl RuntimeHost for DeferredTerminal {
             .durable_sleep_checkpoint(checkpoint_id, state, ms)
             .await
     }
+    async fn operation_continuation_load(
+        &self,
+        op_hash: String,
+        attempt: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.inner
+            .operation_continuation_load(op_hash, attempt)
+            .await
+    }
+    async fn operation_continuation_store(
+        &self,
+        op_hash: String,
+        attempt: u32,
+        state: Vec<u8>,
+    ) -> Result<(), String> {
+        self.inner
+            .operation_continuation_store(op_hash, attempt, state)
+            .await
+    }
+    async fn operation_release(&self, op_hash: String) -> Result<(), String> {
+        self.inner.operation_release(op_hash).await
+    }
     fn now_ms(&self) -> Result<u64, String> {
         self.inner.now_ms()
     }

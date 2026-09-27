@@ -91,6 +91,30 @@ impl DirectWorkflowManifest {
         }
         ids
     }
+
+    /// Agent ids with a suspending call site anywhere in the root graph, its
+    /// nested graphs or its embedded children. Each is imported through both
+    /// `capabilities` and `suspendable`.
+    pub fn suspending_agent_ids(&self) -> std::collections::BTreeSet<String> {
+        fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
+            for agent in &graph.agents {
+                if agent.suspends {
+                    ids.insert(agent.agent_id.clone());
+                }
+            }
+            for step in &graph.steps {
+                for nested in &step.nested_graphs {
+                    collect(&nested.graph, ids);
+                }
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        collect(&self.graph, &mut ids);
+        for child in &self.child_workflows {
+            collect(&child.graph, &mut ids);
+        }
+        ids
+    }
 }
 
 /// Deterministic manifest for one execution graph.
@@ -446,6 +470,11 @@ pub struct DirectAgentManifest {
     /// manifests stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_workflow_agent: bool,
+    /// Whether the catalog declares the capability `suspends`: the site calls
+    /// the agent's `suspendable` interface inside an operation scope. Skipped
+    /// when false so existing manifests stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspends: bool,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
     /// Required capability inputs validated after runtime references resolve.
@@ -1029,6 +1058,9 @@ fn step_manifest(
                     &agent_id,
                     &step.capability_id,
                 ),
+                suspends: agent_catalog.is_some_and(|catalog| {
+                    catalog.capability_suspends(&agent_id, &step.capability_id)
+                }),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(
                     agent_catalog,
@@ -1177,6 +1209,7 @@ fn step_manifest(
                     capability_id,
                 ),
                 is_workflow_agent: false,
+                suspends: false,
                 input_mapping_id,
                 required_inputs: required_agent_inputs(agent_catalog, "ai-tools", capability_id),
                 // Retries are opt-in for AiAgent (default 0 — LLM calls
@@ -1230,6 +1263,7 @@ fn step_manifest(
                             },
                         rate_limited: false,
                         is_workflow_agent: false,
+                        suspends: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1271,6 +1305,7 @@ fn step_manifest(
                             "summarize-memory",
                         ),
                         is_workflow_agent: false,
+                        suspends: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1311,6 +1346,7 @@ fn step_manifest(
                             capability,
                         ),
                         is_workflow_agent: false,
+                        suspends: false,
                         input_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,

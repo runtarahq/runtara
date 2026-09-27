@@ -76,6 +76,40 @@ pub const ABI_WIT: &str = include_str!("../wit/lifecycle/deps/abi/runtara-abi.wi
 /// WIT text for `runtara:workflow-lifecycle@0.2.0`.
 pub const LIFECYCLE_WIT: &str = include_str!("../wit/lifecycle/runtara-workflow-lifecycle.wit");
 
+/// WIT package of the compiler-emitted operation scope.
+pub const OPERATION_PACKAGE: &str = "runtara:workflow-operation@0.1.0";
+
+/// Component import name of the operation scope. Only compiled workflow logic
+/// imports it; no agent may.
+pub const OPERATION_SCOPE_INTERFACE_NAME: &str = "runtara:workflow-operation/scope@0.1.0";
+
+/// WIT text for `runtara:workflow-operation@0.1.0`. It `use`s
+/// `runtara:agent-suspension@0.1.0`, which must be in the resolve first.
+pub const OPERATION_WIT: &str = include_str!("../wit/operation/runtara-workflow-operation.wit");
+
+/// WIT package of the control service.
+pub const CONTROL_PACKAGE: &str = "runtara:control@0.1.0";
+
+/// Interface-name prefix of every control interface. Only the canonical
+/// `control` agent may import one.
+pub const CONTROL_INTERFACE_PREFIX: &str = "runtara:control/";
+
+/// Control types, imported by the control agent.
+pub const CONTROL_TYPES_INTERFACE_NAME: &str = "runtara:control/types@0.1.0";
+
+/// Host control operations: real only in control executor stores.
+pub const CONTROL_API_INTERFACE_NAME: &str = "runtara:control/api@0.1.0";
+
+/// What the composed control copy forwards to.
+pub const CONTROL_EXECUTOR_INTERFACE_NAME: &str = "runtara:control/executor@0.1.0";
+
+/// Exported by the control agent, called only by the host executor.
+pub const CONTROL_EXECUTION_INTERFACE_NAME: &str = "runtara:control/execution@0.1.0";
+
+/// WIT text for `runtara:control@0.1.0`. It `use`s `runtara:agent@0.4.0` and
+/// `runtara:agent-suspension@0.1.0`, which must be in the resolve first.
+pub const CONTROL_WIT: &str = include_str!("../wit/control/runtara-control.wit");
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -454,5 +488,113 @@ mod outbound_http_tests {
                 "max-response-bytes"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use wit_parser::{FunctionKind, Resolve, TypeDefKind};
+
+    fn resolve() -> Resolve {
+        let mut resolve = Resolve::default();
+        resolve
+            .push_str("agent.wit", runtara_agent_wit::RUNTARA_AGENT_WIT)
+            .unwrap();
+        resolve
+            .push_str("agent-suspension.wit", runtara_agent_suspension::WIT)
+            .unwrap();
+        resolve
+    }
+
+    #[test]
+    fn operation_scope_is_sync_and_takes_no_identity_from_agents() {
+        let mut resolve = resolve();
+        let id = resolve
+            .push_str("operation.wit", super::OPERATION_WIT)
+            .unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), super::OPERATION_PACKAGE);
+        let scope = &resolve.interfaces[package.interfaces["scope"]];
+        assert_eq!(
+            scope
+                .functions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["enter", "suspend", "exit", "release"]
+        );
+        assert!(
+            scope
+                .functions
+                .values()
+                .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
+            "the scope is compiler-called and synchronous"
+        );
+        assert_eq!(
+            super::OPERATION_SCOPE_INTERFACE_NAME,
+            format!(
+                "runtara:workflow-operation/scope@{}",
+                package.name.version.as_ref().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn only_host_called_execution_takes_a_continuation() {
+        let mut resolve = resolve();
+        let id = resolve.push_str("control.wit", super::CONTROL_WIT).unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), super::CONTROL_PACKAGE);
+        let params = |interface: &str| -> Vec<String> {
+            resolve.interfaces[package.interfaces[interface]].functions["invoke"]
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect()
+        };
+        assert_eq!(params("executor"), ["capability-id", "input"]);
+        assert_eq!(
+            params("execution"),
+            ["capability-id", "input", "continuation"]
+        );
+        let api = &resolve.interfaces[package.interfaces["api"]];
+        for function in api.functions.values() {
+            assert!(matches!(function.kind, FunctionKind::AsyncFreestanding));
+            assert!(
+                function
+                    .params
+                    .iter()
+                    .all(|param| !["tenant", "parent", "operation", "caller"]
+                        .iter()
+                        .any(|forbidden| param.name.contains(forbidden))),
+                "identity never rides api arguments: {}",
+                function.name
+            );
+        }
+        let types = &resolve.interfaces[package.interfaces["types"]];
+        assert!(matches!(
+            resolve.types[types.types["error-code"]].kind,
+            TypeDefKind::Enum(_)
+        ));
+        for (world, name) in [
+            ("control-client", super::CONTROL_EXECUTOR_INTERFACE_NAME),
+            ("control-agent-host", super::CONTROL_API_INTERFACE_NAME),
+        ] {
+            let world = &resolve.worlds[package.worlds[world]];
+            assert!(
+                world
+                    .imports
+                    .keys()
+                    .any(|key| resolve.name_world_key(key) == name)
+            );
+        }
+        for name in [
+            super::CONTROL_TYPES_INTERFACE_NAME,
+            super::CONTROL_API_INTERFACE_NAME,
+            super::CONTROL_EXECUTOR_INTERFACE_NAME,
+            super::CONTROL_EXECUTION_INTERFACE_NAME,
+        ] {
+            assert!(name.starts_with(super::CONTROL_INTERFACE_PREFIX));
+        }
     }
 }

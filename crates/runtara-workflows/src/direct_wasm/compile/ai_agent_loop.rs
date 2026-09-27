@@ -165,8 +165,7 @@ pub(super) fn emit_ai_agent_loop_plan(
     );
 
     let turn_invoke = indices
-        .agent_invokes
-        .get(agent_component_id)
+        .agent_invoke(agent_component_id)
         .expect("AiAgent loop has a matching ai-tools component import");
     let turn_capability = static_data
         .agent_capability_id(agent_id)
@@ -222,8 +221,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         );
         // load_output = invoke load-memory(conversation)
         let load_invoke = indices
-            .agent_invokes
-            .get(&memory.agent_component_id)
+            .agent_invoke(&memory.agent_component_id)
             .expect("AiAgent memory provider has a matching component import");
         let load_capability = static_data
             .agent_capability_id(memory.load_agent_id)
@@ -760,8 +758,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                 timeout_ms,
             } => {
                 let tool_invoke = indices
-                    .agent_invokes
-                    .get(agent_component_id)
+                    .agent_invoke(agent_component_id)
                     .expect("AiAgent tool has a matching component import");
                 let tool_capability = static_data
                     .agent_capability_id(*agent_id)
@@ -1072,8 +1069,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                 DIRECT_AI_TURN_INPUT_LEN_LOCAL,
             );
             let summarize_invoke = indices
-                .agent_invokes
-                .get(&summarize.agent_component_id)
+                .agent_invoke(&summarize.agent_component_id)
                 .expect("AiAgent summarize provider has a matching component import");
             let summarize_capability = static_data
                 .agent_capability_id(summarize.agent_id)
@@ -1200,8 +1196,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         );
         // invoke save-memory(save_input); the result is unused.
         let save_invoke = indices
-            .agent_invokes
-            .get(&memory.agent_component_id)
+            .agent_invoke(&memory.agent_component_id)
             .expect("AiAgent memory provider has a matching component import");
         let save_capability = static_data
             .agent_capability_id(memory.save_agent_id)

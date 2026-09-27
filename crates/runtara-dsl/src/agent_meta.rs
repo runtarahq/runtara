@@ -41,6 +41,9 @@ pub struct CapabilityMeta {
     pub rate_limited: bool,
     /// Requires isolated, credential-bearing execution by an approved built-in.
     pub trusted: bool,
+    /// May answer with a typed suspension instead of a result
+    /// (`runtara:agent-suspension`); invoked only through `suspendable.invoke`.
+    pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
     pub known_errors: &'static [KnownError],
@@ -302,6 +305,10 @@ pub struct CapabilityInfo {
     /// Host-enforced execution mode; never a workflow-controlled permission.
     #[serde(default)]
     pub trusted: bool,
+    /// May answer with a typed suspension instead of a result. Omitted when
+    /// false, so existing catalogs stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
     #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
@@ -1515,6 +1522,7 @@ pub fn capability_to_api_with_types(
         is_idempotent: cap.is_idempotent,
         rate_limited: cap.rate_limited,
         trusted: cap.trusted,
+        suspends: cap.suspends,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
     }
@@ -1806,6 +1814,10 @@ pub fn validate_agent_metadata_or_panic() {
 // ============================================================================
 // AgentCatalog — runtime-loaded snapshot of every agent's metadata.
 // ============================================================================
+
+/// Canonical id of the built-in control agent, the only agent that may import
+/// `runtara:control/*`. Reserved: no workflow-agent slug may fold onto it.
+pub const CONTROL_AGENT_ID: &str = "control";
 
 /// Canonicalize an agent id to its kebab-case form.
 ///
@@ -2142,6 +2154,7 @@ pub fn workflow_agent_info(
             is_idempotent: false,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: Vec::new(),
             tags: vec![
                 capability_tags::WORKFLOW_AGENT.to_string(),
@@ -2296,6 +2309,13 @@ impl AgentCatalog {
             .capabilities
             .iter()
             .find(|c| c.id == capability_id)
+    }
+
+    /// True when the catalog declares the capability `suspends`. An unknown
+    /// agent or capability does not suspend.
+    pub fn capability_suspends(&self, agent_id: &str, capability_id: &str) -> bool {
+        self.capability(agent_id, capability_id)
+            .is_some_and(|capability| capability.suspends)
     }
 
     /// Return the `integration_ids` of the agent matching `agent_id`
@@ -2591,6 +2611,7 @@ mod output_schema_tests {
             is_idempotent: true,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: &[],
             tags: &[],
         }
@@ -2665,6 +2686,7 @@ mod catalog_tests {
                 is_idempotent: true,
                 rate_limited: false,
                 trusted: false,
+                suspends: false,
                 known_errors: vec![],
                 tags: vec![],
             }],
@@ -3447,6 +3469,7 @@ mod tests {
             is_idempotent: false,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: vec![
                 KnownErrorInfo {
                     code: "NETWORK_ERROR".to_string(),
@@ -3499,6 +3522,7 @@ mod tests {
             is_idempotent: true,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: vec![],
             tags: vec![],
         };

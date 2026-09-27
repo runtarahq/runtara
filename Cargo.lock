@@ -4299,6 +4299,7 @@ dependencies = [
  "runtara-agent-azure-blob-storage",
  "runtara-agent-bedrock",
  "runtara-agent-compression",
+ "runtara-agent-control",
  "runtara-agent-crypto",
  "runtara-agent-csv",
  "runtara-agent-datetime",
@@ -4337,6 +4338,18 @@ dependencies = [
  "strum",
  "wit-bindgen 0.58.0",
  "zip",
+]
+
+[[package]]
+name = "runtara-agent-control"
+version = "8.9.12"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-agent-suspension",
+ "runtara-dsl",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]
@@ -4587,6 +4600,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-suspension"
+version = "8.9.12"
+dependencies = [
+ "wit-parser 0.246.2",
+]
+
+[[package]]
 name = "runtara-agent-teams"
 version = "8.9.12"
 dependencies = [
@@ -4721,6 +4741,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtara-agent-compression",
  "runtara-agent-crypto",
+ "runtara-agent-suspension",
  "runtara-agent-trusted",
  "runtara-agent-wit",
  "runtara-agent-xlsx",
@@ -5083,6 +5104,8 @@ dependencies = [
 name = "runtara-workflow-wit"
 version = "8.9.12"
 dependencies = [
+ "runtara-agent-suspension",
+ "runtara-agent-wit",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5099,6 +5122,7 @@ dependencies = [
  "getrandom 0.3.4",
  "minijinja",
  "reqwest 0.12.28",
+ "runtara-agent-suspension",
  "runtara-agent-trusted",
  "runtara-agent-wit",
  "runtara-component-host",

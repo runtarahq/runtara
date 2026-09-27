@@ -35,6 +35,9 @@ mod embed_tool;
 #[path = "nested_suspend_tests.rs"]
 mod nested_suspend;
 
+#[path = "agent_suspend_tests.rs"]
+mod agent_suspend;
+
 #[path = "reserved_code_tests.rs"]
 mod reserved_code;
 
@@ -86,6 +89,11 @@ struct Host {
     /// encodes its whole call path, so this also shows that replay rebuilds
     /// the same route after a park.
     input_keys: Mutex<Vec<String>>,
+    /// Typed agent suspension continuations by `(op_hash, attempt)`, standing
+    /// in for the durable continuation store.
+    continuations: Mutex<HashMap<(String, u32), Vec<u8>>>,
+    /// Every `operation_release`, in order.
+    released_operations: Mutex<Vec<String>>,
 }
 impl Host {
     fn new() -> Self {
@@ -122,6 +130,8 @@ impl Host {
             suspend_after_input_poll: AtomicUsize::new(usize::MAX),
             cancel_after_input_poll: AtomicUsize::new(usize::MAX),
             input_keys: Mutex::new(Vec::new()),
+            continuations: Mutex::new(HashMap::new()),
+            released_operations: Mutex::new(Vec::new()),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -363,6 +373,38 @@ impl RuntimeHost for Host {
     }
     async fn durable_sleep_checkpoint(&self, _: String, _: Vec<u8>, _: u64) -> Result<(), String> {
         Err("lifecycle retry must park, not sleep in the host".into())
+    }
+    async fn operation_continuation_load(
+        &self,
+        op_hash: String,
+        attempt: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .continuations
+            .lock()
+            .unwrap()
+            .get(&(op_hash, attempt))
+            .cloned())
+    }
+    async fn operation_continuation_store(
+        &self,
+        op_hash: String,
+        attempt: u32,
+        state: Vec<u8>,
+    ) -> Result<(), String> {
+        self.continuations
+            .lock()
+            .unwrap()
+            .insert((op_hash, attempt), state);
+        Ok(())
+    }
+    async fn operation_release(&self, op_hash: String) -> Result<(), String> {
+        self.continuations
+            .lock()
+            .unwrap()
+            .retain(|(stored, _), _| *stored != op_hash);
+        self.released_operations.lock().unwrap().push(op_hash);
+        Ok(())
     }
     fn now_ms(&self) -> Result<u64, String> {
         let clock = self.clock_override.load(Ordering::SeqCst);

@@ -31,6 +31,7 @@ mod agent_error;
 mod agent_invoke;
 mod agent_io;
 mod agent_retry;
+mod agent_suspend;
 mod ai_agent_loop;
 mod artifact_metadata;
 mod branch_parallel;
@@ -88,9 +89,10 @@ pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
 use abi::push_retptr_arg;
 pub use artifact_metadata::{
-    AGENT_IMPORT_ALLOWLIST, AgentImportKind, DirectArtifactFileMetadata, DirectArtifactMetadata,
-    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
-    STAGED_WORKFLOW_AGENT_DENIED_PREFIXES, check_agent_component_imports,
+    AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
+    DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
+    DirectComponentSidecarMetadata, DirectIsolationMetadata, STAGED_WORKFLOW_AGENT_DENIED_PREFIXES,
+    check_agent_component_imports,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -1083,6 +1085,7 @@ pub fn compile_direct_workflow_composed_configured(
         &result.parallel_pools,
         result.component_artifacts.has_connections,
         &Default::default(),
+        &result.component_artifacts.suspending_agents.clone(),
         result.component_artifacts.has_timers,
         result.component_artifacts.needs_monotonic_clock,
     );
@@ -1379,6 +1382,13 @@ fn compile_direct_workflow_inner(
             )));
         }
     }
+    agent_suspend::check_sites(
+        &manifest,
+        abi,
+        omit_runtime,
+        runtime_binding,
+        &scoped_agents,
+    )?;
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1410,6 +1420,7 @@ fn compile_direct_workflow_inner(
         &parallel_pools,
         has_connections,
         &scoped_agents,
+        &manifest.suspending_agent_ids(),
         super::plan::needs_cooperative_timers(&manifest),
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
     );
@@ -1604,6 +1615,7 @@ fn emit_direct_component(
         &parallel_pools,
         has_connections,
         scoped_agents,
+        &manifest.suspending_agent_ids(),
         super::plan::needs_cooperative_timers(manifest),
         core_config.static_data.needs_monotonic_clock(),
     )?;
@@ -1666,6 +1678,7 @@ fn build_direct_component_resolve_configured(
         parallel_pools,
         has_connections,
         &Default::default(),
+        &Default::default(),
         // Structural tests use a superset world; production derives this from
         // the actual manifest, including Agent-free composite retry waits.
         !omit_runtime,
@@ -1682,6 +1695,7 @@ fn build_direct_component_resolve_scoped(
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
+    suspending_agents: &std::collections::BTreeSet<String>,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
@@ -1752,11 +1766,30 @@ fn build_direct_component_resolve_scoped(
                 .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
                 .map_err(component_error)?;
         }
+        if !suspending_agents.is_empty() {
+            // The suspension types, then the operation scope that `use`s them.
+            resolve
+                .push_str(
+                    "runtara-agent-suspension.wit",
+                    runtara_agent_suspension::WIT,
+                )
+                .map_err(component_error)?;
+            resolve
+                .push_str(
+                    "runtara-workflow-operation.wit",
+                    runtara_workflow_wit::OPERATION_WIT,
+                )
+                .map_err(component_error)?;
+        }
         for agent in agents {
             resolve
                 .push_str(
                     format!("runtara-agent-{agent}.wit"),
-                    &agent_wit_package_configured(agent, scoped_agents.contains(agent)),
+                    &agent_wit_package_with_interfaces(
+                        agent,
+                        scoped_agents.contains(agent),
+                        suspending_agents.contains(agent),
+                    ),
                 )
                 .map_err(component_error)?;
             // Phantom pool-member packages (structurally identical interface
@@ -1796,6 +1829,12 @@ fn build_direct_component_resolve_scoped(
             runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
         ));
     }
+    if !suspending_agents.is_empty() {
+        workflow_wit.push_str(&format!(
+            "    import {};\n",
+            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+        ));
+    }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
             "scoped-capabilities-v3"
@@ -1805,6 +1844,12 @@ fn build_direct_component_resolve_scoped(
         workflow_wit.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION};\n",
         ));
+        if suspending_agents.contains(agent) {
+            workflow_wit.push_str(&format!(
+                "    import runtara:agent-{agent}/{}@{AGENT_WIT_VERSION};\n",
+                runtara_agent_suspension::SUSPENDABLE_INTERFACE
+            ));
+        }
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom = split_parallel::pool_member_component_id(agent, member);
@@ -1844,6 +1889,24 @@ fn agent_wit_package(agent: &str) -> String {
 }
 
 fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
+    agent_wit_package_with_interfaces(agent, scoped, false)
+}
+
+/// The per-agent package the workflow logic is encoded against. A suspending
+/// agent's package also declares `suspendable`, so the world can import both
+/// of its type-identical invoke interfaces.
+fn agent_wit_package_with_interfaces(agent: &str, scoped: bool, suspendable: bool) -> String {
+    let (suspendable_interface, suspendable_export) = if suspendable {
+        (
+            runtara_agent_suspension::SUSPENDABLE_INTERFACE_WIT,
+            format!(
+                "    export {};\n",
+                runtara_agent_suspension::SUSPENDABLE_INTERFACE
+            ),
+        )
+    } else {
+        ("", String::new())
+    };
     let interface = if scoped {
         "scoped-capabilities-v3"
     } else {
@@ -1865,9 +1928,11 @@ fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
                  {context}\n\
              ) -> result<list<u8>, error-info>;\n\
          }}\n\
+         {suspendable_interface}\
          \n\
          world agent {{\n\
              export {interface};\n\
+         {suspendable_export}\
          }}\n"
     )
 }

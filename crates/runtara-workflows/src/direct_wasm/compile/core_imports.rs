@@ -152,7 +152,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_step_debug_start: Option<u32>,
     stdlib_step_debug_end: Option<u32>,
     stdlib_step_debug_error: Option<u32>,
-    agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
+    agent_invokes: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     // Parallel-split surface (Phase 3): the CM-async
     // builtins and per-agent async-lowered invokes, populated directly by
     // `core_module` (they are extra CORE imports, not WIT world functions).
@@ -167,7 +167,8 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) timer_sleep_async: Option<u32>,
     pub(super) timer_abort_async: Option<u32>,
     pub(super) monotonic_now: Option<u32>,
-    pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
+    pub(super) agent_invokes_async: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
+    pub(super) operation_scope: Option<DirectOperationScopeImports>,
 }
 
 impl DirectCoreImportIndices {
@@ -673,6 +674,7 @@ impl DirectCoreImportIndices {
             timer_abort_async: self.timer_abort_async,
             monotonic_now: self.monotonic_now,
             agent_invokes_async: self.agent_invokes_async,
+            operation_scope: self.operation_scope,
         })
     }
 }
@@ -823,7 +825,10 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_start: u32,
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
-    pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
+    /// Every per-agent invoke import, keyed by agent and interface: a
+    /// suspending agent is imported through both `capabilities` and
+    /// `suspendable`, whose flat signatures are identical.
+    pub(super) agent_invokes: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     /// Canonical yield, including runtime-free workflow-agent loop boundaries.
     pub(super) thread_yield: Option<u32>,
     /// Wait/subtask builtins, present when the workflow invokes Agents.
@@ -837,10 +842,39 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) timer_sleep_async: Option<u32>,
     pub(super) timer_abort_async: Option<u32>,
     pub(super) monotonic_now: Option<u32>,
-    pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
+    pub(super) agent_invokes_async: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
+    /// Present when the workflow has an operation-scoped call site.
+    pub(super) operation_scope: Option<DirectOperationScopeImports>,
 }
 
 impl DirectCoreFunctionIndices {
+    /// The standard (synchronously typed) invoke import of `agent`: its
+    /// `capabilities` interface, or the private scoped one when isolated.
+    pub(super) fn agent_invoke(&self, agent: &str) -> Option<&DirectAgentInvokeImport> {
+        standard_agent_import(&self.agent_invokes, agent)
+    }
+
+    /// The async lowering of [`Self::agent_invoke`].
+    pub(super) fn agent_invoke_async(&self, agent: &str) -> Option<&DirectAgentInvokeImport> {
+        standard_agent_import(&self.agent_invokes_async, agent)
+    }
+
+    /// The invoke import of one `(agent, interface)` pair.
+    pub(super) fn agent_import(
+        &self,
+        agent: &str,
+        interface: AgentInterface,
+    ) -> Option<&DirectAgentInvokeImport> {
+        self.agent_invokes.get(&(agent.to_string(), interface))
+    }
+
+    /// The operation-scope imports, present only when a call site needs them.
+    pub(super) fn operation_scope(&self) -> &DirectOperationScopeImports {
+        self.operation_scope
+            .as_ref()
+            .expect("an operation-scoped site imports runtara:workflow-operation/scope")
+    }
+
     /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
     ///
     /// Suppressed when the runtime is omitted (nothing to call) and under the
@@ -857,6 +891,58 @@ impl DirectCoreFunctionIndices {
                 crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
             )
     }
+}
+
+/// Which per-agent interface an invoke import belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum AgentInterface {
+    /// `runtara:agent-<id>/capabilities`: the ordinary invoke.
+    Capabilities,
+    /// `runtara:agent-<id>/scoped-capabilities-v3`: the private isolated invoke.
+    ScopedV3,
+    /// `runtara:agent-<id>/suspendable`: returns a typed outcome. Called only
+    /// at suspending sites.
+    Suspendable,
+}
+
+impl AgentInterface {
+    /// The interface name inside the agent's package.
+    pub(super) fn wit_name(self) -> &'static str {
+        match self {
+            Self::Capabilities => "capabilities",
+            Self::ScopedV3 => "scoped-capabilities-v3",
+            Self::Suspendable => runtara_agent_suspension::SUSPENDABLE_INTERFACE,
+        }
+    }
+
+    fn from_wit_name(name: &str) -> Option<Self> {
+        [Self::Capabilities, Self::ScopedV3, Self::Suspendable]
+            .into_iter()
+            .find(|interface| interface.wit_name() == name)
+    }
+}
+
+/// An invoke import is identified by the agent AND the interface: the two
+/// interfaces of a suspending agent are type-identical, so the agent id alone
+/// would bind a site to the wrong one.
+pub(super) type AgentImportKey = (String, AgentInterface);
+
+fn standard_agent_import<'a>(
+    imports: &'a BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
+    agent: &str,
+) -> Option<&'a DirectAgentInvokeImport> {
+    [AgentInterface::Capabilities, AgentInterface::ScopedV3]
+        .into_iter()
+        .find_map(|interface| imports.get(&(agent.to_string(), interface)))
+}
+
+/// Function indices of `runtara:workflow-operation/scope`.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DirectOperationScopeImports {
+    pub(super) enter: u32,
+    pub(super) suspend: u32,
+    pub(super) exit: u32,
+    pub(super) release: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -947,14 +1033,31 @@ pub(super) fn is_connection_resolver_import(
             .is_some_and(|name| name.starts_with("runtara:connection-resolver/resolver"))
 }
 
-pub(super) fn agent_id_for_import(
+/// The `(agent, interface)` of a per-agent import such as
+/// `runtara:agent-crypto/capabilities@0.4.0`; `None` for anything else.
+pub(super) fn agent_import_for(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
-) -> Option<String> {
+) -> Option<AgentImportKey> {
     let name = interface.map(|key| resolve.name_world_key(key))?;
-    name.strip_prefix("runtara:agent-")?
-        .split_once('/')
-        .map(|(agent_id, _)| agent_id.to_string())
+    let (agent_id, rest) = name.strip_prefix("runtara:agent-")?.split_once('/')?;
+    let interface_name = rest.split_once('@').map_or(rest, |(name, _)| name);
+    Some((
+        agent_id.to_string(),
+        AgentInterface::from_wit_name(interface_name)?,
+    ))
+}
+
+fn is_operation_scope_import(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+    function_name: &str,
+) -> bool {
+    function.name == function_name
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name == runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME)
 }
 
 pub(super) fn is_wasi_cli_run_export(
@@ -1294,11 +1397,31 @@ pub(super) fn import_core_function(
         import_indices.stdlib_step_debug_end = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-error") {
         import_indices.stdlib_step_debug_error = Some(function_index);
+    } else if is_operation_scope_import(resolve, interface, function, "enter") {
+        import_indices
+            .operation_scope
+            .get_or_insert_with(Default::default)
+            .enter = function_index;
+    } else if is_operation_scope_import(resolve, interface, function, "suspend") {
+        import_indices
+            .operation_scope
+            .get_or_insert_with(Default::default)
+            .suspend = function_index;
+    } else if is_operation_scope_import(resolve, interface, function, "exit") {
+        import_indices
+            .operation_scope
+            .get_or_insert_with(Default::default)
+            .exit = function_index;
+    } else if is_operation_scope_import(resolve, interface, function, "release") {
+        import_indices
+            .operation_scope
+            .get_or_insert_with(Default::default)
+            .release = function_index;
     } else if function.name == "invoke"
-        && let Some(agent_id) = agent_id_for_import(resolve, interface)
+        && let Some(key) = agent_import_for(resolve, interface)
     {
         import_indices.agent_invokes.insert(
-            agent_id,
+            key,
             DirectAgentInvokeImport {
                 function_index,
                 params: signature.params.clone(),

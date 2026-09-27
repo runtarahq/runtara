@@ -176,6 +176,8 @@ pub struct DirectComponentArtifacts {
     pub shared_components: Vec<DirectSharedComponentRequirement>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectAgentComponentRequirement>,
+    /// Agents imported through `suspendable` as well as `capabilities`.
+    pub suspending_agents: std::collections::BTreeSet<String>,
 }
 
 /// Emit the direct workflow component scaffolding.
@@ -273,6 +275,7 @@ pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
         parallel_pools,
         has_connections,
         &Default::default(),
+        &Default::default(),
         false,
         false,
     )
@@ -288,6 +291,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
+    suspending_agents: &std::collections::BTreeSet<String>,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> DirectComponentArtifacts {
@@ -311,6 +315,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
             parallel_pools,
             has_connections,
             scoped_agents,
+            suspending_agents,
             needs_timers,
             needs_monotonic_clock,
         ),
@@ -323,6 +328,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
         needs_monotonic_clock,
         shared_components,
         agent_components: agents.iter().map(|agent| agent_component(agent)).collect(),
+        suspending_agents: suspending_agents.clone(),
     }
 }
 
@@ -355,6 +361,7 @@ fn emit_world_wit(
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
+    suspending_agents: &std::collections::BTreeSet<String>,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> String {
@@ -380,6 +387,12 @@ fn emit_world_wit(
             runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
         ));
     }
+    if !suspending_agents.is_empty() {
+        out.push_str(&format!(
+            "    import {};\n",
+            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+        ));
+    }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
             "scoped-capabilities-v3"
@@ -389,6 +402,15 @@ fn emit_world_wit(
         out.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{DIRECT_AGENT_WIT_VERSION};\n"
         ));
+        // A suspending agent is also imported through `suspendable`; the one
+        // `...agent-<id>` spread in the wac wires both exports of the same
+        // instance.
+        if suspending_agents.contains(agent) {
+            out.push_str(&format!(
+                "    import runtara:agent-{agent}/{}@{DIRECT_AGENT_WIT_VERSION};\n",
+                runtara_agent_suspension::SUSPENDABLE_INTERFACE
+            ));
+        }
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom =

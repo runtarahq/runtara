@@ -218,6 +218,32 @@ pub trait RuntimeHost: Send + Sync {
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String>;
+    /// The continuation an operation-scoped call site saved for `attempt`, if
+    /// any. `op_hash` is the sha256 of the site's canonical checkpoint key; the
+    /// host scopes it to this instance. Hosts without typed agent suspension
+    /// refuse, so a suspending step fails loudly instead of losing state.
+    async fn operation_continuation_load(
+        &self,
+        _op_hash: String,
+        _attempt: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
+    /// Persist the continuation of a suspended operation (at most
+    /// `runtara_agent_suspension::MAX_CONTINUATION_BYTES`), replacing any
+    /// earlier one for the same `(op_hash, attempt)`.
+    async fn operation_continuation_store(
+        &self,
+        _op_hash: String,
+        _attempt: u32,
+        _state: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
+    /// Drop everything kept for an operation. Idempotent.
+    async fn operation_release(&self, _op_hash: String) -> Result<(), String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
     /// Milliseconds since the UNIX epoch, as the guest sees them.
     ///
     /// Defaults to the wall clock, which is what every production host uses. It

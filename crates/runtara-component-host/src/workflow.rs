@@ -262,6 +262,10 @@ impl WasiHttpHooks for WorkflowHooks {
 /// Store data for a workflow run.
 pub struct WorkflowState {
     trusted: Option<crate::trusted::TrustedCall>,
+    /// Forwarding target of `runtara:control/executor`, when configured.
+    pub(crate) control: Option<crate::control_executor::ControlCall>,
+    /// The operation a suspending call site entered.
+    pub(crate) operation: crate::operation_scope_host::OperationScopeState,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -429,6 +433,7 @@ pub struct WorkflowExecutor {
     database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
+    control: std::sync::OnceLock<Arc<crate::control_executor::ControlExecutor>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
@@ -503,6 +508,17 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("trusted executor already configured"))
     }
 
+    /// Route `runtara:control/executor` calls of every run to `executor`.
+    /// Without one, the composed control agent's calls are `denied`.
+    pub fn set_control_executor(
+        &self,
+        executor: Arc<crate::control_executor::ControlExecutor>,
+    ) -> anyhow::Result<()> {
+        self.control
+            .set(executor)
+            .map_err(|_| anyhow::anyhow!("control executor already configured"))
+    }
+
     /// `engine` must have epoch interruption enabled (see
     /// [`crate::engine::build_engine`]) and an epoch ticker running.
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
@@ -522,8 +538,17 @@ impl WorkflowExecutor {
         crate::outbound_http::add_to_linker(&mut linker)?;
         crate::execution_host::add_execution_to_linker(&mut linker)?;
         crate::trusted::add_to_linker(&mut linker)?;
+        // Typed agent suspension: the compiler-emitted operation scope, the
+        // continuation context of ordinary suspending agents, the control
+        // executor the composed control copy forwards to, and `denied` for a
+        // direct control API call from anything composed into the root.
+        crate::operation_scope_host::add_operation_scope_to_linker(&mut linker)?;
+        crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
+        crate::control_executor::add_control_executor_to_linker(&mut linker)?;
+        crate::control_host::add_denied_control_api_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
+            control: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
@@ -843,6 +868,9 @@ impl WorkflowExecutor {
                     deadline: tokio::time::Instant::now() + spec.timeout,
                     pins: Some(self.trusted_pins(pre.instance_pre().component())),
                 }),
+            // The retired `wasi:cli/run` entry cannot suspend.
+            control: None,
+            operation: Default::default(),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1146,6 +1174,14 @@ impl WorkflowExecutor {
                             .unwrap_or_else(|| self.trusted_pins(pre.component())),
                     ),
                 }),
+            control: self.control.get().cloned().map(|executor| {
+                crate::control_executor::ControlCall {
+                    executor,
+                    tenant: spec.trusted_tenant.clone().unwrap_or_default(),
+                    caller: spec.trusted_instance.clone(),
+                }
+            }),
+            operation: Default::default(),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1393,6 +1429,7 @@ impl WorkflowExecutor {
             exit,
             memory_peak_bytes: store.data().limiter.memory_peak_bytes,
             duration: overall_started.elapsed(),
+            instance_waits: store.data().operation.registered_waits().to_vec(),
         }
     }
 
@@ -1415,6 +1452,8 @@ impl WorkflowExecutor {
         let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
             trusted: None,
+            control: None,
+            operation: Default::default(),
             wasi: WasiCtxBuilder::new().build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1487,6 +1526,9 @@ pub struct InvokeRunResult {
     pub exit: InvokeExit,
     pub memory_peak_bytes: u64,
     pub duration: Duration,
+    /// Instance-wait ids the run's agent suspensions attached. A suspended
+    /// run is woken when any of them settles, besides its lifecycle wakes.
+    pub instance_waits: Vec<String>,
 }
 
 fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {

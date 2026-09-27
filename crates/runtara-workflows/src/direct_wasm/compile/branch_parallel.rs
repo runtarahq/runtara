@@ -492,7 +492,13 @@ pub(super) fn concurrent_branch_pools(
             agent_id,
             max_retries,
             ..
-        } => !static_data.agent_is_workflow_agent(*agent_id) && *max_retries == 0,
+        } => {
+            // An operation-scoped (suspending) site parks the whole workflow,
+            // so it never shares a concurrent window: the group serializes.
+            !static_data.agent_is_workflow_agent(*agent_id)
+                && !static_data.agent_suspends(*agent_id)
+                && *max_retries == 0
+        }
         _ => true, // sync steps have no invoke
     });
     if !ok {
@@ -680,6 +686,7 @@ fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunP
                 && match node {
                     DirectRunPlan::Agent { agent_id, .. } => {
                         !static_data.agent_is_workflow_agent(*agent_id)
+                            && !static_data.agent_suspends(*agent_id)
                     }
                     DirectRunPlan::Log { .. }
                     | DirectRunPlan::Filter { .. }
@@ -1524,8 +1531,7 @@ fn emit_branch_launch(
     super::cooperative_wait::emit_window_deadline_boundary(body, indices, failure_target);
     let component_id = pool_member_component_id(branch.agent_component_id, pool_member);
     let invoke = indices
-        .agent_invokes_async
-        .get(&component_id)
+        .agent_invoke_async(&component_id)
         .expect("parallel branch agents have matching async pool imports");
     let capability_id = static_data
         .agent_capability_id(branch.agent_id)

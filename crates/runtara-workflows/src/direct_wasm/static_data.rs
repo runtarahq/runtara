@@ -189,6 +189,9 @@ pub(super) struct DirectCoreStaticData {
     /// `agent-scope-input` envelope wrap that namespaces the composed child's
     /// checkpoint ids under the invocation site.
     agent_workflow_agents: BTreeSet<u32>,
+    /// Agents whose capability suspends: invoked through `suspendable.invoke`
+    /// inside an operation scope, never inside a parallel window.
+    agent_suspending: BTreeSet<u32>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -371,6 +374,7 @@ impl DirectCoreStaticData {
         let mut agent_connection_literals = BTreeSet::new();
         let mut agent_connection_refs = BTreeSet::new();
         let mut agent_workflow_agents = BTreeSet::new();
+        let mut agent_suspending = BTreeSet::new();
         collect_static_agent_data(
             graph,
             &mut offset,
@@ -378,6 +382,7 @@ impl DirectCoreStaticData {
             &mut agent_connection_literals,
             &mut agent_connection_refs,
             &mut agent_workflow_agents,
+            &mut agent_suspending,
         )?;
         for child in child_workflows {
             collect_static_agent_data(
@@ -387,6 +392,7 @@ impl DirectCoreStaticData {
                 &mut agent_connection_literals,
                 &mut agent_connection_refs,
                 &mut agent_workflow_agents,
+                &mut agent_suspending,
             )?;
         }
 
@@ -426,6 +432,7 @@ impl DirectCoreStaticData {
             agent_connection_literals,
             agent_connection_refs,
             agent_workflow_agents,
+            agent_suspending,
             heap_base: offset,
             memory_min_pages,
         })
@@ -477,6 +484,11 @@ impl DirectCoreStaticData {
     /// the pre-invoke `agent-scope-input` call.
     pub(super) fn agent_is_workflow_agent(&self, agent_id: u32) -> bool {
         self.agent_workflow_agents.contains(&agent_id)
+    }
+
+    /// True when the Agent's capability suspends (catalog `suspends`).
+    pub(super) fn agent_suspends(&self, agent_id: u32) -> bool {
+        self.agent_suspending.contains(&agent_id)
     }
 
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
@@ -558,6 +570,7 @@ fn collect_static_agent_data(
     agent_connection_literals: &mut BTreeSet<u32>,
     agent_connection_refs: &mut BTreeSet<u32>,
     agent_workflow_agents: &mut BTreeSet<u32>,
+    agent_suspending: &mut BTreeSet<u32>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
         let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
@@ -581,6 +594,9 @@ fn collect_static_agent_data(
         if agent.is_workflow_agent {
             agent_workflow_agents.insert(agent.id);
         }
+        if agent.suspends {
+            agent_suspending.insert(agent.id);
+        }
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
@@ -591,6 +607,7 @@ fn collect_static_agent_data(
                 agent_connection_literals,
                 agent_connection_refs,
                 agent_workflow_agents,
+                agent_suspending,
             )?;
         }
     }
@@ -855,6 +872,7 @@ mod tests {
             durable: false,
             rate_limited: false,
             is_workflow_agent: false,
+            suspends: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries: None,

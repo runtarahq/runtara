@@ -1,0 +1,85 @@
+// The control service, called only through the approved control agent.
+//
+// Skeleton from spike S0.2: `api` carries the wait pair the fake `wait`
+// capability needs. Slice 3 completes the types and the ten operations and
+// freezes the package; later slices return `unsupported` until they land.
+//
+// The tenant, the caller instance and the operation come from the host store
+// that runs the call, never from arguments.
+//
+// Released WIT is never edited, only versioned.
+package runtara:control@0.1.0;
+
+interface types {
+    enum error-code {
+        denied,
+        invalid,
+        not-found,
+        too-large,
+        unavailable,
+        unsupported,
+    }
+
+    record control-error {
+        code: error-code,
+        message: string,
+    }
+
+    enum wait-mode {
+        all,
+        any,
+    }
+
+    record wait-progress {
+        finished: list<string>,
+        remaining: list<string>,
+    }
+
+    variant wait-poll {
+        pending(wait-progress),
+        settled(wait-progress),
+    }
+}
+
+/// Host control operations. Real only in the fresh stores the host executor
+/// runs approved control bytes in; every other store links `denied` stubs.
+interface api {
+    use types.{control-error, wait-mode, wait-poll};
+
+    /// Register a host-owned wait on the given instances; returns its id.
+    wait: async func(instance-ids: list<string>, mode: wait-mode) -> result<string, control-error>;
+
+    /// Read a registered wait without blocking.
+    poll-wait: async func(wait-id: string) -> result<wait-poll, control-error>;
+}
+
+/// What the composed copy of the control agent forwards to. It takes no
+/// continuation: the host supplies the caller operation's continuation.
+interface executor {
+    use runtara:agent/types@0.4.0.{error-info};
+    use runtara:agent-suspension/types@0.1.0.{outcome};
+
+    invoke: async func(capability-id: string, input: list<u8>) -> result<outcome, error-info>;
+}
+
+/// Exported by the control agent and called only by the host executor, in a
+/// fresh store where `api` is real.
+interface execution {
+    use runtara:agent/types@0.4.0.{error-info};
+    use runtara:agent-suspension/types@0.1.0.{outcome};
+
+    invoke: async func(
+        capability-id: string,
+        input: list<u8>,
+        continuation: option<list<u8>>,
+    ) -> result<outcome, error-info>;
+}
+
+world control-client {
+    import executor;
+}
+
+world control-agent-host {
+    import api;
+    export execution;
+}

@@ -23,3 +23,5 @@ sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 wit-parser = "0.246"
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }
+runtara-agent-wit = { path = "../runtara-agent-wit" }

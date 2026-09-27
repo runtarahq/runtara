@@ -1,0 +1,42 @@
+// Compiler-emitted operation scope around an operation-scoped call site (a
+// suspending capability or a control mutation).
+//
+// Only compiled workflow logic imports this interface. No agent may, staged
+// workflow-agents included: the agent import allowlist denies it.
+//
+// The host keys everything by `op-hash = sha256(checkpoint-key)` together with
+// the caller instance it owns, where `checkpoint-key` is the canonical v2 Agent
+// checkpoint key of the call site. Identity never comes from agent input.
+//
+// Released WIT is never edited, only versioned.
+package runtara:workflow-operation@0.1.0;
+
+interface scope {
+    use runtara:agent-suspension/types@0.1.0.{wake};
+
+    /// Enter the operation of this call site. With `load`, the continuation
+    /// saved for `attempt` becomes the operation's context, which the host
+    /// hands to the capability (`runtara:agent-suspension/context`, or the
+    /// control executor's `continuation` argument).
+    enter: func(checkpoint-key: string, attempt: u32, load: bool) -> result<_, string>;
+
+    /// Persist `state` as the entered operation's continuation, attach its
+    /// instance waits, and leave the operation. The caller then parks until
+    /// any wake fires or the step deadline passes. Rejects a suspension that
+    /// breaks the caps (no wakes, more than 16, a wait id over 64 bytes, a
+    /// state over 64 KiB).
+    suspend: func(state: list<u8>, wakes: list<wake>) -> result<_, string>;
+
+    /// Leave the operation after the capability completed (`failed` false) or
+    /// failed. A failure discards the continuation, so a replay starts the
+    /// operation afresh.
+    exit: func(failed: bool);
+
+    /// Drop everything kept for the operation once its result is
+    /// checkpointed. Idempotent.
+    release: func(checkpoint-key: string);
+}
+
+world operation-client {
+    import scope;
+}

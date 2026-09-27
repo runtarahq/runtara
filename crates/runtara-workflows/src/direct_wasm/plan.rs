@@ -3829,6 +3829,7 @@ mod tests {
             durable: true,
             rate_limited,
             is_workflow_agent: false,
+            suspends: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries,

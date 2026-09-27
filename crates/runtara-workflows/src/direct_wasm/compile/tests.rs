@@ -2174,6 +2174,7 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
             &Default::default(),
             false,
             &Default::default(),
+            &Default::default(),
             true,
             core_config.static_data.needs_monotonic_clock(),
         )
@@ -2229,6 +2230,7 @@ fn direct_core_emits_value_store_retain_for_loops() {
             None,
             &Default::default(),
             false,
+            &Default::default(),
             &Default::default(),
             true,
             core_config.static_data.needs_monotonic_clock(),

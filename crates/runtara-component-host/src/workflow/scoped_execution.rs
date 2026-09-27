@@ -129,6 +129,7 @@ impl WorkflowExecutor {
                     exit: InvokeExit::Cancelled,
                     memory_peak_bytes: 0,
                     duration: overall_started.elapsed(),
+                    instance_waits: Vec::new(),
                 },
                 result = executor.execute_entry(
                     &pre, spec, input, start_confirmation, InvocationEntry::Lifecycle { interface: None }, control,
@@ -313,6 +314,7 @@ fn host_failure(reason: String) -> InvokeRunResult {
         exit: InvokeExit::Trapped { reason },
         memory_peak_bytes: 0,
         duration: Duration::ZERO,
+        instance_waits: Vec::new(),
     }
 }
 

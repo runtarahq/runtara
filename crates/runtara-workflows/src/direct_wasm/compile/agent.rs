@@ -238,10 +238,22 @@ pub(super) fn emit_agent_plan(
         }
     }
 
-    let invoke = indices
-        .agent_invokes
-        .get(agent_component_id)
-        .expect("direct Agent run plans have matching component imports");
+    // A suspending site calls the type-identical `suspendable` interface of the
+    // same agent instance; every other site calls its standard interface.
+    let suspends = static_data.agent_suspends(agent_id);
+    debug_assert!(
+        !suspends || (max_retries == 0 && durable_checkpoint && memo_slot_ptr_local.is_none()),
+        "agent_suspend::check_sites admits only non-retrying durable sequential sites"
+    );
+    let invoke = if suspends {
+        indices.agent_import(
+            agent_component_id,
+            super::core_imports::AgentInterface::Suspendable,
+        )
+    } else {
+        indices.agent_invoke(agent_component_id)
+    }
+    .expect("direct Agent run plans have matching component imports");
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");
@@ -667,6 +679,9 @@ pub(super) fn emit_agent_plan(
             );
             body.instruction(&Instruction::End);
         } else {
+            if suspends {
+                super::agent_suspend::emit_enter(body, indices, route_ptr_local, route_len_local);
+            }
             emit_agent_invoke(
                 body,
                 indices,
@@ -684,6 +699,9 @@ pub(super) fn emit_agent_plan(
                     None
                 }),
             );
+            if suspends {
+                super::agent_suspend::emit_after_invoke(body, indices);
+            }
         }
         super::deadline_scope::propagate(
             body,
@@ -726,6 +744,9 @@ pub(super) fn emit_agent_plan(
             output_ptr_local,
             output_len_local,
         );
+        if suspends {
+            super::agent_suspend::emit_release(body, indices, route_ptr_local, route_len_local);
+        }
         body.instruction(&Instruction::End);
     }
 
