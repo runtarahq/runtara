@@ -45,7 +45,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
+use runtara_component_host::{ComponentDispatcherService, TestCapabilityRequest};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -64,12 +64,6 @@ fn bundle_dir() -> PathBuf {
 
 fn agents_crates_dir() -> PathBuf {
     workspace_root().join("crates").join("agents")
-}
-
-fn env() -> DispatcherEnv {
-    DispatcherEnv {
-        core_http_url: "http://localhost:9996".into(),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,7 +205,7 @@ async fn capability_fixtures_drive_production_bundle() -> anyhow::Result<()> {
         "no fixtures found under crates/agents/runtara-agent-*/fixtures/"
     );
 
-    let dispatcher = ComponentDispatcherService::from_dir(&bundle, env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(&bundle).await?;
 
     for LoadedFixture {
         agent_id,

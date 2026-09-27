@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use runtara_agent_trusted::{TrustedContext, error};
 use runtara_component_host::trusted::TrustedCredentials;
-use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
+use runtara_component_host::{ComponentDispatcherService, TestCapabilityRequest};
 use serde_json::json;
 
 const CAP: &str = "storage-generate-presigned-url";
@@ -91,10 +91,7 @@ async fn dispatcher_with_credentials(
             std::fs::copy(source.join(&file), bundle.path().join(file))?;
         }
     }
-    let env = DispatcherEnv {
-        core_http_url: "http://127.0.0.1:1".into(),
-    };
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     dispatcher
         .trusted_executor()
         .set_credentials(credentials.clone())?;

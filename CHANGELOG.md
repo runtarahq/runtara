@@ -85,6 +85,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every workflow recompiles once after upgrading.** The direct-WASM lowering
+  tag now ends in `on-signal-remap=v1`, so cached artifacts built by an older
+  server no longer match and each workflow is rebuilt on its next compile or
+  launch. Expect a one-off burst of compilation work after the upgrade; nothing
+  needs to be done by hand.
+- **Agent components are now held to an import allowlist at composition.** A
+  bundled or third-party agent component may import only `wasi:*`,
+  `runtara:agent/types@*` and the host interfaces the component host links
+  (host-io timers, outbound HTTP, the trusted executor, the connection
+  resolver, and the object-model database). Any other import fails composition
+  with an error naming the agent and the import. Published workflow-agents
+  staged by the server for a tenant skip the list, but may never import
+  `runtara:control/*` or `runtara:workflow-operation/*`; a `workflow-agent`
+  tag in the sidecar of a component in the primary components dir does not
+  count. **Operators shipping custom agent components should check their
+  imports (`wasm-tools component wit`) before upgrading.**
+- **A parent calling a published workflow-agent needs that agent in a staging
+  or extra components dir.** The parent re-raises a workflow-agent's reserved
+  park and suspend codes, so an agent the catalog calls a workflow-agent but
+  whose component sits in the primary components dir now fails composition.
+  The server already stages published workflow-agents per tenant. With
+  `runtara-compile`, move the agent's `.wasm` and `.meta.json` out of
+  `--components-dir` and pass their dir with the new repeatable
+  `--extra-components-dir` flag.
 - **`RUNTARA_REQUEST_TIMEOUT_MS` is deprecated as a runtara-server setting; use
   `RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS`.** One name was read by two unrelated
   components meaning two different things in two different units: in runtara-sdk
@@ -157,6 +181,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run whose start gate fails now fails promptly** instead of later as
+  `launch_queue_timeout`. The instance row records termination reason
+  `start_gate_failed`. That label was written without ever existing in the
+  `termination_reason` enum, so the update failed and the run waited for the
+  launch queue to time it out; a forward migration adds the label.
 - **`GET /workflows/{id}/instances/{instanceId}/checkpoints` now honors
   `page`.** The handler normalized the page number and then dropped it, asking
   the store for a limit and no offset — so every page re-read the first `size`

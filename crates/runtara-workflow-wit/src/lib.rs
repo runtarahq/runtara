@@ -8,6 +8,10 @@ pub mod isolation_package;
 pub const OUTBOUND_HTTP_INTERFACE_NAME: &str = "runtara:outbound-http/client@0.1.0";
 pub const OUTBOUND_HTTP_WIT: &str = include_str!("../wit/outbound-http/runtara-outbound-http.wit");
 
+/// Host timers (`sleep`, `abort-after`) that workflows and ordinary agents
+/// import. The component host links this name; the agent allowlist admits it.
+pub const HOST_IO_TIMERS_INTERFACE_NAME: &str = "runtara:host-io/timers@0.1.0";
+
 /// Native database operations available to ordinary WASM agents.
 pub const DATABASE_INTERFACE_NAME: &str = "runtara:database/sql@0.1.0";
 pub const DATABASE_WIT: &str = include_str!("../wit/database/runtara-database.wit");

@@ -32,9 +32,11 @@ pub const DIRECT_AGENT_WIT_VERSION: &str = "0.4.0";
 /// - [`Composed`](Self::Composed): the prebuilt `runtara-workflow-runtime`
 ///   guest component is instantiated and spread into the workflow instance, so
 ///   the composed artifact satisfies the interface internally and the guest
-///   reaches core over `wasi:http` (the legacy loopback). Retained for the
-///   wasmtime-CLI A/B reference axis and for already-compiled artifacts;
-///   the in-process runner supports both bindings side by side.
+///   reaches core over `wasi:http` (the legacy loopback). Retained only for
+///   the wasmtime-CLI A/B reference axis. The production runner does not run
+///   it: the composed runtime traps on its first call to core, its outbound
+///   guard denies raw `wasi:http`, and guests receive no runtime address
+///   (`RUNTARA_HTTP_URL`), so the run ends as `crashed` without reaching core.
 /// - [`HostImport`](Self::HostImport): the interface is left unbound and
 ///   surfaces as a component-level import of the composed artifact — exactly
 ///   like the WASI interfaces already do — for the embedding host to satisfy

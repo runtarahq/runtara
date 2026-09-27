@@ -333,11 +333,13 @@ fn suspend_sentinel_halves() -> (i64, i64) {
 ///   real emission of the suspended arm. The single-element wake list lives
 ///   at offset 88 (past the 80-byte result area, inside the reserved
 ///   low-scratch region, 8-aligned; wake element stride is 32).
-/// - agent capabilities: production workflow-agents are statically certified
-///   non-suspending, so they cannot reach this arm. The retained lower-level
-///   test/migration shape raises [`AGENT_SUSPEND_SENTINEL_CODE`] because its
-///   result type has no suspended arm; a composing parent re-raises it (see
-///   [`emit_agent_suspend_sentinel_check`]).
+/// - agent capabilities: the result type has no suspended arm, so this raises
+///   [`AGENT_SUSPEND_SENTINEL_CODE`] and a composing parent re-raises it (see
+///   [`emit_agent_suspend_sentinel_check`]). A workflow-agent certified
+///   `non-suspending:1` never reaches this arm; one published as a parking
+///   agent (`parks:1`, it waits) can, as can the retained lower-level
+///   test/migration shape. A parked signal wait crosses the boundary as
+///   [`AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE`] instead.
 pub(super) fn emit_entry_suspend_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

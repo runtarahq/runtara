@@ -34,8 +34,6 @@ pub struct EmbeddedRuntaraConfig {
     pub data_dir: PathBuf,
     /// Bind address for runtara-core QUIC server (instance protocol).
     pub core_bind_addr: SocketAddr,
-    /// Address workflow guests use to reach runtara-core.
-    pub core_client_addr: SocketAddr,
     /// Optional bind address for runtara-core's HTTP instance API.
     /// When set, an HTTP server is started alongside QUIC for the instance protocol.
     pub core_http_bind_addr: Option<SocketAddr>,
@@ -83,7 +81,8 @@ impl EmbeddedRuntara {
                 .with_metrics_sink(Arc::new(runtara_environment::metrics::OtlpMetricsSink)),
         );
 
-        // Start Core (instance protocol - workflows connect here via HTTP)
+        // Start Core. Workflow guests never connect to it: every runtime
+        // call is a host import satisfied in-process by the runner.
         let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);
         info!(addr = %core_http_addr, "Starting runtara-core...");
         let mut core_builder = CoreRuntime::builder()
@@ -97,16 +96,12 @@ impl EmbeddedRuntara {
         info!("✓ runtara-core started on {}", core_http_addr);
 
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
-        // and executed on the embedded in-process engine.
-        // Legacy composed artifacts call core through HTTP, while modern ones
-        // use host imports. Use the configured client address rather than the
-        // bind address: it is the endpoint a guest is meant to reach.
-        let core_http_url = format!("http://{}", config.core_client_addr);
+        // and executed on the embedded in-process engine; they reach core
+        // through host imports, so no core address enters a guest.
         let runner: Arc<dyn runtara_environment::runner::Runner> =
             runtara_environment::runner::build_runner_configured(
                 persistence.clone(),
                 event_observer,
-                Some(core_http_url),
                 config
                     .isolation_policy
                     .as_ref()
@@ -352,15 +347,13 @@ pub async fn maybe_start_embedded(
         std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string())
     );
 
-    // Workflow guests run in-process, so no IP transformation is needed —
-    // 127.0.0.1 reaches runtara-core directly.
-    // Core HTTP port is used for both binding and client connections (QUIC is gone)
+    // Core binds loopback only; workflow guests run in-process and reach it
+    // through host imports, never over the network.
     let core_http_addr = core_http_port;
     let config = EmbeddedRuntaraConfig {
         pool,
         data_dir,
         core_bind_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
-        core_client_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
         core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
         core_overrides,
         execution_timeout_policy,

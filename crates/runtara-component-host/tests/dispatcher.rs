@@ -10,7 +10,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
+use runtara_component_host::{ComponentDispatcherService, TestCapabilityRequest};
 
 fn crypto_wasm_path() -> PathBuf {
     let p = common::bundle_dir().join("runtara_agent_crypto.wasm");
@@ -38,17 +38,11 @@ fn build_test_bundle() -> tempfile::TempDir {
     tmp
 }
 
-fn env() -> DispatcherEnv {
-    DispatcherEnv {
-        core_http_url: "http://localhost:9996".into(),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_lists_agents_and_capabilities() -> anyhow::Result<()> {
     let bundle = build_test_bundle();
 
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     assert!(
         dispatcher.has_agent("crypto"),
         "crypto agent should be loaded"
@@ -67,7 +61,7 @@ async fn dispatcher_lists_agents_and_capabilities() -> anyhow::Result<()> {
 async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
     let bundle = build_test_bundle();
 
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     let result = dispatcher
         .test_capability(TestCapabilityRequest {
             tenant_id: "tenant-test".into(),
@@ -104,7 +98,7 @@ async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
 async fn dispatcher_matches_agent_ids_canonically() -> anyhow::Result<()> {
     let bundle = build_test_bundle();
 
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     assert!(
         dispatcher.has_agent("CRYPTO"),
         "case-folded id should match"
@@ -136,7 +130,7 @@ async fn dispatcher_matches_agent_ids_canonically() -> anyhow::Result<()> {
 async fn dispatcher_returns_guest_error_for_unknown_capability() -> anyhow::Result<()> {
     let bundle = build_test_bundle();
 
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     let result = dispatcher
         .test_capability(TestCapabilityRequest {
             tenant_id: "tenant-test".into(),
@@ -167,7 +161,7 @@ async fn dispatcher_returns_guest_error_for_unknown_capability() -> anyhow::Resu
 async fn dispatcher_drift_detector_every_declared_cap_is_routed() -> anyhow::Result<()> {
     let bundle = build_test_bundle();
 
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
 
     for agent_id in dispatcher
         .agent_ids()
@@ -216,7 +210,7 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
         "component-integration-tests requires the production bundle; run scripts/build-agent-components.sh"
     );
 
-    let dispatcher = ComponentDispatcherService::from_dir(&bundle_dir, env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(&bundle_dir).await?;
     let loaded: Vec<String> = dispatcher
         .agent_ids()
         .map(str::to_string)
@@ -295,7 +289,7 @@ async fn dispatcher_mcp_uses_native_metadata_and_host_tenant() -> anyhow::Result
             bundle.path().join(filename),
         )?;
     }
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     dispatcher.set_connection_resolver(Arc::new(Resolver))?;
     let result = dispatcher
         .test_capability(TestCapabilityRequest {

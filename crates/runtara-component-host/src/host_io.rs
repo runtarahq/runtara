@@ -18,7 +18,7 @@ pub(crate) fn add_host_io_to_linker<T: HostIoContext + Send + 'static>(
     // Concurrent timer for in-window retry backoff: a sleep is just
     // another waitable in the window's set, so item backoffs overlap
     // instead of serializing through assembly.
-    let mut timers = linker.instance("runtara:host-io/timers@0.1.0")?;
+    let mut timers = linker.instance(runtara_workflow_wit::HOST_IO_TIMERS_INTERFACE_NAME)?;
     timers.func_wrap_concurrent("sleep", |accessor, (ms,): (u64,)| {
         let allowed = accessor.with(|mut access| access.get().timers_allowed());
         Box::pin(async move {

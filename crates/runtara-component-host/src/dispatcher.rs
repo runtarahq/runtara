@@ -67,13 +67,6 @@ pub struct TestError {
     pub retryable: bool,
 }
 
-/// Runtime address retained for legacy core HTTP consumers.
-/// Per-tenant fields go into `TestCapabilityRequest`.
-#[derive(Debug, Clone)]
-pub struct DispatcherEnv {
-    pub core_http_url: String,
-}
-
 /// Default wall-clock budget for a single `test_capability` invocation. The
 /// operator-test surface is interactive; a capability that hasn't produced a
 /// result in this long is wedged, not slow. Override with
@@ -104,7 +97,6 @@ pub struct ComponentDispatcherService {
     /// server-side `AgentsService` + workflow validation paths can hold the
     /// same data without copying.
     catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
-    env: DispatcherEnv,
     /// Per-call wall-clock budget for `test_capability`.
     test_timeout: Duration,
     /// Per-call guest linear-memory cap for `test_capability`, in bytes.
@@ -141,7 +133,7 @@ impl ComponentDispatcherService {
     /// A missing `.meta.json` is a hard error — the `.wasm` is unusable to the
     /// server without metadata. Mismatched ids (filename stem vs.
     /// `meta.id`) are also rejected so registration can't silently misroute.
-    pub async fn from_dir(component_dir: &Path, env: DispatcherEnv) -> Result<Self> {
+    pub async fn from_dir(component_dir: &Path) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())?;
         // Drive the epoch clock for this engine so the per-call deadlines set in
         // `test_capability` can actually fire — without a ticker the epoch never
@@ -234,7 +226,6 @@ impl ComponentDispatcherService {
             engine,
             agents,
             catalog,
-            env,
             test_timeout: parse_timeout(std::env::var("RUNTARA_TEST_CAPABILITY_TIMEOUT_SECS").ok()),
             memory_max_bytes: parse_memory_max(
                 std::env::var("RUNTARA_TEST_CAPABILITY_MEMORY_MAX_BYTES").ok(),
@@ -306,10 +297,7 @@ impl ComponentDispatcherService {
         }
         let input_bytes = serde_json::to_vec(&input_value)?;
 
-        let ctx = Arc::new(CallContext::for_test(
-            &req.tenant_id,
-            &self.env.core_http_url,
-        ));
+        let ctx = Arc::new(CallContext::for_test(&req.tenant_id));
         // Capture the same active deadline that protects the component call.
         // The outbound service uses it as an absolute upper bound, so a guest cannot start
         // a fresh 120-second HTTP timeout immediately before this interactive
@@ -556,7 +544,7 @@ mod tests {
     }
 
     fn test_ctx() -> Arc<CallContext> {
-        Arc::new(CallContext::for_test("tenant-test", "http://localhost:4"))
+        Arc::new(CallContext::for_test("tenant-test"))
     }
 
     /// Instantiate a minimal WAT component that exports a no-arg `run` func and

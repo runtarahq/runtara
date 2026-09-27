@@ -1,17 +1,18 @@
 //! What happens when a workflow-agent suspends anyway.
 //!
-//! Publishing a suspending workflow as an agent is refused four times over: the
-//! DSL safety report, the staging certification, the composition gate and the
-//! server's loader. The capability ABI is synchronous, so a child that waits
-//! would otherwise hold the parent's runner with no way to park.
-//!
-//! That leaves one question nothing exercised: if an artifact ever does slip
-//! through — a migration, a hand-built package, a certification bug — does the
-//! parent do something safe? The emitter's answer is `AGENT_SUSPEND_SENTINEL_CODE`,
-//! re-raised up the chain before retry classification, per-attempt checkpointing
-//! or onError routing can read it as a failure. Until now that path had no
-//! execution coverage at all, only a stdlib test proving a user error cannot
-//! spoof the code.
+//! The capability ABI is synchronous, so a child that waits would hold the
+//! parent's runner with no way to park. A workflow-agent is therefore published
+//! either certified `non-suspending:1` (the DSL safety report, the staging
+//! certification, the composition gate and the server's loader all refuse a
+//! suspending graph under that certificate) or as a parking agent, `parks:1`,
+//! whose waits cross the capability boundary as reserved error codes:
+//! `AGENT_SUSPEND_SENTINEL_CODE` for a lifecycle suspend and
+//! `AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE` for a signal wait. The parent
+//! re-raises either up the chain before retry classification, per-attempt
+//! checkpointing or onError routing can read it as a failure, and the stdlib
+//! remaps a user error that spoofs either code (pinned end to end by
+//! `workflow_agent_error_step_cannot_spoof_signal_park_or_suspend` in
+//! `tests/direct_wasm_execute.rs`).
 //!
 //! These tests stage a child that waits under `parks:1`, the marker that
 //! says exactly that, and pin what the parent does with it — including when a

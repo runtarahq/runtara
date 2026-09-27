@@ -386,7 +386,7 @@ async fn async_http_preserves_coercion_host_context_and_error_response() -> anyh
         assert_eq!(body["connection_id"], "fixture-connection");
         assert_eq!(body["endpoint"], "reports");
         assert_eq!(body["url"], "https://service.invalid/item?q=hello%20world");
-        assert_eq!(body["timeout_ms"], 1000);
+        assert_eq!(body["timeout_ms"], 30_000);
         assert_eq!(body["headers"]["X-Fixture"], "input");
         assert!(body["headers"].get("X-Runtara-Connection-Id").is_none());
         respond(
@@ -400,14 +400,17 @@ async fn async_http_preserves_coercion_host_context_and_error_response() -> anyh
         "url":"https://service.invalid/item",
         "query_parameters":{"q":"hello world"},
         "headers":{"X-Fixture":"input"},
-        "timeout_ms":"1000", "fail_on_error":"false", "response_type":"text",
+        // A string the agent coerces to a number. The value is only what the
+        // fixture asserts: it bounds the loopback round trip, so it is far
+        // above anything a loaded machine needs.
+        "timeout_ms":"30000", "fail_on_error":"false", "response_type":"text",
         "connection_endpoint":"reports",
         "_connection":{"connection_id":"fixture-connection", "integration_id":"http", "parameters":{}}
     }))?;
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(60),
         invoke_agent(
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             "http-request",
             input,
         ),

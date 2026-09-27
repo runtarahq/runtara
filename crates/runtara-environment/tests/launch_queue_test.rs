@@ -1089,6 +1089,268 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
     context.cleanup().await;
 }
 
+/// A runner that never durably crossed the start gate ends its run as
+/// `start_gate_failed`. The label was written but missing from the enum, so
+/// the terminal write failed with 22P02 and the run only ended later, as a
+/// launch-queue timeout.
+#[tokio::test]
+async fn a_failed_start_gate_ends_the_run_as_start_gate_failed() {
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    let owner = "gate-owner";
+
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("launch must enqueue");
+    let claimed = repository
+        .claim_ready(owner, Duration::from_secs(60), 1)
+        .await
+        .expect("launch must claim")
+        .pop()
+        .expect("one launch must claim");
+    repository
+        .begin_start(&launch_id, owner, claimed.attempt_count)
+        .await
+        .expect("start transition must succeed")
+        .expect("launch must enter starting");
+    let running = repository
+        .mark_running(&launch_id, owner, claimed.attempt_count)
+        .await
+        .expect("running transition must succeed")
+        .expect("launch must become running");
+
+    let message = "runner did not durably cross start gate";
+    let failed = repository
+        .fail_unconfirmed_running(&launch_id, running.attempt_count, message)
+        .await
+        .expect("the terminal write must succeed")
+        .expect("the matching attempt terminalizes its own launch");
+    assert_eq!(failed.state, LaunchState::Failed);
+
+    let launch_state: String =
+        sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1")
+            .bind(&launch_id)
+            .fetch_one(&context.pool)
+            .await
+            .expect("launch must remain readable");
+    assert_eq!(launch_state, "failed");
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await,
+        (
+            "failed".to_string(),
+            Some("start_gate_failed".to_string()),
+            Some(message.to_string()),
+        )
+    );
+
+    context.cleanup().await;
+}
+
+/// A runner that accepts a gated handoff but never crosses the gate: it
+/// either cancels the gate before the dispatcher can open it, or leaves it for
+/// the monitor to time out. The inner mock never sees the gate, so it never
+/// confirms it.
+struct GateBreakingRunner {
+    inner: MockRunner,
+    cancel_before_open: bool,
+}
+
+#[async_trait::async_trait]
+impl Runner for GateBreakingRunner {
+    fn runner_type(&self) -> &'static str {
+        "gate-breaking"
+    }
+
+    async fn try_launch_detached(
+        &self,
+        options: &runtara_environment::runner::LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        let mut options = options.clone();
+        let gate = options
+            .start_gate
+            .take()
+            .expect("the dispatcher gates Start");
+        if self.cancel_before_open {
+            assert!(gate.cancel(), "the gate is still closed during launch");
+        }
+        self.inner.try_launch_detached(&options).await
+    }
+
+    async fn is_running(&self, handle: &RunnerHandle) -> bool {
+        self.inner.is_running(handle).await
+    }
+
+    async fn stop(&self, handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        self.inner.stop(handle).await
+    }
+
+    async fn collect_result(
+        &self,
+        handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        self.inner.collect_result(handle).await
+    }
+}
+
+#[derive(Default)]
+struct RecordingObserver {
+    released: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl runtara_environment::launch_dispatcher::LaunchLifecycleObserver for RecordingObserver {
+    async fn release_admission(
+        &self,
+        _tenant_id: &str,
+        instance_id: &str,
+        reason: &str,
+    ) -> std::result::Result<(), String> {
+        self.released
+            .lock()
+            .unwrap()
+            .push((instance_id.to_string(), reason.to_string()));
+        Ok(())
+    }
+}
+
+/// Drive a Start through the dispatcher with a runner that never crosses the
+/// start gate, and check what production writes: the run ends
+/// `start_gate_failed`, the launch `failed`, the observer releases admission
+/// with that reason, and a later expiry sweep leaves it alone.
+async fn a_failed_gate_through_the_dispatcher(cancel_before_open: bool) {
+    use runtara_environment::launch_dispatcher::{
+        LaunchDispatcherConfig, LaunchLifecycleObservers,
+    };
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    std::fs::write(context.data_dir.join("test_binary"), b"mock workflow")
+        .expect("test artifact must be writable");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    let queue_timeout = Duration::from_secs(3);
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            queue_timeout,
+        ))
+        .await
+        .expect("queue row must be inserted");
+    let enqueued_at = tokio::time::Instant::now();
+
+    let observer = Arc::new(RecordingObserver::default());
+    let observers = LaunchLifecycleObservers::default();
+    observers.install(observer.clone()).await;
+    let runner = Arc::new(GateBreakingRunner {
+        inner: MockRunner::never_completing(),
+        cancel_before_open,
+    });
+    // The gate shares the start lease's deadline; a short lease bounds how
+    // long the monitor waits for a confirmation that never comes.
+    let dispatcher = LaunchDispatcher::new(
+        context.pool.clone(),
+        Arc::new(PostgresPersistence::new(context.pool.clone())),
+        runner.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        observers,
+    )
+    .with_config(LaunchDispatcherConfig {
+        lease_duration: Duration::from_secs(2),
+        ..Default::default()
+    });
+    assert_eq!(
+        dispatcher
+            .dispatch_once()
+            .await
+            .expect("dispatch scan must succeed"),
+        1
+    );
+
+    let label = if cancel_before_open {
+        "closed before open"
+    } else {
+        "never confirmed"
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let (_, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+            let released = observer.released.lock().unwrap().clone();
+            if reason.is_some() && !released.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label}: the failed gate must terminalize the run"));
+
+    let (status, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_eq!(
+        (status.as_str(), reason.as_deref()),
+        ("failed", Some("start_gate_failed")),
+        "{label}"
+    );
+    let launch = repository
+        .get(&launch_id)
+        .await
+        .expect("launch read must succeed")
+        .expect("launch must exist");
+    assert_eq!(launch.state, LaunchState::Failed, "{label}");
+    assert_eq!(
+        observer.released.lock().unwrap().as_slice(),
+        [(fixture.instance_id.clone(), "start_gate_failed".to_string())],
+        "{label}: exactly one release, with the run's own reason"
+    );
+
+    // Past the queue timeout and the gate deadline, the sweeps that used to
+    // end this run as `launch_queue_timeout` find nothing to do.
+    tokio::time::sleep_until(enqueued_at + queue_timeout + Duration::from_millis(200)).await;
+    let expired = repository
+        .expire_due(16)
+        .await
+        .expect("expiry must succeed");
+    assert!(
+        expired.iter().all(|launch| launch.launch_id != launch_id),
+        "{label}: a failed launch must not expire again"
+    );
+    repository
+        .recover_expired_leases(16)
+        .await
+        .expect("lease recovery must succeed");
+    let (status, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_eq!(
+        (status.as_str(), reason.as_deref()),
+        ("failed", Some("start_gate_failed")),
+        "{label}: the terminal reason must survive later sweeps"
+    );
+    assert_eq!(observer.released.lock().unwrap().len(), 1, "{label}");
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_start_gate_the_runner_never_confirms_ends_start_gate_failed() {
+    a_failed_gate_through_the_dispatcher(false).await;
+}
+
+#[tokio::test]
+async fn a_start_gate_closed_before_open_ends_start_gate_failed() {
+    a_failed_gate_through_the_dispatcher(true).await;
+}
+
 #[tokio::test]
 async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     let context = TestContext::new().await.expect("test database must start");

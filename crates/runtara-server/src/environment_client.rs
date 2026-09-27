@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use runtara_environment::handlers::{
-    self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
-    SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
+    self, EnvironmentHandlerState, ResumeInstanceRequest, SendSignalOutcome, StartInstanceRequest,
+    StartRejection, StopInstanceRequest,
 };
 use runtara_environment::image_registry::{Image, ImageFilter, ImageRegistry};
 use runtara_environment::instance_repository::{self, InstanceRepository};
@@ -465,26 +465,6 @@ impl EnvironmentClient {
             SendSignalOutcome::UnknownSignalType { signal_type } => Err(
                 EnvironmentError::InvalidInput(format!("Unknown signal type: {}", signal_type)),
             ),
-        }
-    }
-
-    /// Send a custom (workflow-defined) signal addressed to one checkpoint.
-    #[instrument(skip(self, payload), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id))]
-    pub async fn send_custom_signal(
-        &self,
-        instance_id: &str,
-        checkpoint_id: &str,
-        payload: Option<&[u8]>,
-    ) -> Result<String> {
-        info!("Sending custom signal to instance");
-
-        match handlers::handle_send_custom_signal(&self.state, instance_id, checkpoint_id, payload)
-            .await?
-        {
-            SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
-            SendCustomSignalOutcome::InstanceNotFound => {
-                Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
-            }
         }
     }
 
@@ -1049,55 +1029,6 @@ mod tests {
     use runtara_core::domain::EventType;
     use runtara_core::persistence::{EventRecord, Persistence, memory::InMemoryPersistence};
     use runtara_environment::runner::MockRunner;
-
-    /// A signal payload must reach the store byte for byte.
-    ///
-    /// This path used to run the bytes through `String::from_utf8_lossy` and
-    /// back, because the handler took `Option<&str>`. Every caller happens to
-    /// pass `serde_json::to_vec`, so it was lossless in practice — but any byte
-    /// sequence that is not valid UTF-8 was silently rewritten to U+FFFD on the
-    /// way through, and nothing in the types said so.
-    #[tokio::test]
-    async fn a_signal_payload_is_stored_byte_for_byte() {
-        let persistence = Arc::new(InMemoryPersistence::new());
-        persistence
-            .register_instance("signal-bytes", "tenant-1")
-            .await
-            .unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://localhost:1/unused")
-            .unwrap();
-        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
-            pool,
-            persistence.clone(),
-            Arc::new(MockRunner::new()),
-            std::env::temp_dir(),
-        )));
-
-        // Lone continuation bytes and an interior NUL: not valid UTF-8, so
-        // `from_utf8_lossy` would substitute replacement characters here.
-        let payload: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x01, 0x80, b'{'];
-        assert!(
-            std::str::from_utf8(&payload).is_err(),
-            "the fixture must be invalid UTF-8 or it proves nothing"
-        );
-
-        client
-            .send_custom_signal("signal-bytes", "cp-1", Some(&payload))
-            .await
-            .expect("send custom signal");
-
-        let stored = persistence
-            .get_custom_signal("signal-bytes", "cp-1")
-            .await
-            .expect("read back")
-            .expect("a sent signal is retained");
-        assert_eq!(
-            stored.payload.as_deref(),
-            Some(payload.as_slice()),
-            "the payload must arrive as it was sent, not as lossy UTF-8"
-        );
-    }
 
     #[tokio::test]
     async fn event_filters_keep_wire_names_and_unknown_names_match_nothing() {

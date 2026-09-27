@@ -120,12 +120,22 @@ pub enum TerminationReason {
     Cancelled,
     /// Execution ended without a cooperative cancellation cleanup receipt.
     Aborted,
-    /// Paused by pause signal.
+    /// Paused by pause signal. Never written; decode-only.
     Paused,
     /// Suspended for durable sleep.
     Sleeping,
     /// Instance was running but not tracked by any Environment (e.g., after restart).
     Orphaned,
+    /// Suspended while parked on a signal (`WaitForSignal`).
+    WaitingSignal,
+    /// Suspended after acknowledging a shutdown request.
+    ShutdownRequested,
+    /// Suspended by an environment restart, to be recovered.
+    EnvironmentRestart,
+    /// Stayed queued past its launch-queue deadline and never started.
+    LaunchQueueTimeout,
+    /// The runner never durably crossed the start gate, so no guest code ran.
+    StartGateFailed,
 }
 
 impl TerminationReason {
@@ -146,6 +156,11 @@ impl TerminationReason {
             "paused" => Some(Self::Paused),
             "sleeping" => Some(Self::Sleeping),
             "orphaned" => Some(Self::Orphaned),
+            "waiting_signal" => Some(Self::WaitingSignal),
+            "shutdown_requested" => Some(Self::ShutdownRequested),
+            "environment_restart" => Some(Self::EnvironmentRestart),
+            "launch_queue_timeout" => Some(Self::LaunchQueueTimeout),
+            "start_gate_failed" => Some(Self::StartGateFailed),
             _ => None,
         }
     }
@@ -163,6 +178,11 @@ impl TerminationReason {
             Self::Paused => "paused",
             Self::Sleeping => "sleeping",
             Self::Orphaned => "orphaned",
+            Self::WaitingSignal => "waiting_signal",
+            Self::ShutdownRequested => "shutdown_requested",
+            Self::EnvironmentRestart => "environment_restart",
+            Self::LaunchQueueTimeout => "launch_queue_timeout",
+            Self::StartGateFailed => "start_gate_failed",
         }
     }
 }
@@ -1433,6 +1453,63 @@ pub struct MetricsBucket {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ========================================================================
+    // TerminationReason tests
+    // ========================================================================
+
+    /// Every `termination_reason` label the database enum can hold decodes,
+    /// and each variant encodes back to its label (by name and through serde).
+    /// A label the server cannot decode reads as `None`, hiding why a run ended.
+    #[test]
+    fn termination_reason_labels_round_trip() {
+        let labels = [
+            "completed",
+            "application_error",
+            "crashed",
+            "timeout",
+            "heartbeat_timeout",
+            "cancelled",
+            "aborted",
+            "paused",
+            "sleeping",
+            "orphaned",
+            "waiting_signal",
+            "shutdown_requested",
+            "environment_restart",
+            "launch_queue_timeout",
+            "start_gate_failed",
+        ];
+        for label in labels {
+            let reason = TerminationReason::from_str(label)
+                .unwrap_or_else(|| panic!("`{label}` must decode"));
+            // Exhaustive: a new variant must join the label list above.
+            match reason {
+                TerminationReason::Completed
+                | TerminationReason::ApplicationError
+                | TerminationReason::Crashed
+                | TerminationReason::Timeout
+                | TerminationReason::HeartbeatTimeout
+                | TerminationReason::Cancelled
+                | TerminationReason::Aborted
+                | TerminationReason::Paused
+                | TerminationReason::Sleeping
+                | TerminationReason::Orphaned
+                | TerminationReason::WaitingSignal
+                | TerminationReason::ShutdownRequested
+                | TerminationReason::EnvironmentRestart
+                | TerminationReason::LaunchQueueTimeout
+                | TerminationReason::StartGateFailed => {}
+            }
+            assert_eq!(reason.as_str(), label);
+            assert_eq!(serde_json::to_value(reason).unwrap(), json!(label));
+            assert_eq!(
+                serde_json::from_value::<TerminationReason>(json!(label)).unwrap(),
+                reason
+            );
+        }
+        assert_eq!(TerminationReason::from_str("not_a_reason"), None);
+    }
 
     // ========================================================================
     // InstanceStatus tests

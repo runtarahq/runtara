@@ -33,8 +33,7 @@ pub mod workflow;
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
 pub use connection_resolver_host::{CONNECTION_RESOLVER_INTERFACE_NAME, ConnectionResolverHost};
 pub use dispatcher::{
-    ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
-    TestError, TestResult,
+    ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest, TestError, TestResult,
 };
 pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};

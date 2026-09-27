@@ -166,7 +166,7 @@ async fn run_deadline_with_parent(case: Case, source: &str) -> anyhow::Result<()
             })?;
         let mut store = Store::new(
             &engine,
-            HostState::new(Arc::new(CallContext::for_test("fixture-tenant", "")))
+            HostState::new(Arc::new(CallContext::for_test("fixture-tenant")))
                 .with_outbound_http(Arc::new(crate::outbound_fixture::PublicHttp::default())),
         );
         let instance = linker.instantiate_async(&mut store, &component).await?;

@@ -296,10 +296,16 @@ pub(super) fn resolve_shared_component_dependencies(
         .collect()
 }
 
+/// `workflow_agents` names the agents the emitted code treats as
+/// workflow-agents (see `DirectWorkflowManifest::workflow_agent_ids`). Their
+/// invokes re-raise the reserved park and suspend codes, so each one must
+/// resolve as a staged workflow-agent; any other component could park or
+/// suspend its parent by returning a reserved code.
 pub(super) fn resolve_agent_component_dependencies(
     components_dir: &Path,
     extra_component_dirs: &[std::path::PathBuf],
     components: &[DirectAgentComponentRequirement],
+    workflow_agents: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<ResolvedComponentDependency>, DirectCompileError> {
     components
         .iter()
@@ -308,10 +314,10 @@ pub(super) fn resolve_agent_component_dependencies(
             // extra dirs — staged workflow-agents live in a per-tenant staging
             // dir, and a parent composing `agentId: <slug>` finds the published
             // child's `.wasm` there via the identical naming convention.
-            let dir = std::iter::once(components_dir)
-                .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
-                .find(|dir| dir.join(&component.bundle_wasm_filename).exists());
-            let Some(dir) = dir else {
+            let found = std::iter::once((components_dir, false))
+                .chain(extra_component_dirs.iter().map(|dir| (dir.as_path(), true)))
+                .find(|(dir, _)| dir.join(&component.bundle_wasm_filename).exists());
+            let Some((dir, from_staging_dir)) = found else {
                 let searched: Vec<String> = std::iter::once(components_dir)
                     .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
                     .map(|d| {
@@ -329,8 +335,35 @@ pub(super) fn resolve_agent_component_dependencies(
                     ),
                 )));
             };
-            check_workflow_agent_checkpoint_scope(dir, component)?;
-            resolve_component_dependency(
+            let tagged_kind = check_workflow_agent_checkpoint_scope(dir, component)?;
+            // The sidecar is authored by whoever built the component, so its
+            // `workflow-agent` tag alone never lifts the allowlist: only a
+            // component resolved from a staging dir (where the server writes
+            // the workflow-agents it compiled) is treated as one.
+            let kind = if from_staging_dir {
+                tagged_kind
+            } else {
+                AgentImportKind::Agent
+            };
+            // The parent re-raises a workflow-agent's reserved codes byte for
+            // byte, and the catalog tag that decides that is also authored by
+            // whoever built the component. Only a staged workflow-agent (built
+            // by the server, whose user errors the stdlib remaps) may be one.
+            if workflow_agents.contains(&component.agent_id)
+                && kind != AgentImportKind::StagedWorkflowAgent
+            {
+                return Err(DirectCompileError::Component(format!(
+                    "agent `{}` is a workflow-agent in the catalog but its component in {} is \
+                     not a staged one (tagged `workflow-agent` and found in a staging dir, never \
+                     the components dir); only a staged workflow-agent may park or suspend its \
+                     caller. On the server, republish it (POST /workflows/<id>/publish-agent) \
+                     and recompile; with runtara-compile, move its .wasm and .meta.json out of \
+                     the components dir into a dir passed as --extra-components-dir",
+                    component.agent_id,
+                    dir.display()
+                )));
+            }
+            let resolved = resolve_component_dependency(
                 dir,
                 "agent",
                 Some(component.agent_id.as_str()),
@@ -338,9 +371,86 @@ pub(super) fn resolve_agent_component_dependencies(
                 &component.package_with_version,
                 &component.bundle_wasm_filename,
                 &component.bundle_meta_filename,
-            )
+            )?;
+            check_agent_component_imports(
+                &component.agent_id,
+                &fs::read(&resolved.wasm_path)?,
+                kind,
+            )?;
+            Ok(resolved)
         })
         .collect()
+}
+
+/// How the import allowlist treats one agent dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentImportKind {
+    /// A bundled or third-party agent component. Its root imports must all be
+    /// on [`AGENT_IMPORT_ALLOWLIST`] (or be `wasi:*` / `runtara:agent/types@`).
+    Agent,
+    /// A tenant-staged workflow-agent: tagged `workflow-agent` in its sidecar
+    /// AND resolved from an extra (staging) component dir, never the primary
+    /// components dir. The server compiled it, and it legitimately imports the
+    /// workflow runtime, so it skips the list; it is still denied the
+    /// [`STAGED_WORKFLOW_AGENT_DENIED_PREFIXES`].
+    StagedWorkflowAgent,
+}
+
+/// The types-only agent vocabulary every agent imports; any version.
+const AGENT_TYPES_INTERFACE_PREFIX: &str = "runtara:agent/types@";
+
+/// Every non-WASI host interface an ordinary agent may import: exactly the
+/// ones `runtara_component_host::registry::build_linker` links today. Kept
+/// explicit rather than derived from the linker, because the linker may also
+/// carry stubs that agents must not bind; new host services add entries here.
+/// `runtara:workflow-operation/` is never an agent import. The test
+/// `every_allowlisted_import_links_against_the_agent_linker` links every entry
+/// against `build_linker`, so an entry needs its WIT pushed there too.
+pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
+    runtara_workflow_wit::HOST_IO_TIMERS_INTERFACE_NAME,
+    runtara_workflow_wit::OUTBOUND_HTTP_INTERFACE_NAME,
+    runtara_agent_trusted::EXECUTOR_INTERFACE,
+    runtara_workflow_wit::CONNECTION_RESOLVER_INTERFACE_NAME,
+    runtara_workflow_wit::LEGACY_CONNECTION_RESOLVER_INTERFACE_NAME,
+    runtara_workflow_wit::DATABASE_INTERFACE_NAME,
+];
+
+/// Interfaces no staged workflow-agent may import, although it skips the
+/// allowlist.
+pub const STAGED_WORKFLOW_AGENT_DENIED_PREFIXES: &[&str] =
+    &["runtara:control/", "runtara:workflow-operation/"];
+
+fn agent_import_allowed(import: &str) -> bool {
+    import.starts_with("wasi:")
+        || import.starts_with(AGENT_TYPES_INTERFACE_PREFIX)
+        || AGENT_IMPORT_ALLOWLIST.contains(&import)
+}
+
+/// Reject an agent component whose root imports reach past what its kind may
+/// bind. Only root imports count: nested components are already linked, and
+/// composition lifts anything they leave unresolved to the root.
+pub fn check_agent_component_imports(
+    agent_id: &str,
+    wasm: &[u8],
+    kind: AgentImportKind,
+) -> Result<(), DirectCompileError> {
+    let imports = component_root_imports(wasm).map_err(|error| {
+        DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
+    })?;
+    for import in imports {
+        let allowed = match kind {
+            AgentImportKind::Agent => agent_import_allowed(&import),
+            AgentImportKind::StagedWorkflowAgent => !STAGED_WORKFLOW_AGENT_DENIED_PREFIXES
+                .iter()
+                .any(|prefix| import.starts_with(prefix)),
+        };
+        if !allowed {
+            return Err(DirectCompileError::Component(format!(
+                "agent component `{agent_id}` imports `{import}`, which agents may not import"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Compatibility and safety gate for staged workflow-agents.
@@ -351,10 +461,15 @@ pub(super) fn resolve_agent_component_dependencies(
 /// the parent's runner without a way to park. Generic agents remain untouched:
 /// only a parseable sidecar explicitly tagged `workflow-agent` enters this
 /// gate.
+///
+/// Returns how the sidecar's tags classify the component: only a sidecar
+/// tagged `workflow-agent` yields [`AgentImportKind::StagedWorkflowAgent`], and
+/// the caller still downgrades that to [`AgentImportKind::Agent`] unless the
+/// component was resolved from a staging dir.
 fn check_workflow_agent_checkpoint_scope(
     dir: &Path,
     component: &DirectAgentComponentRequirement,
-) -> Result<(), DirectCompileError> {
+) -> Result<AgentImportKind, DirectCompileError> {
     let meta = fs::read(dir.join(&component.bundle_meta_filename))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
@@ -407,13 +522,13 @@ fn check_workflow_agent_checkpoint_scope(
                 component.agent_id
             )));
         }
-        return Ok(());
+        return Ok(AgentImportKind::StagedWorkflowAgent);
     }
     if meta.is_some() {
         // A parseable sidecar without the workflow-agent tag is a native
         // agent — the fast path taken for every bundled agent on every
-        // compile; no wasm scan.
-        return Ok(());
+        // compile; no wasm scan here (the import allowlist scans it).
+        return Ok(AgentImportKind::Agent);
     }
 
     // A missing/unparseable sidecar cannot identify itself as a
@@ -430,7 +545,7 @@ fn check_workflow_agent_checkpoint_scope(
             component.agent_id
         )));
     }
-    Ok(())
+    Ok(AgentImportKind::Agent)
 }
 
 /// True when the component's TOP-LEVEL imports include the workflow runtime
@@ -447,29 +562,45 @@ pub(super) fn component_imports_prefix(
     wasm: &[u8],
     prefix: &str,
 ) -> Result<bool, DirectCompileError> {
+    Ok(component_root_imports(wasm)?
+        .iter()
+        .any(|import| import.starts_with(prefix)))
+}
+
+/// Every import name at the component's ROOT, in section order. Imports of
+/// nested (already-linked) components and modules are skipped.
+///
+/// The bytes must be a component: a core module's imports sit in a core
+/// import section this scan does not read, so accepting one would report no
+/// imports at all and wave any import through the allowlist.
+fn component_root_imports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError> {
     let parse_error = |err: wasmparser::BinaryReaderError| {
-        DirectCompileError::Component(format!(
-            "failed to parse staged workflow-agent component: {err}"
-        ))
+        DirectCompileError::Component(format!("failed to parse agent component: {err}"))
     };
+    let mut imports = Vec::new();
     let mut depth = 0usize;
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
         match payload.map_err(parse_error)? {
+            wasmparser::Payload::Version { encoding, .. }
+                if depth == 0 && encoding != wasmparser::Encoding::Component =>
+            {
+                return Err(DirectCompileError::Component(
+                    "agent wasm is a core module, not a component; only components compose"
+                        .to_string(),
+                ));
+            }
             wasmparser::Payload::ModuleSection { .. }
             | wasmparser::Payload::ComponentSection { .. } => depth += 1,
             wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
             wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
                 for import in reader {
-                    let import = import.map_err(parse_error)?;
-                    if import.name.0.starts_with(prefix) {
-                        return Ok(true);
-                    }
+                    imports.push(import.map_err(parse_error)?.name.0.to_string());
                 }
             }
             _ => {}
         }
     }
-    Ok(false)
+    Ok(imports)
 }
 
 fn resolve_component_dependency(
@@ -702,6 +833,488 @@ mod tests {
         assert!(
             !runtara_dsl::agent_meta::is_certified_non_suspending_workflow_agent(&info),
             "parking must strip the non-suspending certificate it contradicts"
+        );
+    }
+
+    /// A component whose root imports are exactly `imports` (empty instances).
+    fn component_importing(imports: &[&str]) -> Vec<u8> {
+        let body: String = imports
+            .iter()
+            .map(|name| format!("(import \"{name}\" (instance))"))
+            .collect();
+        wat::parse_str(format!("(component {body})")).expect("fixture component parses")
+    }
+
+    /// Where a fixture agent's files are written before resolution.
+    #[derive(Clone, Copy)]
+    enum FixtureDir {
+        /// The primary components dir (bundled and operator agents).
+        Primary,
+        /// An extra dir passed as `extra_component_dirs` (tenant staging).
+        Staging,
+    }
+
+    /// Stage `imports` as the fixture agent next to a sidecar with `tags` in
+    /// the primary components dir, then resolve it the way composition does.
+    fn resolve_fixture_agent(imports: &[&str], tags: &[&str]) -> Result<(), DirectCompileError> {
+        resolve_fixture_agent_in(FixtureDir::Primary, imports, tags)
+    }
+
+    /// [`resolve_fixture_agent`] with the files written to `location`; the
+    /// other dir exists but stays empty.
+    fn resolve_fixture_agent_in(
+        location: FixtureDir,
+        imports: &[&str],
+        tags: &[&str],
+    ) -> Result<(), DirectCompileError> {
+        resolve_fixture_agent_re_raised(location, imports, tags, false)
+    }
+
+    /// [`resolve_fixture_agent_in`], with the caller's emitted code treating
+    /// the fixture as a workflow-agent when `re_raised` is set.
+    fn resolve_fixture_agent_re_raised(
+        location: FixtureDir,
+        imports: &[&str],
+        tags: &[&str],
+        re_raised: bool,
+    ) -> Result<(), DirectCompileError> {
+        let primary = tempfile::tempdir().expect("primary tempdir");
+        let staging = tempfile::tempdir().expect("staging tempdir");
+        let target = match location {
+            FixtureDir::Primary => primary.path(),
+            FixtureDir::Staging => staging.path(),
+        };
+        let component = component_requirement();
+        fs::write(
+            target.join(&component.bundle_wasm_filename),
+            component_importing(imports),
+        )
+        .expect("write component");
+        write_sidecar(target, tags);
+        let workflow_agents = if re_raised {
+            std::iter::once(component.agent_id.clone()).collect()
+        } else {
+            Default::default()
+        };
+        resolve_agent_component_dependencies(
+            primary.path(),
+            &[staging.path().to_path_buf()],
+            &[component],
+            &workflow_agents,
+        )
+        .map(|_| ())
+    }
+
+    const STAGED_TAGS: &[&str] = &[
+        capability_tags::WORKFLOW_AGENT,
+        capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
+        capability_tags::WORKFLOW_AGENT_NON_SUSPENDING,
+    ];
+
+    #[test]
+    fn an_agent_importing_an_unlisted_interface_is_rejected() {
+        for forbidden in [
+            "runtara:workflow-runtime/runtime@0.4.0",
+            "runtara:workflow-operation/scope@0.1.0",
+            "runtara:control/api@0.1.0",
+            "runtara:trusted-artifacts/s3-storage@0.1.0",
+            "runtara:host-io/timers@9.9.9",
+            "plain-function-import",
+            // Near misses of the agent types prefix: another interface of the
+            // agent package, an unversioned name, and a longer interface name
+            // that merely starts with `types`.
+            "runtara:agent/capabilities@0.4.0",
+            "runtara:agent/types",
+            "runtara:agent/typesx@0.4.0",
+        ] {
+            let error = resolve_fixture_agent(
+                &[
+                    "wasi:cli/environment@0.2.6",
+                    "runtara:agent/types@0.4.0",
+                    forbidden,
+                ],
+                &["memory:read"],
+            )
+            .expect_err("an unlisted import must not compose");
+            let message = error.to_string();
+            assert!(
+                message.contains("published-flow") && message.contains(forbidden),
+                "the error names the agent and the import: {message}"
+            );
+        }
+    }
+
+    /// A core module has no component imports for the scan to read, so it
+    /// must be refused outright rather than read as importing nothing.
+    #[test]
+    fn a_core_module_agent_is_refused_whatever_it_imports() {
+        let core_module =
+            wat::parse_str(r#"(module (import "runtara:control/api@0.1.0" "stop" (func)))"#)
+                .expect("fixture module parses");
+        let error =
+            check_agent_component_imports("published-flow", &core_module, AgentImportKind::Agent)
+                .expect_err("a core module is not an agent component");
+        assert!(
+            error.to_string().contains("published-flow")
+                && error.to_string().contains("core module"),
+            "{error}"
+        );
+
+        for (location, tags) in [
+            (FixtureDir::Primary, &["memory:read"][..]),
+            (FixtureDir::Staging, STAGED_TAGS),
+        ] {
+            let primary = tempfile::tempdir().expect("primary tempdir");
+            let staging = tempfile::tempdir().expect("staging tempdir");
+            let target = match location {
+                FixtureDir::Primary => primary.path(),
+                FixtureDir::Staging => staging.path(),
+            };
+            let component = component_requirement();
+            fs::write(target.join(&component.bundle_wasm_filename), &core_module)
+                .expect("write core module");
+            write_sidecar(target, tags);
+            let error = resolve_agent_component_dependencies(
+                primary.path(),
+                &[staging.path().to_path_buf()],
+                &[component],
+                &Default::default(),
+            )
+            .map(|_| ())
+            .expect_err("composition refuses a core module agent");
+            assert!(error.to_string().contains("core module"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_agent_importing_only_listed_interfaces_composes() {
+        resolve_fixture_agent(
+            &[
+                "wasi:cli/environment@0.2.6",
+                "wasi:io/streams@0.2.6",
+                "runtara:agent/types@0.4.0",
+            ],
+            &["memory:read"],
+        )
+        .expect("wasi and the agent types compose");
+
+        let mut every_listed = vec!["wasi:random/random@0.2.6", "runtara:agent/types@0.3.0"];
+        every_listed.extend_from_slice(AGENT_IMPORT_ALLOWLIST);
+        resolve_fixture_agent(&every_listed, &["memory:read"])
+            .expect("every build_linker interface composes");
+    }
+
+    #[test]
+    fn a_missing_sidecar_still_leaves_the_agent_on_the_allowlist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let component = component_requirement();
+        fs::write(
+            dir.path().join(&component.bundle_wasm_filename),
+            component_importing(&["runtara:control/api@0.1.0"]),
+        )
+        .expect("write component");
+        let error = resolve_agent_component_dependencies(
+            dir.path(),
+            &[],
+            &[component],
+            &Default::default(),
+        )
+        .map(|_| ())
+        .expect_err("a sidecar-less component is an ordinary agent");
+        assert!(error.to_string().contains("runtara:control/api@0.1.0"));
+    }
+
+    #[test]
+    fn a_staged_workflow_agent_skips_the_list_but_not_control_or_operation_scope() {
+        resolve_fixture_agent_in(
+            FixtureDir::Staging,
+            &[
+                "wasi:cli/environment@0.2.6",
+                "runtara:workflow-runtime/runtime@0.4.0",
+                "runtara:workflow-stdlib/json@0.1.0",
+            ],
+            STAGED_TAGS,
+        )
+        .expect("a staged workflow-agent imports the runtime");
+
+        for denied in [
+            "runtara:control/api@0.1.0",
+            "runtara:workflow-operation/scope@0.1.0",
+        ] {
+            let error = resolve_fixture_agent_in(
+                FixtureDir::Staging,
+                &["runtara:workflow-runtime/runtime@0.4.0", denied],
+                STAGED_TAGS,
+            )
+            .expect_err("staged workflow-agents never bind control or the operation scope");
+            assert!(error.to_string().contains(denied), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_workflow_agent_tag_outside_the_staging_dirs_does_not_skip_the_allowlist() {
+        for import in [
+            "runtara:workflow-runtime/runtime@0.4.0",
+            "runtara:trusted-artifacts/s3-storage@0.1.0",
+        ] {
+            let imports = ["wasi:cli/environment@0.2.6", import];
+            let error = resolve_fixture_agent_in(FixtureDir::Primary, &imports, STAGED_TAGS)
+                .expect_err("a primary-dir component cannot tag itself past the allowlist");
+            assert!(
+                error.to_string().contains(import),
+                "the error names the import: {error}"
+            );
+
+            resolve_fixture_agent_in(FixtureDir::Staging, &imports, STAGED_TAGS)
+                .expect("the same files staged as a workflow-agent compose");
+        }
+    }
+
+    #[test]
+    fn an_untagged_agent_in_a_staging_dir_stays_on_the_allowlist() {
+        resolve_fixture_agent_in(
+            FixtureDir::Staging,
+            &["wasi:cli/environment@0.2.6", "runtara:agent/types@0.4.0"],
+            &["memory:read"],
+        )
+        .expect("an ordinary agent with listed imports resolves from a staging dir");
+
+        for forbidden in [
+            "runtara:workflow-runtime/runtime@0.4.0",
+            "runtara:trusted-artifacts/s3-storage@0.1.0",
+        ] {
+            let error = resolve_fixture_agent_in(
+                FixtureDir::Staging,
+                &["runtara:agent/types@0.4.0", forbidden],
+                &["memory:read"],
+            )
+            .expect_err("only the workflow-agent tag lifts the list, even in staging");
+            assert!(error.to_string().contains(forbidden), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_re_raised_workflow_agent_must_resolve_as_a_staged_one() {
+        let imports = ["wasi:cli/environment@0.2.6", "runtara:agent/types@0.4.0"];
+        resolve_fixture_agent_re_raised(FixtureDir::Staging, &imports, STAGED_TAGS, true)
+            .expect("a staged workflow-agent may park its caller");
+
+        // A tagged sidecar in the primary dir, or an untagged one anywhere,
+        // is not a staged workflow-agent, so a caller that re-raises the
+        // reserved codes for it must not compose.
+        for (location, tags) in [
+            (FixtureDir::Primary, STAGED_TAGS),
+            (FixtureDir::Primary, &["memory:read"][..]),
+            (FixtureDir::Staging, &["memory:read"][..]),
+        ] {
+            let error = resolve_fixture_agent_re_raised(location, &imports, tags, true)
+                .expect_err("only a staged workflow-agent may carry the reserved codes");
+            let message = error.to_string();
+            assert!(
+                message.contains("published-flow") && message.contains("staging"),
+                "{message}"
+            );
+            // The same files compose for a caller that treats them as an
+            // ordinary agent.
+            resolve_fixture_agent_re_raised(location, &imports, tags, false)
+                .expect("an ordinary caller composes the same files");
+        }
+    }
+
+    /// The same tagged files in both dirs resolve from the primary dir, where
+    /// they are an ordinary agent: the staged copy never shadows a primary
+    /// one, so a runtime import is refused and a re-raising caller does not
+    /// compose. Conversely, a staged copy can never displace a bundled agent.
+    #[test]
+    fn a_primary_dir_copy_takes_precedence_over_a_staged_one() {
+        let resolve = |imports: &[&str], re_raised: bool| {
+            let primary = tempfile::tempdir().expect("primary tempdir");
+            let staging = tempfile::tempdir().expect("staging tempdir");
+            let component = component_requirement();
+            for dir in [primary.path(), staging.path()] {
+                fs::write(
+                    dir.join(&component.bundle_wasm_filename),
+                    component_importing(imports),
+                )
+                .expect("write component");
+                write_sidecar(dir, STAGED_TAGS);
+            }
+            let workflow_agents = if re_raised {
+                std::iter::once(component.agent_id.clone()).collect()
+            } else {
+                Default::default()
+            };
+            resolve_agent_component_dependencies(
+                primary.path(),
+                &[staging.path().to_path_buf()],
+                &[component],
+                &workflow_agents,
+            )
+            .map(|resolved| {
+                assert_eq!(resolved.len(), 1);
+                assert!(
+                    resolved[0].wasm_path.starts_with(primary.path()),
+                    "resolved from the primary dir: {:?}",
+                    resolved[0].wasm_path
+                );
+            })
+        };
+
+        let runtime = "runtara:workflow-runtime/runtime@0.4.0";
+        let error = resolve(&["wasi:cli/environment@0.2.6", runtime], false)
+            .expect_err("the primary copy is an ordinary agent, held to the allowlist");
+        assert!(error.to_string().contains(runtime), "{error}");
+
+        let listed = ["wasi:cli/environment@0.2.6", "runtara:agent/types@0.4.0"];
+        let error = resolve(&listed, true)
+            .expect_err("the primary copy is not a staged workflow-agent, even with a staged twin");
+        assert!(error.to_string().contains("staging"), "{error}");
+
+        resolve(&listed, false).expect("the primary copy composes as an ordinary agent");
+    }
+
+    #[test]
+    fn the_agent_import_allowlist_never_admits_workflow_or_control_interfaces() {
+        for entry in AGENT_IMPORT_ALLOWLIST {
+            for forbidden in [
+                "runtara:workflow-operation/",
+                "runtara:control/",
+                "runtara:workflow-runtime/",
+                "wasi:",
+            ] {
+                assert!(
+                    !entry.starts_with(forbidden),
+                    "`{entry}` must not be on the agent import allowlist (`{forbidden}`)"
+                );
+            }
+        }
+        for prefix in STAGED_WORKFLOW_AGENT_DENIED_PREFIXES {
+            for suffix in ["", "api", "scope@0.1.0", "scope@0.2.0", "anything@9.9.9"] {
+                let import = format!("{prefix}{suffix}");
+                assert!(
+                    !agent_import_allowed(&import),
+                    "an ordinary agent must never import `{import}`"
+                );
+            }
+        }
+    }
+
+    /// A component importing every function of `interface` (a name from a
+    /// package pushed into `resolve`) with the canonical sync lowering, so
+    /// linking it checks each function's name and type, not only the
+    /// interface name: Wasmtime satisfies an empty instance import without any
+    /// definition.
+    fn component_importing_interface(resolve: &wit_parser::Resolve, interface: &str) -> Vec<u8> {
+        use wit_parser::abi::WasmType;
+        use wit_parser::{LiftLowerAbi, ManglingAndAbi, WasmImport, WorldItem};
+        let mut resolve = resolve.clone();
+        let package = resolve
+            .push_str(
+                "probe.wit",
+                &format!(
+                    "package runtara:allowlist-probe;\nworld probe {{ import {interface}; }}\n"
+                ),
+            )
+            .expect("the probe world resolves: every listed interface needs its WIT here");
+        let world = resolve
+            .select_world(&[package], Some("probe"))
+            .expect("probe world");
+        let mangling = ManglingAndAbi::Legacy(LiftLowerAbi::Sync);
+        let core_type = |ty: &WasmType| match ty {
+            WasmType::I64 | WasmType::PointerOrI64 => "i64",
+            WasmType::F32 => "f32",
+            WasmType::F64 => "f64",
+            WasmType::I32 | WasmType::Pointer | WasmType::Length => "i32",
+        };
+        let mut imports = String::new();
+        for (key, item) in &resolve.worlds[world].imports {
+            let WorldItem::Interface { id, .. } = item else {
+                continue;
+            };
+            for func in resolve.interfaces[*id].functions.values() {
+                let (module, name) = resolve.wasm_import_name(
+                    mangling,
+                    WasmImport::Func {
+                        interface: Some(key),
+                        func,
+                    },
+                );
+                let signature = resolve.wasm_signature(mangling.import_variant(), func);
+                let params: Vec<_> = signature.params.iter().map(core_type).collect();
+                let results: Vec<_> = signature.results.iter().map(core_type).collect();
+                imports.push_str(&format!(
+                    "(import {module:?} {name:?} (func (param {}) (result {})))\n",
+                    params.join(" "),
+                    results.join(" ")
+                ));
+            }
+        }
+        let mut module = wat::parse_str(format!(
+            "(module {imports} (memory (export \"memory\") 1) \
+             (func (export \"cabi_realloc\") (param i32 i32 i32 i32) (result i32) unreachable))"
+        ))
+        .expect("probe module parses");
+        wit_component::embed_component_metadata(
+            &mut module,
+            &resolve,
+            world,
+            wit_component::StringEncoding::UTF8,
+        )
+        .expect("embed probe metadata");
+        wit_component::ComponentEncoder::default()
+            .module(&module)
+            .expect("probe module")
+            .validate(true)
+            .encode()
+            .expect("probe component encodes")
+    }
+
+    /// The allowlist names exactly what the ordinary agent linker binds: every
+    /// entry links, with its functions' types, against
+    /// `runtara_component_host::build_linker`, so a version bump on either side
+    /// fails here rather than when a real agent fails to instantiate.
+    #[test]
+    fn every_allowlisted_import_links_against_the_agent_linker() {
+        let mut resolve = wit_parser::Resolve::default();
+        let legacy_resolver = runtara_workflow_wit::CONNECTION_RESOLVER_WIT
+            .replace("@0.2.0", "@0.1.0")
+            .replace("async func", "func");
+        let bumped_timers = super::super::HOST_IO_TIMERS_WIT.replace("@0.1.0", "@0.2.0");
+        for (path, wit) in [
+            ("timers.wit", super::super::HOST_IO_TIMERS_WIT),
+            ("timers-bumped.wit", bumped_timers.as_str()),
+            ("outbound.wit", runtara_workflow_wit::OUTBOUND_HTTP_WIT),
+            ("trusted.wit", runtara_agent_trusted::WIT),
+            (
+                "resolver.wit",
+                runtara_workflow_wit::CONNECTION_RESOLVER_WIT,
+            ),
+            ("resolver-legacy.wit", legacy_resolver.as_str()),
+            ("database.wit", runtara_workflow_wit::DATABASE_WIT),
+        ] {
+            resolve.push_str(path, wit).expect("interface WIT parses");
+        }
+        let engine = runtara_component_host::build_engine(&Default::default()).expect("engine");
+        let linker = runtara_component_host::build_linker(&engine).expect("agent linker");
+        let links = |interface: &str| {
+            let component = wasmtime::component::Component::new(
+                &engine,
+                component_importing_interface(&resolve, interface),
+            )
+            .expect("probe component compiles");
+            linker.instantiate_pre(&component).map(|_| ())
+        };
+
+        for entry in AGENT_IMPORT_ALLOWLIST {
+            if let Err(error) = links(entry) {
+                panic!("allowlisted `{entry}` does not link against build_linker: {error:#}");
+            }
+        }
+        // The probe checks definitions, not just names: an interface the
+        // linker does not define is refused.
+        assert!(
+            links("runtara:host-io/timers@0.2.0").is_err(),
+            "an undefined interface version must not link"
         );
     }
 

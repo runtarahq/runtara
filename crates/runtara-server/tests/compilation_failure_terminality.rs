@@ -1682,14 +1682,9 @@ async fn synchronous_compile_refuses_an_artifact_pinning_an_uninstalled_trusted_
         std::fs::copy(components.join(&file), bundle.path().join(&file))
             .expect("the s3-storage component must be built");
     }
-    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
-        bundle.path(),
-        runtara_component_host::DispatcherEnv {
-            core_http_url: String::new(),
-        },
-    )
-    .await
-    .expect("dispatcher over the s3-storage component");
+    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
+        .await
+        .expect("dispatcher over the s3-storage component");
     let s3_pin = runtara_workflows::direct_wasm::bundled_trusted_pin(&components, "s3-storage")
         .expect("the bundle ships s3-storage");
     assert_eq!(

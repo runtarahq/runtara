@@ -978,13 +978,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
         let cfg = config::get();
         if let Some(ref dir) = cfg.agent_components_dir {
-            use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+            use runtara_component_host::ComponentDispatcherService;
             // Agent components reach the host through imports, not HTTP, so
             // no core URL is exported into their environment.
-            let env = DispatcherEnv {
-                core_http_url: String::new(),
-            };
-            match ComponentDispatcherService::from_dir(dir, env).await {
+            match ComponentDispatcherService::from_dir(dir).await {
                 Ok(dispatcher) => {
                     let loaded: Vec<&str> = dispatcher.agent_ids().collect();
                     if loaded.is_empty() {

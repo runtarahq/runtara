@@ -1720,3 +1720,7 @@ mod cleanup_alarm_tests;
 #[cfg(test)]
 #[path = "workflow/database_tests.rs"]
 mod database_tests;
+
+#[cfg(test)]
+#[path = "workflow/raw_http_tests.rs"]
+mod raw_http_tests;

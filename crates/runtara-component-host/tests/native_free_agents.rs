@@ -18,7 +18,7 @@ mod common;
 use std::path::PathBuf;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
+use runtara_component_host::{ComponentDispatcherService, TestCapabilityRequest};
 use serde_json::{Value, json};
 
 fn wasm_path(stem: &str) -> PathBuf {
@@ -55,14 +55,6 @@ fn build_bundle() -> tempfile::TempDir {
     tmp
 }
 
-/// Every URL points at a closed port. A surviving forward fails the test rather
-/// than silently succeeding against a real host.
-fn env() -> DispatcherEnv {
-    DispatcherEnv {
-        core_http_url: "http://127.0.0.1:1/unroutable".into(),
-    }
-}
-
 async fn invoke(
     dispatcher: &ComponentDispatcherService,
     agent_id: &str,
@@ -84,7 +76,7 @@ async fn invoke(
 #[tokio::test(flavor = "multi_thread")]
 async fn compression_round_trips_a_zip_inside_wasm() -> anyhow::Result<()> {
     let bundle = build_bundle();
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     assert!(dispatcher.has_agent("compression"));
 
     let created = invoke(
@@ -144,7 +136,7 @@ async fn compression_round_trips_a_zip_inside_wasm() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn xlsx_parses_a_workbook_inside_wasm() -> anyhow::Result<()> {
     let bundle = build_bundle();
-    let dispatcher = ComponentDispatcherService::from_dir(bundle.path(), env()).await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     assert!(dispatcher.has_agent("xlsx"));
 
     // Same fixture as the agent's own unit tests: one sheet "Orders",

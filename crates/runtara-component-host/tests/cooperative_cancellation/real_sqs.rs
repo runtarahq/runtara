@@ -139,7 +139,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
         });
         let output = run_cancellation_fixture(
             bytes,
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             started,
             cleaned,
             server,
@@ -178,7 +178,7 @@ async fn invoke_response(
         Duration::from_secs(10),
         invoke_named_agent(
             "sqs",
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             case.capability,
             serde_json::to_vec(&case.input)?,
         ),
@@ -274,7 +274,7 @@ async fn sqs_transport_and_missing_connection_keep_distinct_retry_contracts() ->
         Duration::from_secs(10),
         invoke_named_agent(
             "sqs",
-            FixtureContext::with_upstream("fixture-tenant", "http://127.0.0.1:1/unused", ""),
+            FixtureContext::with_upstream("fixture-tenant", "http://127.0.0.1:1/unused"),
             "queue-receive-messages",
             serde_json::to_vec(&json!({"queue_url":QUEUE}))?,
         ),

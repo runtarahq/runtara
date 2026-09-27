@@ -11131,6 +11131,10 @@ fn abi_is_part_of_the_lowering_tag() {
     assert!(tag.contains("structured-agent-errors=v1"));
     assert!(tag.contains("plain-child-errors=v1"));
     assert!(
+        tag.contains("on-signal-remap=v1"),
+        "cached artifacts must pick up the stdlib that remaps a spoofed `__rt_on_signal__`: {tag}"
+    );
+    assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"
     );

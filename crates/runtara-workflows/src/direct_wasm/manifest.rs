@@ -66,6 +66,31 @@ impl DirectWorkflowManifest {
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, DirectManifestError> {
         serde_json::to_vec(self).map_err(DirectManifestError::Serialize)
     }
+
+    /// Agent ids the emitted code treats as workflow-agents anywhere in the
+    /// root graph, its nested graphs and its embedded children. Those invokes
+    /// re-raise the reserved park and suspend codes, so composition requires
+    /// each of these agents to resolve as a staged workflow-agent.
+    pub fn workflow_agent_ids(&self) -> std::collections::BTreeSet<String> {
+        fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
+            for agent in &graph.agents {
+                if agent.is_workflow_agent {
+                    ids.insert(agent.agent_id.clone());
+                }
+            }
+            for step in &graph.steps {
+                for nested in &step.nested_graphs {
+                    collect(&nested.graph, ids);
+                }
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        collect(&self.graph, &mut ids);
+        for child in &self.child_workflows {
+            collect(&child.graph, &mut ids);
+        }
+        ids
+    }
 }
 
 /// Deterministic manifest for one execution graph.
@@ -432,8 +457,9 @@ pub struct DirectAgentManifest {
     /// Base retry delay configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
-    /// Total Agent-step budget, retained for deadline lowering. The public
-    /// support gate still rejects it until the complete timeout contract passes.
+    /// Total Agent-step budget in milliseconds, lowered as a cooperative
+    /// deadline that covers preparation, retries and durable suspension (see
+    /// `compile/agent_deadline.rs`). The support gate accepts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
     /// Referenced Agent definition for a synthetic invocation's budget. Its
@@ -2397,6 +2423,103 @@ mod tests {
         assert!(!agent.is_workflow_agent);
         let json = serde_json::to_value(agent).expect("agent json");
         assert!(json.get("isWorkflowAgent").is_none());
+    }
+
+    /// `workflow_agent_ids` gates which agents composition must resolve as
+    /// staged workflow-agents, so it has to see a workflow-agent called from a
+    /// nested graph (a Split body) and from an embedded child as well as the
+    /// root, and must leave native agents out.
+    #[test]
+    fn workflow_agent_ids_walk_nested_graphs_and_child_workflows() {
+        use runtara_dsl::agent_meta::{AgentInfo, workflow_agent_info};
+        let workflow_agent = |id: &str| -> AgentInfo {
+            workflow_agent_info(
+                id,
+                id,
+                "",
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            )
+        };
+        let mut native = workflow_agent("native-flow");
+        for capability in &mut native.capabilities {
+            capability.tags.clear();
+        }
+        let catalog = AgentCatalog::from_agents(vec![
+            native,
+            workflow_agent("split-flow"),
+            workflow_agent("child-flow"),
+            workflow_agent("unused-flow"),
+        ]);
+        let agent_step = |id: &str, agent: &str| {
+            serde_json::json!({"id": id, "stepType": "Agent", "agentId": agent,
+                "capabilityId": "run", "inputMapping": {}})
+        };
+        let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "native",
+            "executionPlan": [
+                {"fromStep": "native", "toStep": "split"},
+                {"fromStep": "split", "toStep": "call_child"},
+                {"fromStep": "call_child", "toStep": "finish"}
+            ],
+            "steps": {
+                "native": agent_step("native", "native-flow"),
+                "split": {"id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "immediate", "value": [1, 2]}},
+                    "subgraph": {
+                        "entryPoint": "body",
+                        "executionPlan": [{"fromStep": "body", "toStep": "done"}],
+                        "steps": {
+                            "body": agent_step("body", "split-flow"),
+                            "done": {"id": "done", "stepType": "Finish"}
+                        }
+                    }},
+                "call_child": {"id": "call_child", "stepType": "EmbedWorkflow",
+                    "childWorkflowId": "child_workflow", "childVersion": "latest",
+                    "inputMapping": {}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .expect("parent parses");
+        let child: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+            "steps": {
+                "call": agent_step("call", "child-flow"),
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .expect("child parses");
+
+        let manifest = build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+            &parent,
+            &[DirectManifestChildWorkflowInput {
+                step_id: "call_child",
+                workflow_id: "child_workflow",
+                version_requested: "latest",
+                version_resolved: 1,
+                execution_graph: &child,
+            }],
+            Some(&catalog),
+        )
+        .expect("manifest builds");
+
+        // Neither workflow-agent sits at the root: the root graph only calls
+        // the native agent.
+        assert!(
+            manifest
+                .graph
+                .agents
+                .iter()
+                .all(|agent| !agent.is_workflow_agent),
+            "the root graph calls only the native agent"
+        );
+        assert_eq!(
+            manifest.workflow_agent_ids(),
+            ["child-flow".to_string(), "split-flow".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
     }
 
     #[test]

@@ -2614,6 +2614,54 @@ mod tests {
         );
     }
 
+    /// A custom signal payload must reach the store byte for byte.
+    ///
+    /// The path used to run the bytes through `String::from_utf8_lossy` and
+    /// back, so any byte sequence that is not valid UTF-8 was silently
+    /// rewritten to U+FFFD on the way through.
+    #[tokio::test]
+    async fn a_custom_signal_payload_is_stored_byte_for_byte() {
+        let (state, persistence) = in_memory_state();
+        persistence
+            .register_instance("signal-bytes", "tenant-1")
+            .await
+            .expect("register");
+
+        // Lone continuation bytes and an interior NUL: not valid UTF-8, so
+        // `from_utf8_lossy` would substitute replacement characters here.
+        let payload: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x01, 0x80, b'{'];
+        assert!(
+            std::str::from_utf8(&payload).is_err(),
+            "the fixture must be invalid UTF-8 or it proves nothing"
+        );
+
+        let outcome = handle_send_custom_signal(&state, "signal-bytes", "cp-1", Some(&payload))
+            .await
+            .expect("send custom signal");
+        assert!(
+            matches!(outcome, SendCustomSignalOutcome::Delivered { .. }),
+            "{outcome:?}"
+        );
+
+        let stored = persistence
+            .get_custom_signal("signal-bytes", "cp-1")
+            .await
+            .expect("read back")
+            .expect("a sent signal is retained");
+        assert_eq!(
+            stored.payload.as_deref(),
+            Some(payload.as_slice()),
+            "the payload must arrive as it was sent, not as lossy UTF-8"
+        );
+
+        assert_eq!(
+            handle_send_custom_signal(&state, "no-such-instance", "cp-1", Some(&payload))
+                .await
+                .expect("a missing instance is an outcome, not an error"),
+            SendCustomSignalOutcome::InstanceNotFound
+        );
+    }
+
     /// An instant a handler reports must be the instant the store holds,
     /// down to the microsecond Postgres actually keeps.
     ///

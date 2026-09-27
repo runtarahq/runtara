@@ -132,7 +132,7 @@ async fn cancellation(method: &'static str, blocked: usize, partial: bool) -> an
             anyhow::Ok(())
         }
     });
-    let context = FixtureContext::with_upstream("fixture-tenant", format!("{base}/upstream"), "");
+    let context = FixtureContext::with_upstream("fixture-tenant", format!("{base}/upstream"));
     let resolver = Arc::new(McpResolver {
         pending: if blocked == 0 {
             Some((started.clone(), cleaned.clone()))
@@ -181,7 +181,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
     forbidden["tool_name"] = "forbidden".into();
     let error = invoke_named_agent(
         "mcp",
-        FixtureContext::with_upstream("fixture-tenant", "", ""),
+        FixtureContext::with_upstream("fixture-tenant", ""),
         "mcp-tool-invoke",
         serde_json::to_vec(&forbidden)?,
     )
@@ -210,7 +210,7 @@ async fn mcp_async_dispatch_keeps_scope_and_protocol_errors() -> anyhow::Result<
             Duration::from_secs(10),
             invoke_named_agent(
                 "mcp",
-                FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+                FixtureContext::with_upstream("fixture-tenant", upstream),
                 "mcp-tool-invoke",
                 serde_json::to_vec(&input(false, false))?,
             ),
@@ -258,7 +258,7 @@ async fn mcp_async_search_preserves_tool_scope_and_schema() -> anyhow::Result<()
         Duration::from_secs(10),
         invoke_named_agent(
             "mcp",
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             "mcp-tool-search",
             serde_json::to_vec(&input(false, false))?,
         ),

@@ -53,6 +53,11 @@ path = "tests/core_instance_api.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "termination_reason_enum"
+path = "tests/termination_reason_enum.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "managed_actions"
 path = "tests/managed_actions.rs"
 required-features = ["db-integration-tests"]

@@ -14,6 +14,8 @@ default = ["compiler"]
 compiler = [
     "dep:runtara-workflow-wit",
     "dep:runtara-agent-wit",
+    # Trusted executor interface name for the agent import allowlist.
+    "dep:runtara-agent-trusted",
     "runtara-workflow-wit/isolation-package",
     "dep:wasm-encoder",
     "dep:wit-component",
@@ -40,6 +42,7 @@ path = "src/bin/compile.rs"
 required-features = ["compiler"]
 
 [dependencies]
+runtara-agent-trusted = { path = "../runtara-agent-trusted", optional = true }
 runtara-agent-wit = { path = "../runtara-agent-wit", version = "8.9", optional = true }
 runtara-dsl = { path = "../runtara-dsl", version = "8.9" }
 # Reference-path tokenization (`reference_path`), so validation splits a path

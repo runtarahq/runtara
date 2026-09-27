@@ -725,28 +725,6 @@ impl RuntimeClient {
         Ok(())
     }
 
-    /// Send a custom signal to a workflow instance.
-    ///
-    /// Used for human-in-the-loop interactions where an AI Agent step is waiting
-    /// for external input via WaitForSignal. The checkpoint address must match
-    /// what the workflow polls. Returns the new retained value's signal ID.
-    pub async fn send_custom_signal(
-        &self,
-        instance_id: &str,
-        checkpoint_id: &str,
-        payload: Option<&[u8]>,
-    ) -> Result<String, RuntimeError> {
-        let sdk = &self.client;
-
-        let signal_id = sdk
-            .send_custom_signal(instance_id, checkpoint_id, payload)
-            .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
-
-        info!(instance_id = %instance_id, signal_id = %signal_id, "Sent custom signal to workflow instance");
-        Ok(signal_id)
-    }
-
     /// Get image info by image ID
     ///
     /// Returns image details including the human-readable name (legacy
@@ -1054,6 +1032,23 @@ mod classify_observed_status_tests {
                 classify_observed_status(timed_out),
                 Some(TerminalOutcome::TimedOut(_))
             ));
+        }
+    }
+
+    /// A failed start gate (and a launch-queue timeout) is a platform failure
+    /// to launch, not a run that outlived its deadline: it maps to `Failed`.
+    #[test]
+    fn a_failed_start_gate_is_a_failure_not_a_timeout() {
+        for reason in [
+            TerminationReason::StartGateFailed,
+            TerminationReason::LaunchQueueTimeout,
+        ] {
+            let mut failed = info(InstanceStatus::Failed);
+            failed.termination_reason = Some(reason);
+            match classify_observed_status(failed) {
+                Some(TerminalOutcome::Failed(o)) => assert!(!o.success, "{reason:?}"),
+                other => panic!("{reason:?}: expected Failed, got {other:?}"),
+            }
         }
     }
 

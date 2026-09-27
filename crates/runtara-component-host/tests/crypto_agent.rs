@@ -29,10 +29,7 @@ async fn crypto_invoke_hash() -> anyhow::Result<()> {
     let linker = build_linker(&engine)?;
     let loaded = load_agent(&engine, &linker, &wasm, "crypto")?;
 
-    let ctx = Arc::new(CallContext::for_test(
-        "tenant-test",
-        "http://localhost:9996",
-    ));
+    let ctx = Arc::new(CallContext::for_test("tenant-test"));
     let state = HostState::new(ctx.clone());
     let (mut store, instance) = instantiate(&engine, &loaded.pre, state).await?;
 

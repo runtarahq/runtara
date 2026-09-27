@@ -561,6 +561,7 @@ fn shared_components_dir() -> PathBuf {
         b"embed-workflow-result",
         b"embed-workflow-output-from-result",
         b"embed-workflow-error",
+        b"__rt_on_signal__:user",
     ];
     assert!(
         required_stdlib_markers.iter().all(|marker| {
@@ -571,6 +572,37 @@ fn shared_components_dir() -> PathBuf {
         "required shared workflow stdlib is stale: {stdlib_wasm:?}; run scripts/build-agent-components.sh"
     );
     dir
+}
+
+/// Every agent in the staged bundle composes under the import allowlist. A
+/// bundled agent that grows an unlisted import would otherwise surface only as
+/// a compile failure of whichever workflow first uses it.
+#[test]
+fn bundled_agents_satisfy_import_allowlist() {
+    use runtara_workflows::direct_wasm::{AgentImportKind, check_agent_component_imports};
+    let dir = shared_components_dir();
+    let mut checked = Vec::new();
+    for entry in fs::read_dir(&dir).expect("read staged component bundle") {
+        let path = entry.expect("bundle entry").path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(agent) = name
+            .strip_prefix("runtara_agent_")
+            .and_then(|rest| rest.strip_suffix(".wasm"))
+        else {
+            continue;
+        };
+        let wasm = fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+        check_agent_component_imports(agent, &wasm, AgentImportKind::Agent).unwrap_or_else(
+            |error| panic!("bundled agent `{agent}` breaks the allowlist: {error}"),
+        );
+        checked.push(agent.to_string());
+    }
+    assert!(
+        checked.iter().any(|agent| agent == "http"),
+        "the staged bundle at {dir:?} must contain the bundled agents, found {checked:?}"
+    );
 }
 
 /// The integration suite constructs staged workflow-agent sidecars directly,
@@ -9595,6 +9627,621 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
     std::mem::forget(temp);
 }
 
+/// A composed workflow-agent's Error step cannot forge the reserved sentinels.
+///
+/// `__rt_on_signal__` (a nested signal wait, route in `message`) and
+/// `__rt_suspended__` (a nested lifecycle suspend) are how a child's park
+/// crosses the capability boundary; the parent matches the code byte for byte
+/// and re-raises the park. A user-authored Error step carrying either code
+/// must reach the parent as an ordinary failure with the `:user` suffix — the
+/// parent routes `onError` (or fails without it), and never parks on a signal
+/// or suspends.
+#[test]
+fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
+    let components_dir = direct_e2e_components_dir();
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for (slug, sentinel) in [
+        ("spoof-signal-child", "__rt_on_signal__"),
+        ("spoof-suspend-child", "__rt_suspended__"),
+    ] {
+        let slug = slug.to_string();
+        let child_graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "name": "Spoofing Child",
+            "durable": false,
+            "steps": {
+                "spoof": {
+                    "stepType": "Error",
+                    "id": "spoof",
+                    "category": "permanent",
+                    "code": sentinel,
+                    // Under `__rt_on_signal__` the parent would read this as
+                    // the route to park on.
+                    "message": "approval",
+                    "severity": "error"
+                }
+            },
+            "entryPoint": "spoof",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("child parses");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let child = compile_direct_workflow_composed_configured(
+            DirectCompilationInput {
+                workflow_id: format!("{slug}-wf"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: child_graph.clone(),
+                child_workflows: vec![],
+                output_dir: temp.path().join("child-build"),
+                track_events: false,
+                agent_catalog: None,
+                agent_slug: Some(slug.clone()),
+            },
+            &components_dir,
+            RuntimeBinding::HostImport,
+            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            false,
+        )
+        .expect("child agent compile+compose succeeds");
+
+        let staging = temp.path().join("workflow-agents");
+        fs::create_dir_all(&staging).expect("staging dir");
+        let file_stem = format!("runtara_agent_{}", slug.replace('-', "_"));
+        fs::copy(&child.wasm_path, staging.join(format!("{file_stem}.wasm")))
+            .expect("stage child wasm");
+        let info = certified_workflow_agent_info(
+            &slug,
+            "Spoofing Child",
+            "",
+            &child_graph.input_schema,
+            &child_graph.output_schema,
+        );
+        fs::write(
+            staging.join(format!("{file_stem}.meta.json")),
+            serde_json::to_vec_pretty(&info).expect("meta serializes"),
+        )
+        .expect("stage child meta");
+        let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+            info,
+        ]));
+
+        for route_on_error in [true, false] {
+            let mut parent_graph = serde_json::json!({
+                "name": "Parent Of Spoofing Child",
+                "steps": {
+                    "call": {
+                        "stepType": "Agent",
+                        "id": "call",
+                        "agentId": slug,
+                        "capabilityId": "run",
+                        "inputMapping": {}
+                    },
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "reached": { "valueType": "immediate", "value": true }
+                        }
+                    }
+                },
+                "entryPoint": "call",
+                "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+                "variables": {},
+                "inputSchema": {},
+                "outputSchema": {}
+            });
+            if route_on_error {
+                parent_graph["steps"]["recovered"] = serde_json::json!({
+                    "stepType": "Finish",
+                    "id": "recovered",
+                    "inputMapping": {
+                        "code": { "valueType": "reference", "value": "steps.__error.code" },
+                        "message": { "valueType": "reference", "value": "steps.__error.message" }
+                    }
+                });
+                parent_graph["executionPlan"]
+                    .as_array_mut()
+                    .expect("execution plan")
+                    .push(serde_json::json!({
+                        "fromStep": "call", "toStep": "recovered", "label": "onError"
+                    }));
+            }
+            let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+                DirectCompilationInput {
+                    workflow_id: format!("{slug}-parent-{route_on_error}"),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: serde_json::from_value(parent_graph).expect("parent parses"),
+                    child_workflows: vec![],
+                    output_dir: temp.path().join(format!("parent-build-{route_on_error}")),
+                    track_events: false,
+                    agent_catalog: Some(catalog.clone()),
+                    agent_slug: None,
+                },
+                runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+                false,
+            )
+            .expect("parent compile succeeds");
+            runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+                &mut parent,
+                &components_dir,
+                std::slice::from_ref(&staging),
+            )
+            .expect("parent compose finds the staged child");
+
+            let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+            let run = runtime.block_on(async {
+                let pre = executor
+                    .load_instance_pre(&parent.wasm_path)
+                    .await
+                    .expect("load parent artifact");
+                executor
+                    .execute_invoke(
+                        &pre,
+                        runtara_component_host::WorkflowRunSpec {
+                            trusted_instance: None,
+                            trusted_tenant: Some("direct-wasm-execute".into()),
+                            env: HashMap::new(),
+                            stderr: None,
+                            timeout: Duration::from_secs(60),
+                            cancel: None,
+                            limits: runtara_component_host::WorkflowLimits::default(),
+                            runtime: Some(host.clone()),
+                        },
+                        b"{}".to_vec(),
+                    )
+                    .await
+            });
+
+            let expected_code = format!("{sentinel}:user");
+            match (route_on_error, run.exit) {
+                (true, runtara_component_host::InvokeExit::Completed(output)) => {
+                    let output: Value = serde_json::from_slice(&output).expect("output is JSON");
+                    assert_eq!(
+                        output["code"],
+                        Value::String(expected_code.clone()),
+                        "{sentinel}: onError must see the remapped code: {output}"
+                    );
+                }
+                (false, runtara_component_host::InvokeExit::Failed(error)) => {
+                    assert_eq!(
+                        error.code, expected_code,
+                        "{sentinel}: the parent must fail with the remapped code: {error:?}"
+                    );
+                }
+                (_, other) => panic!(
+                    "{sentinel} (onError={route_on_error}): a spoofed sentinel must fail the \
+                     call, never park or suspend the parent; got {other:?}"
+                ),
+            }
+        }
+    }
+}
+
+/// A hand-written agent returning a raw reserved code cannot park or suspend
+/// its parent. Tagged `workflow-agent` in the catalog (so the parent would
+/// re-raise the code) but resolved from the primary components dir, it must
+/// not compose. Untagged, the code is an ordinary step failure.
+#[test]
+fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
+    let bundle = direct_e2e_components_dir();
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let info = |tagged: bool| {
+        let mut info = certified_workflow_agent_info(
+            "reserved-code",
+            "Reserved Code",
+            "",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        if !tagged {
+            for capability in &mut info.capabilities {
+                capability.tags.clear();
+            }
+        }
+        info
+    };
+
+    for sentinel in ["__rt_on_signal__", "__rt_suspended__"] {
+        for tagged in [true, false] {
+            for route_on_error in [true, false] {
+                let temp = tempfile::tempdir().expect("tempdir");
+                let components = temp.path().join("components");
+                fs::create_dir(&components).expect("components dir");
+                for entry in fs::read_dir(&bundle).expect("read bundle") {
+                    let entry = entry.expect("bundle entry");
+                    if entry.file_type().expect("entry type").is_file() {
+                        fs::hard_link(entry.path(), components.join(entry.file_name()))
+                            .expect("link bundle component");
+                    }
+                }
+                fs::write(
+                    components.join("runtara_agent_reserved_code.wasm"),
+                    wat::parse_str(
+                        include_str!("../src/direct_wasm/compile/reserved-code-agent.wat")
+                            .replace("__rt_on_signal__", sentinel),
+                    )
+                    .expect("fixture agent parses"),
+                )
+                .expect("write fixture agent");
+                fs::write(
+                    components.join("runtara_agent_reserved_code.meta.json"),
+                    serde_json::to_vec(&info(tagged)).expect("meta serializes"),
+                )
+                .expect("write fixture meta");
+
+                let mut graph = serde_json::json!({
+                    "name": "Parent Of Reserved Code Agent",
+                    "steps": {
+                        "call": {
+                            "stepType": "Agent",
+                            "id": "call",
+                            "agentId": "reserved-code",
+                            "capabilityId": "run",
+                            "maxRetries": 0,
+                            "inputMapping": {}
+                        },
+                        "finish": {
+                            "stepType": "Finish",
+                            "id": "finish",
+                            "inputMapping": {
+                                "reached": { "valueType": "immediate", "value": true }
+                            }
+                        }
+                    },
+                    "entryPoint": "call",
+                    "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+                    "variables": {},
+                    "inputSchema": {},
+                    "outputSchema": {}
+                });
+                if route_on_error {
+                    graph["steps"]["recovered"] = serde_json::json!({
+                        "stepType": "Finish",
+                        "id": "recovered",
+                        "inputMapping": {
+                            "code": { "valueType": "reference", "value": "steps.__error.code" }
+                        }
+                    });
+                    graph["executionPlan"]
+                        .as_array_mut()
+                        .expect("execution plan")
+                        .push(serde_json::json!({
+                            "fromStep": "call", "toStep": "recovered", "label": "onError"
+                        }));
+                }
+                let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+                    DirectCompilationInput {
+                        workflow_id: "reserved-code-parent".to_string(),
+                        version: 1,
+                        source_checksum: None,
+                        execution_graph: serde_json::from_value(graph).expect("parent parses"),
+                        child_workflows: vec![],
+                        output_dir: temp.path().join("parent-build"),
+                        track_events: false,
+                        agent_catalog: tagged.then(|| {
+                            Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+                                info(true),
+                            ]))
+                        }),
+                        agent_slug: None,
+                    },
+                    WorkflowAbi::InvokeHostImports,
+                    false,
+                )
+                .expect("parent compile succeeds");
+                let composed = compose_direct_workflow(&mut parent, &components);
+                if tagged {
+                    let error = composed.expect_err(
+                        "a primary-dir agent must not compose where the parent re-raises its codes",
+                    );
+                    assert!(
+                        error.to_string().contains("reserved-code"),
+                        "{sentinel}: {error}"
+                    );
+                    continue;
+                }
+                composed.expect("an untagged agent composes");
+
+                let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+                let run = runtime.block_on(async {
+                    let pre = executor
+                        .load_instance_pre(&parent.wasm_path)
+                        .await
+                        .expect("load parent artifact");
+                    executor
+                        .execute_invoke(
+                            &pre,
+                            runtara_component_host::WorkflowRunSpec {
+                                trusted_instance: None,
+                                trusted_tenant: Some("direct-wasm-execute".into()),
+                                env: HashMap::new(),
+                                stderr: None,
+                                timeout: Duration::from_secs(60),
+                                cancel: None,
+                                limits: runtara_component_host::WorkflowLimits::default(),
+                                runtime: Some(host.clone()),
+                            },
+                            b"{}".to_vec(),
+                        )
+                        .await
+                });
+                match (route_on_error, run.exit) {
+                    (true, runtara_component_host::InvokeExit::Completed(output)) => {
+                        let output: Value =
+                            serde_json::from_slice(&output).expect("output is JSON");
+                        assert!(
+                            output["code"]
+                                .as_str()
+                                .is_some_and(|code| code.starts_with(sentinel)),
+                            "{sentinel}: onError must see the agent's failure: {output}"
+                        );
+                    }
+                    // The terminal Err leaves through the stdlib remap: the
+                    // raw reserved code never reaches a caller.
+                    (false, runtara_component_host::InvokeExit::Failed(error)) => assert_eq!(
+                        error.code,
+                        format!("{sentinel}:user"),
+                        "{sentinel}: the parent must fail with the remapped code: {error:?}"
+                    ),
+                    (_, other) => panic!(
+                        "{sentinel} (onError={route_on_error}): a native agent's reserved code \
+                         must fail the step, never park or suspend the parent; got {other:?}"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// A reserved code bubbling out of a staged workflow-agent is remapped.
+///
+/// The staged workflow-agent calls an ordinary agent that fails with a raw
+/// reserved code, and has no `onError`, so the agent's error becomes the
+/// workflow-agent's own terminal `Err`. That `Err` leaves through the stdlib
+/// remap as `<code>:user`, so the root that composes the workflow-agent (and
+/// re-raises its reserved codes) sees an ordinary failure: it routes `onError`
+/// or fails, and never parks on the route in `message` or suspends.
+#[test]
+fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root() {
+    let bundle = direct_e2e_components_dir();
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for sentinel in ["__rt_on_signal__", "__rt_suspended__"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // The bundle plus the untagged fixture agent returning `sentinel`.
+        let components = temp.path().join("components");
+        fs::create_dir(&components).expect("components dir");
+        for entry in fs::read_dir(&bundle).expect("read bundle") {
+            let entry = entry.expect("bundle entry");
+            if entry.file_type().expect("entry type").is_file() {
+                fs::hard_link(entry.path(), components.join(entry.file_name()))
+                    .expect("link bundle component");
+            }
+        }
+        fs::write(
+            components.join("runtara_agent_reserved_code.wasm"),
+            wat::parse_str(
+                include_str!("../src/direct_wasm/compile/reserved-code-agent.wat")
+                    .replace("__rt_on_signal__", sentinel),
+            )
+            .expect("fixture agent parses"),
+        )
+        .expect("write fixture agent");
+        let mut native_info = certified_workflow_agent_info(
+            "reserved-code",
+            "Reserved Code",
+            "",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        for capability in &mut native_info.capabilities {
+            capability.tags.clear();
+        }
+        fs::write(
+            components.join("runtara_agent_reserved_code.meta.json"),
+            serde_json::to_vec(&native_info).expect("meta serializes"),
+        )
+        .expect("write fixture meta");
+
+        // The workflow-agent: one call to the fixture, no onError.
+        let slug = "bubbling-child".to_string();
+        let child_graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "name": "Bubbling Child",
+            "durable": false,
+            "steps": {
+                "call": {
+                    "stepType": "Agent",
+                    "id": "call",
+                    "agentId": "reserved-code",
+                    "capabilityId": "run",
+                    "maxRetries": 0,
+                    "inputMapping": {}
+                },
+                "finish": {
+                    "stepType": "Finish",
+                    "id": "finish",
+                    "inputMapping": {
+                        "reached": { "valueType": "immediate", "value": true }
+                    }
+                }
+            },
+            "entryPoint": "call",
+            "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("child parses");
+        let child = compile_direct_workflow_composed_configured(
+            DirectCompilationInput {
+                workflow_id: format!("{slug}-wf"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: child_graph.clone(),
+                child_workflows: vec![],
+                output_dir: temp.path().join("child-build"),
+                track_events: false,
+                agent_catalog: None,
+                agent_slug: Some(slug.clone()),
+            },
+            &components,
+            RuntimeBinding::HostImport,
+            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            false,
+        )
+        .expect("workflow-agent compile+compose succeeds");
+
+        let staging = temp.path().join("workflow-agents");
+        fs::create_dir_all(&staging).expect("staging dir");
+        let file_stem = format!("runtara_agent_{}", slug.replace('-', "_"));
+        fs::copy(&child.wasm_path, staging.join(format!("{file_stem}.wasm")))
+            .expect("stage child wasm");
+        let info = certified_workflow_agent_info(
+            &slug,
+            "Bubbling Child",
+            "",
+            &child_graph.input_schema,
+            &child_graph.output_schema,
+        );
+        fs::write(
+            staging.join(format!("{file_stem}.meta.json")),
+            serde_json::to_vec_pretty(&info).expect("meta serializes"),
+        )
+        .expect("stage child meta");
+        let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+            info,
+        ]));
+
+        for route_on_error in [true, false] {
+            let mut root_graph = serde_json::json!({
+                "name": "Root Of Bubbling Child",
+                "steps": {
+                    "call": {
+                        "stepType": "Agent",
+                        "id": "call",
+                        "agentId": slug,
+                        "capabilityId": "run",
+                        "maxRetries": 0,
+                        "inputMapping": {}
+                    },
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish",
+                        "inputMapping": {
+                            "reached": { "valueType": "immediate", "value": true }
+                        }
+                    }
+                },
+                "entryPoint": "call",
+                "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+                "variables": {},
+                "inputSchema": {},
+                "outputSchema": {}
+            });
+            if route_on_error {
+                root_graph["steps"]["recovered"] = serde_json::json!({
+                    "stepType": "Finish",
+                    "id": "recovered",
+                    "inputMapping": {
+                        "code": { "valueType": "reference", "value": "steps.__error.code" }
+                    }
+                });
+                root_graph["executionPlan"]
+                    .as_array_mut()
+                    .expect("execution plan")
+                    .push(serde_json::json!({
+                        "fromStep": "call", "toStep": "recovered", "label": "onError"
+                    }));
+            }
+            let mut root = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+                DirectCompilationInput {
+                    workflow_id: format!("{slug}-root-{route_on_error}"),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: serde_json::from_value(root_graph).expect("root parses"),
+                    child_workflows: vec![],
+                    output_dir: temp.path().join(format!("root-build-{route_on_error}")),
+                    track_events: false,
+                    agent_catalog: Some(catalog.clone()),
+                    agent_slug: None,
+                },
+                WorkflowAbi::InvokeHostImports,
+                false,
+            )
+            .expect("root compile succeeds");
+            runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+                &mut root,
+                &components,
+                std::slice::from_ref(&staging),
+            )
+            .expect("root compose finds the staged workflow-agent");
+
+            let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+            let run = runtime.block_on(async {
+                let pre = executor
+                    .load_instance_pre(&root.wasm_path)
+                    .await
+                    .expect("load root artifact");
+                executor
+                    .execute_invoke(
+                        &pre,
+                        runtara_component_host::WorkflowRunSpec {
+                            trusted_instance: None,
+                            trusted_tenant: Some("direct-wasm-execute".into()),
+                            env: HashMap::new(),
+                            stderr: None,
+                            timeout: Duration::from_secs(60),
+                            cancel: None,
+                            limits: runtara_component_host::WorkflowLimits::default(),
+                            runtime: Some(host.clone()),
+                        },
+                        b"{}".to_vec(),
+                    )
+                    .await
+            });
+
+            // The workflow-agent's terminal Err was remapped before the root
+            // saw it, so both arms see the `:user` code. Any other exit
+            // (Suspended above all) means the raw code reached the root's
+            // re-raise.
+            let expected_code = format!("{sentinel}:user");
+            match (route_on_error, run.exit) {
+                (true, runtara_component_host::InvokeExit::Completed(output)) => {
+                    let output: Value = serde_json::from_slice(&output).expect("output is JSON");
+                    assert_eq!(
+                        output["code"],
+                        Value::String(expected_code.clone()),
+                        "{sentinel}: onError must see the remapped code: {output}"
+                    );
+                }
+                (false, runtara_component_host::InvokeExit::Failed(error)) => {
+                    assert_eq!(
+                        error.code, expected_code,
+                        "{sentinel}: the root must fail with the remapped code: {error:?}"
+                    );
+                }
+                (_, other) => panic!(
+                    "{sentinel} (onError={route_on_error}): a code bubbling out of a \
+                     workflow-agent must fail the call, never park or suspend the root; \
+                     got {other:?}"
+                ),
+            }
+            assert!(
+                host.acknowledged_commands.lock().unwrap().is_empty(),
+                "{sentinel}: the root must not act on a signal"
+            );
+        }
+    }
+}
+
 /// P6 flagship: a DURABLE workflow published as an agent runs composed inside
 /// a parent. The child keeps the runtime import (a durable Delay checkpoints +
 /// sleeps through it); composition bubbles that import up to the composed
@@ -11689,7 +12336,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
 
     // Hermetic LLM stub: the model requests the tool twice, then completes.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
     let (capture_tx, _capture_rx) = mpsc::channel::<CapturedMessage>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let server_state = Arc::new(ServerState::default());
@@ -11707,7 +12353,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
 
     let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_URL".to_string(), format!("http://{addr}"));
     env.insert(
         "RUNTARA_TENANT_ID".to_string(),
         "direct-wasm-execute".to_string(),
@@ -13800,14 +14445,9 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     let mut metadata = fs::read(&sidecar).unwrap();
     metadata.push(b'\n');
     fs::write(&sidecar, metadata).unwrap();
-    let replacement = runtara_component_host::ComponentDispatcherService::from_dir(
-        _bundle.path(),
-        runtara_component_host::DispatcherEnv {
-            core_http_url: "http://127.0.0.1:1".into(),
-        },
-    )
-    .await
-    .unwrap();
+    let replacement = runtara_component_host::ComponentDispatcherService::from_dir(_bundle.path())
+        .await
+        .unwrap();
     let upgraded_resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     replacement
         .trusted_executor()
@@ -13862,8 +14502,10 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     // fails on its first attempt instead of backing off and retrying a call
     // that can never succeed on this host.
     let mut retry_graph = trusted_presign_graph();
+    // A backoff far longer than the bound below, so the bound can absorb a
+    // slow component load under a parallel suite and still catch one sleep.
     retry_graph["steps"]["sign"]["maxRetries"] = serde_json::json!(3);
-    retry_graph["steps"]["sign"]["retryDelay"] = serde_json::json!(3000);
+    retry_graph["steps"]["sign"]["retryDelay"] = serde_json::json!(30_000);
     let mut retrying = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
         DirectCompilationInput {
             workflow_id: "trusted-retry".into(),
@@ -13895,7 +14537,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     assert_eq!(attempts.len(), 1, "exactly one attempt ran: {attempts:?}");
     assert!(attempts[0].ends_with("::attempt::1"), "{attempts:?}");
     assert!(
-        started.elapsed() < Duration::from_millis(2500),
+        started.elapsed() < Duration::from_secs(15),
         "no retry backoff was slept: {:?}",
         started.elapsed()
     );
@@ -13907,14 +14549,9 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     // A bundle that no longer ships the pinned built-in at all: the artifact
     // still loads and its call fails the same way, before any credential.
     let without_s3 = tempfile::tempdir().unwrap();
-    let removed = runtara_component_host::ComponentDispatcherService::from_dir(
-        without_s3.path(),
-        runtara_component_host::DispatcherEnv {
-            core_http_url: "http://127.0.0.1:1".into(),
-        },
-    )
-    .await
-    .unwrap();
+    let removed = runtara_component_host::ComponentDispatcherService::from_dir(without_s3.path())
+        .await
+        .unwrap();
     assert_eq!(removed.trusted_executor().artifact_pins().count(), 0);
     let removed_resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     removed
@@ -14343,14 +14980,10 @@ async fn a_stale_trusted_pin_fails_only_its_own_agent_calls() {
         let mut metadata = fs::read(&sidecar).unwrap();
         metadata.push(b'\n');
         fs::write(&sidecar, metadata).unwrap();
-        let replacement = runtara_component_host::ComponentDispatcherService::from_dir(
-            bundle.path(),
-            runtara_component_host::DispatcherEnv {
-                core_http_url: "http://127.0.0.1:1".into(),
-            },
-        )
-        .await
-        .unwrap();
+        let replacement =
+            runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
+                .await
+                .unwrap();
         let upgraded_resolves = Arc::new(PerAgentTrustedCredentials::default());
         replacement
             .trusted_executor()
@@ -14499,14 +15132,9 @@ async fn trusted_bundle_dispatcher(
             fs::copy(components.join(&file), bundle.path().join(file)).unwrap();
         }
     }
-    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
-        bundle.path(),
-        runtara_component_host::DispatcherEnv {
-            core_http_url: "http://127.0.0.1:1".into(),
-        },
-    )
-    .await
-    .unwrap();
+    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
+        .await
+        .unwrap();
     let resolves = Arc::new(PerAgentTrustedCredentials::default());
     dispatcher
         .trusted_executor()
@@ -14552,14 +15180,9 @@ async fn trusted_test_dispatcher(
         let file = format!("runtara_agent_s3_storage.{suffix}");
         fs::copy(components.join(&file), bundle.path().join(file)).unwrap();
     }
-    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
-        bundle.path(),
-        runtara_component_host::DispatcherEnv {
-            core_http_url: "http://127.0.0.1:1".into(),
-        },
-    )
-    .await
-    .unwrap();
+    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
+        .await
+        .unwrap();
     let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     dispatcher
         .trusted_executor()

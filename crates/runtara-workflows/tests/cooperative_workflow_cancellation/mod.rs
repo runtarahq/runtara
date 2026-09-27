@@ -1136,10 +1136,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             }
             let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
                 bundle.path(),
-                runtara_component_host::DispatcherEnv {
-
-                    core_http_url: url.clone(),
-                },
             ).await?;
             let executor = runtara_component_host::WorkflowExecutor::new(
                 Arc::clone(embedded_executor().engine()),

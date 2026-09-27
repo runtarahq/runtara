@@ -88,8 +88,9 @@ pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
 use abi::push_retptr_arg;
 pub use artifact_metadata::{
-    DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    AGENT_IMPORT_ALLOWLIST, AgentImportKind, DirectArtifactFileMetadata, DirectArtifactMetadata,
+    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    STAGED_WORKFLOW_AGENT_DENIED_PREFIXES, check_agent_component_imports,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -565,6 +566,10 @@ pub struct DirectCompilationResult {
     /// Agent dependencies emitted with the private logical-context interface.
     /// Composition must bind every selected dependency to a reviewed adapter.
     pub scoped_agents: std::collections::BTreeSet<String>,
+    /// Agents the emitted code treats as workflow-agents: their invokes
+    /// re-raise the reserved park and suspend codes. Composition refuses any
+    /// of them that does not resolve as a staged workflow-agent.
+    pub workflow_agents: std::collections::BTreeSet<String>,
     /// Path to the primary emitted Wasm artifact.
     ///
     /// Before static composition this is the directly emitted
@@ -707,6 +712,7 @@ fn compose_direct_workflow_selected(
         components_dir,
         extra_component_dirs,
         &result.component_artifacts.agent_components,
+        &result.workflow_agents,
     )?;
     if let Some(report) = &result.artifact_metadata.isolation_selection {
         for (package, digest) in &report.shared_components {
@@ -987,9 +993,14 @@ pub fn compile_direct_workflow_composed(
 /// `RUNTARA_DIRECT_RUNTIME_BINDING` — the operational rollback lever.
 ///
 /// Default (unset or anything else): `HostImport`. `composed` reverts new
-/// compiles to the legacy composed-runtime shape (guest HTTP loopback), which
-/// the runner still executes fully — set it on the server and recompile if a
-/// host-import regression ever needs a same-day escape hatch.
+/// compiles to the legacy composed-runtime shape (guest HTTP loopback). It is
+/// no longer an escape hatch: such an artifact cannot reach core under the
+/// production runner. Its runtime traps on the first call to core, and past
+/// that the outbound guard would refuse the loopback HTTP and guests receive
+/// no runtime address; the run ends promptly as `crashed` (pinned by
+/// `a_composed_runtime_artifact_crashes_promptly_under_the_production_runner`
+/// in runtara-environment). The lever is kept (not failed closed) until no
+/// deployment is confirmed to set it.
 fn runtime_binding_from_env() -> super::component::RuntimeBinding {
     runtime_binding_from_raw(
         std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING")
@@ -1145,7 +1156,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1451,6 +1462,7 @@ fn compile_direct_workflow_inner(
             )?)
         },
         scoped_agents,
+        workflow_agents: manifest.workflow_agent_ids(),
         wasm_path,
         workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
         manifest_path,

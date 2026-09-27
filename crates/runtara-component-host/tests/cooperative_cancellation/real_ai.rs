@@ -179,7 +179,7 @@ async fn cancellation(
         Duration::from_secs(15),
         cancel_and_reuse(
             bytes,
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             started,
             cleaned,
         ),
@@ -308,7 +308,7 @@ async fn exchange(
         Duration::from_secs(10),
         invoke_named_agent(
             agent,
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             capability,
             serde_json::to_vec(&input(provider, capability))?,
         ),

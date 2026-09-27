@@ -35,6 +35,9 @@ mod embed_tool;
 #[path = "nested_suspend_tests.rs"]
 mod nested_suspend;
 
+#[path = "reserved_code_tests.rs"]
+mod reserved_code;
+
 struct CheckpointFault {
     pattern: String,
     write: bool,
@@ -728,7 +731,9 @@ async fn invoke_with_connections(
                 trusted_tenant: Some("fixture".into()),
                 env: HashMap::new(),
                 stderr: None,
-                timeout: Duration::from_secs(5),
+                // A hang guard only: no test here expects the run to time out,
+                // and the longest emitted budget (8s) must end first.
+                timeout: Duration::from_secs(15),
                 cancel: None,
                 limits: Default::default(),
                 runtime: Some(host),
@@ -739,7 +744,7 @@ async fn invoke_with_connections(
         .exit)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Response {
     Hang,
     Ok,
@@ -775,6 +780,8 @@ async fn run_shaped(
     let server_host = host.clone();
     let first_request = Arc::new(Mutex::new(None));
     let first = first_request.clone();
+    let retry_request = Arc::new(Mutex::new(None));
+    let retry = retry_request.clone();
     let req = requests.clone();
     let eof = closed.clone();
     let server = tokio::spawn(async move {
@@ -792,6 +799,9 @@ async fn run_shaped(
                 "Agent invoked after cancelled preparation"
             );
             let attempt = req.fetch_add(1, Ordering::SeqCst);
+            if attempt == 1 {
+                *retry.lock().unwrap() = Some(Instant::now());
+            }
             if attempt == 0 {
                 *first.lock().unwrap() = Some(Instant::now());
                 if matches!(
@@ -1013,17 +1023,31 @@ async fn run_shaped(
             response,
             Response::RetryThenHang | Response::RollbackThenHang
         ) {
-            let elapsed = first_request.lock().unwrap().unwrap().elapsed();
+            let budget = Duration::from_millis(timeout);
+            assert!(first_request.lock().unwrap().is_some());
             // The budget starts before component initialization and the first
             // provider request. Measure its lower bound from invocation entry.
             let active_elapsed = host.first_invocation_start.lock().unwrap().expect("invocation start recorded").elapsed();
             assert!(
-                active_elapsed >= Duration::from_millis(1_700),
+                active_elapsed >= budget.mul_f64(0.85),
                 "wall clock jump shortened a live budget: {active_elapsed:?}"
             );
+            // A budget restarted by the retry could not expire until nearly a
+            // whole budget after the retry's request (less the request's own
+            // latency), so ending sooner proves it was not restarted. The
+            // retry delay plus initialization is the slack left for a late
+            // timer under a loaded suite.
+            let retried_at = retry_request
+                .lock()
+                .unwrap()
+                .expect("the retry reached the provider");
+            let since_retry = retried_at.elapsed();
+            let backoff = retried_at.duration_since(first_request.lock().unwrap().unwrap());
             assert!(
-                elapsed < Duration::from_millis(2_700),
-                "a retry restarted the two-second budget: {elapsed:?}"
+                since_retry < budget - Duration::from_millis(250),
+                "{response:?}: a retry restarted the {budget:?} budget: {since_retry:?} after \
+                 the retry, which came {backoff:?} after the first attempt; {active_elapsed:?} \
+                 since invocation"
             );
         }
         if !durable && !matches!(shape, Shape::InheritedWhile { .. }) {
@@ -1109,8 +1133,12 @@ async fn agent_deadline_success_and_saturating_budget_preserve_output() -> anyho
 
 #[tokio::test]
 async fn agent_deadline_covers_later_attempt_without_resetting_budget() -> anyhow::Result<()> {
+    // A long retry delay inside the budget keeps a restarted budget far from
+    // a correct one, so a loaded machine's late timer cannot pass for either.
+    // The budget left after the delay (5s) absorbs a slow component start and
+    // first request, which must fit before the retry can reach the provider.
     for response in [Response::RetryThenHang, Response::RollbackThenHang] {
-        run(response, 2_000, false, 5, 1_000).await?;
+        run(response, 8_000, false, 5, 3_000).await?;
     }
     Ok(())
 }

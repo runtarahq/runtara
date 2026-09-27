@@ -216,9 +216,6 @@ impl Drop for TaskCompletionGuard {
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
     scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
-    /// Address legacy HTTP-composed artifacts use for runtara-core. Modern
-    /// HostImport-composed artifacts receive the native runtime host instead.
-    core_http_url: Option<String>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
@@ -662,7 +659,6 @@ impl EmbeddedWasmRunner {
         }
         Ok(Self {
             config,
-            core_http_url: None,
             scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits,
@@ -761,25 +757,19 @@ impl EmbeddedWasmRunner {
         self
     }
 
-    /// Give legacy HTTP-composed artifacts the core API address.
-    ///
-    /// This is deliberately a runner setting rather than an inherited process
-    /// environment variable: guest execution receives only the explicitly
-    /// constructed environment in [`Self::merged_env`].
-    pub fn with_core_http_url(mut self, core_http_url: String) -> Self {
-        self.core_http_url = Some(core_http_url);
-        self
-    }
-
+    /// The guest environment: the runner's own variables plus the launch's.
+    /// Guests never receive a runtime address — every runtime call is a host
+    /// import — so a `RUNTARA_HTTP_URL` in the free-form launch environment is
+    /// dropped rather than handed to the guest.
     fn merged_env(&self, options: &LaunchOptions) -> HashMap<String, String> {
         let mut env = common::build_env(
             &self.config,
             &options.instance_id,
             &options.tenant_id,
             options.checkpoint_id.as_deref(),
-            self.core_http_url.as_deref(),
         );
         env.extend(options.env.clone());
+        env.remove(common::RUNTIME_URL_ENV);
         env
     }
 
@@ -2160,6 +2150,54 @@ mod tests {
             }),
         ];
         assert_eq!(earliest_wake_deadline_ms(&wakes), None);
+    }
+
+    /// A guest never receives a runtime address, even when the free-form
+    /// launch environment carries one.
+    #[tokio::test]
+    async fn no_guest_env_holds_a_runtime_address() {
+        let runner = super::EmbeddedWasmRunner::new(
+            super::WorkflowRunnerConfig {
+                data_dir: std::env::temp_dir(),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::new(runtara_core::persistence::memory::InMemoryPersistence::new()),
+        )
+        .expect("runner builds");
+        let mut options = super::LaunchOptions {
+            launch_id: "launch-env".into(),
+            instance_id: "instance-env".into(),
+            tenant_id: "tenant-env".into(),
+            wasm_path: std::path::PathBuf::from("/unused/workflow.wasm"),
+            requires_lifecycle_invoke: true,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: serde_json::Value::Null,
+            timeout: Duration::from_secs(30),
+            checkpoint_id: Some("checkpoint-env".into()),
+            env: HashMap::new(),
+            prepersisted_input: None,
+            start_gate: None,
+        };
+        let env = runner.merged_env(&options);
+        assert!(!env.contains_key(super::common::RUNTIME_URL_ENV), "{env:?}");
+        assert_eq!(
+            env.get("RUNTARA_INSTANCE_ID").map(String::as_str),
+            Some("instance-env")
+        );
+
+        options.env = HashMap::from([
+            (
+                super::common::RUNTIME_URL_ENV.to_string(),
+                "http://127.0.0.1:8003".to_string(),
+            ),
+            ("CUSTOM".to_string(), "kept".to_string()),
+        ]);
+        let env = runner.merged_env(&options);
+        assert!(!env.contains_key(super::common::RUNTIME_URL_ENV), "{env:?}");
+        assert_eq!(env.get("CUSTOM").map(String::as_str), Some("kept"));
     }
 
     /// A timed signal wait parks until its stored persistence deadline, not the

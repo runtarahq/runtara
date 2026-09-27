@@ -103,18 +103,14 @@ pub struct FixtureContext {
 impl FixtureContext {
     pub fn public() -> Self {
         Self {
-            context: CallContext::for_test("fixture-tenant", ""),
+            context: CallContext::for_test("fixture-tenant"),
             upstream: None,
         }
     }
-    pub fn with_upstream(
-        tenant: impl Into<String>,
-        upstream: impl Into<String>,
-        core: impl Into<String>,
-    ) -> Self {
+    pub fn with_upstream(tenant: impl Into<String>, upstream: impl Into<String>) -> Self {
         let upstream = upstream.into();
         Self {
-            context: CallContext::for_test(tenant, core),
+            context: CallContext::for_test(tenant),
             upstream: (!upstream.is_empty()).then_some(upstream),
         }
     }

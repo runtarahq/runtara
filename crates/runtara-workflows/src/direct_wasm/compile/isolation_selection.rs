@@ -182,6 +182,7 @@ impl AgentLoweringSelection {
             &components_dir,
             &extra_component_dirs,
             &requirements,
+            &manifest.workflow_agent_ids(),
         )?;
         let mut agents = dependencies
             .iter()

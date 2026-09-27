@@ -155,7 +155,18 @@ async fn run(shape: Shape, deadline: bool) -> anyhow::Result<()> {
                         let mut request = Vec::new(); let mut buffer = [0;1024];
                         while !request.windows(4).any(|w| w == b"\r\n\r\n") {
                             let n = stream.read(&mut buffer).await?;
-                            anyhow::ensure!(n>0,"lookup closed before headers");
+                            if n == 0 {
+                                // The preparation deadline can fire after the peer
+                                // connected but before it wrote its request (a
+                                // loaded machine widens that window). The peer was
+                                // still pending and is now closed, which is the
+                                // cleanup this fixture checks; a partial request
+                                // is still an error.
+                                anyhow::ensure!(request.is_empty(), "peer closed mid-headers");
+                                host.requests.fetch_add(1,Ordering::SeqCst);
+                                host.closed_count.fetch_add(1,Ordering::SeqCst); host.closed.notify_one();
+                                return anyhow::Ok(());
+                            }
                             request.extend_from_slice(&buffer[..n]);
                         }
                         let path = std::str::from_utf8(&request)?.split_whitespace().nth(1).unwrap();
