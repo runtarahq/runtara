@@ -310,7 +310,9 @@ impl RuntimeClient {
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
-    /// One page of a parent's launched and admitted children, plus the total.
+    /// One page of a parent's launched, admitted and never-launched
+    /// children, plus the total.
+    #[allow(clippy::too_many_arguments)]
     pub async fn control_children(
         &self,
         tenant: &str,
@@ -318,10 +320,43 @@ impl RuntimeClient {
         options: &runtara_environment::instance_repository::ListInstancesOptions,
         include_launched: bool,
         admitted: &[runtara_environment::control_reads::AdmittedChild],
+        outcomes: &runtara_environment::control_reads::ChildOutcomes,
         order: runtara_environment::control_reads::ChildOrder,
     ) -> Result<(Vec<runtara_environment::control_reads::ControlChild>, i64), RuntimeError> {
         self.client
-            .control_children(tenant, parent, options, include_launched, admitted, order)
+            .control_children(
+                tenant,
+                parent,
+                options,
+                include_launched,
+                admitted,
+                outcomes,
+                order,
+            )
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Publish a never-launched child's outcome, fenced against its launch
+    /// (the instance row wins).
+    pub async fn publish_external_outcome(
+        &self,
+        outcome: &runtara_core::persistence::ExternalOutcome,
+    ) -> Result<runtara_core::persistence::PublishOutcome, RuntimeError> {
+        self.client
+            .publish_external_outcome(outcome)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// A never-launched child's published outcome, if any.
+    pub async fn get_external_outcome(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::ExternalOutcomeRecord>, RuntimeError> {
+        self.client
+            .get_external_outcome(tenant, instance_id)
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }

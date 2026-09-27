@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, Utc};
 use runtara_core::domain::InstanceStatus;
+use runtara_core::persistence::ExternalOutcomeKind;
 
 use crate::error::Result;
 use crate::instance_repository::{InstanceRepository, ListInstancesOptions};
@@ -137,13 +138,47 @@ pub struct AdmittedChild {
     pub admitted_at: DateTime<Utc>,
 }
 
-/// One child of a parent, launched or still in admission.
+/// A child that never launched and whose outcome is published
+/// (`instance_external_outcomes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeChild {
+    /// The child's instance id.
+    pub instance_id: String,
+    /// `not_started` or `cancelled`.
+    pub outcome: ExternalOutcomeKind,
+    /// Why, when known.
+    pub reason: Option<String>,
+    /// The workflow it would have run.
+    pub workflow_id: Option<String>,
+    /// Its resolved version.
+    pub workflow_version: Option<i32>,
+    /// Its run label.
+    pub run_label: Option<String>,
+    /// When it was admitted.
+    pub admitted_at: DateTime<Utc>,
+    /// When its outcome was published (its finish).
+    pub published_at: DateTime<Utc>,
+}
+
+/// Which published outcomes [`InstanceRepository::control_children`] lists
+/// beside the launched and admitted children.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChildOutcomes {
+    /// The outcome kinds to include; empty lists none.
+    pub kinds: Vec<ExternalOutcomeKind>,
+    /// Only outcomes of this workflow.
+    pub workflow_id: Option<String>,
+}
+
+/// One child of a parent, launched, still in admission, or ended unlaunched.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlChild {
     /// The child has an instance row.
     Launched(Box<ControlInstance>),
     /// Admitted and not launched yet (`queued`).
     Admitted(AdmittedChild),
+    /// Never launched; its outcome is published.
+    Outcome(OutcomeChild),
 }
 
 impl ControlChild {
@@ -152,6 +187,7 @@ impl ControlChild {
         match self {
             Self::Launched(row) => &row.instance_id,
             Self::Admitted(child) => &child.instance_id,
+            Self::Outcome(child) => &child.instance_id,
         }
     }
 }
@@ -185,6 +221,10 @@ struct ChildRow {
     finished_at: Option<DateTime<Utc>>,
     parent_instance_id: Option<String>,
     admitted_at: Option<DateTime<Utc>>,
+    outcome: Option<String>,
+    outcome_reason: Option<String>,
+    workflow_id: Option<String>,
+    workflow_version: Option<i32>,
 }
 
 /// Longest lineage [`InstanceRepository::control_lineage`] walks.
@@ -225,10 +265,18 @@ impl InstanceRepository {
 
     /// One page of the children of `parent` in `tenant`: the launched ones
     /// matching `options` (tenant and parent are set here) merged with the
-    /// `admitted` ones that have no instance row yet, in one statement, plus
-    /// the merged total. A child both admitted and launched counts once, as
-    /// launched. The caller filters `admitted` by everything but launch;
-    /// without `include_launched` only `admitted` children are listed.
+    /// `admitted` ones that have no instance row yet and with the published
+    /// outcomes of children that never launched (`outcomes`; filtered here by
+    /// kind, workflow, run label, admission time as creation and publication
+    /// as finish), in one statement, plus the merged total. A child both
+    /// admitted and launched counts once, as launched; the launch fence keeps
+    /// an outcome and an instance row apart. The caller filters `admitted`
+    /// by everything but launch; without `include_launched` no launched
+    /// children are listed.
+    ///
+    /// Only this parent-scoped read lists outcomes; the public list of runs
+    /// never does.
+    #[allow(clippy::too_many_arguments)]
     pub async fn control_children(
         &self,
         tenant: &str,
@@ -236,6 +284,7 @@ impl InstanceRepository {
         options: &ListInstancesOptions,
         include_launched: bool,
         admitted: &[AdmittedChild],
+        outcomes: &ChildOutcomes,
         order: ChildOrder,
     ) -> Result<(Vec<ControlChild>, i64)> {
         let options = ListInstancesOptions {
@@ -258,7 +307,9 @@ impl InstanceRepository {
              img.name AS image_name, i.run_label, i.status::TEXT AS status, \
              i.termination_reason::TEXT AS termination_reason, \
              {EXPLICITLY_PAUSED_SQL} AS explicitly_paused, i.created_at, i.started_at, \
-             i.finished_at, i.parent_instance_id, i.admitted_at{FROM}"
+             i.finished_at, i.parent_instance_id, i.admitted_at, NULL::TEXT AS outcome, \
+             NULL::TEXT AS outcome_reason, NULL::TEXT AS workflow_id, \
+             NULL::INTEGER AS workflow_version{FROM}"
         ));
         crate::db::push_instance_filters(&mut query, &options);
         if !include_launched {
@@ -267,7 +318,7 @@ impl InstanceRepository {
         query
             .push(
                 " UNION ALL SELECT FALSE, f.instance_id, NULL, NULL, f.run_label, NULL, NULL, \
-                 FALSE, f.admitted_at, NULL, NULL, NULL, f.admitted_at \
+                 FALSE, f.admitted_at, NULL, NULL, NULL, f.admitted_at, NULL, NULL, NULL, NULL \
                  FROM unnest(",
             )
             .push_bind(
@@ -292,9 +343,54 @@ impl InstanceRepository {
             )
             .push(
                 "::TIMESTAMPTZ[]) AS f(instance_id, run_label, admitted_at) \
-                 WHERE NOT EXISTS (SELECT 1 FROM instances AS x WHERE x.instance_id = f.instance_id)), \
-                 page AS (SELECT * FROM children ORDER BY ",
-            )
+                 WHERE NOT EXISTS (SELECT 1 FROM instances AS x WHERE x.instance_id = f.instance_id) \
+                 AND NOT EXISTS (SELECT 1 FROM instance_external_outcomes AS y \
+                                 WHERE y.instance_id = f.instance_id)",
+            );
+        if !outcomes.kinds.is_empty() {
+            query
+                .push(
+                    " UNION ALL SELECT FALSE, o.instance_id, o.tenant_id, NULL, o.run_label, NULL, \
+                     NULL, FALSE, o.admitted_at, NULL, o.published_at, o.parent_instance_id, \
+                     o.admitted_at, o.outcome, o.reason, o.workflow_id, o.workflow_version \
+                     FROM instance_external_outcomes AS o WHERE o.tenant_id = ",
+                )
+                .push_bind(tenant.to_owned())
+                .push(" AND o.parent_instance_id = ")
+                .push_bind(parent.to_owned())
+                .push(" AND o.outcome = ANY(")
+                .push_bind(
+                    outcomes
+                        .kinds
+                        .iter()
+                        .map(|kind| kind.as_str().to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .push("::TEXT[])");
+            if let Some(workflow) = &outcomes.workflow_id {
+                query
+                    .push(" AND o.workflow_id = ")
+                    .push_bind(workflow.clone());
+            }
+            if let Some(label) = &options.run_label {
+                query.push(" AND o.run_label = ").push_bind(label.clone());
+            }
+            for (column, value) in [
+                ("o.admitted_at >= ", options.created_after),
+                ("o.admitted_at < ", options.created_before),
+                ("o.published_at >= ", options.finished_after),
+                ("o.published_at < ", options.finished_before),
+            ] {
+                if let Some(value) = value {
+                    query.push(" AND ").push(column).push_bind(value);
+                }
+            }
+            query.push(
+                " AND NOT EXISTS (SELECT 1 FROM instances AS z WHERE z.instance_id = o.instance_id)",
+            );
+        }
+        query
+            .push("), page AS (SELECT * FROM children ORDER BY ")
             .push(order_sql)
             .push(" LIMIT ")
             .push_bind(options.limit)
@@ -312,6 +408,22 @@ impl InstanceRepository {
             let (Some(launched), Some(instance_id)) = (row.launched, row.instance_id) else {
                 continue;
             };
+            if let Some(outcome) = row.outcome.as_deref() {
+                let outcome = ExternalOutcomeKind::parse(outcome).ok_or_else(|| {
+                    crate::error::Error::Other(format!("unknown external outcome '{outcome}'"))
+                })?;
+                children.push(ControlChild::Outcome(OutcomeChild {
+                    instance_id,
+                    outcome,
+                    reason: row.outcome_reason,
+                    workflow_id: row.workflow_id,
+                    workflow_version: row.workflow_version,
+                    run_label: row.run_label,
+                    admitted_at: row.admitted_at.unwrap_or_default(),
+                    published_at: row.finished_at.unwrap_or_default(),
+                }));
+                continue;
+            }
             if !launched {
                 if let Some(child) = admitted
                     .iter()
@@ -757,6 +869,7 @@ mod parent_tests {
                         },
                         true,
                         admitted,
+                        &ChildOutcomes::default(),
                         order,
                     )
                     .await
@@ -797,6 +910,7 @@ mod parent_tests {
                 },
                 false,
                 &admitted,
+                &ChildOutcomes::default(),
                 ChildOrder::AdmittedAsc,
             )
             .await
@@ -807,6 +921,84 @@ mod parent_tests {
                 .iter()
                 .all(|child| matches!(child, ControlChild::Admitted(_)))
         );
+        // A child that never launched and whose outcome is published joins
+        // the page; the public list above never shows it.
+        let unlaunched = runtara_core::persistence::ExternalOutcome {
+            instance_id: id("unlaunched"),
+            tenant_id: tenant.clone(),
+            parent_instance_id: id("parent"),
+            outcome: ExternalOutcomeKind::Cancelled,
+            reason: Some("parent ended".into()),
+            admitted_at: ms(40),
+            workflow_id: Some("wf".into()),
+            workflow_version: Some(1),
+            run_label: Some("u".into()),
+        };
+        assert_eq!(
+            <runtara_store_postgres::PostgresPersistence as runtara_core::persistence::Persistence>::publish_external_outcome(
+                &runtara_store_postgres::PostgresPersistence::new(pool.clone()),
+                &unlaunched,
+            )
+                .await
+                .unwrap(),
+            runtara_core::persistence::PublishOutcome::Published
+        );
+        let every_outcome = ChildOutcomes {
+            kinds: vec![
+                ExternalOutcomeKind::NotStarted,
+                ExternalOutcomeKind::Cancelled,
+            ],
+            workflow_id: None,
+        };
+        let (with_outcomes, total) = instances
+            .control_children(
+                &tenant,
+                &id("parent"),
+                &ListInstancesOptions {
+                    limit: 10,
+                    ..Default::default()
+                },
+                true,
+                &admitted,
+                &every_outcome,
+                ChildOrder::AdmittedAsc,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total, 5);
+        assert!(matches!(
+            &with_outcomes[3],
+            ControlChild::Outcome(child)
+                if child.instance_id == id("unlaunched")
+                    && child.outcome == ExternalOutcomeKind::Cancelled
+                    && child.reason.as_deref() == Some("parent ended")
+        ));
+        let (other_workflow, total) = instances
+            .control_children(
+                &tenant,
+                &id("parent"),
+                &ListInstancesOptions {
+                    limit: 10,
+                    ..Default::default()
+                },
+                false,
+                &[],
+                &ChildOutcomes {
+                    workflow_id: Some("another".into()),
+                    ..every_outcome.clone()
+                },
+                ChildOrder::AdmittedAsc,
+            )
+            .await
+            .unwrap();
+        assert!(other_workflow.is_empty());
+        assert_eq!(total, 0);
+        assert_eq!(
+            instances.list(&options).await.unwrap().total_count,
+            2,
+            "outcomes stay out of the public list"
+        );
+
         // Another tenant's parent id sees none of them.
         let (none, total) = instances
             .control_children(
@@ -818,6 +1010,7 @@ mod parent_tests {
                 },
                 true,
                 &[],
+                &ChildOutcomes::default(),
                 ChildOrder::AdmittedAsc,
             )
             .await

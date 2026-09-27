@@ -398,6 +398,15 @@ pub enum LaunchQueueError {
     /// A child's parent link is malformed or names no run of its tenant.
     #[error("invalid parent: {0}")]
     InvalidParent(String),
+    /// A child whose never-launched outcome is already published: the
+    /// published outcome stands and the child is never launched.
+    #[error("child {instance_id} already has a published {outcome} outcome")]
+    LaunchFenced {
+        /// The fenced child.
+        instance_id: String,
+        /// The published outcome (`not_started` or `cancelled`).
+        outcome: &'static str,
+    },
     /// PostgreSQL rejected or could not complete a queue operation.
     #[error("launch queue database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -623,6 +632,24 @@ impl LaunchRepository {
                 .map_err(|error| LaunchQueueError::InvalidParent(error.to_string()))?;
         }
         let mut tx = self.pool.begin().await?;
+        // A child's launch and its external outcome exclude each other: under
+        // the per-instance launch fence, a child whose `not_started` or
+        // `cancelled` outcome is already published is never written.
+        if request.parent.is_some() {
+            runtara_store_postgres::fence::take_launch_fence(&mut tx, &request.launch.instance_id)
+                .await?;
+            if let Some(outcome) = runtara_store_postgres::fence::published_outcome(
+                &mut tx,
+                &request.launch.instance_id,
+            )
+            .await?
+            {
+                return Err(LaunchQueueError::LaunchFenced {
+                    instance_id: request.launch.instance_id.clone(),
+                    outcome: outcome.as_str(),
+                });
+            }
+        }
         // A child is written only while a run of its own tenant holds the
         // parent id; the check and the claim are one statement.
         let claimed: Option<String> = sqlx::query_scalar(

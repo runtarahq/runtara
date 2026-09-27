@@ -52,13 +52,13 @@ use crate::workers::execution_engine::{
     self, CommandEffect, ExecutionEngine, ExecutionError, PauseOutcome, ResumeOutcome,
     StartChildError, StopOutcome,
 };
-use crate::workers::execution_outbox::ControlChildRequest;
+use crate::workers::execution_outbox::{AdmissionCancel, ControlChildRequest};
 use runtara_component_host::control_host::CommandOutcome;
 use runtara_core::persistence::control_receipts::{
     BeginReceipt, ControlIntent, ControlReceipt, ControlReceiptState, ControlReceipts,
 };
 use runtara_core::persistence::inputs::{InputError, InputRequest, InputState};
-use runtara_environment::control_reads::{AdmittedChild, ChildOrder, ControlChild};
+use runtara_environment::control_reads::{AdmittedChild, ChildOrder, ChildOutcomes, ControlChild};
 use sha2::{Digest, Sha256};
 
 /// How long a call waits for the embedded runtime to install the service.
@@ -573,7 +573,7 @@ impl NativeControl {
         mutation: Mutation,
         instance_id: String,
         arguments: Value,
-        cancel: Option<(u32, String)>,
+        cancel: Option<(u64, String)>,
     ) -> Result<CommandResult, ControlError> {
         let tenant = self.tenant(authority)?;
         let (caller, operation) = mutation_identity(authority, mutation.as_str())?;
@@ -613,7 +613,7 @@ impl NativeControl {
         mutation: Mutation,
         instance_id: &str,
         arguments: Value,
-        cancel: Option<(u32, String)>,
+        cancel: Option<(u64, String)>,
     ) -> Result<CommandResult, ControlError> {
         let runtime = self.runtime().await?;
         let relation = self.relation(tenant, caller, instance_id).await?;
@@ -651,8 +651,47 @@ impl NativeControl {
                 }
             },
         };
-        let applied =
-            apply_lifecycle(&runtime, tenant, mutation, instance_id, cancel, reapplying).await;
+        // A run with an instance row is stopped in Environment: the row
+        // wins. A child without one is cancelled in admission (a launch that
+        // races this is stopped when its outcome is published).
+        let launched = mutation == Mutation::Cancel
+            && runtime
+                .control_instance(tenant, instance_id, 0, 0)
+                .await
+                .map_err(|_| unavailable("the run could not be read"))?
+                .is_some();
+        let admission = match (&cancel, self.installed_engine()) {
+            (Some((grace_ms, reason)), Some(engine))
+                if mutation == Mutation::Cancel && !launched =>
+            {
+                engine
+                    .outbox()
+                    .cancel_request(tenant, instance_id, reason, *grace_ms)
+                    .await
+                    .map_err(|_| unavailable("the child's admission could not be read"))
+                    .map(Some)
+            }
+            _ => Ok(None),
+        };
+        let applied = match admission {
+            Err(error) => Err(error),
+            Ok(Some(AdmissionCancel::Cancelled)) => Ok(CommandOutcome::Applied),
+            Ok(Some(AdmissionCancel::IntentStored)) => Ok(CommandOutcome::Requested),
+            Ok(Some(AdmissionCancel::AlreadyEnded { .. })) => {
+                match apply_lifecycle(&runtime, tenant, mutation, instance_id, cancel, reapplying)
+                    .await
+                {
+                    // Never launched: the ended admission is the outcome.
+                    Err(error) if error.code == ControlErrorCode::NotFound => {
+                        Ok(CommandOutcome::AlreadyTerminal)
+                    }
+                    other => other,
+                }
+            }
+            Ok(_) => {
+                apply_lifecycle(&runtime, tenant, mutation, instance_id, cancel, reapplying).await
+            }
+        };
         // A child still in admission has no run to pause or resume yet.
         let applied = match applied {
             Err(error)
@@ -990,8 +1029,53 @@ impl NativeControl {
             ..Default::default()
         };
         let runtime = self.runtime().await?;
+        // Ended admissions publish their outcomes first, so the page has no
+        // gap between a child leaving admission and its outcome appearing.
+        if let Some(engine) = self.installed_engine() {
+            let pending = engine
+                .outbox()
+                .unpublished_outcomes_of(tenant, parent)
+                .await
+                .map_err(|_| unavailable("the children could not be listed"))?;
+            for pending in pending {
+                crate::workers::control_children::settle_outcome(
+                    engine.outbox(),
+                    &runtime,
+                    &pending,
+                )
+                .await
+                .map_err(|_| unavailable("the children could not be listed"))?;
+            }
+        }
+        let mut kinds = Vec::new();
+        for (status, kind) in [
+            (
+                InstanceStatus::NotStarted,
+                runtara_core::persistence::ExternalOutcomeKind::NotStarted,
+            ),
+            (
+                InstanceStatus::Cancelled,
+                runtara_core::persistence::ExternalOutcomeKind::Cancelled,
+            ),
+        ] {
+            if request.statuses.is_empty() || request.statuses.contains(&status) {
+                kinds.push(kind);
+            }
+        }
+        let outcomes = ChildOutcomes {
+            kinds,
+            workflow_id: request.workflow_id.clone(),
+        };
         let (children, total) = runtime
-            .control_children(tenant, parent, &options, include_launched, &admitted, order)
+            .control_children(
+                tenant,
+                parent,
+                &options,
+                include_launched,
+                &admitted,
+                &outcomes,
+                order,
+            )
             .await
             .map_err(|_| unavailable("the children could not be listed"))?;
         let total = total.max(0) as u64;
@@ -1005,6 +1089,22 @@ impl NativeControl {
                     .find(|request| request.instance_id == admitted.instance_id)
                     .map(queued_summary)
                     .expect("admitted children come from these requests"),
+                ControlChild::Outcome(child) => {
+                    outcome_summary(&runtara_core::persistence::ExternalOutcomeRecord {
+                        outcome: runtara_core::persistence::ExternalOutcome {
+                            instance_id: child.instance_id.clone(),
+                            tenant_id: tenant.to_owned(),
+                            parent_instance_id: parent.to_owned(),
+                            outcome: child.outcome,
+                            reason: child.reason.clone(),
+                            admitted_at: child.admitted_at,
+                            workflow_id: child.workflow_id.clone(),
+                            workflow_version: child.workflow_version,
+                            run_label: child.run_label.clone(),
+                        },
+                        published_at: child.published_at,
+                    })
+                }
             })
             .collect();
         Ok(InstancePage {
@@ -1030,7 +1130,7 @@ async fn apply_lifecycle(
     tenant: &str,
     mutation: Mutation,
     instance_id: &str,
-    cancel: Option<(u32, String)>,
+    cancel: Option<(u64, String)>,
     reapplying: bool,
 ) -> Result<CommandOutcome, ControlError> {
     let not_paused = || {
@@ -1041,7 +1141,9 @@ async fn apply_lifecycle(
     };
     match mutation {
         Mutation::Cancel => {
-            let (grace_seconds, reason) = cancel.expect("cancel carries its arguments");
+            let (grace_ms, reason) = cancel.expect("cancel carries its arguments");
+            // The stop grace is whole seconds; round a partial second up.
+            let grace_seconds = u32::try_from(grace_ms.div_ceil(1000)).unwrap_or(u32::MAX);
             match execution_engine::stop_for(runtime, tenant, instance_id, grace_seconds, &reason)
                 .await
                 .map_err(execution_error)?
@@ -1241,6 +1343,44 @@ fn queued_summary(request: &ControlChildRequest) -> InstanceSummary {
         started_at_ms: None,
         finished_at_ms: None,
     }
+}
+
+/// A child that never launched, from its published outcome: `not-started`
+/// or `cancelled`, finished when the outcome was published.
+fn outcome_summary(record: &runtara_core::persistence::ExternalOutcomeRecord) -> InstanceSummary {
+    let outcome = &record.outcome;
+    InstanceSummary {
+        instance_id: outcome.instance_id.clone(),
+        workflow_id: outcome.workflow_id.clone().unwrap_or_default(),
+        version: outcome
+            .workflow_version
+            .and_then(|version| u32::try_from(version).ok())
+            .filter(|version| *version > 0),
+        run_label: outcome.run_label.clone(),
+        parent_instance_id: Some(outcome.parent_instance_id.clone()),
+        status: outcome_status(outcome.outcome),
+        suspension_reason: None,
+        termination_reason: outcome.reason.clone(),
+        created_at_ms: millis(outcome.admitted_at),
+        started_at_ms: None,
+        finished_at_ms: Some(millis(record.published_at)),
+    }
+}
+
+fn outcome_status(kind: runtara_core::persistence::ExternalOutcomeKind) -> InstanceStatus {
+    match kind {
+        runtara_core::persistence::ExternalOutcomeKind::NotStarted => InstanceStatus::NotStarted,
+        runtara_core::persistence::ExternalOutcomeKind::Cancelled => InstanceStatus::Cancelled,
+    }
+}
+
+/// Neither a run, a published outcome nor an admission record: it never
+/// existed in this tenant, or retention removed it.
+fn no_longer_retained() -> ControlError {
+    ControlError::new(
+        ControlErrorCode::NotFound,
+        "no such run in this tenant, or it is no longer retained",
+    )
 }
 
 fn no_terminal() -> TerminalResult {
@@ -1452,19 +1592,79 @@ impl ControlHost for NativeControl {
             )
             .await
             .map_err(|_| unavailable("the run could not be read"))?;
-        match row {
-            Some(row) => Ok(InstanceDetail {
+        if let Some(row) = row {
+            return Ok(InstanceDetail {
                 instance: summary(&row),
                 terminal: terminal(&row),
+            });
+        }
+        // A child that never launched: its published outcome, ...
+        let read_outcome = |_| unavailable("the run could not be read");
+        if let Some(record) = runtime
+            .get_external_outcome(tenant, &instance_id)
+            .await
+            .map_err(read_outcome)?
+        {
+            return Ok(InstanceDetail {
+                instance: outcome_summary(&record),
+                terminal: no_terminal(),
+            });
+        }
+        // ... or its admission record: `queued` while in admission, and an
+        // ended admission publishes its outcome now, under the launch fence.
+        let Some(request) = self.admitted_child(tenant, &instance_id).await? else {
+            return Err(no_longer_retained());
+        };
+        if request.in_admission() {
+            return Ok(InstanceDetail {
+                instance: queued_summary(&request),
+                terminal: no_terminal(),
+            });
+        }
+        let Some(engine) = self.installed_engine() else {
+            return Err(unavailable("the run could not be read"));
+        };
+        let Some(pending) = engine
+            .outbox()
+            .unpublished_outcomes_of(tenant, request.parent_instance_id.as_deref().unwrap_or(""))
+            .await
+            .map_err(|_| unavailable("the run could not be read"))?
+            .into_iter()
+            .find(|pending| pending.child.instance_id == instance_id)
+        else {
+            return Err(no_longer_retained());
+        };
+        let settled =
+            crate::workers::control_children::settle_outcome(engine.outbox(), &runtime, &pending)
+                .await
+                .map_err(|_| unavailable("the run's outcome could not be published"))?;
+        // The core row wins: a launch that beat the fence is read as a run.
+        if settled == crate::workers::control_children::OutcomeSettled::Launched
+            && let Some(row) = runtime
+                .control_instance(
+                    tenant,
+                    &instance_id,
+                    contract::GET_OUTPUT_INLINE_BYTES,
+                    contract::GET_ERROR_INLINE_BYTES,
+                )
+                .await
+                .map_err(|_| unavailable("the run could not be read"))?
+        {
+            return Ok(InstanceDetail {
+                instance: summary(&row),
+                terminal: terminal(&row),
+            });
+        }
+        match runtime
+            .get_external_outcome(tenant, &instance_id)
+            .await
+            .map_err(read_outcome)?
+        {
+            Some(record) => Ok(InstanceDetail {
+                instance: outcome_summary(&record),
+                terminal: no_terminal(),
             }),
-            // Admitted by `start` and not launched yet.
-            None => match self.admitted_child(tenant, &instance_id).await? {
-                Some(request) if request.in_admission() => Ok(InstanceDetail {
-                    instance: queued_summary(&request),
-                    terminal: no_terminal(),
-                }),
-                _ => Err(not_found()),
-            },
+            None => Err(no_longer_retained()),
         }
     }
 
@@ -1731,8 +1931,6 @@ impl ControlHost for NativeControl {
                 contract::MAX_CANCEL_GRACE_MS
             ))
         })?;
-        // The stop grace is whole seconds; round a partial second up.
-        let grace_seconds = grace_ms.div_ceil(1000) as u32;
         let reason = request
             .reason
             .clone()
@@ -1752,7 +1950,7 @@ impl ControlHost for NativeControl {
             Mutation::Cancel,
             request.instance_id,
             arguments,
-            Some((grace_seconds, reason)),
+            Some((grace_ms, reason)),
         )
         .await
     }

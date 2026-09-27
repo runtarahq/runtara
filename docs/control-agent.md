@@ -134,10 +134,13 @@ purposes:
 
 - **Retention.** A finished child stays readable while its parent is not
   terminal, however long the parent runs: a parent may `get` or `wait` on a
-  child years after the child finished. Instance cleanup (today it deletes
+  child years after the child finished. Instance cleanup (it deletes
   terminal instances after `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS`, 3 days by
-  default) skips a terminal instance whose parent is not terminal. Once the
-  parent finishes, its children fall back to normal retention.
+  default) skips a terminal instance whose parent is not terminal. A pinned
+  child becomes eligible once its parent is terminal and both are past
+  retention: its age counts from the later of the two finishes. A missing
+  parent counts as terminal. The published outcome of a child that never
+  launched follows the same rule, aged from its publication.
 - **Label scope,** as above.
 - **Parent-close policy,** below.
 

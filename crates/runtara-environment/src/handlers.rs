@@ -339,6 +339,15 @@ pub enum StartRejection {
         instance_id: String,
     },
 
+    /// A child admitted by `control:start` already has a published
+    /// never-launched outcome; it is never launched. Not retryable.
+    LaunchFenced {
+        /// The fenced child.
+        instance_id: String,
+        /// The published outcome (`not_started` or `cancelled`).
+        outcome: String,
+    },
+
     /// Environment could not carry the start through — a database, queue or
     /// persistence failure. Unlike every refusal above, the same request may
     /// succeed on a retry, so a caller must not treat it as a bad image.
@@ -359,6 +368,13 @@ impl std::fmt::Display for StartRejection {
             Self::InstanceAlreadyExists { instance_id } => {
                 write!(formatter, "Instance '{instance_id}' already exists")
             }
+            Self::LaunchFenced {
+                instance_id,
+                outcome,
+            } => write!(
+                formatter,
+                "Child '{instance_id}' was not launched: its {outcome} outcome is already published"
+            ),
             Self::Internal(detail) => write!(formatter, "Failed to create instance: {detail}"),
         }
     }
@@ -724,6 +740,18 @@ pub async fn handle_start_instance(
             Ok(StartInstanceResponse::rejected(StartRejection::Internal(
                 format!("instance '{instance_id}' exists without an active launch generation"),
             )))
+        }
+        Err(crate::launch_queue::LaunchQueueError::LaunchFenced {
+            instance_id: fenced,
+            outcome,
+        }) => {
+            info!(instance_id = %fenced, outcome, "Refusing the launch of a child whose outcome is published");
+            Ok(StartInstanceResponse::rejected(
+                StartRejection::LaunchFenced {
+                    instance_id: fenced,
+                    outcome: outcome.to_string(),
+                },
+            ))
         }
         Err(crate::launch_queue::LaunchQueueError::InvalidParent(detail)) => {
             warn!(instance_id = %instance_id, detail, "Refusing a child start with an invalid parent");

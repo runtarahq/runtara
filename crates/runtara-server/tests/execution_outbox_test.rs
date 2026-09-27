@@ -1082,3 +1082,332 @@ async fn a_child_not_compiled_yet_is_requeued_until_its_deadline() {
     assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 0);
     cleanup(&pool, &tenant_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// Ownership (slice 8): cancel in every admission state, fenced outcomes
+// ---------------------------------------------------------------------------
+
+async fn deliver(pool: &PgPool, request_id: Uuid) {
+    sqlx::query("UPDATE execution_requests SET state = 'delivered' WHERE request_id = $1")
+        .bind(request_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE execution_outbox SET state = 'delivered' WHERE request_id = $1")
+        .bind(request_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn admit(
+    outbox: &ExecutionOutbox,
+    tenant_id: &str,
+    parent: &str,
+    op: &str,
+) -> (Uuid, String) {
+    let event = child_event(tenant_id, parent, None);
+    let admitted = outbox
+        .enqueue_child(
+            tenant_id,
+            &event,
+            &format!("control:{parent}:{op}"),
+            10,
+            child(parent, "v1:a", 8),
+        )
+        .await
+        .expect("admit a child");
+    (admitted.request_id, event.instance_id)
+}
+
+/// `queued` and `delivered` children are cancelled in admission (their
+/// reservation and control share freed, a `cancelled` outcome due);
+/// `launching` stores an intent; `accepted` is Environment's; an ended
+/// admission and a stranger are reported as such. The first cancel stands.
+#[tokio::test]
+async fn cancel_works_in_every_admission_state() {
+    use runtara_server::workers::execution_outbox::AdmissionCancel;
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-cancel-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+
+    // queued
+    let (queued_request, queued) = admit(&outbox, &tenant_id, "parent", "q").await;
+    assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 1);
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &queued, "not needed", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::Cancelled
+    );
+    assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 0);
+    assert_eq!(reserved_count(&pool, &tenant_id).await, 0);
+    let row = outbox
+        .control_child(&tenant_id, &queued)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            row.state.as_str(),
+            row.outcome.as_deref(),
+            row.outcome_reason.as_deref()
+        ),
+        ("cancelled", Some("cancelled"), Some("not needed"))
+    );
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &queued, "again", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::AlreadyEnded {
+            state: "cancelled".into()
+        }
+    );
+    // A stream entry delivered before the cancel can no longer launch it.
+    assert_eq!(
+        outbox
+            .claim_for_launch(queued_request, &tenant_id, &queued, "worker")
+            .await
+            .unwrap(),
+        DurableLaunchClaim::Rejected
+    );
+
+    // delivered
+    let (delivered_request, delivered) = admit(&outbox, &tenant_id, "parent", "d").await;
+    deliver(&pool, delivered_request).await;
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &delivered, "parent ended", 5000)
+            .await
+            .unwrap(),
+        AdmissionCancel::Cancelled
+    );
+
+    // launching: an intent, kept through a second cancel.
+    let (launching_request, launching) = admit(&outbox, &tenant_id, "parent", "l").await;
+    deliver(&pool, launching_request).await;
+    assert_eq!(
+        outbox
+            .claim_for_launch(launching_request, &tenant_id, &launching, "worker")
+            .await
+            .unwrap(),
+        DurableLaunchClaim::Claimed
+    );
+    for reason in ["first", "second"] {
+        assert_eq!(
+            outbox
+                .cancel_request(&tenant_id, &launching, reason, 2500)
+                .await
+                .unwrap(),
+            AdmissionCancel::IntentStored
+        );
+    }
+    let (reason, grace): (Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT cancel_reason, cancel_grace_ms FROM execution_requests WHERE request_id = $1",
+    )
+    .bind(launching_request)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((reason.as_deref(), grace), (Some("first"), Some(2500)));
+    assert_eq!(
+        outbox.control_reservations(&tenant_id).await.unwrap(),
+        1,
+        "a launching child keeps its slot"
+    );
+
+    // accepted
+    assert!(
+        outbox
+            .mark_launch_accepted(launching_request, "worker")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &launching, "late", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::Accepted
+    );
+
+    // A top-level request is not a child.
+    let top = Uuid::new_v4();
+    outbox
+        .enqueue(
+            &tenant_id,
+            &event(&tenant_id, top),
+            &source_idempotency_key("http-api", "top"),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &top.to_string(), "x", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::NotFound
+    );
+    cleanup(&pool, &tenant_id).await;
+}
+
+/// Races around the launch handoff: an intent follows the child to
+/// `accepted` (and is applied once), back to admission, or into an expiry
+/// that makes its outcome `cancelled`; a refused launch is `not_started`
+/// with its terminal reason. Each outcome is published once.
+#[tokio::test]
+async fn cancel_intents_and_outcomes_follow_launching_races() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-races-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+    let ours = |rows: Vec<runtara_server::workers::execution_outbox::ControlChildPending>| {
+        rows.into_iter()
+            .filter(|row| row.tenant_id == tenant_id)
+            .map(|row| row.child.instance_id)
+            .collect::<Vec<_>>()
+    };
+
+    // Intent while launching, then accepted: due for Environment once.
+    let (accepted_request, accepted) = admit(&outbox, &tenant_id, "parent", "a").await;
+    deliver(&pool, accepted_request).await;
+    outbox
+        .claim_for_launch(accepted_request, &tenant_id, &accepted, "w")
+        .await
+        .unwrap();
+    outbox
+        .cancel_request(&tenant_id, &accepted, "stop", 0)
+        .await
+        .unwrap();
+    assert!(
+        ours(outbox.pending_cancel_intents(100).await.unwrap()).is_empty(),
+        "a launching child waits for its handoff"
+    );
+    outbox
+        .mark_launch_accepted(accepted_request, "w")
+        .await
+        .unwrap();
+    assert_eq!(
+        ours(outbox.pending_cancel_intents(100).await.unwrap()),
+        vec![accepted.clone()]
+    );
+    assert!(outbox.mark_intent_applied(accepted_request).await.unwrap());
+    assert!(!outbox.mark_intent_applied(accepted_request).await.unwrap());
+    assert!(ours(outbox.pending_cancel_intents(100).await.unwrap()).is_empty());
+
+    // Intent while launching, then the handoff returns it to admission.
+    let (returned_request, returned) = admit(&outbox, &tenant_id, "parent", "r").await;
+    deliver(&pool, returned_request).await;
+    outbox
+        .claim_for_launch(returned_request, &tenant_id, &returned, "w")
+        .await
+        .unwrap();
+    outbox
+        .cancel_request(&tenant_id, &returned, "stop", 0)
+        .await
+        .unwrap();
+    outbox
+        .release_launch_claim(returned_request, "w", "workflow_not_compiled")
+        .await
+        .unwrap();
+    assert_eq!(
+        ours(outbox.pending_cancel_intents(100).await.unwrap()),
+        vec![returned.clone()]
+    );
+
+    // Intent while launching, then the lease and deadline lapse: expired,
+    // and the outcome is the requested cancel.
+    let (expiring_request, expiring) = admit(&outbox, &tenant_id, "parent", "e").await;
+    deliver(&pool, expiring_request).await;
+    outbox
+        .claim_for_launch(expiring_request, &tenant_id, &expiring, "w")
+        .await
+        .unwrap();
+    outbox
+        .cancel_request(&tenant_id, &expiring, "stop it", 0)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_requests SET deadline_at = NOW() - INTERVAL '1 second' WHERE request_id = $1",
+    )
+    .bind(expiring_request)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_outbox SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE request_id = $1",
+    )
+    .bind(expiring_request)
+    .execute(&pool)
+    .await
+    .unwrap();
+    outbox.expire_due().await.unwrap();
+    let row = outbox
+        .control_child(&tenant_id, &expiring)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            row.state.as_str(),
+            row.outcome.as_deref(),
+            row.outcome_reason.as_deref()
+        ),
+        ("expired", Some("cancelled"), Some("stop it"))
+    );
+
+    // A launch refused after the handoff is `not_started`, with its reason.
+    let (refused_request, refused) = admit(&outbox, &tenant_id, "parent", "t").await;
+    deliver(&pool, refused_request).await;
+    outbox
+        .claim_for_launch(refused_request, &tenant_id, &refused, "w")
+        .await
+        .unwrap();
+    outbox
+        .terminalize_launch_claim(refused_request, "w", "environment_launch_failed")
+        .await
+        .unwrap();
+    let row = outbox
+        .control_child(&tenant_id, &refused)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (row.outcome.as_deref(), row.outcome_reason.as_deref()),
+        (Some("not_started"), Some("environment_launch_failed"))
+    );
+    let due = ours(outbox.unpublished_outcomes(100).await.unwrap());
+    assert!(due.contains(&expiring) && due.contains(&refused), "{due:?}");
+
+    // Publication is recorded once; a launch that won clears the outcome.
+    assert!(
+        outbox
+            .mark_outcome_published(refused_request, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !outbox
+            .mark_outcome_published(refused_request, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        outbox
+            .mark_outcome_published(expiring_request, true)
+            .await
+            .unwrap()
+    );
+    let row = outbox
+        .control_child(&tenant_id, &expiring)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.outcome, None, "the launch won the fence");
+    assert!(ours(outbox.unpublished_outcomes(100).await.unwrap()).is_empty());
+    cleanup(&pool, &tenant_id).await;
+}

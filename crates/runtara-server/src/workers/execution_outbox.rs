@@ -262,6 +262,10 @@ pub struct ControlChildRequest {
     /// `cancelled` or `terminal`.
     pub state: String,
     pub terminal_reason: Option<String>,
+    /// `not_started` or `cancelled` once the request ended without a launch
+    /// (published to the runtime by the control-children publisher).
+    pub outcome: Option<String>,
+    pub outcome_reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -273,11 +277,91 @@ impl ControlChildRequest {
             "queued" | "delivered" | "launching" | "accepted"
         )
     }
+
+    /// The never-launched outcome this request of `tenant_id` ended with, if
+    /// any.
+    pub fn external_outcome(
+        &self,
+        tenant_id: &str,
+    ) -> Option<runtara_core::persistence::ExternalOutcome> {
+        let outcome =
+            runtara_core::persistence::ExternalOutcomeKind::parse(self.outcome.as_deref()?)?;
+        Some(runtara_core::persistence::ExternalOutcome {
+            instance_id: self.instance_id.clone(),
+            tenant_id: tenant_id.to_owned(),
+            parent_instance_id: self.parent_instance_id.clone()?,
+            outcome,
+            reason: self.outcome_reason.clone().map(truncate_reason),
+            admitted_at: self.created_at,
+            workflow_id: Some(self.workflow_id.clone()),
+            workflow_version: self.workflow_version,
+            run_label: self.run_label.clone(),
+        })
+    }
+}
+
+/// Keep a reason within the runtime's outcome cap, on a char boundary.
+fn truncate_reason(mut reason: String) -> String {
+    let cap = runtara_core::persistence::MAX_EXTERNAL_OUTCOME_REASON_BYTES;
+    if reason.len() > cap {
+        let mut end = cap;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    reason
 }
 
 const CONTROL_CHILD_COLUMNS: &str = "request_id, instance_id, workflow_id, workflow_version, \
      run_label, parent_instance_id, parent_close_policy, start_fingerprint, state, \
-     terminal_reason, created_at";
+     terminal_reason, outcome, outcome_reason, created_at";
+
+/// SET clause fragment recording a child request's never-launched outcome at
+/// a terminal admission transition: `cancelled` when a cancel was requested
+/// (with its reason), else `not_started` with the terminal reason bound at
+/// `$reason`. A top-level request gets none.
+fn child_outcome_set(reason: &str) -> String {
+    format!(
+        "outcome = CASE WHEN parent_instance_id IS NULL THEN NULL \
+                        WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' \
+                        ELSE 'not_started' END, \
+         outcome_reason = CASE WHEN parent_instance_id IS NULL THEN NULL \
+                               WHEN cancel_requested_at IS NOT NULL THEN cancel_reason \
+                               ELSE {reason} END"
+    )
+}
+
+/// What [`ExecutionOutbox::cancel_request`] did to a child's admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionCancel {
+    /// The child was `queued` or `delivered`: it is cancelled and will never
+    /// launch; its reservation (and control share) is released and its
+    /// `cancelled` outcome is due for publication.
+    Cancelled,
+    /// The child is `launching`: the cancel is stored as an intent, applied
+    /// in Environment once the launch is accepted, or here if it returns to
+    /// admission.
+    IntentStored,
+    /// Environment accepted the launch: stop it there.
+    Accepted,
+    /// The admission already ended (`expired`, `cancelled` or `terminal`).
+    AlreadyEnded { state: String },
+    /// No child request with this id in the tenant.
+    NotFound,
+}
+
+/// A child request whose never-launched outcome awaits publication, or whose
+/// cancel intent awaits application.
+#[derive(Debug, Clone, FromRow)]
+pub struct ControlChildPending {
+    pub tenant_id: String,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    pub cancel_reason: Option<String>,
+    pub cancel_grace_ms: Option<i64>,
+    #[sqlx(flatten)]
+    pub child: ControlChildRequest,
+}
 
 /// The unique index that keeps a run label to one child per parent.
 const PARENT_RUN_LABEL_KEY: &str = "execution_requests_parent_run_label_key";
@@ -719,6 +803,238 @@ impl ExecutionOutbox {
         .await?)
     }
 
+    /// Cancel a child `control:start` admitted, in whatever admission state
+    /// it is (see [`AdmissionCancel`]). Idempotent: the first cancel's reason
+    /// and grace stand.
+    ///
+    /// Locks the outbox row before the request row, like every other
+    /// handoff transition, so it serializes with the relay and the launch
+    /// claim instead of deadlocking with them.
+    pub async fn cancel_request(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+        reason: &str,
+        grace_ms: u64,
+    ) -> Result<AdmissionCancel, ExecutionOutboxError> {
+        let reason = truncate_reason(reason.to_owned());
+        let grace_ms = i64::try_from(grace_ms).unwrap_or(i64::MAX).min(3_600_000);
+        let request_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT request_id FROM execution_requests
+            WHERE tenant_id = $1 AND instance_id = $2 AND parent_instance_id IS NOT NULL
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(request_id) = request_id else {
+            return Ok(AdmissionCancel::NotFound);
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT 1 FROM execution_outbox WHERE request_id = $1 FOR UPDATE")
+            .bind(request_id)
+            .execute(&mut *tx)
+            .await?;
+        let state = sqlx::query_scalar::<_, String>(
+            "SELECT state FROM execution_requests WHERE request_id = $1 FOR UPDATE",
+        )
+        .bind(request_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let outcome = match state.as_str() {
+            "queued" | "delivered" => {
+                record_cancel_intent(&mut tx, request_id, &reason, grace_ms).await?;
+                sqlx::query(
+                    r#"
+                    UPDATE execution_requests
+                    SET state = 'cancelled',
+                        terminal_reason = cancel_reason,
+                        outcome = 'cancelled',
+                        outcome_reason = cancel_reason,
+                        updated_at = NOW()
+                    WHERE request_id = $1
+                    "#,
+                )
+                .bind(request_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    UPDATE execution_outbox
+                    SET state = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+                        last_error = 'control_cancelled', updated_at = NOW()
+                    WHERE request_id = $1 AND state IN ('pending', 'leased', 'delivered')
+                    "#,
+                )
+                .bind(request_id)
+                .execute(&mut *tx)
+                .await?;
+                let released =
+                    release_admission_in_tx(&mut tx, request_id, "control_cancelled").await?;
+                tx.commit().await?;
+                release_valkey_admission(released).await;
+                return Ok(AdmissionCancel::Cancelled);
+            }
+            "launching" => {
+                record_cancel_intent(&mut tx, request_id, &reason, grace_ms).await?;
+                AdmissionCancel::IntentStored
+            }
+            "accepted" => AdmissionCancel::Accepted,
+            other => AdmissionCancel::AlreadyEnded {
+                state: other.to_owned(),
+            },
+        };
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    /// Child requests that ended without a launch and whose outcome is not
+    /// published yet, oldest first.
+    pub async fn unpublished_outcomes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ControlChildPending>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, ControlChildPending>(&format!(
+            "SELECT tenant_id, cancel_requested_at, cancel_reason, cancel_grace_ms, \
+             {CONTROL_CHILD_COLUMNS} FROM execution_requests \
+             WHERE outcome IS NOT NULL AND outcome_published_at IS NULL \
+               AND state IN ('expired', 'cancelled', 'terminal') \
+             ORDER BY updated_at LIMIT $1"
+        ))
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// The same for one parent's children (a `query(parent)` publishes them
+    /// before it reads).
+    pub async fn unpublished_outcomes_of(
+        &self,
+        tenant_id: &str,
+        parent_instance_id: &str,
+    ) -> Result<Vec<ControlChildPending>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, ControlChildPending>(&format!(
+            "SELECT tenant_id, cancel_requested_at, cancel_reason, cancel_grace_ms, \
+             {CONTROL_CHILD_COLUMNS} FROM execution_requests \
+             WHERE outcome IS NOT NULL AND outcome_published_at IS NULL \
+               AND state IN ('expired', 'cancelled', 'terminal') \
+               AND tenant_id = $1 AND parent_instance_id = $2 \
+             ORDER BY created_at"
+        ))
+        .bind(tenant_id)
+        .bind(parent_instance_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Record that a child's outcome is settled in the runtime: published
+    /// (or already there), or `launched` when the runtime has an instance
+    /// row, which wins, so the request carries no outcome after all.
+    pub async fn mark_outcome_published(
+        &self,
+        request_id: Uuid,
+        launched: bool,
+    ) -> Result<bool, ExecutionOutboxError> {
+        let marked = sqlx::query(
+            r#"
+            UPDATE execution_requests
+            SET outcome_published_at = NOW(),
+                outcome = CASE WHEN $2 THEN NULL ELSE outcome END,
+                outcome_reason = CASE WHEN $2 THEN NULL ELSE outcome_reason END,
+                updated_at = NOW()
+            WHERE request_id = $1 AND outcome_published_at IS NULL
+            "#,
+        )
+        .bind(request_id)
+        .bind(launched)
+        .execute(&self.pool)
+        .await?;
+        Ok(marked.rows_affected() > 0)
+    }
+
+    /// Cancel intents not applied yet whose child is back in admission or
+    /// accepted by Environment (a `launching` one waits for its handoff).
+    pub async fn pending_cancel_intents(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ControlChildPending>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, ControlChildPending>(&format!(
+            "SELECT tenant_id, cancel_requested_at, cancel_reason, cancel_grace_ms, \
+             {CONTROL_CHILD_COLUMNS} FROM execution_requests \
+             WHERE cancel_requested_at IS NOT NULL AND outcome_published_at IS NULL \
+               AND state IN ('queued', 'delivered', 'accepted') \
+             ORDER BY cancel_requested_at LIMIT $1"
+        ))
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Record that an accepted child's cancel intent reached Environment.
+    pub async fn mark_intent_applied(
+        &self,
+        request_id: Uuid,
+    ) -> Result<bool, ExecutionOutboxError> {
+        let marked = sqlx::query(
+            r#"
+            UPDATE execution_requests
+            SET outcome_published_at = NOW(), updated_at = NOW()
+            WHERE request_id = $1 AND state = 'accepted'
+              AND cancel_requested_at IS NOT NULL AND outcome_published_at IS NULL
+            "#,
+        )
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(marked.rows_affected() > 0)
+    }
+
+    /// Parents with `cancel` children still in admission and not being
+    /// cancelled: the candidates of the admission half of the parent-close
+    /// cascade.
+    pub async fn parents_with_cancel_children_in_admission(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT DISTINCT tenant_id, parent_instance_id
+            FROM execution_requests
+            WHERE parent_close_policy = 'cancel'
+              AND state IN ('queued', 'delivered', 'launching')
+              AND cancel_requested_at IS NULL
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// A parent's `cancel` children still in admission without a cancel.
+    pub async fn cancel_children_in_admission(
+        &self,
+        tenant_id: &str,
+        parent_instance_id: &str,
+    ) -> Result<Vec<String>, ExecutionOutboxError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT instance_id FROM execution_requests
+            WHERE tenant_id = $1 AND parent_instance_id = $2
+              AND parent_close_policy = 'cancel'
+              AND state IN ('queued', 'delivered', 'launching')
+              AND cancel_requested_at IS NULL
+            ORDER BY created_at
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(parent_instance_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Release a reservation exactly once. P0.1's durable launch handoff and
     /// lifecycle transitions can call this without knowing whether a prior
     /// relay, expiry reaper, or terminal path already released it.
@@ -1070,19 +1386,18 @@ impl ExecutionOutbox {
         reason: &str,
     ) -> Result<bool, ExecutionOutboxError> {
         let mut tx = self.pool.begin().await?;
-        let terminalized = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            UPDATE execution_requests AS request
-            SET state = 'terminal', terminal_reason = $3, updated_at = NOW()
-            FROM execution_outbox AS outbox
-            WHERE request.request_id = $1
-              AND outbox.request_id = request.request_id
-              AND request.state = 'launching'
-              AND outbox.state = 'leased'
-              AND outbox.lease_owner = $2
-            RETURNING request.request_id
-            "#,
-        )
+        let terminalized = sqlx::query_scalar::<_, Uuid>(&format!(
+            "UPDATE execution_requests AS request \
+             SET state = 'terminal', terminal_reason = $3, {}, updated_at = NOW() \
+             FROM execution_outbox AS outbox \
+             WHERE request.request_id = $1 \
+               AND outbox.request_id = request.request_id \
+               AND request.state = 'launching' \
+               AND outbox.state = 'leased' \
+               AND outbox.lease_owner = $2 \
+             RETURNING request.request_id",
+            child_outcome_set("$3")
+        ))
         .bind(request_id)
         .bind(lease_owner)
         .bind(reason)
@@ -1337,16 +1652,12 @@ impl ExecutionOutbox {
             let reason = reason
                 .as_deref()
                 .unwrap_or("execution_outbox_deadline_exceeded");
-            sqlx::query(
-                r#"
-                UPDATE execution_requests
-                SET state = 'expired',
-                    terminal_reason = $2,
-                    updated_at = NOW()
-                WHERE request_id = $1
-                  AND state IN ('queued', 'delivered', 'launching')
-                "#,
-            )
+            sqlx::query(&format!(
+                "UPDATE execution_requests \
+                     SET state = 'expired', terminal_reason = $2, {}, updated_at = NOW() \
+                     WHERE request_id = $1 AND state IN ('queued', 'delivered', 'launching')",
+                child_outcome_set("$2")
+            ))
             .bind(request_id)
             .bind(reason)
             .execute(&mut *tx)
@@ -1401,6 +1712,31 @@ impl ExecutionOutbox {
         tx.commit().await?;
         Ok(request_ids.len())
     }
+}
+
+/// Store a cancel intent on a child request; the first one stands.
+async fn record_cancel_intent(
+    tx: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    reason: &str,
+    grace_ms: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE execution_requests
+        SET cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
+            cancel_reason = COALESCE(cancel_reason, $2),
+            cancel_grace_ms = COALESCE(cancel_grace_ms, $3),
+            updated_at = NOW()
+        WHERE request_id = $1
+        "#,
+    )
+    .bind(request_id)
+    .bind(reason)
+    .bind(grace_ms)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn find_by_idempotency_in_tx(
@@ -1550,16 +1886,12 @@ async fn expire_request_in_tx(
     .fetch_optional(&mut **tx)
     .await?
     .unwrap_or_else(|| "execution_outbox_deadline_exceeded".to_owned());
-    sqlx::query(
-        r#"
-        UPDATE execution_requests
-        SET state = 'expired',
-            terminal_reason = $2,
-            updated_at = NOW()
-        WHERE request_id = $1
-          AND state IN ('queued', 'delivered', 'launching')
-        "#,
-    )
+    sqlx::query(&format!(
+        "UPDATE execution_requests \
+         SET state = 'expired', terminal_reason = $2, {}, updated_at = NOW() \
+         WHERE request_id = $1 AND state IN ('queued', 'delivered', 'launching')",
+        child_outcome_set("$2")
+    ))
     .bind(request_id)
     .bind(&reason)
     .execute(&mut **tx)

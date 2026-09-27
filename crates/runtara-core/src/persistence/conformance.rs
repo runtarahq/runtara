@@ -1198,9 +1198,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let cutoff = Utc::now() + Duration::seconds(60);
     let sweep_limit = 100_000;
     let terminal = backend
-        .get_terminal_instances_older_than(cutoff, sweep_limit)
+        .get_terminal_instances_older_than(cutoff, None, sweep_limit)
         .await
-        .expect("get_terminal_instances_older_than failed");
+        .expect("get_terminal_instances_older_than failed")
+        .eligible;
     assert!(
         terminal.iter().any(|id| id == &instance_id),
         "completed instance must appear in terminal sweep before cutoff \
@@ -2741,3 +2742,353 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
 
 /// Authoritative managed-input lifecycle and acceptance conformance.
 pub mod inputs;
+
+/// External outcomes are fenced against launches: the first publication
+/// wins, a published outcome refuses the child's launch, and an existing
+/// instance row refuses the publication.
+pub async fn run_external_outcome_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::{ExternalOutcome, ExternalOutcomeKind, ParentLink, PublishOutcome};
+    let tenant = format!("outcome-conformance-{}", Uuid::new_v4());
+    let parent = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&parent, &tenant, None, None)
+            .await
+            .unwrap()
+    );
+    let admitted_at = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("a current timestamp");
+    let outcome = |id: &str, kind| ExternalOutcome {
+        instance_id: id.into(),
+        tenant_id: tenant.clone(),
+        parent_instance_id: parent.clone(),
+        outcome: kind,
+        reason: Some("execution_outbox_deadline_exceeded".into()),
+        admitted_at,
+        workflow_id: Some("wf".into()),
+        workflow_version: Some(3),
+        run_label: Some("label".into()),
+    };
+    let link = ParentLink {
+        parent_instance_id: parent.clone(),
+        parent_close_policy: "cancel".into(),
+        admitted_at,
+    };
+
+    // Publish, then launch: the launch is refused and writes nothing.
+    let unlaunched = Uuid::new_v4().to_string();
+    assert_eq!(
+        backend
+            .publish_external_outcome(&outcome(&unlaunched, ExternalOutcomeKind::NotStarted))
+            .await
+            .unwrap(),
+        PublishOutcome::Published
+    );
+    assert_eq!(
+        backend
+            .publish_external_outcome(&outcome(&unlaunched, ExternalOutcomeKind::Cancelled))
+            .await
+            .unwrap(),
+        PublishOutcome::AlreadyPublished,
+        "the first outcome stands"
+    );
+    let stored = backend
+        .get_external_outcome(&tenant, &unlaunched)
+        .await
+        .unwrap()
+        .expect("the published outcome");
+    assert_eq!(
+        stored.outcome,
+        outcome(&unlaunched, ExternalOutcomeKind::NotStarted)
+    );
+    assert!(
+        backend
+            .get_external_outcome("another-tenant", &unlaunched)
+            .await
+            .unwrap()
+            .is_none(),
+        "outcomes are tenant-scoped"
+    );
+    let refused = backend
+        .try_register_child_instance(&unlaunched, &tenant, None, None, &link)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(crate::error::CoreError::InvalidInstanceState { .. })
+        ),
+        "a launch after a published outcome is fenced, got {refused:?}"
+    );
+    assert!(backend.get_instance(&unlaunched).await.unwrap().is_none());
+
+    // Launch, then publish: the launch wins and nothing is published.
+    let launched = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_child_instance(&launched, &tenant, None, None, &link)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend
+            .publish_external_outcome(&outcome(&launched, ExternalOutcomeKind::NotStarted))
+            .await
+            .unwrap(),
+        PublishOutcome::Launched
+    );
+    assert!(
+        backend
+            .get_external_outcome(&tenant, &launched)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A malformed outcome is refused.
+    let mut oversized = outcome(&Uuid::new_v4().to_string(), ExternalOutcomeKind::Cancelled);
+    oversized.reason = Some("x".repeat(crate::persistence::MAX_EXTERNAL_OUTCOME_REASON_BYTES + 1));
+    assert!(matches!(
+        backend.publish_external_outcome(&oversized).await,
+        Err(crate::error::CoreError::ValidationError { .. })
+    ));
+    let mut orphan = outcome(&Uuid::new_v4().to_string(), ExternalOutcomeKind::Cancelled);
+    orphan.parent_instance_id = orphan.instance_id.clone();
+    assert!(backend.publish_external_outcome(&orphan).await.is_err());
+
+    backend
+        .delete_instances_batch(&[parent, launched])
+        .await
+        .unwrap();
+}
+
+/// Retention pins a finished child until its parent is terminal, one level
+/// deep, aged from the later of the two finishes; a missing parent counts as
+/// terminal; a pass pages with a cursor and reads each row once; external
+/// outcomes follow the same pin by `published_at`.
+///
+/// Every timestamp comes from the store's own clock (read back from rows),
+/// and each pass starts after a sentinel finished first, so rows other tests
+/// left in a shared database do not change what this sees.
+pub async fn run_retention_pin_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::{ExternalOutcome, ExternalOutcomeKind, ParentLink, RetentionCursor};
+    use std::collections::BTreeSet;
+    let tenant_name = format!("retention-pin-{}", Uuid::new_v4());
+    let tenant = tenant_name.as_str();
+    let pause = || tokio::time::sleep(std::time::Duration::from_millis(15));
+    let top = |id: String| async move {
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, None, None)
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let child = |id: String, parent: String| async move {
+        let link = ParentLink {
+            parent_instance_id: parent,
+            parent_close_policy: "cancel".into(),
+            admitted_at: Utc::now(),
+        };
+        assert!(
+            backend
+                .try_register_child_instance(&id, tenant, None, None, &link)
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let finish = |id: String| async move {
+        backend
+            .complete_instance(CompleteInstanceParams::new(
+                &id,
+                CoreInstanceStatus::Completed,
+            ))
+            .await
+            .unwrap();
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .expect("a terminal run has finished_at")
+    };
+    // One whole pass from `start`, in pages of `limit`.
+    let sweep = |cutoff: chrono::DateTime<Utc>, start: RetentionCursor, limit: i64| async move {
+        let mut eligible = Vec::new();
+        let mut pinned = 0u64;
+        let mut pages = 0usize;
+        let mut after = Some(start);
+        loop {
+            let page = backend
+                .get_terminal_instances_older_than(cutoff, after.as_ref(), limit)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(page.eligible.len() as i64 <= limit);
+            eligible.extend(page.eligible);
+            pinned += page.pinned;
+            match page.next {
+                Some(next) => {
+                    assert!(
+                        after.as_ref().is_none_or(|prev| (
+                            next.finished_at,
+                            next.instance_id.as_bytes()
+                        ) > (
+                            prev.finished_at,
+                            prev.instance_id.as_bytes()
+                        )),
+                        "the cursor must advance"
+                    );
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        let unique: BTreeSet<_> = eligible.iter().cloned().collect();
+        assert_eq!(unique.len(), eligible.len(), "a pass reads each row once");
+        (unique, pinned, pages)
+    };
+
+    let sentinel = top(Uuid::new_v4().to_string()).await;
+    let start = RetentionCursor {
+        finished_at: finish(sentinel.clone()).await,
+        instance_id: sentinel.clone(),
+    };
+    pause().await;
+
+    // grandparent (running) -> pinned child (finished) -> grandchild (finished)
+    let grandparent = top(Uuid::new_v4().to_string()).await;
+    backend
+        .update_instance_status(&grandparent, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let pinned_child = child(Uuid::new_v4().to_string(), grandparent.clone()).await;
+    let grandchild = child(Uuid::new_v4().to_string(), pinned_child.clone()).await;
+    finish(grandchild.clone()).await;
+    finish(pinned_child.clone()).await;
+    // A child whose parent is gone.
+    let doomed = top(Uuid::new_v4().to_string()).await;
+    let orphan = child(Uuid::new_v4().to_string(), doomed.clone()).await;
+    finish(orphan.clone()).await;
+    finish(doomed.clone()).await;
+    assert_eq!(
+        backend
+            .delete_instances_batch(std::slice::from_ref(&doomed))
+            .await
+            .unwrap(),
+        1
+    );
+    // A child that finished before its parent: aged from the parent's finish.
+    let late_parent = top(Uuid::new_v4().to_string()).await;
+    let early_child = child(Uuid::new_v4().to_string(), late_parent.clone()).await;
+    finish(early_child.clone()).await;
+    pause().await;
+    let late_finish = finish(late_parent.clone()).await;
+    let plain = top(Uuid::new_v4().to_string()).await;
+    let last = finish(plain.clone()).await;
+
+    // External outcomes: one pinned by the running grandparent, one whose
+    // parent is gone.
+    let outcome = |id: &str, parent: &str| ExternalOutcome {
+        instance_id: id.into(),
+        tenant_id: tenant.to_owned(),
+        parent_instance_id: parent.into(),
+        outcome: ExternalOutcomeKind::NotStarted,
+        reason: None,
+        admitted_at: Utc::now(),
+        workflow_id: None,
+        workflow_version: None,
+        run_label: None,
+    };
+    let pinned_outcome = Uuid::new_v4().to_string();
+    let orphan_outcome = Uuid::new_v4().to_string();
+    backend
+        .publish_external_outcome(&outcome(&pinned_outcome, &grandparent))
+        .await
+        .unwrap();
+    backend
+        .publish_external_outcome(&outcome(&orphan_outcome, &doomed))
+        .await
+        .unwrap();
+
+    let future = last + Duration::seconds(5);
+    let (eligible, pinned, pages) = sweep(future, start.clone(), 2).await;
+    assert!(pages > 2, "a limit of 2 pages the pass");
+    assert!(
+        !eligible.contains(&pinned_child),
+        "a child of a running parent is pinned"
+    );
+    assert!(pinned >= 1);
+    for id in [&grandchild, &orphan, &early_child, &late_parent, &plain] {
+        assert!(eligible.contains(id), "{id} should be eligible");
+    }
+    assert!(
+        !eligible.contains(&sentinel),
+        "the pass starts after its cursor"
+    );
+
+    // Past the child's retention but not its parent's: still pinned.
+    let (eligible, _, _) = sweep(late_finish, start.clone(), 100).await;
+    assert!(
+        !eligible.contains(&early_child),
+        "the child's age counts from its parent's later finish"
+    );
+    assert!(eligible.contains(&grandchild), "pinning is one level deep");
+    assert!(!eligible.contains(&pinned_child));
+
+    // Outcome cleanup follows the same pin.
+    let deleted_before = backend
+        .delete_external_outcomes_older_than(future, 10_000)
+        .await
+        .unwrap();
+    assert!(deleted_before >= 1);
+    assert!(
+        backend
+            .get_external_outcome(tenant, &orphan_outcome)
+            .await
+            .unwrap()
+            .is_none(),
+        "an outcome whose parent is gone ages out"
+    );
+    assert!(
+        backend
+            .get_external_outcome(tenant, &pinned_outcome)
+            .await
+            .unwrap()
+            .is_some(),
+        "an outcome of a running parent is pinned"
+    );
+
+    // The parent ends: its child and outcome are released.
+    let released = finish(grandparent.clone()).await;
+    let later = released + Duration::seconds(5);
+    let (eligible, _, _) = sweep(later, start.clone(), 100).await;
+    assert!(eligible.contains(&pinned_child));
+    backend
+        .delete_external_outcomes_older_than(later, 10_000)
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .get_external_outcome(tenant, &pinned_outcome)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    backend
+        .delete_instances_batch(&[
+            sentinel,
+            grandparent,
+            pinned_child,
+            grandchild,
+            orphan,
+            late_parent,
+            early_child,
+            plain,
+        ])
+        .await
+        .unwrap();
+}

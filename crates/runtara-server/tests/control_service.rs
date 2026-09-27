@@ -1296,6 +1296,7 @@ struct Children {
     server: sqlx::PgPool,
     engine: Arc<ExecutionEngine>,
     control: NativeControl,
+    runtime: Arc<RuntimeClient>,
 }
 
 static SERVER_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -1326,13 +1327,14 @@ impl Children {
             runtara_server::product_events::ProductEventSink::new(events),
         ));
         let control = NativeControl::new(Some(fx.tenant.clone()));
-        control.install(runtime);
+        control.install(runtime.clone());
         control.install_engine(engine.clone());
         Self {
             fx,
             server,
             engine,
             control,
+            runtime,
         }
     }
 
@@ -1838,5 +1840,385 @@ async fn start_refuses_what_can_never_run_and_what_does_not_fit() {
             .await,
     );
     assert_eq!(at_15.code, ControlErrorCode::Capacity);
+    cx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Ownership: cancel before launch, fenced outcomes, parent-close cascade
+// ---------------------------------------------------------------------------
+
+impl Children {
+    async fn request_id(&self, child: &str) -> Uuid {
+        self.engine
+            .control_child(&self.fx.tenant, child)
+            .await
+            .unwrap()
+            .unwrap()
+            .request_id
+    }
+
+    async fn deliver(&self, child: &str) -> Uuid {
+        let request = self.request_id(child).await;
+        for sql in [
+            "UPDATE execution_requests SET state = 'delivered' WHERE request_id = $1",
+            "UPDATE execution_outbox SET state = 'delivered' WHERE request_id = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(request)
+                .execute(&self.server)
+                .await
+                .unwrap();
+        }
+        request
+    }
+
+    async fn expire(&self, child: &str) {
+        sqlx::query(
+            "UPDATE execution_requests SET deadline_at = NOW() - INTERVAL '1 second' WHERE request_id = $1",
+        )
+        .bind(self.request_id(child).await)
+        .execute(&self.server)
+        .await
+        .unwrap();
+        self.engine.outbox().expire_due().await.unwrap();
+    }
+
+    /// A control service over a fresh engine: the engine's cached
+    /// concurrency count and local admissions start from zero, as after a
+    /// restart, instead of counting every admission this test made.
+    fn fresh_control(&self) -> NativeControl {
+        let (events, _) = tokio::sync::mpsc::channel(64);
+        let control = NativeControl::new(Some(self.fx.tenant.clone()));
+        control.install(self.runtime.clone());
+        control.install_engine(Arc::new(ExecutionEngine::new(
+            self.server.clone(),
+            Arc::new(WorkflowRepository::new(self.server.clone())),
+            Some(self.runtime.clone()),
+            None,
+            runtara_server::product_events::ProductEventSink::new(events),
+        )));
+        control
+    }
+
+    fn publisher(&self) -> runtara_server::workers::control_children::ControlChildrenPublisher {
+        runtara_server::workers::control_children::ControlChildrenPublisher::new(
+            self.engine.outbox().clone(),
+            self.runtime.clone(),
+        )
+    }
+
+    async fn published_at(&self, child: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        sqlx::query_scalar(
+            "SELECT outcome_published_at FROM execution_requests WHERE tenant_id = $1 AND instance_id = $2",
+        )
+        .bind(&self.fx.tenant)
+        .bind(child)
+        .fetch_one(&self.server)
+        .await
+        .unwrap()
+    }
+}
+
+/// A child cancelled in admission reads `cancelled` and can never launch; an
+/// expired one reads `not-started`; a launch that raced its expiry wins; a
+/// cancel stored mid-launch reaches the launched child; `cancel` children
+/// still in admission follow their ended parent while `leave_running` ones
+/// stay; the passes are idempotent; `query(parent)` lists the outcomes and
+/// the public list does not.
+#[tokio::test]
+async fn children_that_never_launch_get_one_fenced_outcome() {
+    let cx = Children::new().await;
+    let tenant = cx.fx.tenant.clone();
+    let workflow = cx.child_workflow().await;
+    let parent = cx.fx.run("parent", &tenant).await;
+    cx.fx.park(&parent).await;
+    let op = |n: &str| scoped(&tenant, &parent, n);
+    let reader = authority(&tenant, None);
+    let start = |n: i64, label: &str, policy: ParentClosePolicy| {
+        let mut request = start_request(&workflow, n, Some(label));
+        request.parent_close_policy = policy;
+        request
+    };
+    let publisher = cx.publisher();
+
+    // Cancelled in admission: applied at once, share freed, fenced.
+    let a = cx
+        .control
+        .start(&op("a"), start(1, "a", ParentClosePolicy::Cancel))
+        .await
+        .unwrap()
+        .instance_id;
+    let cancel = |id: &str, reason: &str| CancelRequest {
+        instance_id: id.into(),
+        reason: Some(reason.into()),
+        grace_ms: Some(0),
+    };
+    let result = cx
+        .control
+        .cancel(&op("ca"), cancel(&a, "no longer needed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        (result.outcome, result.replayed),
+        (CommandOutcome::Applied, false)
+    );
+    assert!(
+        cx.control
+            .cancel(&op("ca"), cancel(&a, "no longer needed"))
+            .await
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(
+        cx.engine
+            .outbox()
+            .control_reservations(&tenant)
+            .await
+            .unwrap(),
+        0
+    );
+    // `get` publishes the outcome inline.
+    let read = cx.control.get(&reader, a.clone()).await.unwrap();
+    assert_eq!(read.instance.status, InstanceStatus::Cancelled);
+    assert_eq!(
+        read.instance.termination_reason.as_deref(),
+        Some("no longer needed")
+    );
+    assert_eq!(
+        read.instance.parent_instance_id.as_deref(),
+        Some(parent.as_str())
+    );
+    assert!(cx.published_at(&a).await.is_some());
+    let fenced = cx
+        .fx
+        .persistence
+        .try_register_child_instance(
+            &a,
+            &tenant,
+            None,
+            None,
+            &ParentLink {
+                parent_instance_id: parent.clone(),
+                parent_close_policy: "cancel".into(),
+                admitted_at: chrono::Utc::now(),
+            },
+        )
+        .await;
+    assert!(fenced.is_err(), "a published outcome refuses the launch");
+
+    // Expired before launch: `not-started`, published by the pass.
+    let c = cx
+        .control
+        .start(&op("c"), start(2, "c", ParentClosePolicy::Cancel))
+        .await
+        .unwrap()
+        .instance_id;
+    cx.expire(&c).await;
+    let round = publisher.run_once().await.unwrap();
+    assert!(round.published >= 1, "{round:?}");
+    let first_publication = cx.published_at(&c).await.expect("published");
+    let read = cx.control.get(&reader, c.clone()).await.unwrap();
+    assert_eq!(read.instance.status, InstanceStatus::NotStarted);
+    assert_eq!(
+        read.instance.termination_reason.as_deref(),
+        Some("execution_outbox_deadline_exceeded")
+    );
+    publisher.run_once().await.unwrap();
+    assert_eq!(
+        cx.published_at(&c).await,
+        Some(first_publication),
+        "the passes are idempotent"
+    );
+
+    // Expired, but its launch won the race: the run is the truth.
+    let d = cx
+        .control
+        .start(&op("d"), start(3, "d", ParentClosePolicy::Cancel))
+        .await
+        .unwrap()
+        .instance_id;
+    cx.launch(&d).await;
+    cx.expire(&d).await;
+    let round = publisher.run_once().await.unwrap();
+    assert!(round.launched >= 1, "{round:?}");
+    assert_eq!(
+        cx.control
+            .get(&reader, d.clone())
+            .await
+            .unwrap()
+            .instance
+            .status,
+        InstanceStatus::Pending,
+        "no child reads not-started while it runs"
+    );
+    assert!(
+        cx.runtime
+            .get_external_outcome(&tenant, &d)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // query(parent) lists the outcomes; the public list does not.
+    let page = cx
+        .control
+        .query(
+            &reader,
+            QueryRequest {
+                parent: Some(ParentFilter::Instance(parent.clone())),
+                ..query(10)
+            },
+        )
+        .await
+        .unwrap();
+    let statuses: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| (item.instance_id.as_str(), item.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            (a.as_str(), InstanceStatus::Cancelled),
+            (c.as_str(), InstanceStatus::NotStarted),
+            (d.as_str(), InstanceStatus::Pending),
+        ]
+    );
+    let only_not_started = cx
+        .control
+        .query(
+            &reader,
+            QueryRequest {
+                parent: Some(ParentFilter::Instance(parent.clone())),
+                statuses: vec![InstanceStatus::NotStarted],
+                ..query(10)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(only_not_started.total, 1);
+    assert_eq!(only_not_started.items[0].instance_id, c);
+    let public = cx
+        .engine
+        .list_all_executions(
+            &tenant,
+            None,
+            None,
+            runtara_server::api::dto::executions::ExecutionFilters {
+                parent_instance_id: Some(parent.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        public
+            .content
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        [d.as_str()],
+        "outcomes stay out of the public list"
+    );
+    // The launched child ends, so it no longer holds a slot.
+    cx.fx.complete(&d, Core::Completed, None, None).await;
+
+    // A cancel stored while launching reaches the child once it launched.
+    let b = cx
+        .control
+        .start(&op("b"), start(4, "b", ParentClosePolicy::LeaveRunning))
+        .await
+        .unwrap()
+        .instance_id;
+    let b_request = cx.deliver(&b).await;
+    assert_eq!(
+        cx.engine
+            .outbox()
+            .claim_for_launch(b_request, &tenant, &b, "worker")
+            .await
+            .unwrap(),
+        runtara_server::workers::execution_outbox::DurableLaunchClaim::Claimed
+    );
+    let result = cx
+        .control
+        .cancel(&op("cb"), cancel(&b, "mid-launch"))
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, CommandOutcome::Requested);
+    assert_eq!(
+        cx.control
+            .get(&reader, b.clone())
+            .await
+            .unwrap()
+            .instance
+            .status,
+        InstanceStatus::Queued
+    );
+    cx.launch(&b).await;
+    assert!(
+        cx.engine
+            .outbox()
+            .mark_launch_accepted(b_request, "worker")
+            .await
+            .unwrap()
+    );
+    cx.fx.park(&b).await;
+    let round = publisher.run_once().await.unwrap();
+    assert!(round.intents_applied >= 1, "{round:?}");
+    assert_eq!(
+        cx.control
+            .get(&reader, b.clone())
+            .await
+            .unwrap()
+            .instance
+            .status,
+        InstanceStatus::Cancelled
+    );
+    publisher.run_once().await.unwrap();
+    // The stop was applied once: the intent is marked.
+    assert!(cx.published_at(&b).await.is_some());
+    cx.engine
+        .outbox()
+        .release_admission_for_instance(&tenant, &b, "test")
+        .await
+        .unwrap();
+
+    // The parent ends: its `cancel` child in admission follows, the
+    // `leave_running` one stays. (A fresh engine, so the admissions above do
+    // not count against the local concurrency gate.)
+    let control = cx.fresh_control();
+    let e = control
+        .start(&op("e"), start(5, "e", ParentClosePolicy::Cancel))
+        .await
+        .unwrap()
+        .instance_id;
+    let f = control
+        .start(&op("f"), start(6, "f", ParentClosePolicy::LeaveRunning))
+        .await
+        .unwrap()
+        .instance_id;
+    let round = publisher.run_once().await.unwrap();
+    assert_eq!(round.cascaded, 0, "a suspended parent has not ended");
+    cx.fx.complete(&parent, Core::Completed, None, None).await;
+    let round = publisher.run_once().await.unwrap();
+    assert!(round.cascaded >= 1, "{round:?}");
+    let read = cx.control.get(&reader, e.clone()).await.unwrap();
+    assert_eq!(read.instance.status, InstanceStatus::Cancelled);
+    assert_eq!(
+        read.instance.termination_reason,
+        Some(format!("parent {parent} terminated (completed)"))
+    );
+    assert_eq!(
+        cx.control
+            .get(&reader, f.clone())
+            .await
+            .unwrap()
+            .instance
+            .status,
+        InstanceStatus::Queued,
+        "leave_running survives its parent"
+    );
+    let round = publisher.run_once().await.unwrap();
+    assert_eq!(round.cascaded, 0, "the cascade cancels once");
     cx.cleanup().await;
 }

@@ -5,6 +5,10 @@
 //! Polls for sleeping instances and relaunches them when their wake time
 //! arrives. Queries the `sleep_until` column via Core's Persistence trait.
 //!
+//! It also runs the parent-close cascade (decision D3): a bounded task, off
+//! the wake path, that asks every unfinished child with the `cancel` policy
+//! whose parent has ended to stop, with a 5 s grace.
+//!
 //! Two properties keep a large backlog from taking days to clear: the poll
 //! interval is the *idle* wait, so a batch that comes back full is followed
 //! immediately by the next one; and a batch is relaunched concurrently rather
@@ -19,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
-use crate::handlers::DrainController;
+use crate::handlers::{DrainController, EnvironmentHandlerState, StopInstanceRequest};
 use crate::instance_repository::InstanceRepository;
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
@@ -105,6 +109,33 @@ pub(crate) fn concurrency_within_pool(requested: usize, pool_max_connections: us
     requested.min(usable).max(1)
 }
 
+/// Grace a child gets when its parent ends (decision D3).
+pub const PARENT_CLOSE_GRACE: Duration = Duration::from_secs(5);
+
+/// The principal the parent-close cascade acts as.
+pub const PARENT_CLOSE_PRINCIPAL: &str = "platform:parent-close";
+
+/// How many cascade stops run at once.
+const PARENT_CLOSE_CONCURRENCY: usize = 8;
+
+/// What one parent-close pass did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParentCloseStats {
+    /// Children selected: `cancel` policy, unfinished, parent ended or gone,
+    /// no cancel pending.
+    pub selected: usize,
+    /// Of those, the stops Environment accepted.
+    pub stopped: usize,
+}
+
+/// The stop reason a cascaded child records.
+pub fn parent_close_reason(parent_instance_id: &str, parent_status: Option<&str>) -> String {
+    format!(
+        "parent {parent_instance_id} terminated ({})",
+        parent_status.unwrap_or("missing")
+    )
+}
+
 /// Wake scheduler that runs as a background task.
 pub struct WakeScheduler {
     pool: PgPool,
@@ -115,6 +146,9 @@ pub struct WakeScheduler {
     drain: DrainController,
     launch_notifier: Arc<Notify>,
     lifecycle_observers: LaunchLifecycleObservers,
+    /// The handlers the parent-close cascade stops children through; the
+    /// cascade does not run without them.
+    parent_close: Option<Arc<EnvironmentHandlerState>>,
 }
 
 impl WakeScheduler {
@@ -147,7 +181,15 @@ impl WakeScheduler {
             drain: DrainController::new(),
             launch_notifier: Arc::new(Notify::new()),
             lifecycle_observers: LaunchLifecycleObservers::default(),
+            parent_close: None,
         }
+    }
+
+    /// Run the parent-close cascade, stopping children as
+    /// [`crate::handlers::handle_stop_instance`] does through `state`.
+    pub fn with_parent_close(mut self, state: Arc<EnvironmentHandlerState>) -> Self {
+        self.parent_close = Some(state);
+        self
     }
 
     /// Attach an externally-managed drain controller so spawned monitors
@@ -193,6 +235,9 @@ impl WakeScheduler {
         // its signature so callers are unaffected.
         let this = Arc::new(self);
         let batch_size = this.config.batch_size;
+        // The cascade runs beside the wakes, one pass at a time, so a slow
+        // stop never delays a wake and passes never pile up.
+        let mut cascade: Option<tokio::task::JoinHandle<()>> = None;
 
         loop {
             // Check for shutdown without waiting, so a saturated scheduler
@@ -206,6 +251,18 @@ impl WakeScheduler {
             if stopping {
                 info!("Wake scheduler shutting down");
                 break;
+            }
+
+            if this.parent_close.is_some()
+                && !this.drain.is_draining()
+                && cascade.as_ref().is_none_or(|task| task.is_finished())
+            {
+                let scheduler = Arc::clone(&this);
+                cascade = Some(tokio::spawn(async move {
+                    if let Err(error) = scheduler.run_parent_close_pass().await {
+                        warn!(%error, "Parent-close cascade pass failed");
+                    }
+                }));
             }
 
             let claimed = match Arc::clone(&this).process_pending_wakes().await {
@@ -230,6 +287,11 @@ impl WakeScheduler {
                 }
                 _ = tokio::time::sleep(this.config.poll_interval) => {}
             }
+        }
+        // A pass cut short resumes on the next boot: it holds no locks, and
+        // the children it did not reach are selected again.
+        if let Some(task) = cascade {
+            task.abort();
         }
     }
 
@@ -368,6 +430,106 @@ impl WakeScheduler {
         }
 
         Ok(claimed)
+    }
+
+    /// One parent-close pass (decision D3): ask each unfinished child with the
+    /// `cancel` policy whose parent is terminal or gone to stop, with a 5 s
+    /// grace, as [`crate::handlers::handle_stop_instance`] does.
+    ///
+    /// Selection is a plain read (no row locks are held across the stops) of
+    /// at most `batch_size` children, oldest admission first, skipping any
+    /// with a cancel already pending, so a pass after a crash does not stop a
+    /// child twice. A suspended parent is not an ending. Nothing runs while
+    /// draining or without handlers.
+    pub async fn run_parent_close_pass(&self) -> crate::error::Result<ParentCloseStats> {
+        let Some(state) = self.parent_close.clone() else {
+            return Ok(ParentCloseStats::default());
+        };
+        if self.drain.is_draining() {
+            return Ok(ParentCloseStats::default());
+        }
+        let children: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT c.instance_id, c.parent_instance_id, p.status::TEXT
+            FROM instances AS c
+            LEFT JOIN instances AS p
+                ON p.instance_id = c.parent_instance_id AND p.tenant_id = c.tenant_id
+            WHERE c.parent_close_policy = 'cancel'
+              AND c.status NOT IN ('completed', 'failed', 'cancelled')
+              AND (p.instance_id IS NULL OR p.status IN ('completed', 'failed', 'cancelled'))
+              AND NOT EXISTS (
+                  SELECT 1 FROM pending_signals AS s
+                  WHERE s.instance_id = c.instance_id AND s.signal_type = 'cancel'
+              )
+            ORDER BY c.admitted_at, c.instance_id
+            LIMIT $1
+            "#,
+        )
+        .bind(self.config.batch_size.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut stats = ParentCloseStats {
+            selected: children.len(),
+            ..ParentCloseStats::default()
+        };
+        if children.is_empty() {
+            return Ok(stats);
+        }
+        let permits = Arc::new(tokio::sync::Semaphore::new(PARENT_CLOSE_CONCURRENCY));
+        let mut tasks = tokio::task::JoinSet::new();
+        for (child, parent, parent_status) in children {
+            let state = Arc::clone(&state);
+            let permits = Arc::clone(&permits);
+            tasks.spawn(async move {
+                let _permit = permits.acquire_owned().await.expect("cascade semaphore");
+                let reason = parent_close_reason(&parent, parent_status.as_deref());
+                info!(
+                    instance_id = %child,
+                    parent_instance_id = %parent,
+                    principal = PARENT_CLOSE_PRINCIPAL,
+                    reason = %reason,
+                    "Cancelling child after its parent ended"
+                );
+                match crate::handlers::handle_stop_instance(
+                    &state,
+                    StopInstanceRequest {
+                        instance_id: child.clone(),
+                        reason,
+                        grace_period_seconds: PARENT_CLOSE_GRACE.as_secs(),
+                    },
+                )
+                .await
+                {
+                    Ok(response) if response.success => true,
+                    Ok(response) => {
+                        warn!(
+                            instance_id = %child,
+                            principal = PARENT_CLOSE_PRINCIPAL,
+                            error = ?response.error,
+                            "Parent-close stop was not confirmed"
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        warn!(
+                            instance_id = %child,
+                            principal = PARENT_CLOSE_PRINCIPAL,
+                            %error,
+                            "Parent-close stop failed"
+                        );
+                        false
+                    }
+                }
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(true) => stats.stopped += 1,
+                Ok(false) => {}
+                Err(error) => error!(%error, "Parent-close task panicked"),
+            }
+        }
+        Ok(stats)
     }
 
     /// Apply cancellation only while the instance is still parked. A concurrent

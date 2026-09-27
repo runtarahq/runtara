@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Retention / cleanup operations.
 //!
-//! Covers `get_terminal_instances_older_than` and `delete_instances_batch`.
+//! Covers `get_terminal_instances_older_than` (with the parent pin) and
+//! `delete_instances_batch`.
 //!
 //! `delete_instances_batch` still delegates to an inherent
 //! [`crate::dialect::PostgresDialect::exec_delete_instances_batch`]
@@ -11,39 +12,92 @@
 //! simply an extra hop, and folding it back in belongs with the wider dialect
 //! cleanup.
 
+/// One retention page without its cursor, order and limit: terminal rows
+/// past `$1`, each flagged pinned when its parent (same tenant) exists and is
+/// not terminal with `finished_at < $1`.
+pub(crate) const RETENTION_PAGE_SQL: &str = r#"
+    SELECT i.instance_id, i.finished_at,
+           (p.instance_id IS NOT NULL AND NOT (
+                p.status IN ('completed', 'failed', 'cancelled')
+                AND p.finished_at IS NOT NULL
+                AND p.finished_at < $1
+           )) AS pinned
+    FROM instances AS i
+    LEFT JOIN instances AS p
+        ON i.parent_instance_id IS NOT NULL
+       AND p.instance_id = i.parent_instance_id
+       AND p.tenant_id = i.tenant_id
+    WHERE i.status IN ('completed', 'failed', 'cancelled')
+      AND i.finished_at IS NOT NULL
+      AND i.finished_at < $1"#;
+
 macro_rules! impl_retention_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
-            /// SELECT instance IDs whose status is terminal (completed /
-            /// failed / cancelled) and `finished_at < older_than`,
-            /// ordered oldest-first for batch-cleanup workers.
+            /// One page of a retention pass: terminal instances (completed /
+            /// failed / cancelled) with `finished_at < older_than`, strictly
+            /// after the cursor, in `(finished_at, instance_id)` order, each
+            /// flagged pinned or eligible. SELECT-only.
+            ///
+            /// A child is pinned while its parent (of the same tenant) exists
+            /// and is not terminal with `finished_at < older_than`: the child
+            /// stays until its parent is terminal, aged from the later of the
+            /// two finishes. One level: only the direct parent is consulted,
+            /// and a missing parent pins nothing. The cursor lets a pass read
+            /// every pinned row once instead of once per page.
             pub(crate) async fn op_get_terminal_instances_older_than(
                 pool: &$Pool,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
+                after: ::core::option::Option<&::runtara_core::persistence::RetentionCursor>,
                 limit: i64,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<::std::string::String>,
+                ::runtara_core::persistence::RetentionPage,
                 ::runtara_core::error::CoreError,
             > {
-                use crate::dialect::Dialect;
-                let p1 = <$Dialect>::placeholder(1);
-                let p2 = <$Dialect>::placeholder(2);
-                let sql = format!(
-                    "SELECT instance_id \
-                     FROM instances \
-                     WHERE status IN ('completed', 'failed', 'cancelled') \
-                       AND finished_at IS NOT NULL \
-                       AND finished_at < {p1} \
-                     ORDER BY finished_at ASC \
-                     LIMIT {p2}"
-                );
-                let rows: ::std::vec::Vec<(::std::string::String,)> = ::sqlx::query_as(&sql)
-                    .bind(older_than)
-                    .bind(limit)
-                    .fetch_all(pool)
-                    .await
-                    .db()?;
-                Ok(rows.into_iter().map(|(id,)| id).collect())
+                // Two statements rather than `$3 IS NULL OR ...`, which would
+                // keep the planner off the index range scan.
+                let page_sql = crate::ops_common::ops::retention::RETENTION_PAGE_SQL;
+                let order = "ORDER BY i.finished_at ASC, i.instance_id COLLATE \"C\" ASC LIMIT $2";
+                let sql = match after {
+                    None => format!("{page_sql} {order}"),
+                    Some(_) => format!(
+                        "{page_sql} AND (i.finished_at, i.instance_id COLLATE \"C\") \
+                         > ($3, $4::TEXT COLLATE \"C\") {order}"
+                    ),
+                };
+                let mut query = ::sqlx::query_as::<
+                    _,
+                    (
+                        ::std::string::String,
+                        ::chrono::DateTime<::chrono::Utc>,
+                        bool,
+                    ),
+                >(&sql)
+                .bind(older_than)
+                .bind(limit);
+                if let Some(cursor) = after {
+                    query = query
+                        .bind(cursor.finished_at)
+                        .bind(cursor.instance_id.as_str());
+                }
+                let rows = query.fetch_all(pool).await.db()?;
+                let mut page = ::runtara_core::persistence::RetentionPage::default();
+                if limit > 0 && rows.len() as i64 == limit {
+                    page.next = rows.last().map(|(id, finished_at, _)| {
+                        ::runtara_core::persistence::RetentionCursor {
+                            finished_at: *finished_at,
+                            instance_id: id.clone(),
+                        }
+                    });
+                }
+                for (id, _, pinned) in rows {
+                    if pinned {
+                        page.pinned += 1;
+                    } else {
+                        page.eligible.push(id);
+                    }
+                }
+                Ok(page)
             }
 
             /// DELETE a batch of instances by ID. Returns the number of

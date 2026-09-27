@@ -34,10 +34,19 @@
 #              CONTROL_CAPACITY_RATE_LIMITED (control's share is 4) while an
 #              outside trigger is still admitted.
 #
-# Later stages (ownership, waits) are added by their slices. Stage 1 ends by
-# revoking the control approval, so it runs after every other stage.
+#   4  OWNERSHIP children with parentClosePolicy `cancel` are cancelled when
+#              their parent fails, completes, or ends while the server is
+#              down (SIGKILL, parent failed out of band, restart); a
+#              `leave_running` sibling survives; a child held in admission
+#              (its workflow cannot compile while compilations are off) is
+#              cancelled there and never runs, and reads `cancelled`; no
+#              child reads `not-started` while it runs, and no id has both
+#              a run and a never-launched outcome.
 #
-# Usage:  STAGES=1,2,3 ./e2e/test_control_agent.sh
+# Later stages (waits) are added by their slices. Stage 1 ends by revoking
+# the control approval, so it runs after every other stage.
+#
+# Usage:  STAGES=1,2,3,4 ./e2e/test_control_agent.sh
 #
 # Prereqs: Postgres + docker (isolated Valkey), a built runtara-server, and
 # prebuilt components (scripts/build-agent-components.sh).
@@ -52,8 +61,8 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-STAGES="${STAGES:-1,2,3}"
-IMPLEMENTED_STAGES="1,2,3"
+STAGES="${STAGES:-1,2,3,4}"
+IMPLEMENTED_STAGES="1,2,3,4"
 for stage in ${STAGES//,/ }; do
     case ",${IMPLEMENTED_STAGES}," in
         *",${stage},"*) ;;
@@ -154,7 +163,7 @@ start_server() {
         VALKEY_PORT="${TEST_VALKEY_PORT}" \
         OTEL_SDK_DISABLED=true \
         SQLX_OFFLINE="${SQLX_OFFLINE}" \
-        exec "${RUNTARA_SERVER_BIN}"
+        exec env ${SERVER_EXTRA_ENV:-} "${RUNTARA_SERVER_BIN}"
     ) >>"${TEST_LOG}" 2>&1 &
     SERVER_PID=$!
 
@@ -695,6 +704,224 @@ if stage_enabled 3; then
     [ -n "${OUTSIDE}" ] || { print_error "An outside trigger should be admitted while control holds its share: ${RESP}"; exit 1; }
     [ "$(wait_status "${OUTSIDE}" completed 120)" = "completed" ] || { print_error "The outside run did not finish: $(instance_row "${OUTSIDE}")"; exit 1; }
     print_success "The fifth running child is CONTROL_CAPACITY_RATE_LIMITED; an outside trigger still runs ✓"
+fi
+
+if stage_enabled 4; then
+    # -----------------------------------------------------------------------
+    # Stage 4: ownership.
+    # -----------------------------------------------------------------------
+    labelled_child() {
+        psql_quiet -d "${TEST_DB_SERVER}" -c \
+            "SELECT instance_id FROM execution_requests WHERE tenant_id = '${TENANT}' AND parent_instance_id = '$1' AND run_label = '$2'"
+    }
+    own_start_step() {
+        # id, label, policy
+        jq -n --arg id "$1" --arg label "$2" --arg policy "$3" '{
+            id: $id, stepType: "Agent", agentId: "control", capabilityId: "start",
+            maxRetries: 0, durable: true, inputMapping: {
+                workflowId: { valueType: "reference", value: "data.child" },
+                runLabel: { valueType: "immediate", value: $label },
+                parentClosePolicy: { valueType: "immediate", value: $policy },
+                inputs: { valueType: "immediate", value: { data: {}, variables: {} } } } }'
+    }
+    own_get_step() {
+        jq -n --arg id "$1" --arg ref "$2" '{
+            id: $id, stepType: "Agent", agentId: "control", capabilityId: "get", maxRetries: 0,
+            inputMapping: { instanceId: { valueType: "reference", value: $ref } } }'
+    }
+    # control:get of a run through the test endpoint; echoes its status.
+    # control:get of a run through the (rate-limited) test endpoint; echoes
+    # its status.
+    control_status() {
+        local resp
+        for _ in {1..10}; do
+            resp=$(test_control get "{\"instanceId\": \"$1\"}")
+            case "${resp}" in *"Rate limit exceeded"*) sleep 1 ;; *) break ;; esac
+        done
+        echo "${resp}" \
+            | jq -r '[.. | objects | select(has("instance")) | .instance.status][0] // "unreadable"' 2>/dev/null \
+            || echo "unreadable"
+    }
+    no_running_not_started() {
+        local id st
+        for id in "$@"; do
+            st=$(control_status "${id}")
+            [ "${st}" != "not_started" ] || { print_error "Child ${id} reads not-started while it runs"; exit 1; }
+        done
+    }
+    # Wait for a child to be cancelled, checking it never reads not-started.
+    wait_cancelled() {
+        local id="$1" limit="$2" st deadline
+        deadline=$(( $(date +%s) + limit ))
+        while [ "$(date +%s)" -lt "${deadline}" ]; do
+            st=$(instance_status "${id}")
+            [ "${st}" = "cancelled" ] && return 0
+            case "${st}" in completed|failed) print_error "Child ${id} ended ${st}, not cancelled"; exit 1 ;; esac
+            no_running_not_started "${id}"
+            sleep 2
+        done
+        print_error "Child ${id} was not cancelled: $(instance_row "${id}")"; exit 1
+    }
+    make_workflow_uncompiled() {
+        local name="$1" graph="$2" resp wf_id
+        resp=$(api_post /workflows/create "{\"name\": \"${name}\", \"description\": \"control e2e\"}")
+        wf_id=$(echo "${resp}" | jq -r '.data.id // empty')
+        [ -n "${wf_id}" ] || { print_error "Workflow create failed: ${resp}"; exit 1; }
+        resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${graph}}")
+        [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Update failed: ${resp}"; exit 1; }
+        echo "${wf_id}"
+    }
+
+    # Earlier stages leave busy children holding control's share of the
+    # concurrency limit for a while; start once they have finished.
+    for _ in {1..120}; do
+        [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM instances WHERE tenant_id = '${TENANT}' AND status IN ('pending', 'running')")" = "0" ] && break
+        sleep 1
+    done
+
+    OWNED_GRAPH=$(jq -n '{
+        name: "control-owned", durable: true, entryPoint: "approve",
+        steps: { approve: { id: "approve", stepType: "WaitForSignal", name: "Approve",
+                            pollIntervalMs: 500,
+                            responseSchema: { approved: { type: "boolean", required: true } } },
+                 finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [ { fromStep: "approve", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: {}
+    }')
+    read -r OWNED_WF _ <<< "$(make_workflow control-owned "${OWNED_GRAPH}")"
+    CHILD_DATA=$(jq -nc --arg c "${OWNED_WF}" '{child: $c, missing: "no-such-run"}')
+    PARENT_INPUTS='{"child": {"type": "string", "required": true}, "missing": {"type": "string", "required": true}}'
+
+    print_step "Stage 4: a parent fails; its cancel child follows, its leave_running child stays..."
+    STEPS=$(jq -n \
+        --argjson c "$(own_start_step startC c cancel)" \
+        --argjson l "$(own_start_step startL l leave_running)" \
+        --argjson boom "$(own_get_step boom data.missing)" '{
+        startC: $c, startL: $l, boom: $boom,
+        hold: { id: "hold", stepType: "Delay", durationMs: { valueType: "immediate", value: 4000 } },
+        finish: { id: "finish", stepType: "Finish" } }')
+    FAILING_GRAPH=$(jq -n --argjson steps "${STEPS}" --argjson inputs "${PARENT_INPUTS}" '{
+        name: "control-failing-parent", durable: true, entryPoint: "startC", steps: $steps,
+        executionPlan: [ { fromStep: "startC", toStep: "startL" }, { fromStep: "startL", toStep: "hold" },
+                         { fromStep: "hold", toStep: "boom" }, { fromStep: "boom", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: $inputs }')
+    read -r FAILING_WF _ <<< "$(make_workflow control-failing-parent "${FAILING_GRAPH}")"
+    P_FAIL=$(launch "${FAILING_WF}" "${CHILD_DATA}")
+    for _ in {1..60}; do [ -n "$(labelled_child "${P_FAIL}" l)" ] && break; sleep 0.5; done
+    C_FAIL=$(labelled_child "${P_FAIL}" c); L_FAIL=$(labelled_child "${P_FAIL}" l)
+    [ -n "${C_FAIL}" ] && [ -n "${L_FAIL}" ] || { print_error "The failing parent did not start both children"; exit 1; }
+    for child in "${C_FAIL}" "${L_FAIL}"; do
+        [ "$(wait_status "${child}" suspended 90)" = "suspended" ] || { print_error "Child ${child} did not park: $(instance_row "${child}")"; exit 1; }
+        ST=$(control_status "${child}")
+        [ "${ST}" = "suspended" ] || { print_error "control:get should read the parked child as suspended, got '${ST}': $(test_control get "{\"instanceId\": \"${child}\"}" | head -c 400)"; exit 1; }
+    done
+    [ "$(wait_status "${P_FAIL}" failed 120)" = "failed" ] || { print_error "The parent should fail: $(instance_row "${P_FAIL}")"; exit 1; }
+    wait_cancelled "${C_FAIL}" 90
+    grep -q "parent ${P_FAIL} terminated (failed)" "${TEST_LOG}" || { print_error "No parent-close reason in the log"; exit 1; }
+    grep -q "platform:parent-close" "${TEST_LOG}" || { print_error "The cascade did not act as platform:parent-close"; exit 1; }
+    print_success "Parent failed: the cancel child was cancelled (parent ${P_FAIL} terminated (failed)) ✓"
+
+    print_step "Stage 4: a parent completes; its cancel child follows..."
+    STEPS=$(jq -n \
+        --argjson c "$(own_start_step startC c cancel)" \
+        --argjson l "$(own_start_step startL l leave_running)" \
+        --argjson getC "$(own_get_step getC steps.startC.outputs.instanceId)" \
+        --argjson getL "$(own_get_step getL steps.startL.outputs.instanceId)" '{
+        startC: $c, startL: $l, getC: $getC, getL: $getL,
+        hold: { id: "hold", stepType: "Delay", durationMs: { valueType: "immediate", value: 4000 } },
+        finish: { id: "finish", stepType: "Finish", inputMapping: {
+            getC: { valueType: "reference", value: "steps.getC.outputs" },
+            getL: { valueType: "reference", value: "steps.getL.outputs" } } } }')
+    DONE_PARENT_GRAPH=$(jq -n --argjson steps "${STEPS}" --argjson inputs "${PARENT_INPUTS}" '{
+        name: "control-completing-parent", durable: true, entryPoint: "startC", steps: $steps,
+        executionPlan: [ { fromStep: "startC", toStep: "startL" }, { fromStep: "startL", toStep: "hold" },
+                         { fromStep: "hold", toStep: "getC" }, { fromStep: "getC", toStep: "getL" },
+                         { fromStep: "getL", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: $inputs }')
+    read -r DONE_PARENT_WF _ <<< "$(make_workflow control-completing-parent "${DONE_PARENT_GRAPH}")"
+    P_DONE=$(launch "${DONE_PARENT_WF}" "${CHILD_DATA}")
+    [ "$(wait_status "${P_DONE}" completed 120)" = "completed" ] || { print_error "The parent should complete: $(instance_row "${P_DONE}")"; exit 1; }
+    OUT=$(instance_output "${P_DONE}")
+    C_DONE=$(echo "${OUT}" | jq -r '.getC.instance.instanceId'); L_DONE=$(echo "${OUT}" | jq -r '.getL.instance.instanceId')
+    for status in "$(echo "${OUT}" | jq -r '.getC.instance.status')" "$(echo "${OUT}" | jq -r '.getL.instance.status')"; do
+        case "${status}" in not_started|null|"") print_error "The parent read a live child as '${status}': ${OUT}"; exit 1 ;; esac
+    done
+    wait_cancelled "${C_DONE}" 90
+    print_success "Parent completed: the cancel child was cancelled; the parent never read a live child as not-started ✓"
+
+    print_step "Stage 4: the parent ends while the server is down (SIGKILL)..."
+    STEPS=$(jq -n --argjson c "$(own_start_step startC c cancel)" '{
+        startC: $c,
+        hold: { id: "hold", stepType: "Delay", durationMs: { valueType: "immediate", value: 120000 } },
+        finish: { id: "finish", stepType: "Finish" } }')
+    CRASH_GRAPH=$(jq -n --argjson steps "${STEPS}" --argjson inputs "${PARENT_INPUTS}" '{
+        name: "control-crashing-parent", durable: true, entryPoint: "startC", steps: $steps,
+        executionPlan: [ { fromStep: "startC", toStep: "hold" }, { fromStep: "hold", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: $inputs }')
+    read -r CRASH_WF _ <<< "$(make_workflow control-crashing-parent "${CRASH_GRAPH}")"
+    P_CRASH=$(launch "${CRASH_WF}" "${CHILD_DATA}")
+    for _ in {1..60}; do [ -n "$(labelled_child "${P_CRASH}" c)" ] && break; sleep 0.5; done
+    C_CRASH=$(labelled_child "${P_CRASH}" c)
+    [ "$(wait_status "${C_CRASH}" suspended 90)" = "suspended" ] || { print_error "Child did not park: $(instance_row "${C_CRASH}")"; exit 1; }
+    [ "$(wait_status "${P_CRASH}" suspended 90)" = "suspended" ] || { print_error "Parent did not park in its Delay: $(instance_row "${P_CRASH}")"; exit 1; }
+    crash_server
+    # No parent code runs: the parent is ended out of band while the platform
+    # is down, and only the parent link can carry the policy.
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "UPDATE instances SET status = 'failed', finished_at = NOW(), sleep_until = NULL, error = 'e2e: ended while the platform was down' WHERE instance_id = '${P_CRASH}'" >/dev/null
+    start_server
+    wait_cancelled "${C_CRASH}" 90
+    [ "$(instance_status "${L_FAIL}")" = "suspended" ] || { print_error "The leave_running child did not survive: $(instance_row "${L_FAIL}")"; exit 1; }
+    [ "$(instance_status "${L_DONE}")" = "suspended" ] || { print_error "The leave_running child did not survive: $(instance_row "${L_DONE}")"; exit 1; }
+    no_running_not_started "${L_FAIL}" "${L_DONE}"
+    print_success "After a SIGKILL restart the cascade cancelled the child; leave_running children survived ✓"
+
+    print_step "Stage 4: a child held in admission is cancelled there and never runs..."
+    HELD_GRAPH=$(jq -n '{
+        name: "control-held", durable: true, entryPoint: "finish",
+        steps: { finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [], variables: {}, inputSchema: {}, outputSchema: {} }')
+    STEPS=$(jq -n \
+        --argjson h "$(own_start_step startH h cancel)" \
+        --argjson boom "$(own_get_step boom data.missing)" '{
+        startH: $h, boom: $boom,
+        hold: { id: "hold", stepType: "Delay", durationMs: { valueType: "immediate", value: 3000 } },
+        finish: { id: "finish", stepType: "Finish" } }')
+    HOLD_GRAPH=$(jq -n --argjson steps "${STEPS}" --argjson inputs "${PARENT_INPUTS}" '{
+        name: "control-holding-parent", durable: true, entryPoint: "startH", steps: $steps,
+        executionPlan: [ { fromStep: "startH", toStep: "hold" }, { fromStep: "hold", toStep: "boom" },
+                         { fromStep: "boom", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: $inputs }')
+    read -r HOLD_WF _ <<< "$(make_workflow control-holding-parent "${HOLD_GRAPH}")"
+    # With compilations off the held child's workflow, saved only now, can
+    # never compile, so it stays in admission (retried as not compiled yet)
+    # while its parent runs and fails.
+    crash_server
+    SERVER_EXTRA_ENV="MAX_CONCURRENT_COMPILATIONS=0" start_server
+    HELD_WF=$(make_workflow_uncompiled control-held "${HELD_GRAPH}")
+    P_HOLD=$(launch "${HOLD_WF}" "$(jq -nc --arg c "${HELD_WF}" '{child: $c, missing: "no-such-run"}')")
+    [ "$(wait_status "${P_HOLD}" failed 120)" = "failed" ] || { print_error "The holding parent should fail: $(instance_row "${P_HOLD}")"; exit 1; }
+    H=$(labelled_child "${P_HOLD}" h)
+    [ -n "${H}" ] || { print_error "The holding parent did not admit its child"; exit 1; }
+    ST=""
+    for _ in {1..60}; do
+        ST=$(request_state "${H}")
+        case "${ST}" in cancelled*) break ;; esac
+        sleep 1
+    done
+    [ "${ST}" = "cancelled|parent ${P_HOLD} terminated (failed)" ] || { print_error "The held child was not cancelled in admission: '${ST}'"; exit 1; }
+    [ -z "$(instance_row "${H}")" ] || { print_error "The held child ran: $(instance_row "${H}")"; exit 1; }
+    [ "$(control_status "${H}")" = "cancelled" ] || { print_error "The held child should read cancelled: $(test_control get "{\"instanceId\": \"${H}\"}")"; exit 1; }
+    OUTCOME=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT outcome || '|' || reason FROM instance_external_outcomes WHERE instance_id = '${H}'")
+    [ "${OUTCOME}" = "cancelled|parent ${P_HOLD} terminated (failed)" ] || { print_error "Unexpected outcome: '${OUTCOME}'"; exit 1; }
+    crash_server
+    start_server
+    sleep 3
+    [ -z "$(instance_row "${H}")" ] || { print_error "The held child ran after the restart: $(instance_row "${H}")"; exit 1; }
+    BOTH=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT count(*) FROM instance_external_outcomes AS o JOIN instances AS i ON i.instance_id = o.instance_id")
+    [ "${BOTH}" = "0" ] || { print_error "${BOTH} ids have both a run and a never-launched outcome"; exit 1; }
+    print_success "The held child was cancelled in admission, never ran, and reads cancelled ✓"
 fi
 
 if stage_enabled 1; then

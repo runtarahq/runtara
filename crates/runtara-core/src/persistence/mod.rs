@@ -119,6 +119,136 @@ impl ParentLink {
     }
 }
 
+/// How a child admitted by `control:start` ended without ever launching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalOutcomeKind {
+    /// Its admission expired or was refused before a launch.
+    NotStarted,
+    /// It was cancelled while still in admission.
+    Cancelled,
+}
+
+impl ExternalOutcomeKind {
+    /// Storage spelling (`not_started`, `cancelled`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parse the storage spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "not_started" => Some(Self::NotStarted),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// The fenced outcome of a child that never launched: the host publishes it
+/// once, and only while no instance row exists for the id. The row a launch
+/// writes and this outcome exclude each other (see
+/// [`Persistence::publish_external_outcome`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalOutcome {
+    /// The child's instance id.
+    pub instance_id: String,
+    /// The child's tenant.
+    pub tenant_id: String,
+    /// The run that started it.
+    pub parent_instance_id: String,
+    /// `not_started` or `cancelled`.
+    pub outcome: ExternalOutcomeKind,
+    /// Why, when known (the admission's terminal or cancel reason).
+    pub reason: Option<String>,
+    /// When `control:start` admitted it.
+    pub admitted_at: DateTime<Utc>,
+    /// The workflow it would have run.
+    pub workflow_id: Option<String>,
+    /// The resolved workflow version.
+    pub workflow_version: Option<i32>,
+    /// Its per-parent run label.
+    pub run_label: Option<String>,
+}
+
+/// A published [`ExternalOutcome`] and when it was published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalOutcomeRecord {
+    /// The outcome as published (the first publication wins).
+    pub outcome: ExternalOutcome,
+    /// When it was published; retention ages it from here.
+    pub published_at: DateTime<Utc>,
+}
+
+/// What [`Persistence::publish_external_outcome`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// This call published the outcome.
+    Published,
+    /// An outcome for the id was already published; it stands unchanged.
+    AlreadyPublished,
+    /// The id has an instance row: the launch won, and nothing was written.
+    Launched,
+}
+
+/// Longest external-outcome reason a backend stores.
+pub const MAX_EXTERNAL_OUTCOME_REASON_BYTES: usize = 1024;
+
+impl ExternalOutcome {
+    /// Reject an outcome no backend may store.
+    pub fn validate(&self) -> Result<(), CoreError> {
+        let invalid = |field: &str, message: &str| CoreError::ValidationError {
+            field: field.into(),
+            message: message.into(),
+        };
+        if self.instance_id.trim().is_empty() || self.tenant_id.trim().is_empty() {
+            return Err(invalid("instanceId", "the instance and tenant must be set"));
+        }
+        if self.parent_instance_id.trim().is_empty() || self.parent_instance_id == self.instance_id
+        {
+            return Err(invalid(
+                "parentInstanceId",
+                "an external outcome needs another run as its parent",
+            ));
+        }
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > MAX_EXTERNAL_OUTCOME_REASON_BYTES)
+        {
+            return Err(invalid(
+                "reason",
+                "the outcome reason must be at most 1024 bytes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Where a retention pass has read up to: the last terminal instance it saw,
+/// in `(finished_at, instance_id)` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionCursor {
+    /// `finished_at` of the last row read.
+    pub finished_at: DateTime<Utc>,
+    /// Its instance id (ties broken bytewise).
+    pub instance_id: String,
+}
+
+/// One page of a retention pass over terminal instances.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetentionPage {
+    /// Terminal instances past retention that may be deleted.
+    pub eligible: Vec<String>,
+    /// Terminal children past their own retention that stay because their
+    /// parent is not terminal, or finished too recently.
+    pub pinned: u64,
+    /// Where the next page starts; `None` when the pass is done.
+    pub next: Option<RetentionCursor>,
+}
+
 /// Checkpoint record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct CheckpointRecord {
@@ -602,6 +732,41 @@ pub trait Persistence: Send + Sync {
             field: "parentInstanceId".into(),
             message: "This persistence backend does not support parent links".into(),
         })
+    }
+
+    /// Publish the outcome of a child that never launched, fenced against its
+    /// launch.
+    ///
+    /// Under the same per-instance fence that
+    /// [`Self::try_register_child_instance`] (and any host path that writes a
+    /// child's instance row) takes, in one step: an existing instance row
+    /// wins and nothing is written ([`PublishOutcome::Launched`]); else the
+    /// first outcome for the id is stored ([`PublishOutcome::Published`]) and
+    /// later ones leave it unchanged ([`PublishOutcome::AlreadyPublished`]).
+    /// A launch that follows a published outcome is refused, so an id never
+    /// has both an instance row and an outcome.
+    ///
+    /// Backends without external outcomes refuse every publication.
+    async fn publish_external_outcome(
+        &self,
+        outcome: &ExternalOutcome,
+    ) -> Result<PublishOutcome, CoreError> {
+        let _ = outcome;
+        Err(CoreError::ValidationError {
+            field: "instanceId".into(),
+            message: "This persistence backend does not support external outcomes".into(),
+        })
+    }
+
+    /// The published outcome of `instance_id` in `tenant_id`, if any. A
+    /// foreign or unknown id is `None`.
+    async fn get_external_outcome(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<ExternalOutcomeRecord>, CoreError> {
+        let _ = (tenant_id, instance_id);
+        Ok(None)
     }
 
     /// Read an instance's full row, launch input included.
@@ -1256,17 +1421,41 @@ pub trait Persistence: Send + Sync {
     // Data Retention / Cleanup (optional - default implementations no-op)
     // ========================================================================
 
-    /// Get terminal instance IDs older than the specified timestamp.
+    /// One page of a retention pass: up to `limit` terminal instances
+    /// (completed, failed, cancelled) that finished before `older_than`,
+    /// strictly after `after`, in `(finished_at, instance_id)` order.
     ///
-    /// Only returns instances with terminal status: completed, failed, cancelled.
-    /// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
+    /// Each row read is either eligible for deletion or pinned. A child
+    /// (`parent` set) is pinned while its parent exists and is not terminal,
+    /// or finished at or after `older_than`: a finished child stays readable
+    /// until its parent is terminal, and its age counts from the later of
+    /// the two finishes. Pinning is one level deep (a grandchild depends on
+    /// its own parent only) and a missing parent counts as terminal.
+    ///
+    /// The caller starts a pass with `after = None` and follows
+    /// [`RetentionPage::next`] until it is `None`, so pinned rows are read
+    /// once per pass rather than once per page.
     async fn get_terminal_instances_older_than(
         &self,
         _older_than: DateTime<Utc>,
+        _after: Option<&RetentionCursor>,
         _limit: i64,
-    ) -> Result<Vec<String>, CoreError> {
-        // Default: empty list (no cleanup supported)
-        Ok(vec![])
+    ) -> Result<RetentionPage, CoreError> {
+        // Default: nothing to sweep (no cleanup supported)
+        Ok(RetentionPage::default())
+    }
+
+    /// Delete up to `limit` external outcomes published before `older_than`
+    /// whose parent is terminal and finished before `older_than`, or gone:
+    /// the same pin as [`Self::get_terminal_instances_older_than`], aged by
+    /// `published_at`. Returns how many were removed; callers loop until it
+    /// is below `limit`.
+    async fn delete_external_outcomes_older_than(
+        &self,
+        _older_than: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<u64, CoreError> {
+        Ok(0)
     }
 
     /// Delete instances by their IDs.

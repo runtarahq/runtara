@@ -82,6 +82,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   label index on `execution_requests`). Migrations are forward-only; do not
   downgrade past this release.
 
+- **Control's children are owned by their parent.** A finished child stays
+  readable until its parent is terminal: instance cleanup keeps it until both
+  are past `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS` (one level deep; a missing
+  parent counts as terminal) and logs `pinned_terminal_children` per pass.
+  With `parentClosePolicy: cancel`, a child is cancelled whenever its parent
+  ends (completed, failed, cancelled, or gone; a suspended parent has not
+  ended), with a 5 s grace and the reason `parent <id> terminated
+  (<status>)`, even when the parent crashed or was stopped from outside;
+  `leave_running` children are left alone. `cancel` works in every
+  admission state: a child not launched yet is cancelled before it ever
+  runs and frees its slot, one mid-launch is stopped as soon as its launch
+  is accepted. A child that never launched gets exactly one fenced outcome,
+  `not-started` or `cancelled` with its reason, which `get` and
+  `query(parent)` report and the public executions list does not; a launch
+  and that outcome exclude each other, so no running child ever reads
+  `not-started`. Image cleanup no longer stalls on images a launch still
+  references. **Upgrade note:** the first boot migrates the runtime database
+  (`038`: `instance_external_outcomes` and two partial indexes on
+  `instances`) and the server database (`20260927000200`: a partial index on
+  `execution_requests`).
+
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
   self-signed or private-CA certificate with full verification;

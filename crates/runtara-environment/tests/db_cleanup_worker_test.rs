@@ -933,3 +933,234 @@ async fn debug_sweep_is_off_when_no_window_is_configured() {
 
     cleanup_test_data(&pool, &[&instance_id], &image_id).await;
 }
+
+/// A finished child of a running parent stays; one pass over a large pinned
+/// population reads each pinned row once (the cursor), counts it once, and
+/// still deletes what is eligible around it.
+#[tokio::test]
+async fn pinned_children_are_read_once_per_pass() {
+    skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
+    const PINNED: i64 = 100_000;
+    let pool = get_test_pool().await.expect("Failed to get test pool");
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let tenant_id = format!("pinned-{}", Uuid::new_v4());
+    let parent = format!("{tenant_id}-parent");
+    let ended_parent = format!("{tenant_id}-ended-parent");
+    create_test_instance(&pool, &parent, &tenant_id, "", "running", None).await;
+    create_test_instance(
+        &pool,
+        &ended_parent,
+        &tenant_id,
+        "",
+        "completed",
+        Some(Utc::now() - ChronoDuration::days(35)),
+    )
+    .await;
+    // 100k finished children of the running parent, 40 days old.
+    sqlx::query(
+        r#"
+        INSERT INTO instances (instance_id, tenant_id, status, created_at, finished_at,
+                               parent_instance_id, parent_close_policy, admitted_at)
+        SELECT $1 || '-pinned-' || g, $1, 'completed', NOW() - INTERVAL '41 days',
+               NOW() - INTERVAL '40 days' + g * INTERVAL '1 millisecond', $2, 'cancel',
+               NOW() - INTERVAL '41 days'
+        FROM generate_series(1, $3) AS g
+        "#,
+    )
+    .bind(&tenant_id)
+    .bind(&parent)
+    .bind(PINNED)
+    .execute(&pool)
+    .await
+    .expect("seed pinned children");
+    // A bulk seed leaves the planner's statistics describing the table before
+    // it; production grows gradually and autovacuum keeps up.
+    sqlx::query("ANALYZE instances")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Eligible rows spread through the pinned range, and a child of an old,
+    // ended parent.
+    let mut eligible = Vec::new();
+    for i in 0..25 {
+        let id = format!("{tenant_id}-plain-{i}");
+        create_test_instance(
+            &pool,
+            &id,
+            &tenant_id,
+            "",
+            "failed",
+            Some(Utc::now() - ChronoDuration::days(40) + ChronoDuration::seconds(i * 4)),
+        )
+        .await;
+        eligible.push(id);
+    }
+    let released = format!("{tenant_id}-released");
+    sqlx::query(
+        "INSERT INTO instances (instance_id, tenant_id, status, created_at, finished_at, \
+                                parent_instance_id, parent_close_policy, admitted_at) \
+         VALUES ($1, $2, 'completed', NOW() - INTERVAL '41 days', NOW() - INTERVAL '39 days', \
+                 $3, 'cancel', NOW() - INTERVAL '41 days')",
+    )
+    .bind(&released)
+    .bind(&tenant_id)
+    .bind(&ended_parent)
+    .execute(&pool)
+    .await
+    .unwrap();
+    eligible.push(released);
+
+    // Every pinned row in the database, not only this test's.
+    let expected_pinned: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM instances AS i
+        JOIN instances AS p ON p.instance_id = i.parent_instance_id AND p.tenant_id = i.tenant_id
+        WHERE i.status IN ('completed', 'failed', 'cancelled')
+          AND i.finished_at < NOW() - INTERVAL '30 days'
+          AND NOT (p.status IN ('completed', 'failed', 'cancelled')
+                   AND p.finished_at < NOW() - INTERVAL '30 days')
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(expected_pinned >= PINNED);
+
+    let worker = DbCleanupWorker::new(
+        pool.clone(),
+        persistence,
+        DbCleanupWorkerConfig {
+            enabled: true,
+            poll_interval: Duration::from_secs(3600),
+            max_age: Duration::from_secs(30 * 24 * 3600),
+            batch_size: 1000,
+            debug_event_max_age: None,
+        },
+    );
+    let started = std::time::Instant::now();
+    let stats = worker.run_once().await.expect("retention pass");
+    eprintln!("pinned pass: {stats:?} in {:?}", started.elapsed());
+    assert_eq!(
+        stats.pinned_terminal_children as i64, expected_pinned,
+        "each pinned row is read exactly once per pass"
+    );
+    assert!(
+        stats.pages as i64 <= (expected_pinned + stats.deleted as i64) / 1000 + 2,
+        "the pass pages forward instead of re-reading: {stats:?}"
+    );
+    for id in &eligible {
+        assert!(!instance_exists(&pool, id).await, "{id} should be deleted");
+    }
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instances WHERE tenant_id = $1 AND parent_instance_id = $2",
+    )
+    .bind(&tenant_id)
+    .bind(&parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining, PINNED,
+        "pinned children stay while the parent runs"
+    );
+    assert!(instance_exists(&pool, &parent).await);
+
+    sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Images held by a launch generation (ON DELETE RESTRICT) are skipped, so
+/// a batch full of them no longer starves deletable images behind them.
+#[tokio::test]
+async fn images_held_by_launches_do_not_starve_cleanup() {
+    use runtara_environment::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
+    skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
+    let pool = get_test_pool().await.expect("Failed to get test pool");
+    let tenant_id = format!("image-starve-{}", Uuid::new_v4());
+    let mut held = Vec::new();
+    for i in 0..5 {
+        let image_id = create_test_image(&pool, &tenant_id).await;
+        sqlx::query("UPDATE images SET updated_at = TIMESTAMPTZ '2000-01-01' + $2 * INTERVAL '1 minute' WHERE image_id = $1")
+            .bind(&image_id)
+            .bind(i)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let instance_id = format!("{tenant_id}-held-{i}");
+        create_test_instance(
+            &pool,
+            &instance_id,
+            &tenant_id,
+            &image_id,
+            "completed",
+            Some(Utc::now() - ChronoDuration::days(40)),
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, \
+                                            state, deadline_at) \
+             VALUES ($1, $2, $3, $4, 'start', 'completed', NOW())",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&instance_id)
+        .bind(&tenant_id)
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        held.push((image_id, instance_id));
+    }
+    let free = create_test_image(&pool, &tenant_id).await;
+    sqlx::query("UPDATE images SET updated_at = TIMESTAMPTZ '2000-01-02' WHERE image_id = $1")
+        .bind(&free)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let worker = ImageCleanupWorker::new(
+        pool.clone(),
+        ImageCleanupWorkerConfig {
+            batch_size: 5,
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        },
+    );
+    worker.run_once().await.expect("image cleanup");
+    let exists = |image: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM images WHERE image_id = $1)")
+                .bind(image)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(
+        !exists(free.clone()).await,
+        "the deletable image behind them is removed"
+    );
+    for (image, _) in &held {
+        assert!(
+            exists(image.clone()).await,
+            "an image held by a launch stays"
+        );
+    }
+
+    sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM images WHERE tenant_id = $1")
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

@@ -370,7 +370,8 @@ impl EnvironmentRuntimeConfig {
         let wake_scheduler =
             WakeScheduler::new(self.pool.clone(), self.persistence.clone(), wake_config)
                 .with_drain(drain.clone())
-                .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
+                .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone())
+                .with_parent_close(state.clone());
 
         let wake = Worker::spawn(
             "wake scheduler",

@@ -51,6 +51,8 @@ struct Store {
     custom_signals: HashMap<(String, String), CustomSignalRecord>,
     control_receipts:
         HashMap<(String, String), crate::persistence::control_receipts::ControlReceipt>,
+    /// Fenced outcomes of children that never launched, by instance id.
+    external_outcomes: HashMap<String, crate::persistence::ExternalOutcomeRecord>,
     /// Stands in for a sequence: the only monotonic id source a store without
     /// one has to invent.
     next_id: i64,
@@ -210,6 +212,35 @@ impl InMemoryPersistence {
     }
 }
 
+/// A child is pinned while its parent exists and has not been terminal
+/// since before `older_than`.
+fn retention_pinned(store: &Store, instance: &InstanceRecord, older_than: DateTime<Utc>) -> bool {
+    instance
+        .parent
+        .as_ref()
+        .is_some_and(|link| !parent_released(store, &link.parent_instance_id, older_than))
+}
+
+/// The parent no longer pins its children: it is gone, or terminal and
+/// finished before `older_than`.
+fn parent_released(store: &Store, parent_instance_id: &str, older_than: DateTime<Utc>) -> bool {
+    match store.instances.get(parent_instance_id) {
+        None => true,
+        Some(parent) => {
+            parent.status.is_terminal() && parent.finished_at.is_some_and(|t| t < older_than)
+        }
+    }
+}
+
+/// The error a launch gets once the child's outcome is published.
+fn launch_fenced(instance_id: &str, outcome: crate::persistence::ExternalOutcomeKind) -> CoreError {
+    CoreError::InvalidInstanceState {
+        instance_id: instance_id.into(),
+        expected: "unlaunched child without a published outcome".into(),
+        actual: outcome.as_str().into(),
+    }
+}
+
 /// Statuses that stamp `finished_at`.
 fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
     matches!(
@@ -306,33 +337,97 @@ impl Persistence for InMemoryPersistence {
         parent: &crate::persistence::ParentLink,
     ) -> Result<bool, CoreError> {
         parent.validate(instance_id)?;
-        {
-            let store = self.store.lock().unwrap();
-            if store.instances.contains_key(instance_id) {
-                return Ok(false);
-            }
-            if !store
-                .instances
-                .get(&parent.parent_instance_id)
-                .is_some_and(|row| row.tenant_id == tenant_id)
-            {
-                return Err(CoreError::ValidationError {
-                    field: "parentInstanceId".into(),
-                    message: "the parent is not a run of this tenant".into(),
-                });
-            }
-        }
-        if !self
-            .try_register_instance_with_label(instance_id, tenant_id, input, run_label)
-            .await?
-        {
+        let run_label =
+            runtara_dsl::run_label::normalize_run_label(run_label).map_err(|message| {
+                CoreError::ValidationError {
+                    field: "runLabel".into(),
+                    message,
+                }
+            })?;
+        // One lock: the launch fence against a published outcome, the parent
+        // check and the insert are a single step.
+        let mut store = self.store.lock().unwrap();
+        if store.instances.contains_key(instance_id) {
             return Ok(false);
         }
-        let mut store = self.store.lock().unwrap();
-        if let Some(row) = store.instances.get_mut(instance_id) {
-            row.parent = Some(parent.clone());
+        if let Some(published) = store.external_outcomes.get(instance_id) {
+            return Err(launch_fenced(instance_id, published.outcome.outcome));
         }
+        if !store
+            .instances
+            .get(&parent.parent_instance_id)
+            .is_some_and(|row| row.tenant_id == tenant_id)
+        {
+            return Err(CoreError::ValidationError {
+                field: "parentInstanceId".into(),
+                message: "the parent is not a run of this tenant".into(),
+            });
+        }
+        store.instances.insert(
+            instance_id.to_string(),
+            InstanceRecord {
+                run_label,
+                instance_id: instance_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+                definition_version: 1,
+                status: CoreInstanceStatus::Pending,
+                checkpoint_id: None,
+                attempt: 1,
+                max_attempts: 3,
+                created_at: Utc::now(),
+                started_at: None,
+                finished_at: None,
+                input: input.map(ToOwned::to_owned),
+                output: None,
+                error: None,
+                sleep_until: None,
+                wake_reason: None,
+                termination_reason: None,
+                exit_code: None,
+                recovery_attempts: 0,
+                recovery_marker: None,
+                parent: Some(parent.clone()),
+            },
+        );
         Ok(true)
+    }
+
+    async fn publish_external_outcome(
+        &self,
+        outcome: &crate::persistence::ExternalOutcome,
+    ) -> Result<crate::persistence::PublishOutcome, CoreError> {
+        use crate::persistence::PublishOutcome;
+        outcome.validate()?;
+        let mut store = self.store.lock().unwrap();
+        if store.instances.contains_key(&outcome.instance_id) {
+            return Ok(PublishOutcome::Launched);
+        }
+        if store.external_outcomes.contains_key(&outcome.instance_id) {
+            return Ok(PublishOutcome::AlreadyPublished);
+        }
+        store.external_outcomes.insert(
+            outcome.instance_id.clone(),
+            crate::persistence::ExternalOutcomeRecord {
+                outcome: outcome.clone(),
+                published_at: Utc::now(),
+            },
+        );
+        Ok(PublishOutcome::Published)
+    }
+
+    async fn get_external_outcome(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<crate::persistence::ExternalOutcomeRecord>, CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .external_outcomes
+            .get(instance_id)
+            .filter(|record| record.outcome.tenant_id == tenant_id)
+            .cloned())
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
@@ -914,29 +1009,80 @@ impl Persistence for InMemoryPersistence {
             .count() as i64)
     }
 
-    /// Terminal instances that finished before `older_than`, oldest first.
+    /// Terminal instances that finished before `older_than`, oldest first,
+    /// children pinned by their parent (see the trait).
     ///
-    /// The trait's default returns an empty list, which reads as "nothing to
+    /// The trait's default returns an empty page, which reads as "nothing to
     /// sweep" rather than "not implemented" -- a backend that takes it loses
     /// retention silently, so this implements it.
     async fn get_terminal_instances_older_than(
         &self,
         older_than: DateTime<Utc>,
+        after: Option<&crate::persistence::RetentionCursor>,
         limit: i64,
-    ) -> Result<Vec<String>, CoreError> {
+    ) -> Result<crate::persistence::RetentionPage, CoreError> {
         let store = self.store.lock().unwrap();
         let mut terminal: Vec<_> = store
             .instances
             .values()
             .filter(|i| i.status.is_terminal())
-            .filter(|i| i.finished_at.is_some_and(|t| t < older_than))
+            .filter_map(|i| {
+                i.finished_at
+                    .filter(|t| *t < older_than)
+                    .map(|finished| (finished, i))
+            })
+            .filter(|(finished, i)| {
+                after.is_none_or(|cursor| {
+                    (*finished, i.instance_id.as_bytes())
+                        > (cursor.finished_at, cursor.instance_id.as_bytes())
+                })
+            })
             .collect();
-        terminal.sort_by_key(|i| i.finished_at);
-        Ok(terminal
-            .into_iter()
-            .take(limit.max(0) as usize)
-            .map(|i| i.instance_id.clone())
-            .collect())
+        terminal.sort_by(|(a, x), (b, y)| {
+            (a, x.instance_id.as_bytes()).cmp(&(b, y.instance_id.as_bytes()))
+        });
+        terminal.truncate(limit.max(0) as usize);
+        let mut page = crate::persistence::RetentionPage::default();
+        for (_, instance) in &terminal {
+            if retention_pinned(&store, instance, older_than) {
+                page.pinned += 1;
+            } else {
+                page.eligible.push(instance.instance_id.clone());
+            }
+        }
+        if limit > 0 && terminal.len() as i64 == limit {
+            page.next =
+                terminal
+                    .last()
+                    .map(|(finished, instance)| crate::persistence::RetentionCursor {
+                        finished_at: *finished,
+                        instance_id: instance.instance_id.clone(),
+                    });
+        }
+        Ok(page)
+    }
+
+    async fn delete_external_outcomes_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<u64, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut due: Vec<_> = store
+            .external_outcomes
+            .values()
+            .filter(|record| record.published_at < older_than)
+            .filter(|record| {
+                parent_released(&store, &record.outcome.parent_instance_id, older_than)
+            })
+            .map(|record| (record.published_at, record.outcome.instance_id.clone()))
+            .collect();
+        due.sort();
+        due.truncate(limit.max(0) as usize);
+        for (_, id) in &due {
+            store.external_outcomes.remove(id);
+        }
+        Ok(due.len() as u64)
     }
 
     /// Delete instances and everything hanging off them.
@@ -1286,8 +1432,72 @@ mod tests {
         crate::persistence::conformance::run_parked_pause_sequence(&backend).await;
         crate::persistence::conformance::run_control_receipt_sequence(&backend).await;
         crate::persistence::conformance::run_parent_link_sequence(&backend).await;
+        crate::persistence::conformance::run_external_outcome_sequence(&backend).await;
+        crate::persistence::conformance::run_retention_pin_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    }
+
+    /// Publishing a never-launched child's outcome and launching it race to
+    /// exactly one winner, and no id ends with both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_launch_fence_race_has_one_winner() {
+        use crate::persistence::{
+            ExternalOutcome, ExternalOutcomeKind, ParentLink, PublishOutcome,
+        };
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        backend.register_instance("parent", "tenant").await.unwrap();
+        let admitted_at = Utc::now();
+        for i in 0..500 {
+            let child = format!("child-{i}");
+            let publish = {
+                let (backend, child) = (backend.clone(), child.clone());
+                tokio::spawn(async move {
+                    backend
+                        .publish_external_outcome(&ExternalOutcome {
+                            instance_id: child,
+                            tenant_id: "tenant".into(),
+                            parent_instance_id: "parent".into(),
+                            outcome: ExternalOutcomeKind::NotStarted,
+                            reason: None,
+                            admitted_at,
+                            workflow_id: None,
+                            workflow_version: None,
+                            run_label: None,
+                        })
+                        .await
+                        .unwrap()
+                })
+            };
+            let launch = {
+                let (backend, child) = (backend.clone(), child.clone());
+                tokio::spawn(async move {
+                    backend
+                        .try_register_child_instance(
+                            &child,
+                            "tenant",
+                            None,
+                            None,
+                            &ParentLink {
+                                parent_instance_id: "parent".into(),
+                                parent_close_policy: "cancel".into(),
+                                admitted_at,
+                            },
+                        )
+                        .await
+                })
+            };
+            match (publish.await.unwrap(), launch.await.unwrap()) {
+                (PublishOutcome::Launched, Ok(true))
+                | (PublishOutcome::Published, Err(CoreError::InvalidInstanceState { .. })) => {}
+                other => panic!("iteration {i}: {other:?}"),
+            }
+            let store = backend.store.lock().unwrap();
+            assert!(
+                store.instances.contains_key(&child)
+                    != store.external_outcomes.contains_key(&child)
+            );
+        }
     }
 
     /// Parallel wakers racing for one instance must produce a single winner.

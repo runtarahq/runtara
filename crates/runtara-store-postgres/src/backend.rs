@@ -559,7 +559,13 @@ impl Persistence for PostgresPersistence {
             details: e.to_string(),
         };
         // The parent check and the insert are one statement: a child is
-        // written only while a run of its own tenant holds the parent id.
+        // written only while a run of its own tenant holds the parent id. The
+        // launch fence goes first, so a child whose outcome is already
+        // published is never written.
+        let mut tx = self.pool.begin().await.map_err(persistence)?;
+        crate::fence::take_launch_fence(&mut tx, instance_id)
+            .await
+            .map_err(persistence)?;
         let inserted: Option<String> = sqlx::query_scalar(
             r#"
             INSERT INTO instances
@@ -568,6 +574,9 @@ impl Persistence for PostgresPersistence {
             SELECT $1, $2, 1, 'pending', NOW(), $3, $4, $5, $6, $7
             WHERE EXISTS (
                 SELECT 1 FROM instances AS p WHERE p.instance_id = $5 AND p.tenant_id = $2
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM instance_external_outcomes AS o WHERE o.instance_id = $1
             )
             ON CONFLICT (instance_id) DO NOTHING
             RETURNING instance_id
@@ -580,25 +589,52 @@ impl Persistence for PostgresPersistence {
         .bind(&parent.parent_instance_id)
         .bind(&parent.parent_close_policy)
         .bind(parent.admitted_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(persistence)?;
         if inserted.is_some() {
+            tx.commit().await.map_err(persistence)?;
             return Ok(true);
         }
         let taken: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instances WHERE instance_id = $1)")
                 .bind(instance_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(persistence)?;
+        let fenced = crate::fence::published_outcome(&mut tx, instance_id)
+            .await
+            .map_err(persistence)?;
+        tx.commit().await.map_err(persistence)?;
         if taken {
             return Ok(false);
+        }
+        if let Some(outcome) = fenced {
+            return Err(CoreError::InvalidInstanceState {
+                instance_id: instance_id.into(),
+                expected: "unlaunched child without a published outcome".into(),
+                actual: outcome.as_str().into(),
+            });
         }
         Err(CoreError::ValidationError {
             field: "parentInstanceId".into(),
             message: "the parent is not a run of this tenant".into(),
         })
+    }
+
+    async fn publish_external_outcome(
+        &self,
+        outcome: &runtara_core::persistence::ExternalOutcome,
+    ) -> Result<runtara_core::persistence::PublishOutcome, CoreError> {
+        crate::fence::publish(&self.pool, outcome).await
+    }
+
+    async fn get_external_outcome(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::ExternalOutcomeRecord>, CoreError> {
+        crate::fence::get(&self.pool, tenant_id, instance_id).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
@@ -1018,9 +1054,18 @@ impl Persistence for PostgresPersistence {
     async fn get_terminal_instances_older_than(
         &self,
         older_than: DateTime<Utc>,
+        after: Option<&runtara_core::persistence::RetentionCursor>,
         limit: i64,
-    ) -> Result<Vec<String>, CoreError> {
-        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
+    ) -> Result<runtara_core::persistence::RetentionPage, CoreError> {
+        Self::op_get_terminal_instances_older_than(&self.pool, older_than, after, limit).await
+    }
+
+    async fn delete_external_outcomes_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<u64, CoreError> {
+        crate::fence::delete_older_than(&self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {

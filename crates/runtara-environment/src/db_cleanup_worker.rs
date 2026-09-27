@@ -3,7 +3,10 @@
 //! Background worker for cleaning up old database records.
 //!
 //! Terminal instances (completed, failed, cancelled) older than the configured
-//! retention period are deleted along with all related records.
+//! retention period are deleted along with all related records. A finished
+//! child of a `control:start` parent is kept until the parent is terminal and
+//! both are past retention; external outcomes of children that never launched
+//! follow the same rule, aged by publication.
 //!
 //! The deletion process:
 //! 1. Queries for terminal instances older than `max_age`
@@ -19,7 +22,7 @@ use std::time::Duration;
 
 use crate::config::{ProcessEnv, Vars, days, parse_enabled, positive};
 use chrono::Utc;
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{Persistence, RetentionCursor};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
@@ -117,6 +120,20 @@ fn debug_event_max_age_from_raw(raw: Option<&str>) -> Option<Duration> {
     }
 }
 
+/// What one retention pass did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPassStats {
+    /// Terminal instances deleted.
+    pub deleted: u64,
+    /// Terminal children past retention kept because their parent is not
+    /// terminal, or finished too recently. Each is counted once per pass.
+    pub pinned_terminal_children: u64,
+    /// Pages the pass read.
+    pub pages: u64,
+    /// External outcomes of never-launched children deleted.
+    pub outcomes_deleted: u64,
+}
+
 /// Background worker that cleans up old database records.
 pub struct DbCleanupWorker {
     pool: PgPool,
@@ -179,8 +196,14 @@ impl DbCleanupWorker {
     /// events with it via ON DELETE CASCADE and the event sweep only has to
     /// deal with events belonging to instances that are still live.
     async fn run_cleanup_pass(&self) -> Result<()> {
-        self.cleanup_old_instances().await?;
-        self.cleanup_old_debug_events().await
+        self.run_once().await.map(|_| ())
+    }
+
+    /// Run one retention pass now and report what it did.
+    pub async fn run_once(&self) -> Result<RetentionPassStats> {
+        let stats = self.cleanup_old_instances().await?;
+        self.cleanup_old_debug_events().await?;
+        Ok(stats)
     }
 
     /// Sweep step-debug events past their own, shorter retention window.
@@ -234,61 +257,85 @@ impl DbCleanupWorker {
         Ok(())
     }
 
-    /// Cleanup old terminal instances.
-    async fn cleanup_old_instances(&self) -> Result<()> {
+    /// Cleanup old terminal instances, then the external outcomes of
+    /// children that never launched.
+    ///
+    /// One pass walks the terminal instances past retention with a cursor,
+    /// so children pinned by a live parent are read once per pass rather
+    /// than once per batch; their count is logged as
+    /// `pinned_terminal_children`.
+    async fn cleanup_old_instances(&self) -> Result<RetentionPassStats> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(self.config.max_age)
                 .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?;
 
-        let mut total_deleted = 0u64;
+        let mut stats = RetentionPassStats::default();
+        let mut after: Option<RetentionCursor> = None;
 
         loop {
-            // Get batch of instances to delete
-            let instance_ids = self
+            // Get the next page of terminal instances past retention.
+            let page = self
                 .persistence
-                .get_terminal_instances_older_than(cutoff, self.config.batch_size)
+                .get_terminal_instances_older_than(cutoff, after.as_ref(), self.config.batch_size)
                 .await?;
+            stats.pages += 1;
+            stats.pinned_terminal_children += page.pinned;
+            let instance_ids = page.eligible;
 
-            if instance_ids.is_empty() {
-                break;
-            }
+            if !instance_ids.is_empty() {
+                let batch_size = instance_ids.len();
 
-            let batch_size = instance_ids.len();
+                // Clean up environment-specific tables first (no FK cascade)
+                if let Err(e) = self.cleanup_environment_tables(&instance_ids).await {
+                    warn!(
+                        error = %e,
+                        batch_size = batch_size,
+                        "Failed to cleanup environment tables, skipping batch"
+                    );
+                    break;
+                }
 
-            // Clean up environment-specific tables first (no FK cascade)
-            if let Err(e) = self.cleanup_environment_tables(&instance_ids).await {
-                warn!(
-                    error = %e,
+                // Delete from instances table (cascades to Core tables)
+                let deleted = self
+                    .persistence
+                    .delete_instances_batch(&instance_ids)
+                    .await?;
+
+                stats.deleted += deleted;
+
+                debug!(
                     batch_size = batch_size,
-                    "Failed to cleanup environment tables, skipping batch"
+                    deleted = deleted,
+                    total_deleted = stats.deleted,
+                    "Cleaned up batch of instances"
                 );
-                break;
             }
 
-            // Delete from instances table (cascades to Core tables)
+            // A short page ends the pass; a full one carries the cursor on.
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+
+        // Outcomes of children that never launched age like the children:
+        // from publication, and only once the parent is terminal or gone.
+        loop {
             let deleted = self
                 .persistence
-                .delete_instances_batch(&instance_ids)
+                .delete_external_outcomes_older_than(cutoff, self.config.batch_size)
                 .await?;
-
-            total_deleted += deleted;
-
-            debug!(
-                batch_size = batch_size,
-                deleted = deleted,
-                total_deleted = total_deleted,
-                "Cleaned up batch of instances"
-            );
-
-            // If we got fewer than batch_size, we're done
-            if batch_size < self.config.batch_size as usize {
+            stats.outcomes_deleted += deleted;
+            if self.config.batch_size <= 0 || deleted < self.config.batch_size as u64 {
                 break;
             }
         }
 
-        if total_deleted > 0 {
+        if stats.deleted > 0 || stats.outcomes_deleted > 0 || stats.pinned_terminal_children > 0 {
             info!(
-                total_deleted = total_deleted,
+                total_deleted = stats.deleted,
+                outcomes_deleted = stats.outcomes_deleted,
+                pinned_terminal_children = stats.pinned_terminal_children,
                 cutoff = %cutoff,
                 "Database cleanup cycle completed"
             );
@@ -296,7 +343,7 @@ impl DbCleanupWorker {
             debug!("Database cleanup cycle completed, no old instances found");
         }
 
-        Ok(())
+        Ok(stats)
     }
 
     /// Clean up environment-specific tables that don't have FK cascade.

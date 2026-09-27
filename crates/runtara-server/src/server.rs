@@ -1464,6 +1464,21 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         println!("✓ Execution admission reconciler started");
     }
 
+    // Children admitted by control:start that never launched get one fenced
+    // outcome, cancels stored mid-launch are applied once the launch is
+    // accepted, and `cancel` children still in admission follow their ended
+    // parent (decision D3). Environment's wake scheduler cascades to the
+    // children that did launch.
+    if let Some(runtime_client) = runtime_client.clone() {
+        let publisher = workers::control_children::ControlChildrenPublisher::new(
+            workers::execution_outbox::ExecutionOutbox::new(pool.clone()),
+            runtime_client,
+        );
+        let publisher_shutdown = shutdown_signal.clone();
+        shutdown_coordinator.spawn_intake(async move { publisher.run(publisher_shutdown).await });
+        println!("✓ Control children publisher started");
+    }
+
     // Invocation cleanup worker (server DB retention).
     // Does not require Valkey — runs independently.
     {

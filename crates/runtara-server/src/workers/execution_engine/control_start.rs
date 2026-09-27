@@ -17,7 +17,8 @@ use super::ExecutionEngine;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::repositories::workflows::CompilationStatus;
 use crate::workers::execution_outbox::{
-    ChildAdmission, ControlChildRequest, ExecutionOutboxError, source_idempotency_key,
+    ChildAdmission, ControlChildRequest, ExecutionOutbox, ExecutionOutboxError,
+    source_idempotency_key,
 };
 use runtara_control_contract as contract;
 use runtara_workflows::input_validation::validate_workflow_start_inputs;
@@ -387,6 +388,12 @@ impl ExecutionEngine {
         self.outbox.control_child(tenant_id, instance_id).await
     }
 
+    /// The server's admission records, for the control service's cancel and
+    /// never-launched outcomes.
+    pub fn outbox(&self) -> &ExecutionOutbox {
+        &self.outbox
+    }
+
     /// The children of `parent` still in admission, in admission order.
     pub async fn admitted_children(
         &self,
@@ -542,6 +549,8 @@ mod tests {
             start_fingerprint: fingerprint.map(str::to_owned),
             state: "queued".into(),
             terminal_reason: None,
+            outcome: None,
+            outcome_reason: None,
             created_at: chrono::Utc::now(),
         };
         let child = replay(row(Some("v1:a")), "v1:a").unwrap();
