@@ -27,6 +27,7 @@
 
 use std::collections::BTreeSet;
 
+use runtara_agent_suspension::layout;
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 
 use super::abi::{
@@ -48,22 +49,26 @@ use crate::direct_wasm::manifest::DirectGraphManifest;
 // `outcome = variant { completed(list<u8>), suspended(suspension) }`,
 // `suspension = record { wakes: list<wake>, state: list<u8> }` and
 // `wake = variant { at(u64), instances(string) }`. The error arm is the same
-// `error-info` at +8 as `capabilities.invoke`'s. `agent_suspend_tests` derives
-// every offset from the WIT with `wit_parser::SizeAlign`.
+// `error-info` at +8 as `capabilities.invoke`'s. Every offset comes from
+// `runtara_agent_suspension::layout`, which `runtara-workflow-wit` pins against
+// the WIT's `SizeAlign`; `agent_suspend_tests` re-derives them here.
 
 /// Discriminant of `outcome` (0 = completed, 1 = suspended).
-pub(super) const OUTCOME_DISCRIMINANT_OFFSET: u64 = 8;
+pub(super) const OUTCOME_DISCRIMINANT_OFFSET: u64 = layout::INVOKE_RESULT_PAYLOAD_OFFSET as u64;
+const OUTCOME_PAYLOAD: u64 = OUTCOME_DISCRIMINANT_OFFSET + layout::OUTCOME_PAYLOAD_OFFSET as u64;
 /// `completed(list<u8>)` pointer and length.
-pub(super) const COMPLETED_PTR_OFFSET: u64 = 12;
-pub(super) const COMPLETED_LEN_OFFSET: u64 = 16;
+pub(super) const COMPLETED_PTR_OFFSET: u64 = OUTCOME_PAYLOAD;
+pub(super) const COMPLETED_LEN_OFFSET: u64 = COMPLETED_PTR_OFFSET + 4;
 /// `suspended(suspension)`: `wakes` then `state`, each pointer and length.
-pub(super) const SUSPENDED_WAKES_PTR_OFFSET: u64 = 12;
-pub(super) const SUSPENDED_WAKES_LEN_OFFSET: u64 = 16;
-pub(super) const SUSPENDED_STATE_PTR_OFFSET: u64 = 20;
-pub(super) const SUSPENDED_STATE_LEN_OFFSET: u64 = 24;
+pub(super) const SUSPENDED_WAKES_PTR_OFFSET: u64 =
+    OUTCOME_PAYLOAD + layout::SUSPENSION_WAKES_OFFSET as u64;
+pub(super) const SUSPENDED_WAKES_LEN_OFFSET: u64 = SUSPENDED_WAKES_PTR_OFFSET + 4;
+pub(super) const SUSPENDED_STATE_PTR_OFFSET: u64 =
+    OUTCOME_PAYLOAD + layout::SUSPENSION_STATE_OFFSET as u64;
+pub(super) const SUSPENDED_STATE_LEN_OFFSET: u64 = SUSPENDED_STATE_PTR_OFFSET + 4;
 /// One `wake` element: discriminant at +0 (0 = at), `at` value at +8.
-pub(super) const WAKE_SIZE: i32 = 16;
-pub(super) const WAKE_AT_VALUE_OFFSET: u64 = 8;
+pub(super) const WAKE_SIZE: i32 = layout::WAKE_SIZE as i32;
+pub(super) const WAKE_AT_VALUE_OFFSET: u64 = layout::WAKE_PAYLOAD_OFFSET as u64;
 
 /// The first (and, in the tracer, only) attempt of an operation.
 const FIRST_ATTEMPT: i32 = 1;

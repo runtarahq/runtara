@@ -1138,6 +1138,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             Ok(filled) => println!("   \u{2713} Backfilled slugs for {filled} workflow(s)"),
             Err(e) => eprintln!("   \u{26a0} Workflow slug backfill failed (continuing): {e}"),
         }
+        match slug_service.warn_reserved_slug_collisions().await {
+            Ok(0) => {}
+            Ok(found) => eprintln!(
+                "   \u{26a0} {found} workflow slug(s) collide with a reserved agent id (`control`); their workflow-agents are excluded"
+            ),
+            Err(e) => eprintln!("   \u{26a0} Reserved slug check failed (continuing): {e}"),
+        }
     }
 
     // Spawn background task to warn when pool usage is high

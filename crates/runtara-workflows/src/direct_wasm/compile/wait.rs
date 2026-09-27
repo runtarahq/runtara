@@ -126,7 +126,7 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
+    super::abi::emit_call_wide_result(body, indices.stdlib_wait_poll_interval_ms);
     emit_abandon_input_on_error(
         body,
         indices,
@@ -332,7 +332,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_wait_timeout_ms));
+    super::abi::emit_call_wide_result(body, indices.stdlib_wait_timeout_ms);
     emit_retptr_error_or_return(
         body,
         indices,
@@ -370,7 +370,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_RESUMED_LOCAL));
     body.instruction(&Instruction::Else);
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
@@ -485,7 +485,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
+    super::abi::emit_call_wide_result(body, indices.stdlib_wait_poll_interval_ms);
     emit_abandon_input_on_error_target(
         body,
         indices,

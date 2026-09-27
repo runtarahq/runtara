@@ -464,6 +464,23 @@ impl WorkflowRepository {
         Ok(row.0)
     }
 
+    /// Live workflows whose slug folds (case-insensitive, `_` as `-`) onto one
+    /// of `ids`, as `(tenant_id, workflow_id, slug)`.
+    pub async fn list_slugs_folding_onto(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        sqlx::query_as(
+            "SELECT tenant_id, workflow_id, slug FROM workflows \
+             WHERE deleted_at IS NULL AND slug IS NOT NULL \
+               AND replace(lower(slug), '_', '-') = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// Read a workflow's slug from the identity row.
     pub async fn get_slug(
         &self,

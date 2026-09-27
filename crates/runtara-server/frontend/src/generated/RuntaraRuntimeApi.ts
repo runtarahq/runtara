@@ -1294,6 +1294,11 @@ export interface CapabilityInfo {
   output: FieldTypeInfo;
   rateLimited: boolean;
   /**
+   * May answer with a typed suspension instead of a result. Omitted when
+   * false, so existing catalogs stay byte-identical.
+   */
+  suspends?: boolean;
+  /**
    * Semantic tags for capability classification and filtering.
    * Well-known tags: "memory:read", "memory:write".
    */

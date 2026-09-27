@@ -94,8 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validate the label constraint and refresh its statistics. The substring
   `search` filter keeps its 250-character limit.
 - **Every workflow recompiles once after upgrading.** The direct-WASM lowering
-  tag now ends in `on-signal-remap=v1`, so cached artifacts built by an older
-  server no longer match and each workflow is rebuilt on its next compile or
+  tag now adds `on-signal-remap=v1` and `wide-result-errors=v1` (the latter
+  fixes error messages from clock and delay host calls being read from the
+  wrong offset), so cached artifacts built by an older server no longer match and each workflow is rebuilt on its next compile or
   launch. Expect a one-off burst of compilation work after the upgrade; nothing
   needs to be done by hand.
 - **Agent components are now held to an import allowlist at composition.** A

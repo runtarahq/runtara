@@ -128,7 +128,7 @@ fn emit_park_until_deadline(
     push_i64_load_from_ptr(body, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     // Compare `now + tolerance` against the deadline rather than `now` alone,
@@ -175,7 +175,7 @@ fn emit_park_fresh(
     output_len_local: u32,
 ) {
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
@@ -259,7 +259,7 @@ pub(super) fn emit_delay_plan(
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_delay_duration_ms));
+    super::abi::emit_call_wide_result(body, indices.stdlib_delay_duration_ms);
     // Attribute an unresolvable duration (e.g. a template error) to this step and
     // fail, instead of the bare `return_if_retptr_error` silent exit.
     emit_retptr_error_or_step_fail(

@@ -25,13 +25,19 @@ struct AgentComponentArgs {
 /// contains Rust function names, not a second copy of the wire IDs. This owns
 /// no tasks and does not transform blocking capability bodies into async I/O.
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let args = match darling::ast::NestedMeta::parse_meta_list(input.into()) {
+    expand_tokens(input.into()).into()
+}
+
+/// [`expand`] over `proc_macro2` tokens, so unit tests can inspect the
+/// generated glue.
+fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let args = match darling::ast::NestedMeta::parse_meta_list(input) {
         Ok(args) => args,
-        Err(error) => return error.into_compile_error().into(),
+        Err(error) => return error.into_compile_error(),
     };
     let args = match AgentComponentArgs::from_list(&args) {
         Ok(args) => args,
-        Err(error) => return error.write_errors().into(),
+        Err(error) => return error.write_errors(),
     };
     if args.agent.is_empty()
         || !args
@@ -46,16 +52,14 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             &args.capabilities,
             "agent must be a kebab-case identifier",
         )
-        .into_compile_error()
-        .into();
+        .into_compile_error();
     }
     if args.trusted && (args.control_executor || args.suspending.is_some()) {
         return syn::Error::new_spanned(
             &args.capabilities,
             "a trusted agent can neither suspend nor be the control executor",
         )
-        .into_compile_error()
-        .into();
+        .into_compile_error();
     }
     if args.suspending.is_some() && !args.control_executor {
         // Ordinary suspending agents read their continuation through
@@ -64,8 +68,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             &args.capabilities,
             "`suspending` is supported only with `control_executor = true`",
         )
-        .into_compile_error()
-        .into();
+        .into_compile_error();
     }
     let agent = &args.agent;
     let interface = format_ident!("agent_{}", agent.replace('-', "_"));
@@ -105,30 +108,26 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     for capability in &args.capabilities.elems {
         let syn::Expr::Path(path) = capability else {
             return syn::Error::new_spanned(capability, "expected a capability function name")
-                .into_compile_error()
-                .into();
+                .into_compile_error();
         };
         // A capability may live in a child module (`downloads::download_file`);
         // its generated ID and adapter sit beside it in that module.
         let segments = &path.path.segments;
         let Some(last) = segments.last() else {
             return syn::Error::new_spanned(capability, "expected a capability function name")
-                .into_compile_error()
-                .into();
+                .into_compile_error();
         };
         if path.path.leading_colon.is_some()
             || segments.iter().any(|segment| !segment.arguments.is_none())
         {
             return syn::Error::new_spanned(capability, "capabilities must be in this crate")
-                .into_compile_error()
-                .into();
+                .into_compile_error();
         }
         let name = &last.ident;
         let key = quote!(#path).to_string();
         if !seen.insert(key) {
             return syn::Error::new_spanned(capability, "duplicate capability function")
-                .into_compile_error()
-                .into();
+                .into_compile_error();
         }
         let module: Vec<_> = segments.iter().take(segments.len() - 1).collect();
         let id = format_ident!("__CAPABILITY_ID_{}", name.to_string().to_uppercase());
@@ -138,8 +137,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     }
     if args.control_executor {
         return control_executor(&args, agent, &interface, &world, &wit_paths, &listed)
-            .unwrap_or_else(syn::Error::into_compile_error)
-            .into();
+            .unwrap_or_else(syn::Error::into_compile_error);
     }
     quote! {
         #[cfg(target_arch = "wasm32")]
@@ -237,7 +235,6 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #[cfg(target_arch = "wasm32")]
         bindings::export!(Component with_types_in bindings);
     }
-    .into()
 }
 
 /// Glue for the control agent. The composed copy never runs a capability body:
@@ -465,4 +462,95 @@ fn control_executor(
         #[cfg(target_arch = "wasm32")]
         bindings::export!(Component with_types_in bindings);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_tokens;
+    use quote::quote;
+
+    /// Whitespace-free rendering, so assertions do not depend on how
+    /// `proc_macro2` spaces tokens.
+    fn expand(input: proc_macro2::TokenStream) -> String {
+        expand_tokens(input)
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    #[test]
+    fn the_control_executor_forwards_both_exports_and_runs_execution() {
+        let glue = expand(quote! {
+            agent = "control",
+            control_executor = true,
+            capabilities = [get, waits::wait],
+            suspending = [waits::wait],
+        });
+        // The composed copy runs no capability body: both exports forward to
+        // the host executor.
+        assert_eq!(
+            glue.matches("bindings::runtara::control::executor::invoke(capability_id,input)")
+                .count(),
+            2,
+            "{glue}"
+        );
+        for export in [
+            "implbindings::exports::runtara::agent_control::capabilities::GuestforComponent",
+            "implbindings::exports::runtara::agent_control::suspendable::GuestforComponent",
+            "implbindings::exports::runtara::control::execution::GuestforComponent",
+        ] {
+            assert!(glue.contains(export), "missing {export}");
+        }
+        // Only the host-called execution takes the continuation and hands it
+        // to the capability.
+        assert!(glue.contains("continuation:Option<Vec<u8>>"));
+        assert!(glue.contains("runtara_agent_suspension::SuspendContext::new(continuation)"));
+        assert!(glue.contains("waits::__suspend_wait(value,&context)"));
+        assert!(glue.contains("__invoke_get(value)"));
+        // The suspending list is checked against the metadata at compile time.
+        assert!(glue.contains("const_:()=assert!(waits::__CAPABILITY_SUSPENDS_WAIT==true"));
+        assert!(glue.contains("const_:()=assert!(__CAPABILITY_SUSPENDS_GET==false"));
+        // The plain export refuses a suspending capability.
+        assert!(glue.contains("runtara_agent_suspension::SUSPENSION_UNSUPPORTED"));
+        assert!(glue.contains(r#"world:"runtara:agent-control/agent""#));
+        assert!(glue.contains(r#""../../runtara-workflow-wit/wit/control""#));
+    }
+
+    #[test]
+    fn misdeclared_suspension_lists_are_rejected() {
+        for (input, message) in [
+            (
+                quote! { agent = "control", capabilities = [wait], suspending = [wait] },
+                "`suspending` is supported only with `control_executor = true`",
+            ),
+            (
+                quote! {
+                    agent = "control", control_executor = true,
+                    capabilities = [get], suspending = [wait]
+                },
+                "a suspending capability must also be listed in `capabilities`",
+            ),
+            (
+                quote! {
+                    agent = "control", control_executor = true,
+                    capabilities = [wait], suspending = [wait, wait]
+                },
+                "duplicate suspending capability",
+            ),
+            (
+                quote! {
+                    agent = "signer", trusted = true, control_executor = true,
+                    capabilities = [sign]
+                },
+                "a trusted agent can neither suspend nor be the control executor",
+            ),
+        ] {
+            let tokens = expand_tokens(input).to_string();
+            assert!(
+                tokens.contains("compile_error") && tokens.contains(message),
+                "expected `{message}` in {tokens}"
+            );
+        }
+    }
 }

@@ -11137,6 +11137,10 @@ fn abi_is_part_of_the_lowering_tag() {
         "cached artifacts must pick up the stdlib that remaps a spoofed `__rt_on_signal__`: {tag}"
     );
     assert!(
+        tag.contains("wide-result-errors=v1"),
+        "cached artifacts must pick up the corrected error-string offsets of wide results: {tag}"
+    );
+    assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"
     );

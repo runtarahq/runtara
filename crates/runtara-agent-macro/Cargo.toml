@@ -22,3 +22,6 @@ darling = "0.20"
 runtara-dsl = { path = "../runtara-dsl", default-features = false }
 serde_json.workspace = true
 serde.workspace = true
+# Compile-pass/-fail fixtures for suspension and control-executor declarations.
+trybuild = "1"
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }

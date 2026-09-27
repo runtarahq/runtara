@@ -51,6 +51,30 @@ pub const SUSPENSION_UNSUPPORTED: &str = "SUSPENSION_UNSUPPORTED";
 /// The suspension violated the contract (no wakes, too many, oversized).
 pub const AGENT_INVALID_SUSPENSION: &str = "AGENT_INVALID_SUSPENSION";
 
+/// Canonical-ABI layout (wasm32) of the `types` interface: what the direct
+/// emitter reads from a `suspendable.invoke` result and what the host's
+/// component-type mirrors must match. Pinned against `wit_parser::SizeAlign`
+/// by `runtara-workflow-wit`'s tests. Byte sizes and offsets.
+pub mod layout {
+    /// `wake`: a u8 discriminant, the payload 8-aligned for `at(u64)`.
+    pub const WAKE_SIZE: u32 = 16;
+    pub const WAKE_ALIGN: u32 = 8;
+    pub const WAKE_PAYLOAD_OFFSET: u32 = 8;
+    /// `suspension`: `wakes` then `state`, each a pointer and a length.
+    pub const SUSPENSION_SIZE: u32 = 16;
+    pub const SUSPENSION_ALIGN: u32 = 4;
+    pub const SUSPENSION_WAKES_OFFSET: u32 = 0;
+    pub const SUSPENSION_STATE_OFFSET: u32 = 8;
+    /// `outcome`: a u8 discriminant, then `completed(list<u8>)` or
+    /// `suspended(suspension)` at the same payload offset.
+    pub const OUTCOME_SIZE: u32 = 20;
+    pub const OUTCOME_ALIGN: u32 = 4;
+    pub const OUTCOME_PAYLOAD_OFFSET: u32 = 4;
+    /// `result<outcome, error-info>` of `suspendable.invoke`: `error-info`
+    /// holds an `option<u64>`, so both arms sit 8-aligned after the tag.
+    pub const INVOKE_RESULT_PAYLOAD_OFFSET: u32 = 8;
+}
+
 /// When the host should re-invoke a suspended capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Wake {

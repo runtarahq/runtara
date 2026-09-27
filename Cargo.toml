@@ -36,6 +36,8 @@ members = [
     "crates/runtara-agent-trusted",
     # Typed agent suspension contract (runtara:agent-suspension)
     "crates/runtara-agent-suspension",
+    # Control service contract: caps, codes, capacity share, start schema
+    "crates/runtara-control-contract",
     "crates/runtara-workflow-wit",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",

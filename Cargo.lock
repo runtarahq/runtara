@@ -1968,6 +1968,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4346,6 +4352,7 @@ version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
  "runtara-agent-suspension",
+ "runtara-control-contract",
  "runtara-dsl",
  "serde",
  "serde_json",
@@ -4443,10 +4450,12 @@ dependencies = [
  "darling 0.20.11",
  "proc-macro2",
  "quote",
+ "runtara-agent-suspension",
  "runtara-dsl",
  "serde",
  "serde_json",
  "syn 2.0.117",
+ "trybuild",
 ]
 
 [[package]]
@@ -4805,6 +4814,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-control-contract"
+version = "8.9.12"
+dependencies = [
+ "runtara-dsl",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "runtara-core"
 version = "8.9.12"
 dependencies = [
@@ -5106,6 +5124,7 @@ version = "8.9.12"
 dependencies = [
  "runtara-agent-suspension",
  "runtara-agent-wit",
+ "runtara-control-contract",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6220,6 +6239,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
+name = "target-tuple"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6474,6 +6499,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.3",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6721,6 +6761,21 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "trybuild"
+version = "1.0.121"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0cabaa10be1917331a313866bd94526343e03c77bcf69144b62b072ad35d47c"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-tuple",
+ "termcolor",
+ "toml 1.1.2+spec-1.1.0",
+]
 
 [[package]]
 name = "typenum"
@@ -7380,7 +7435,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "sha2 0.10.9",
- "toml",
+ "toml 0.9.12+spec-1.1.0",
  "wasmtime-environ",
  "windows-sys 0.61.2",
  "zstd",

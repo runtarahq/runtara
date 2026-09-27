@@ -1,0 +1,8 @@
+error: a trusted capability cannot suspend: trusted execution runs in a fresh store that cannot park
+  --> tests/ui/fail/trusted_capability_suspends.rs:10:1
+   |
+10 | / fn sign(
+11 | |     input: Input,
+12 | |     _context: &runtara_agent_suspension::SuspendContext,
+13 | | ) -> Result<runtara_agent_suspension::Suspendable<String>, String> {
+   | |__________________________________________________________________^

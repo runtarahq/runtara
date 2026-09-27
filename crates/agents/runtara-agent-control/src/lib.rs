@@ -15,10 +15,11 @@
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_agent_suspension::{SuspendContext, Suspendable, Wake};
+use runtara_control_contract::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 /// Version tag of the `wait` continuation.
-const CONTINUATION_VERSION: u32 = 1;
+const CONTINUATION_VERSION: u32 = runtara_control_contract::CONTROL_CONTINUATION_V1;
 
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[serde(rename_all = "camelCase")]
@@ -49,7 +50,7 @@ pub struct WaitOutput {
 
     #[field(
         display_name = "Resolution",
-        description = "`satisfied` when the mode was met, `empty` for no runs"
+        description = "`satisfied` when the mode was met, `deadline` when time ran out, `empty` for no runs"
     )]
     pub resolution: String,
 
@@ -73,9 +74,10 @@ fn wait_all(mode: Option<&str>) -> Result<bool, String> {
     match mode.unwrap_or("all") {
         "all" => Ok(true),
         "any" => Ok(false),
-        other => Err(error(
-            "CONTROL_INVALID",
+        other => Err(control_error(
+            ErrorCode::Invalid,
             &format!("mode must be `all` or `any`, not `{other}`"),
+            None,
         )),
     }
 }
@@ -88,6 +90,11 @@ fn error(code: &str, message: &str) -> String {
         "severity": "error",
     })
     .to_string()
+}
+
+/// A control failure as the `#[capability]` JSON error envelope.
+fn control_error(code: ErrorCode, message: &str, retry_after_ms: Option<u64>) -> String {
+    runtara_control_contract::agent_error(code, message, retry_after_ms).to_string()
 }
 
 fn encode_continuation(wait_id: &str) -> Vec<u8> {
@@ -116,6 +123,7 @@ fn decode_continuation(bytes: &[u8]) -> Result<String, String> {
 enum Poll {
     Pending,
     Settled {
+        resolution: &'static str,
         finished: Vec<String>,
         remaining: Vec<String>,
     },
@@ -155,11 +163,12 @@ pub async fn wait(
             wakes: vec![Wake::Instances(wait_id)],
         },
         Poll::Settled {
+            resolution,
             finished,
             remaining,
         } => Suspendable::Completed(WaitOutput {
             mode,
-            resolution: "satisfied".into(),
+            resolution: resolution.into(),
             finished,
             remaining,
         }),
@@ -169,19 +178,32 @@ pub async fn wait(
 /// Host control calls. Real only in the host executor's store.
 #[cfg(target_arch = "wasm32")]
 mod host {
-    use super::Poll;
+    use super::{ErrorCode, Poll};
     use crate::bindings::runtara::control::{api, types};
 
     fn control_error(error: types::ControlError) -> String {
         let code = match error.code {
-            types::ErrorCode::Denied => "CONTROL_DENIED",
-            types::ErrorCode::Invalid => "CONTROL_INVALID",
-            types::ErrorCode::NotFound => "CONTROL_NOT_FOUND",
-            types::ErrorCode::TooLarge => "CONTROL_TOO_LARGE",
-            types::ErrorCode::Unavailable => "CONTROL_UNAVAILABLE",
-            types::ErrorCode::Unsupported => "CONTROL_UNSUPPORTED",
+            types::ErrorCode::Denied => ErrorCode::Denied,
+            types::ErrorCode::Invalid => ErrorCode::Invalid,
+            types::ErrorCode::NotFound => ErrorCode::NotFound,
+            types::ErrorCode::NotRunnable => ErrorCode::NotRunnable,
+            types::ErrorCode::NotChild => ErrorCode::NotChild,
+            types::ErrorCode::RequiresInstance => ErrorCode::RequiresInstance,
+            types::ErrorCode::RequiresOperation => ErrorCode::RequiresOperation,
+            types::ErrorCode::Capacity => ErrorCode::Capacity,
+            types::ErrorCode::ReplayConflict => ErrorCode::ReplayConflict,
+            types::ErrorCode::LabelConflict => ErrorCode::LabelConflict,
+            types::ErrorCode::TooLarge => ErrorCode::TooLarge,
+            types::ErrorCode::Unavailable => ErrorCode::Unavailable,
+            types::ErrorCode::Unsupported => ErrorCode::Unsupported,
+            types::ErrorCode::NotWaiting => ErrorCode::NotWaiting,
+            types::ErrorCode::Ambiguous => ErrorCode::Ambiguous,
+            types::ErrorCode::AlreadyAnswered => ErrorCode::AlreadyAnswered,
+            types::ErrorCode::NotPausable => ErrorCode::NotPausable,
+            types::ErrorCode::NotPaused => ErrorCode::NotPaused,
+            types::ErrorCode::WaitClosed => ErrorCode::WaitClosed,
         };
-        super::error(code, &error.message)
+        super::control_error(code, &error.message, error.retry_after_ms)
     }
 
     pub(super) async fn register_wait(ids: Vec<String>, all: bool) -> Result<String, String> {
@@ -190,7 +212,13 @@ mod host {
         } else {
             types::WaitMode::Any
         };
-        api::wait(ids, mode).await.map_err(control_error)
+        api::wait(types::WaitRequest {
+            instance_ids: ids,
+            mode,
+            deadline_ms: None,
+        })
+        .await
+        .map_err(control_error)
     }
 
     pub(super) async fn poll_wait(wait_id: &str) -> Result<Poll, String> {
@@ -200,9 +228,19 @@ mod host {
                 .map_err(control_error)?
             {
                 types::WaitPoll::Pending(_) => Poll::Pending,
-                types::WaitPoll::Settled(progress) => Poll::Settled {
-                    finished: progress.finished,
-                    remaining: progress.remaining,
+                types::WaitPoll::Settled(settled) => Poll::Settled {
+                    resolution: match settled.resolution {
+                        types::WaitResolution::Satisfied => "satisfied",
+                        types::WaitResolution::Deadline => "deadline",
+                        types::WaitResolution::Empty => "empty",
+                    },
+                    finished: settled
+                        .progress
+                        .finished
+                        .into_iter()
+                        .map(|target| target.instance_id)
+                        .collect(),
+                    remaining: settled.progress.remaining,
                 },
             },
         )
@@ -216,9 +254,10 @@ mod host {
     use super::Poll;
 
     fn unavailable() -> String {
-        super::error(
-            "CONTROL_UNAVAILABLE",
+        super::control_error(
+            super::ErrorCode::Unavailable,
             "control capabilities require the component host",
+            None,
         )
     }
 

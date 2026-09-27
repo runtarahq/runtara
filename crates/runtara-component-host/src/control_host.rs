@@ -17,55 +17,38 @@ use std::sync::Arc;
 
 use wasmtime::component::Linker;
 
-/// WIT mirror of `runtara:control/types.error-code`.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(enum)]
-#[repr(u8)]
-pub enum ControlErrorCode {
-    #[component(name = "denied")]
-    Denied,
-    #[component(name = "invalid")]
-    Invalid,
-    #[component(name = "not-found")]
-    NotFound,
-    #[component(name = "too-large")]
-    TooLarge,
-    #[component(name = "unavailable")]
-    Unavailable,
-    #[component(name = "unsupported")]
-    Unsupported,
+mod bindings {
+    // Types only: the host links `api` by hand below and calls `execution`
+    // through a typed function, so every type is generated from the WIT
+    // itself and cannot drift from it.
+    wasmtime::component::bindgen!({
+        path: [
+            "../runtara-agent-wit/wit",
+            "../runtara-agent-suspension/wit",
+            "../runtara-workflow-wit/wit/control",
+        ],
+        world: "runtara:control/control-agent-host",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        additional_derives: [PartialEq, Eq],
+    });
 }
 
-/// WIT mirror of `runtara:control/types.control-error`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(record)]
-pub struct ControlError {
-    pub code: ControlErrorCode,
-    pub message: String,
-}
+pub use bindings::runtara::control::types::{
+    CancelRequest, CommandOutcome, CommandResult, ControlError, ErrorCode as ControlErrorCode,
+    InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentClosePolicy, ParentFilter,
+    PendingSignal, PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest,
+    SendSignalResult, SignalScope, SortField, SortOrder, StartRequest, StartResult,
+    SuspensionReason, TargetOutcome, TerminalResult, WaitMode, WaitPoll, WaitProgress, WaitRequest,
+    WaitResolution, WaitSettled,
+};
 
 impl ControlError {
     pub fn new(code: ControlErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
+            retry_after_ms: None,
         }
     }
 
@@ -84,60 +67,6 @@ impl ControlError {
     }
 }
 
-/// WIT mirror of `runtara:control/types.wait-mode`.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(enum)]
-#[repr(u8)]
-pub enum WaitMode {
-    #[component(name = "all")]
-    All,
-    #[component(name = "any")]
-    Any,
-}
-
-/// WIT mirror of `runtara:control/types.wait-progress`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(record)]
-pub struct WaitProgress {
-    pub finished: Vec<String>,
-    pub remaining: Vec<String>,
-}
-
-/// WIT mirror of `runtara:control/types.wait-poll`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(variant)]
-pub enum WaitPoll {
-    #[component(name = "pending")]
-    Pending(WaitProgress),
-    #[component(name = "settled")]
-    Settled(WaitProgress),
-}
-
 /// Who a control call acts for. Only the host fills it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlAuthority {
@@ -150,15 +79,88 @@ pub struct ControlAuthority {
 }
 
 /// The native control service behind `runtara:control/api`. Every operation
-/// defaults to `unsupported` until its slice lands.
+/// defaults to `unsupported` until its slice lands, so `runtara:control@0.1.0`
+/// never needs a new version for it. The rules each operation enforces are
+/// pinned in the WIT's doc comments.
 #[async_trait::async_trait]
 pub trait ControlHost: Send + Sync {
-    /// Register a wait on `instance_ids`; returns its id.
+    /// Durably admit a child of the caller.
+    async fn start(
+        &self,
+        _authority: &ControlAuthority,
+        _request: StartRequest,
+    ) -> Result<StartResult, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Read one instance of the tenant.
+    async fn get(
+        &self,
+        _authority: &ControlAuthority,
+        _instance_id: String,
+    ) -> Result<InstanceDetail, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Find instances of the tenant.
+    async fn query(
+        &self,
+        _authority: &ControlAuthority,
+        _request: QueryRequest,
+    ) -> Result<InstancePage, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// List open `WaitForSignal` requests.
+    async fn list_pending_signals(
+        &self,
+        _authority: &ControlAuthority,
+        _request: PendingSignalsRequest,
+    ) -> Result<PendingSignalPage, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Answer an open `WaitForSignal` request.
+    async fn send_signal(
+        &self,
+        _authority: &ControlAuthority,
+        _request: SendSignalRequest,
+    ) -> Result<SendSignalResult, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Cancel a child.
+    async fn cancel(
+        &self,
+        _authority: &ControlAuthority,
+        _request: CancelRequest,
+    ) -> Result<CommandResult, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Pause a child.
+    async fn pause(
+        &self,
+        _authority: &ControlAuthority,
+        _instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Resume an explicitly paused child.
+    async fn resume(
+        &self,
+        _authority: &ControlAuthority,
+        _instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Register the caller operation's wait; returns its id.
     async fn wait(
         &self,
         _authority: &ControlAuthority,
-        _instance_ids: Vec<String>,
-        _mode: WaitMode,
+        _request: WaitRequest,
     ) -> Result<String, ControlError> {
         Err(ControlError::unsupported())
     }
@@ -191,35 +193,58 @@ impl ControlApiView for crate::host_state::HostState {
     }
 }
 
+/// Every `runtara:control/api` function as `name => method(param) -> ok`,
+/// handed to `$link!($linker; ...)`. One list for the real and the denied
+/// binding, so both always link the whole interface.
+macro_rules! with_control_api {
+    ($link:ident!($linker:ident)) => {
+        $link!($linker;
+            "start" => start(StartRequest) -> StartResult,
+            "get" => get(String) -> InstanceDetail,
+            "query" => query(QueryRequest) -> InstancePage,
+            "list-pending-signals" => list_pending_signals(PendingSignalsRequest) -> PendingSignalPage,
+            "send-signal" => send_signal(SendSignalRequest) -> SendSignalResult,
+            "cancel" => cancel(CancelRequest) -> CommandResult,
+            "pause" => pause(String) -> CommandResult,
+            "resume" => resume(String) -> CommandResult,
+            "wait" => wait(WaitRequest) -> String,
+            "poll-wait" => poll_wait(String) -> WaitPoll,
+        )
+    };
+}
+
+/// Names of the functions the host links for `runtara:control/api`.
+#[cfg(test)]
+macro_rules! api_names {
+    ($linker:ident; $($name:literal => $method:ident($param:ty) -> $ok:ty,)*) => {
+        [$($name),*]
+    };
+}
+
+#[cfg(test)]
+pub(crate) const LINKED_API_FUNCTIONS: [&str; 10] = with_control_api!(api_names!(unused));
+
 /// Bind `runtara:control/api` to the store's [`ControlApiCall`]. Only the
 /// control executor's linker uses this; a store without one is `denied`.
 pub(crate) fn add_control_api_to_linker<T: ControlApiView + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
     let mut api = linker.instance(runtara_workflow_wit::CONTROL_API_INTERFACE_NAME)?;
-    api.func_wrap_concurrent(
-        "wait",
-        |accessor, (instance_ids, mode): (Vec<String>, WaitMode)| {
-            let call = accessor.with(|mut access| access.get().control_api());
-            Box::pin(async move {
-                let result = match call {
-                    Some(call) => call.host.wait(&call.authority, instance_ids, mode).await,
-                    None => Err(ControlError::denied()),
-                };
-                Ok((result,))
-            })
-        },
-    )?;
-    api.func_wrap_concurrent("poll-wait", |accessor, (wait_id,): (String,)| {
-        let call = accessor.with(|mut access| access.get().control_api());
-        Box::pin(async move {
-            let result = match call {
-                Some(call) => call.host.poll_wait(&call.authority, wait_id).await,
-                None => Err(ControlError::denied()),
-            };
-            Ok((result,))
-        })
-    })?;
+    macro_rules! link_real {
+        ($api:ident; $($name:literal => $method:ident($param:ty) -> $ok:ty,)*) => {$(
+            $api.func_wrap_concurrent($name, |accessor, (param,): ($param,)| {
+                let call = accessor.with(|mut access| access.get().control_api());
+                Box::pin(async move {
+                    let result: Result<$ok, ControlError> = match call {
+                        Some(call) => call.host.$method(&call.authority, param).await,
+                        None => Err(ControlError::denied()),
+                    };
+                    Ok((result,))
+                })
+            })?;
+        )*};
+    }
+    with_control_api!(link_real!(api));
     Ok(())
 }
 
@@ -229,12 +254,14 @@ pub(crate) fn add_denied_control_api_to_linker<T: Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
     let mut api = linker.instance(runtara_workflow_wit::CONTROL_API_INTERFACE_NAME)?;
-    api.func_wrap_concurrent("wait", |_, (_, _): (Vec<String>, WaitMode)| {
-        Box::pin(async { Ok((Err::<String, _>(ControlError::denied()),)) })
-    })?;
-    api.func_wrap_concurrent("poll-wait", |_, (_,): (String,)| {
-        Box::pin(async { Ok((Err::<WaitPoll, _>(ControlError::denied()),)) })
-    })?;
+    macro_rules! link_denied {
+        ($api:ident; $($name:literal => $method:ident($param:ty) -> $ok:ty,)*) => {$(
+            $api.func_wrap_concurrent($name, |_, (_,): ($param,)| {
+                Box::pin(async { Ok((Err::<$ok, _>(ControlError::denied()),)) })
+            })?;
+        )*};
+    }
+    with_control_api!(link_denied!(api));
     Ok(())
 }
 
@@ -271,4 +298,43 @@ pub(crate) fn add_denied_control_executor_to_linker<T: Send + 'static>(
             })
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operation_scope_host::{SuspendableOutcome, Suspension, SuspensionWake};
+    use runtara_agent_suspension::layout;
+    use wasmtime::component::ComponentType;
+
+    /// The host links exactly the functions the frozen WIT declares.
+    #[test]
+    fn every_api_function_is_linked() {
+        let wit = runtara_workflow_wit::CONTROL_WIT;
+        let api = &wit[wit.find("interface api {").expect("api interface")..];
+        let api = &api[..api.find("\n}").expect("end of api")];
+        let declared: Vec<&str> = api
+            .lines()
+            .filter_map(|line| line.trim().split_once(": async func"))
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(declared, LINKED_API_FUNCTIONS);
+    }
+
+    /// The hand-written suspension mirrors have the canonical layout the
+    /// emitter reads (`runtara_agent_suspension::layout`, pinned against the
+    /// WIT by `runtara-workflow-wit`).
+    #[test]
+    fn suspension_mirrors_match_the_canonical_layout() {
+        assert_eq!(SuspensionWake::SIZE32, layout::WAKE_SIZE as usize);
+        assert_eq!(SuspensionWake::ALIGN32, layout::WAKE_ALIGN);
+        assert_eq!(Suspension::SIZE32, layout::SUSPENSION_SIZE as usize);
+        assert_eq!(Suspension::ALIGN32, layout::SUSPENSION_ALIGN);
+        assert_eq!(SuspendableOutcome::SIZE32, layout::OUTCOME_SIZE as usize);
+        assert_eq!(SuspendableOutcome::ALIGN32, layout::OUTCOME_ALIGN);
+        assert_eq!(
+            <Result<SuspendableOutcome, crate::ErrorInfo> as ComponentType>::ALIGN32,
+            layout::INVOKE_RESULT_PAYLOAD_OFFSET
+        );
+    }
 }

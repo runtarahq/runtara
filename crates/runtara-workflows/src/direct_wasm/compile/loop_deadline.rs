@@ -83,7 +83,7 @@ pub(super) fn enter(
     );
     // Convert the durable epoch deadline once for this live scope.
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_LOOP_NOW_MS_LOCAL));
@@ -245,7 +245,7 @@ pub(super) fn load_budget(
         body.instruction(&Instruction::Else);
     }
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalTee(DIRECT_LOOP_NOW_MS_LOCAL));

@@ -1,0 +1,10 @@
+error[E0080]: evaluation panicked: `get` is listed in `suspending` but is not #[capability(suspends = true)]
+  --> tests/ui/fail/listed_capability_does_not_suspend.rs:14:1
+   |
+14 | / runtara_agent_macro::agent_component!(
+15 | |     agent = "control",
+16 | |     control_executor = true,
+17 | |     capabilities = [get],
+18 | |     suspending = [get],
+19 | | );
+   | |_^ evaluation of `_` failed here

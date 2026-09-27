@@ -1,0 +1,9 @@
+error[E0080]: evaluation panicked: `wait` is #[capability(suspends = true)] but is not listed in `suspending`
+  --> tests/ui/fail/suspending_capability_not_listed.rs:15:1
+   |
+15 | / runtara_agent_macro::agent_component!(
+16 | |     agent = "control",
+17 | |     control_executor = true,
+18 | |     capabilities = [wait],
+19 | | );
+   | |_^ evaluation of `_` failed here

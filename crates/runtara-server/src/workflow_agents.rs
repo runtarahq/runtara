@@ -24,8 +24,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtara_dsl::agent_meta::{
-    AgentCatalog, AgentInfo, is_certified_non_suspending_workflow_agent, is_parking_workflow_agent,
+    AgentCatalog, AgentInfo, CONTROL_AGENT_ID, canonical_agent_id,
+    is_certified_non_suspending_workflow_agent, is_parking_workflow_agent,
 };
+
+/// Whether an agent id or workflow slug folds onto a built-in id no tenant
+/// workflow-agent may take, whether or not that built-in is installed:
+/// `control`, whose imports only the approved control agent receives.
+pub fn folds_onto_reserved_agent(id: &str) -> bool {
+    canonical_agent_id(id) == CONTROL_AGENT_ID
+}
+
+/// Whether the metadata claims a host-enforced execution mode only built-ins
+/// may have: `trusted` (host credentials) or `suspends` (typed suspension,
+/// which composition wires to host continuation state).
+fn claims_host_execution_mode(info: &AgentInfo) -> bool {
+    info.capabilities.iter().any(|c| c.trusted || c.suspends)
+}
 
 /// Per-tenant staging dir for published workflow-agents.
 pub fn staging_dir(tenant_id: &str) -> PathBuf {
@@ -65,8 +80,13 @@ pub fn load_tenant_agents(tenant_id: &str) -> Vec<AgentInfo> {
             .and_then(|bytes| {
                 serde_json::from_slice::<AgentInfo>(&bytes).map_err(|e| e.to_string())
             }) {
-            Ok(info) if info.capabilities.iter().any(|c| c.trusted) => {
-                tracing::warn!("rejecting tenant workflow-agent with trusted capability metadata");
+            Ok(info) if claims_host_execution_mode(&info) => {
+                tracing::warn!(
+                    "rejecting tenant workflow-agent with trusted or suspending capability metadata"
+                );
+            }
+            Ok(info) if folds_onto_reserved_agent(&info.id) => {
+                tracing::warn!(agent = %info.id, "excluding tenant workflow-agent whose id is reserved");
             }
             Ok(info) => agents.push(info),
             Err(e) => {
@@ -95,13 +115,12 @@ pub fn catalog_with_workflow_agents(
 
 fn merge_catalog(base: &Arc<AgentCatalog>, overlay: Vec<AgentInfo>) -> Arc<AgentCatalog> {
     let mut agents = base.agents().to_vec();
-    let built_in_ids: std::collections::HashSet<_> = agents
-        .iter()
-        .map(|a| runtara_dsl::agent_meta::canonical_agent_id(&a.id))
-        .collect();
+    let built_in_ids: std::collections::HashSet<_> =
+        agents.iter().map(|a| canonical_agent_id(&a.id)).collect();
     agents.extend(overlay.into_iter().filter(|a| {
-        !a.capabilities.iter().any(|c| c.trusted)
-            && !built_in_ids.contains(&runtara_dsl::agent_meta::canonical_agent_id(&a.id))
+        !claims_host_execution_mode(a)
+            && !folds_onto_reserved_agent(&a.id)
+            && !built_in_ids.contains(&canonical_agent_id(&a.id))
     }));
     Arc::new(AgentCatalog::from_agents(agents))
 }
@@ -112,7 +131,7 @@ fn merge_catalog(base: &Arc<AgentCatalog>, overlay: Vec<AgentInfo>) -> Arc<Agent
 pub fn published_agent_ids(tenant_id: &str) -> std::collections::HashSet<String> {
     load_tenant_agents(tenant_id)
         .into_iter()
-        .map(|info| runtara_dsl::agent_meta::canonical_agent_id(&info.id))
+        .map(|info| canonical_agent_id(&info.id))
         .collect()
 }
 
@@ -147,10 +166,16 @@ pub fn stage(
     composed_wasm: &std::path::Path,
     info: &AgentInfo,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
-    if info.capabilities.iter().any(|c| c.trusted) {
+    if claims_host_execution_mode(info) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "tenant workflow-agents cannot declare trusted capabilities",
+            "tenant workflow-agents cannot declare trusted or suspending capabilities",
+        ));
+    }
+    if folds_onto_reserved_agent(slug) || folds_onto_reserved_agent(&info.id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("workflow-agent id `{slug}` is reserved for a built-in agent"),
         ));
     }
     // Either certificate stages, exactly as composition accepts either: a proof
@@ -208,6 +233,60 @@ mod tests {
         );
         assert!(merged.agents().iter().any(|a| a.id == "tenant-safe"));
     }
+    #[test]
+    fn tenant_catalog_cannot_declare_suspension_or_take_the_control_id() {
+        // The control agent need not be installed for `control` to stay reserved.
+        let base = Arc::new(AgentCatalog::from_agents(vec![info("s3-storage")]));
+        let mut parks = info("tenant-waiter");
+        parks.capabilities[0].suspends = true;
+        let merged = merge_catalog(
+            &base,
+            vec![parks, info("control"), info("CONTROL"), info("tenant-safe")],
+        );
+        let ids: Vec<_> = merged.agents().iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["s3-storage", "tenant-safe"]);
+    }
+
+    #[test]
+    fn publication_rejects_suspension_and_reserved_ids_before_writing_any_files() {
+        let mut parks = info("tenant-waiter");
+        parks.capabilities[0].suspends = true;
+        let err = stage(
+            "test-tenant",
+            "tenant-waiter",
+            std::path::Path::new("no-source-needed"),
+            &parks,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("suspending"));
+
+        let err = stage(
+            "test-tenant",
+            "control",
+            std::path::Path::new("no-source-needed"),
+            &info("control"),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("reserved"));
+        assert!(
+            !staging_dir("test-tenant")
+                .join("runtara_agent_control.meta.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn only_ids_folding_onto_control_are_reserved() {
+        for id in ["control", "CONTROL", "Control"] {
+            assert!(folds_onto_reserved_agent(id), "{id}");
+        }
+        for id in ["controls", "control-room", "my-control", "ctrl"] {
+            assert!(!folds_onto_reserved_agent(id), "{id}");
+        }
+    }
+
     #[test]
     fn publication_rejects_trust_before_writing_any_files() {
         let mut spoof = info("tenant-signer");

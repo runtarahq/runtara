@@ -14,7 +14,8 @@ use super::*;
 use runtara_component_host::InvokeRunResult;
 use runtara_component_host::control_executor::ControlExecutor;
 use runtara_component_host::control_host::{
-    ControlAuthority, ControlError, ControlHost, WaitMode, WaitPoll, WaitProgress,
+    ControlAuthority, ControlError, ControlHost, InstanceStatus, TargetOutcome, TerminalResult,
+    WaitMode, WaitPoll, WaitProgress, WaitRequest, WaitResolution, WaitSettled,
 };
 use runtara_component_host::lifecycle::WorkflowWake;
 // This test module is itself named `agent_suspend`; name the emitter module.
@@ -117,13 +118,34 @@ fn control_api_probe() -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
   (import "runtara:control/api@0.1.0" (instance $api
-    (type $progress-def (record (field "finished" (list string)) (field "remaining" (list string))))
+    (type $mode-def (enum "all" "any"))
+    (export "wait-mode" (type $mode (eq $mode-def)))
+    (type $status-def (enum "queued" "pending" "running" "suspended" "completed" "failed"
+      "cancelled" "not-started"))
+    (export "instance-status" (type $status (eq $status-def)))
+    (type $terminal-def (record (field "output" (option (list u8)))
+      (field "output-bytes" (option u64)) (field "output-omitted" bool)
+      (field "error" (option (list u8))) (field "error-omitted" bool)))
+    (export "terminal-result" (type $terminal (eq $terminal-def)))
+    (type $target-def (record (field "instance-id" string) (field "status" $status)
+      (field "finished-at-ms" (option u64)) (field "terminal" $terminal)))
+    (export "target-outcome" (type $target (eq $target-def)))
+    (type $progress-def (record (field "mode" $mode) (field "finished" (list $target))
+      (field "remaining" (list string)) (field "deadline-ms" (option u64))))
     (export "wait-progress" (type $progress (eq $progress-def)))
-    (type $poll-def (variant (case "pending" $progress) (case "settled" $progress)))
+    (type $resolution-def (enum "satisfied" "deadline" "empty"))
+    (export "wait-resolution" (type $resolution (eq $resolution-def)))
+    (type $settled-def (record (field "resolution" $resolution) (field "progress" $progress)))
+    (export "wait-settled" (type $settled (eq $settled-def)))
+    (type $poll-def (variant (case "pending" $progress) (case "settled" $settled)))
     (export "wait-poll" (type $poll (eq $poll-def)))
-    (type $code-def (enum "denied" "invalid" "not-found" "too-large" "unavailable" "unsupported"))
+    (type $code-def (enum "denied" "invalid" "not-found" "not-runnable" "not-child"
+      "requires-instance" "requires-operation" "capacity" "replay-conflict" "label-conflict"
+      "too-large" "unavailable" "unsupported" "not-waiting" "ambiguous" "already-answered"
+      "not-pausable" "not-paused" "wait-closed"))
     (export "error-code" (type $code (eq $code-def)))
-    (type $error-def (record (field "code" $code) (field "message" string)))
+    (type $error-def (record (field "code" $code) (field "message" string)
+      (field "retry-after-ms" (option u64))))
     (export "control-error" (type $control-error (eq $error-def)))
     (export "poll-wait" (func async (param "wait-id" string)
       (result (result $poll (error $control-error)))))))
@@ -140,9 +162,10 @@ fn control_api_probe() -> Vec<u8> {
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       (call $poll (i32.const 1024) (i32.const 1) (i32.const 3072))
       (i32.store8 (i32.const 2048) (i32.const 0))
+      ;; `result<wait-poll, control-error>` is 8-aligned: err payload at +8.
       (if (i32.and
             (i32.eq (i32.load8_u (i32.const 3072)) (i32.const 1))
-            (i32.eqz (i32.load8_u (i32.const 3076))))
+            (i32.eqz (i32.load8_u (i32.const 3080))))
         (then (i32.store (i32.const 2056) (i32.const 1040)) (i32.store (i32.const 2060) (i32.const 8)))
         (else (i32.store (i32.const 2056) (i32.const 1056)) (i32.store (i32.const 2060) (i32.const 9))))
       (i32.const 2048)))
@@ -432,7 +455,7 @@ async fn each_site_binds_its_interface_and_a_relaunch_delivers_the_continuation(
 /// A control service whose one wait settles on its second poll.
 #[derive(Default)]
 struct FakeControl {
-    registrations: Mutex<Vec<(ControlAuthority, Vec<String>, WaitMode)>>,
+    registrations: Mutex<Vec<(ControlAuthority, WaitRequest)>>,
     polls: Mutex<Vec<(ControlAuthority, String)>>,
 }
 
@@ -441,13 +464,12 @@ impl ControlHost for FakeControl {
     async fn wait(
         &self,
         authority: &ControlAuthority,
-        instance_ids: Vec<String>,
-        mode: WaitMode,
+        request: WaitRequest,
     ) -> Result<String, ControlError> {
         self.registrations
             .lock()
             .unwrap()
-            .push((authority.clone(), instance_ids, mode));
+            .push((authority.clone(), request));
         Ok("wait-1".into())
     }
 
@@ -460,13 +482,31 @@ impl ControlHost for FakeControl {
         polls.push((authority.clone(), wait_id));
         Ok(if polls.len() == 1 {
             WaitPoll::Pending(WaitProgress {
+                mode: WaitMode::All,
                 finished: vec![],
                 remaining: vec!["child-1".into()],
+                deadline_ms: None,
             })
         } else {
-            WaitPoll::Settled(WaitProgress {
-                finished: vec!["child-1".into()],
-                remaining: vec![],
+            WaitPoll::Settled(WaitSettled {
+                resolution: WaitResolution::Satisfied,
+                progress: WaitProgress {
+                    mode: WaitMode::All,
+                    finished: vec![TargetOutcome {
+                        instance_id: "child-1".into(),
+                        status: InstanceStatus::Completed,
+                        finished_at_ms: Some(1),
+                        terminal: TerminalResult {
+                            output: Some(b"{}".to_vec()),
+                            output_bytes: Some(2),
+                            output_omitted: false,
+                            error: None,
+                            error_omitted: false,
+                        },
+                    }],
+                    remaining: vec![],
+                    deadline_ms: None,
+                },
             })
         })
     }
@@ -509,9 +549,10 @@ async fn the_composed_control_copy_forwards_to_the_host_executor() -> anyhow::Re
     let op_hash = {
         let registrations = fake.registrations.lock().unwrap();
         assert_eq!(registrations.len(), 1);
-        let (authority, ids, mode) = &registrations[0];
-        assert_eq!(ids, &vec!["child-1".to_string()]);
-        assert_eq!(*mode, WaitMode::All);
+        let (authority, request) = &registrations[0];
+        assert_eq!(request.instance_ids, vec!["child-1".to_string()]);
+        assert_eq!(request.mode, WaitMode::All);
+        assert_eq!(request.deadline_ms, None);
         assert_eq!(authority.tenant, "fixture");
         assert_eq!(authority.caller.as_deref(), Some("parent-1"));
         authority

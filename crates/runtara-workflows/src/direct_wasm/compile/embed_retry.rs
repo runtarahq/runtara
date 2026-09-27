@@ -141,9 +141,7 @@ pub(super) fn emit_embed_retry_error_info(
     body.instruction(&Instruction::LocalGet(error_ptr_local));
     body.instruction(&Instruction::LocalGet(error_len_local));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(
-        indices.stdlib_workflow_error_retry_after_ms,
-    ));
+    super::abi::emit_call_wide_result(body, indices.stdlib_workflow_error_retry_after_ms);
     return_if_retptr_error(body, indices);
     push_retptr_u8_load(body, DIRECT_RESULT_OPTION_U64_TAG_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL));
@@ -214,7 +212,7 @@ fn emit_embed_retry_delay(
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_retry_delay_ms));
+    super::abi::emit_call_wide_result(body, indices.stdlib_retry_delay_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));

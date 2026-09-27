@@ -98,9 +98,14 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                 "wait-poll-interval-ms-scoped" => {
                                     let address = memory.data_size(&caller) - 128;
                                     memory.write(&mut caller, address, ORIGINAL_ERROR)?;
+                                    // `result<u64, string>`: the u64 arm makes the
+                                    // payload 8-aligned, so the error string sits at
+                                    // +8/+12 and +4 is padding.
                                     response[0] = 1;
-                                    response[4..8].copy_from_slice(&(address as u32).to_le_bytes());
-                                    response[8..12].copy_from_slice(
+                                    response[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+                                    response[8..12]
+                                        .copy_from_slice(&(address as u32).to_le_bytes());
+                                    response[12..16].copy_from_slice(
                                         &(ORIGINAL_ERROR.len() as u32).to_le_bytes(),
                                     );
                                 }

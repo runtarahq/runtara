@@ -1,0 +1,13 @@
+error: capabilities take one input; trusted capabilities also take an immutable &TrustedContext; suspending capabilities also take an immutable &SuspendContext and return Result<Suspendable<O>, E>
+  --> tests/ui/fail/suspending_signature.rs:11:1
+   |
+11 | fn plain_result(input: Input, _context: &runtara_agent_suspension::SuspendContext) -> Result<String, String> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: capabilities take one input; trusted capabilities also take an immutable &TrustedContext; suspending capabilities also take an immutable &SuspendContext and return Result<Suspendable<O>, E>
+  --> tests/ui/fail/suspending_signature.rs:17:1
+   |
+17 | / fn no_context(
+18 | |     input: Input,
+19 | | ) -> Result<runtara_agent_suspension::Suspendable<String>, String> {
+   | |__________________________________________________________________^

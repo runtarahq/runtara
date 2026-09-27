@@ -77,6 +77,41 @@ pub(super) fn push_retptr_arg(function: &mut WasmFunction) {
     function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
 }
 
+/// Where every error reader (`load_retptr_list`, `return_if_retptr_error`,
+/// ...) expects the `string` of a `result<T, string>`: right after the tag,
+/// as for any 4-aligned `T`.
+const RETPTR_ERR_PTR_OFFSET: u64 = 4;
+/// Where the canonical ABI puts that `string` when `T` is 8-aligned (`u64`,
+/// `option<u64>`): the payload follows the tag at +8.
+pub(super) const RETPTR_WIDE_ERR_PTR_OFFSET: u64 = 8;
+
+/// Call `index`, an import returning `result<T, string>` with an 8-aligned
+/// `T` (`u64`, `option<u64>`), then move an error's string from +8/+12 to
+/// +4/+8, where every shared error reader looks. The ok arm is untouched.
+/// Without this, those readers took the padding at +4 as the pointer and the
+/// real pointer as the length.
+pub(super) fn emit_call_wide_result(function: &mut WasmFunction, index: u32) {
+    function.instruction(&Instruction::Call(index));
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    // Pointer first: the length's source (+12) is never a destination.
+    for field in [0, 4] {
+        function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+        function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
+        function.instruction(&Instruction::I32Load(MemArg {
+            offset: RETPTR_WIDE_ERR_PTR_OFFSET + field,
+            align: 2,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset: RETPTR_ERR_PTR_OFFSET + field,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+    function.instruction(&Instruction::End);
+}
+
 fn return_if_retptr_error_tag(function: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));

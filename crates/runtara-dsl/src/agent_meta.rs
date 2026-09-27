@@ -1819,6 +1819,15 @@ pub fn validate_agent_metadata_or_panic() {
 /// `runtara:control/*`. Reserved: no workflow-agent slug may fold onto it.
 pub const CONTROL_AGENT_ID: &str = "control";
 
+/// Whether a call to `capability` of `agent_id` is operation-scoped: the
+/// compiler wraps it in a `runtara:workflow-operation` scope, so the host
+/// derives a replay-safe identity from the call site. That holds for every
+/// suspending capability and for every capability of the control agent
+/// (reads included, since caller-relative filters need the scope too).
+pub fn is_operation_scoped(agent_id: &str, capability: &CapabilityInfo) -> bool {
+    capability.suspends || canonical_agent_id(agent_id) == CONTROL_AGENT_ID
+}
+
 /// Canonicalize an agent id to its kebab-case form.
 ///
 /// Kebab-case is the canonical agent id everywhere it matters at runtime: the
@@ -2318,6 +2327,13 @@ impl AgentCatalog {
             .is_some_and(|capability| capability.suspends)
     }
 
+    /// True when calls to the capability are operation-scoped (see
+    /// [`is_operation_scoped`]). An unknown agent or capability is not.
+    pub fn is_operation_scoped(&self, agent_id: &str, capability_id: &str) -> bool {
+        self.capability(agent_id, capability_id)
+            .is_some_and(|capability| is_operation_scoped(agent_id, capability))
+    }
+
     /// Return the `integration_ids` of the agent matching `agent_id`
     /// (matched canonically; see [`canonical_agent_id`]), or an empty `Vec`
     /// if the agent isn't loaded.
@@ -2711,6 +2727,47 @@ mod catalog_tests {
                 .collect::<Vec<_>>(),
             vec!["b", "a"]
         );
+    }
+
+    #[test]
+    fn suspends_defaults_to_false_is_omitted_when_false_and_round_trips() {
+        let capability = sample_agent("crypto").capabilities.remove(0);
+        let json = serde_json::to_value(&capability).unwrap();
+        assert!(
+            json.get("suspends").is_none(),
+            "false stays off the wire, so existing catalogs are unchanged"
+        );
+        let parsed: CapabilityInfo = serde_json::from_value(json.clone()).unwrap();
+        assert!(!parsed.suspends, "a missing field defaults to false");
+
+        let mut suspending = capability;
+        suspending.suspends = true;
+        let json = serde_json::to_value(&suspending).unwrap();
+        assert_eq!(json["suspends"], true);
+        assert!(
+            serde_json::from_value::<CapabilityInfo>(json)
+                .unwrap()
+                .suspends
+        );
+    }
+
+    #[test]
+    fn operation_scoped_capabilities_suspend_or_belong_to_control() {
+        let mut waiting = sample_agent("waiter");
+        waiting.capabilities[0].suspends = true;
+        let cat = AgentCatalog::from_agents(vec![
+            sample_agent("crypto"),
+            sample_agent(CONTROL_AGENT_ID),
+            waiting,
+        ]);
+        assert!(!cat.is_operation_scoped("crypto", "hash"));
+        assert!(cat.is_operation_scoped("control", "hash"));
+        assert!(cat.is_operation_scoped("CONTROL", "hash"));
+        assert!(cat.is_operation_scoped("waiter", "hash"));
+        assert!(cat.capability_suspends("waiter", "hash"));
+        assert!(!cat.capability_suspends("control", "hash"));
+        assert!(!cat.is_operation_scoped("control", "missing"));
+        assert!(!cat.is_operation_scoped("missing", "hash"));
     }
 
     #[test]
