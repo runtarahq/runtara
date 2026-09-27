@@ -90,6 +90,8 @@ pub struct PersistenceRuntimeHost {
     interrupt_guest: Option<Arc<dyn Fn() + Send + Sync>>,
     /// The instance's tenant, read once for instance-wait calls.
     tenant: tokio::sync::OnceCell<String>,
+    /// The durable launch's kind, which trusted calls are judged by.
+    trusted_launch: runtara_component_host::trusted::TrustedLaunch,
 }
 
 impl PersistenceRuntimeHost {
@@ -109,7 +111,20 @@ impl PersistenceRuntimeHost {
             cancel_token: None,
             interrupt_guest: None,
             tenant: tokio::sync::OnceCell::new(),
+            trusted_launch: Default::default(),
         }
+    }
+
+    /// The kind of the durable launch this run executes (from the launch
+    /// queue row, never the guest). Unset, it is `Start`, the strictest:
+    /// only a wake or resume may run a trusted call under an earlier approved
+    /// pin.
+    pub fn with_trusted_launch(
+        mut self,
+        launch: runtara_component_host::trusted::TrustedLaunch,
+    ) -> Self {
+        self.trusted_launch = launch;
+        self
     }
 
     /// Serve `load_input` from these bytes instead of reading the store.
@@ -425,6 +440,10 @@ impl RuntimeHost for PersistenceRuntimeHost {
             .map_err(Self::err)?
             .ok_or_else(|| format!("instance {} not found", self.instance_id))?;
         Ok(instance.input)
+    }
+
+    fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
+        self.trusted_launch
     }
 
     fn instance_id(&self) -> Result<String, String> {

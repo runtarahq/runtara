@@ -8,6 +8,14 @@
 //! both are past retention; external outcomes of children that never launched
 //! follow the same rule, aged by publication.
 //!
+//! A pinned child that retention would already have deleted (terminal and
+//! past retention by its own finish, parent still running or parked) is
+//! pruned instead: its checkpoints, signals, closed input requests, park,
+//! invocation lease and attempts, `input` and `stderr` go, and its row,
+//! outcome, events and accepted input receipts stay, so `get` and `wait`
+//! read the same result. The prune runs after the deletion pass on the same
+//! `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS` window and batch size.
+//!
 //! The deletion process:
 //! 1. Queries for terminal instances older than `max_age`
 //! 2. Cleans up environment-specific tables (no FK cascade)
@@ -132,6 +140,11 @@ pub struct RetentionPassStats {
     pub pages: u64,
     /// External outcomes of never-launched children deleted.
     pub outcomes_deleted: u64,
+    /// Pinned terminal children of live parents pruned in place; a child
+    /// already pruned by an earlier pass is not counted again.
+    pub pruned_children: u64,
+    /// Pages the prune pass read.
+    pub prune_pages: u64,
 }
 
 /// Background worker that cleans up old database records.
@@ -200,10 +213,56 @@ impl DbCleanupWorker {
     }
 
     /// Run one retention pass now and report what it did.
+    ///
+    /// Deletion first, then pruning, so a child whose parent has just been
+    /// released is deleted outright rather than pruned first.
     pub async fn run_once(&self) -> Result<RetentionPassStats> {
-        let stats = self.cleanup_old_instances().await?;
+        let cutoff = self.retention_cutoff()?;
+        let mut stats = self.cleanup_old_instances(cutoff).await?;
+        self.prune_pinned_children(cutoff, &mut stats).await?;
         self.cleanup_old_debug_events().await?;
         Ok(stats)
+    }
+
+    /// Instances that finished before this are past retention.
+    fn retention_cutoff(&self) -> Result<chrono::DateTime<Utc>> {
+        Ok(Utc::now()
+            - chrono::Duration::from_std(self.config.max_age)
+                .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?)
+    }
+
+    /// Prune the pinned terminal children that retention would already have
+    /// deleted, had their parent not been live: one cursor walk per pass, one
+    /// transaction per page. Logs `pruned_children`.
+    async fn prune_pinned_children(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+        stats: &mut RetentionPassStats,
+    ) -> Result<()> {
+        let mut after: Option<RetentionCursor> = None;
+        loop {
+            let page = self
+                .persistence
+                .prune_pinned_terminal(cutoff, after.as_ref(), self.config.batch_size)
+                .await?;
+            stats.prune_pages += 1;
+            stats.pruned_children += page.pruned;
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        if stats.pruned_children > 0 {
+            info!(
+                pruned_children = stats.pruned_children,
+                pages = stats.prune_pages,
+                cutoff = %cutoff,
+                "Pruned pinned terminal children"
+            );
+        } else {
+            debug!("Prune pass completed, no pinned children to prune");
+        }
+        Ok(())
     }
 
     /// Sweep step-debug events past their own, shorter retention window.
@@ -264,11 +323,10 @@ impl DbCleanupWorker {
     /// so children pinned by a live parent are read once per pass rather
     /// than once per batch; their count is logged as
     /// `pinned_terminal_children`.
-    async fn cleanup_old_instances(&self) -> Result<RetentionPassStats> {
-        let cutoff = Utc::now()
-            - chrono::Duration::from_std(self.config.max_age)
-                .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?;
-
+    async fn cleanup_old_instances(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+    ) -> Result<RetentionPassStats> {
         let mut stats = RetentionPassStats::default();
         let mut after: Option<RetentionCursor> = None;
 

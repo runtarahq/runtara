@@ -266,6 +266,18 @@ pub struct RetentionPage {
     pub next: Option<RetentionCursor>,
 }
 
+/// One page of a prune pass over pinned terminal children.
+///
+/// See [`Persistence::prune_pinned_terminal`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrunePage {
+    /// Children on this page that had anything left to prune. A child pruned
+    /// by an earlier pass is read again but not counted, so a rerun reports 0.
+    pub pruned: u64,
+    /// Where the next page starts; `None` when the pass is done.
+    pub next: Option<RetentionCursor>,
+}
+
 /// Checkpoint record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct CheckpointRecord {
@@ -1502,6 +1514,38 @@ pub trait Persistence: Send + Sync {
     ) -> Result<RetentionPage, CoreError> {
         // Default: nothing to sweep (no cleanup supported)
         Ok(RetentionPage::default())
+    }
+
+    /// One page of a prune pass: strip the bulky, no-longer-needed data of
+    /// terminal children that retention would already have deleted were they
+    /// not pinned, and keep their `instances` row and outcome.
+    ///
+    /// A child is on the page when it is terminal, finished before
+    /// `older_than` by its own `finished_at`, and its parent (same tenant)
+    /// exists and is not terminal: the inverse of the retention pin in
+    /// [`Self::get_terminal_instances_older_than`], narrowed to live parents.
+    /// A child of a recently finished parent is left alone; retention deletes
+    /// it outright soon.
+    ///
+    /// Pruning drops the child's checkpoints, lifecycle and custom signals,
+    /// closed input requests, input park, invocation lease and attempts, and
+    /// clears its `input` and `stderr`. It keeps the row itself (status,
+    /// output, error, termination reason, parent link, run label, metadata),
+    /// its events, and its accepted input requests, whose receipts a replayed
+    /// `send-signal` still returns; so `get` and `wait` read the same result
+    /// before and after.
+    ///
+    /// Up to `limit` children strictly after `after`, in `(finished_at,
+    /// instance_id)` order, one transaction per page. The caller starts with
+    /// `after = None` and follows [`PrunePage::next`] until it is `None`.
+    /// Pruning an already pruned child changes nothing.
+    async fn prune_pinned_terminal(
+        &self,
+        _older_than: DateTime<Utc>,
+        _after: Option<&RetentionCursor>,
+        _limit: i64,
+    ) -> Result<PrunePage, CoreError> {
+        Ok(PrunePage::default())
     }
 
     /// Delete up to `limit` external outcomes published before `older_than`

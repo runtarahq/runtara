@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Retention / cleanup operations.
 //!
-//! Covers `get_terminal_instances_older_than` (with the parent pin) and
-//! `delete_instances_batch`.
+//! Covers `get_terminal_instances_older_than` (with the parent pin),
+//! `prune_pinned_terminal` (the pin inverted) and `delete_instances_batch`.
 //!
 //! `delete_instances_batch` still delegates to an inherent
 //! [`crate::dialect::PostgresDialect::exec_delete_instances_batch`]
@@ -30,6 +30,41 @@ pub(crate) const RETENTION_PAGE_SQL: &str = r#"
     WHERE i.status IN ('completed', 'failed', 'cancelled')
       AND i.finished_at IS NOT NULL
       AND i.finished_at < $1"#;
+
+/// One prune page without its cursor, order and limit: terminal children
+/// past `$1` by their own finish whose parent (same tenant) exists and is not
+/// terminal. The slice 8 pin inverted and narrowed to live parents: a child of
+/// a recently finished parent is left to retention, which deletes it soon.
+pub(crate) const PRUNE_PAGE_SQL: &str = r#"
+    SELECT i.instance_id, i.finished_at
+    FROM instances AS i
+    JOIN instances AS p
+        ON p.instance_id = i.parent_instance_id
+       AND p.tenant_id = i.tenant_id
+    WHERE i.parent_instance_id IS NOT NULL
+      AND i.status IN ('completed', 'failed', 'cancelled')
+      AND i.finished_at IS NOT NULL
+      AND i.finished_at < $1
+      AND p.status NOT IN ('completed', 'failed', 'cancelled')"#;
+
+/// What a prune removes, per table, for the locked children in `$1`. Each
+/// statement returns the instance ids it touched, so the page counts only
+/// children that still had something to prune.
+pub(crate) const PRUNE_STATEMENTS: [&str; 8] = [
+    "DELETE FROM checkpoints WHERE instance_id = ANY($1) RETURNING instance_id",
+    "DELETE FROM pending_signals WHERE instance_id = ANY($1) RETURNING instance_id",
+    "DELETE FROM pending_checkpoint_signals WHERE instance_id = ANY($1) RETURNING instance_id",
+    // Accepted requests stay: their receipts answer a replayed send-signal.
+    "DELETE FROM instance_input_requests \
+     WHERE instance_id = ANY($1) AND state = 'closed' RETURNING instance_id",
+    "DELETE FROM instance_input_parks WHERE instance_id = ANY($1) RETURNING instance_id",
+    "DELETE FROM invocation_attempts WHERE instance_id = ANY($1) RETURNING instance_id",
+    "DELETE FROM invocation_root_leases WHERE instance_id = ANY($1) RETURNING instance_id",
+    // Not `OF status`, so neither terminal trigger fires.
+    "UPDATE instances SET input = NULL, stderr = NULL \
+     WHERE instance_id = ANY($1) AND (input IS NOT NULL OR stderr IS NOT NULL) \
+     RETURNING instance_id",
+];
 
 macro_rules! impl_retention_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
@@ -97,6 +132,85 @@ macro_rules! impl_retention_ops {
                         page.eligible.push(id);
                     }
                 }
+                Ok(page)
+            }
+
+            /// One page of a prune pass over pinned terminal children (see
+            /// `Persistence::prune_pinned_terminal`): the page is read without
+            /// locks, then pruned in one transaction that first locks the
+            /// children still terminal (`FOR NO KEY UPDATE`, in id order), so a
+            /// concurrent status change cannot interleave and foreign-key
+            /// inserts (events) are not blocked.
+            pub(crate) async fn op_prune_pinned_terminal(
+                pool: &$Pool,
+                older_than: ::chrono::DateTime<::chrono::Utc>,
+                after: ::core::option::Option<&::runtara_core::persistence::RetentionCursor>,
+                limit: i64,
+            ) -> ::core::result::Result<
+                ::runtara_core::persistence::PrunePage,
+                ::runtara_core::error::CoreError,
+            > {
+                let page_sql = crate::ops_common::ops::retention::PRUNE_PAGE_SQL;
+                let order = "ORDER BY i.finished_at ASC, i.instance_id COLLATE \"C\" ASC LIMIT $2";
+                let sql = match after {
+                    None => format!("{page_sql} {order}"),
+                    Some(_) => format!(
+                        "{page_sql} AND (i.finished_at, i.instance_id COLLATE \"C\") \
+                         > ($3, $4::TEXT COLLATE \"C\") {order}"
+                    ),
+                };
+                let mut query = ::sqlx::query_as::<
+                    _,
+                    (::std::string::String, ::chrono::DateTime<::chrono::Utc>),
+                >(&sql)
+                .bind(older_than)
+                .bind(limit);
+                if let Some(cursor) = after {
+                    query = query
+                        .bind(cursor.finished_at)
+                        .bind(cursor.instance_id.as_str());
+                }
+                let rows = query.fetch_all(pool).await.db()?;
+                let mut page = ::runtara_core::persistence::PrunePage::default();
+                if limit > 0 && rows.len() as i64 == limit {
+                    page.next = rows.last().map(|(id, finished_at)| {
+                        ::runtara_core::persistence::RetentionCursor {
+                            finished_at: *finished_at,
+                            instance_id: id.clone(),
+                        }
+                    });
+                }
+                if rows.is_empty() {
+                    return Ok(page);
+                }
+                let ids: ::std::vec::Vec<::std::string::String> =
+                    rows.into_iter().map(|(id, _)| id).collect();
+                let mut tx = pool.begin().await.db()?;
+                let locked: ::std::vec::Vec<::std::string::String> = ::sqlx::query_scalar(
+                    "SELECT instance_id FROM instances \
+                     WHERE instance_id = ANY($1) \
+                       AND status IN ('completed', 'failed', 'cancelled') \
+                     ORDER BY instance_id COLLATE \"C\" \
+                     FOR NO KEY UPDATE",
+                )
+                .bind(&ids)
+                .fetch_all(&mut *tx)
+                .await
+                .db()?;
+                let mut touched = ::std::collections::HashSet::new();
+                if !locked.is_empty() {
+                    for statement in crate::ops_common::ops::retention::PRUNE_STATEMENTS {
+                        let hit: ::std::vec::Vec<::std::string::String> =
+                            ::sqlx::query_scalar(statement)
+                                .bind(&locked)
+                                .fetch_all(&mut *tx)
+                                .await
+                                .db()?;
+                        touched.extend(hit);
+                    }
+                }
+                tx.commit().await.db()?;
+                page.pruned = touched.len() as u64;
                 Ok(page)
             }
 

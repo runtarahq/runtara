@@ -461,6 +461,10 @@ pub struct LaunchOptions {
     /// what a woken workflow sees. Only the first-start path may set this, and
     /// only once `store_instance_input` has actually succeeded.
     pub prepersisted_input: Option<Vec<u8>>,
+    /// Which durable launch this is (from the launch queue row). Trusted
+    /// calls under an earlier approved pin run only on `Wake` or `Resume`;
+    /// callers without a queued launch pass `Start`, the strictest.
+    pub launch_kind: crate::launch_queue::LaunchKind,
     /// Optional supervisor gate that must open before the detached task loads
     /// or invokes the guest. Direct/legacy callers leave this unset; durable
     /// dispatchers always provide one.
@@ -834,6 +838,7 @@ mod prepared_launch_tests {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
         }
     }

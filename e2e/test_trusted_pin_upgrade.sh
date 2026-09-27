@@ -1,6 +1,6 @@
 #!/bin/bash
-# E2E Test: a trusted built-in upgrade recompiles new launches and fails an
-# old instance only at its trusted call.
+# E2E Test: a trusted built-in upgrade recompiles new launches, and a run
+# parked on the old version resumes and presigns (trusted pins, option B).
 #
 # A workflow that presigns with `s3-storage` pins that built-in's exact
 # version (component and metadata hashes). After an operator installs a
@@ -8,9 +8,16 @@
 #
 #   READINESS  the recorded artifact no longer counts as compiled; the next
 #              launch recompiles once, pins the installed version, and runs.
+#   HISTORY    boot records every installed trusted pin in
+#              `approved_builtin_artifacts`, so after the upgrade the history
+#              holds the old and the new s3-storage pins.
 #   OLD RUN    an instance parked on the old artifact still loads when it
-#              wakes; its trusted call fails with TRUSTED_VERSION_REQUIRED
-#              instead of the whole artifact failing to link.
+#              wakes, and its trusted call runs: the old pin is approved and
+#              not revoked, and the launch is a wake, so the host runs the
+#              installed s3-storage bytes and presigns. A start under the old
+#              pin is never admitted (READINESS recompiles it, PUBLISHED fails
+#              it); revoked or never-approved pins keep failing with
+#              TRUSTED_VERSION_REQUIRED (unit-tested in runtara-component-host).
 #   PUBLISHED  a parent reaching the built-in through a published
 #              workflow-agent cannot shed the old pin by recompiling (nothing
 #              restages the child), so its launch fails terminally, naming the
@@ -223,7 +230,7 @@ sign_step() {
 }
 
 echo "==============================================================="
-echo "E2E: trusted built-in upgrade (readiness recompiles, old run fails at the call)"
+echo "E2E: trusted built-in upgrade (readiness recompiles, parked run resumes under its approved pin)"
 echo "==============================================================="
 
 [ -x "${RUNTARA_SERVER_BIN}" ] || { print_error "Missing server bin ${RUNTARA_SERVER_BIN} (cargo build -p runtara-server --bin runtara-server)"; exit 1; }
@@ -344,6 +351,13 @@ start_server
 [ "$(version_compiled "${SIGN_WF}" "${SIGN_V}")" = "false" ] || { print_error "The version list still reports the stale artifact compiled"; exit 1; }
 print_success "Stale artifact no longer reported compiled ✓"
 
+HISTORY=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+    "SELECT count(*) FILTER (WHERE revoked_at IS NULL) || '|' || count(*) || '|' || count(*) FILTER (WHERE pin = '${B_PINS}')
+     FROM approved_builtin_artifacts WHERE pin LIKE 'runtara:trusted-artifacts/s3-storage-h%'")
+echo "  s3-storage history (approved|total|old pin): ${HISTORY}"
+[ "${HISTORY}" = "2|2|1" ] || { print_error "Expected the old and new s3-storage pins approved: ${HISTORY}"; exit 1; }
+print_success "Boot recorded both s3-storage versions in the approved history ✓"
+
 print_step "Next launch recompiles once against the installed version..."
 INST=$(launch "${SIGN_WF}")
 [ "$(wait_terminal "${INST}" 300)" = "completed" ] || { print_error "Post-upgrade run did not complete: $(instance_row "${INST}")"; exit 1; }
@@ -412,17 +426,17 @@ print_success "Republished workflow-agent: parent pins the installed version and
 print_step "Waiting for the parked instance to wake on its old artifact..."
 ST=$(wait_terminal "${PARKED}" $(( PARK_DELAY_MS / 1000 + 120 )))
 ROW=$(instance_row "${PARKED}")
-echo "  status=${ST} error=$(echo "${ROW}" | cut -d'|' -f3- | head -c 400)"
-[ "${ST}" = "failed" ] || { print_error "Old instance should fail at its trusted call, got ${ST}: ${ROW}"; exit 1; }
-echo "${ROW} $(instance_json "${PARKED}")" | grep -q "TRUSTED_VERSION_REQUIRED" \
-    || { print_error "Old instance did not fail with TRUSTED_VERSION_REQUIRED: ${ROW}"; exit 1; }
-if echo "${ROW}" | grep -q "approved trusted artifact unavailable"; then
-    print_error "Old instance failed at load, not at the call"; exit 1
+echo "  status=${ST} row=$(echo "${ROW}" | head -c 400)"
+[ "${ST}" = "completed" ] || { print_error "Old instance should wake and presign under its approved pin, got ${ST}: ${ROW}"; exit 1; }
+echo "${ROW}" | grep -q "X-Amz-Signature=" \
+    || { print_error "Old instance has no signed URL: ${ROW}"; exit 1; }
+if echo "${ROW} $(instance_json "${PARKED}")" | grep -q "TRUSTED_VERSION_REQUIRED"; then
+    print_error "Old instance was refused at its trusted call: ${ROW}"; exit 1
 fi
 if echo "${ROW} $(instance_json "${PARKED}")" | grep -q "e2e-synthetic-secret"; then
     print_error "Credential material leaked into the instance record"; exit 1
 fi
-print_success "Old instance loaded and failed only at the trusted call (TRUSTED_VERSION_REQUIRED) ✓"
+print_success "Old instance woke on its old artifact and presigned on the installed bytes ✓"
 
 # ---------------------------------------------------------------------------
 # A bundle replaced on disk without a restart: the compiler reads a version
@@ -465,4 +479,4 @@ INST=$(launch "${DRIFT_WF}")
 print_success "After the restart the failure retried once and the workflow runs ✓"
 
 echo
-print_success "Trusted built-in upgrades recompile new launches and fail old runs only at the call."
+print_success "Trusted built-in upgrades recompile new launches and parked runs resume under approved pins."

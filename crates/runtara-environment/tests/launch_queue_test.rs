@@ -1847,6 +1847,7 @@ async fn owned_mock_execution(
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await

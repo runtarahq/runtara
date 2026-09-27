@@ -221,6 +221,7 @@ impl Harness {
             checkpoint_id: None,
             env: HashMap::new(),
             prepersisted_input: Some(input),
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         }
     }

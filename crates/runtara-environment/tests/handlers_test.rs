@@ -1012,6 +1012,7 @@ async fn running_stop_fixture(
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2151,6 +2152,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2263,6 +2265,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2360,6 +2363,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2570,6 +2574,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await

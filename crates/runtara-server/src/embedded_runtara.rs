@@ -98,6 +98,18 @@ impl EmbeddedRuntara {
             }
             None => Default::default(),
         };
+        // Trusted pins, option B: record the installed trusted built-ins in
+        // the same history and hand the approved, non-revoked trusted pins to
+        // the executor, so a parked run pinned to an earlier approved version
+        // keeps presigning on wake or resume (on the installed bytes). Starts
+        // never use the history; readiness stays installed-only.
+        if let Some(trusted) = &trusted {
+            runtara_environment::approved_builtins::ApprovedBuiltins::install_trusted(
+                &config.pool,
+                trusted,
+            )
+            .await?;
+        }
 
         // Create shared persistence layer. The metrics sink is what turns
         // Core's terminal-state facts into OTLP workflow metrics; without it

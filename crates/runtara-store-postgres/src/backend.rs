@@ -1103,6 +1103,15 @@ impl Persistence for PostgresPersistence {
         Self::op_get_terminal_instances_older_than(&self.pool, older_than, after, limit).await
     }
 
+    async fn prune_pinned_terminal(
+        &self,
+        older_than: DateTime<Utc>,
+        after: Option<&runtara_core::persistence::RetentionCursor>,
+        limit: i64,
+    ) -> Result<runtara_core::persistence::PrunePage, CoreError> {
+        Self::op_prune_pinned_terminal(&self.pool, older_than, after, limit).await
+    }
+
     async fn delete_external_outcomes_older_than(
         &self,
         older_than: DateTime<Utc>,

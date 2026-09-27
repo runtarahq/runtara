@@ -24,6 +24,11 @@ agent and trusted agent upgrades:
   and `runtara:agent-suspension` 0.1.0, and built-in/trusted artifact pins.
   A pin since revoked or no longer shipped fails at the call, not at load.
 - Approved `approved_builtin_artifacts` rows are only revoked, never deleted.
+  Boot records the installed control and trusted (S3, Azure) pins there. A
+  parked run woken or resumed under an older approved, non-revoked trusted pin
+  runs the installed bytes; a start under it, or a revoked or never-approved
+  pin, fails with `TRUSTED_VERSION_REQUIRED` before any credential lookup. The
+  launch kind is the host's (the launch queue row), never the guest's.
 - Released WIT is never edited, only versioned. The frozen 0.1.0 guests in
   `runtara-component-host/src/workflow/frozen_abi/` must keep linking.
 

@@ -93,6 +93,9 @@ impl RuntimeHost for DeferredTerminal {
     async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
         self.inner.load_input().await
     }
+    fn trusted_launch(&self) -> crate::trusted::TrustedLaunch {
+        self.inner.trusted_launch()
+    }
     fn instance_id(&self) -> Result<String, String> {
         self.inner.instance_id()
     }

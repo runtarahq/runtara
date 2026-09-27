@@ -13,7 +13,7 @@ This plan delivers the `control` agent (nine capabilities, `start` through `wait
 ## Not in v1
 - Brief exclusions (report redesign, parallel embedded graphs, future-match subscriptions, compensation); caller user identity (authorization uses instance relations instead); force-terminate; pause propagation; lifecycle ABI changes.
 - Control or suspending steps in AiAgent tools, `WaitForSignal.onWait`, published workflow-agents, legacy scoped isolation or Composed builds; suspending steps in onError. Parallel windows serialize them (W075).
-- `Idempotency-Key` fingerprint conflicts, stricter public `resume`, pruning pinned children (slice 12), six filed follow-ups.
+- `Idempotency-Key` fingerprint conflicts, stricter public `resume`, six filed follow-ups. (Pruning pinned children, slice 12, and trusted option B, slice 11, are now implemented.)
 
 ## Where the code differs from the brief
 1. Operation identity lives in `WorkflowState`; `CallContext` is off the production path.
@@ -40,8 +40,8 @@ This plan delivers the `control` agent (nine capabilities, `start` through `wait
 | 8 | Ownership | 7 | Pin, launch fence, outcomes, close cascade, cleanup guard; e2e 4 |
 | 9 | Durable instance waits | 3, 5, 6, 8; S0.4 | Wait store, trigger, reconciler, host wait |
 | 10 | Typed suspension and `wait` | 6, 9; S0.2 | Parallel approvals; e2e 1-5 acceptance |
-| 11 | Upgrade safety | 5, 8, 10, D | Cleanup and frozen-ABI tests, trusted option B if K5; e2e 6, upgrade |
-| 12 | Prune pinned children | 8, 9 | Optional, on its trigger |
+| 11 | Upgrade safety | 5, 8, 10, D | Cleanup and frozen-ABI tests, trusted option B (owner-approved, implemented); e2e 6, upgrade |
+| 12 | Prune pinned children | 8, 9 | Implemented; prunes what retention would already have deleted |
 | 13 | Surfaces and docs | 4-11 | UI, MCP, docs, changelog, `/steps` fixes; e2e 5.1 |
 
 Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open at G0, G0 exits for 1-9 only, slice 3 freezes the suspendable-only (K1) shapes, and 10 waits for the K1 outcome; D is independent, before 1. **Kill criteria:** K1 (S0.2 not green in 6 days): agent imports only `suspendable`; while unresolved, 1-9 ship without `wait`. K2 (S0.4 deadlock, lost wake, double fence winner, >15% overhead): drop the trigger's waiter stamp (keep `wake_pending`), then reconciler-only. K5 (digest history rejected): installed control digests only, no trusted option B.
@@ -71,8 +71,8 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 ## Still open
 - **Composed binding:** does any deployment set `RUNTARA_DIRECT_RUNTIME_BINDING=composed`? Until ops answers, slice 1 does not fail closed; slices 4 and 13 add a release note.
 - **Launch-queue timeout:** children and woken parents can hit the 300 s timeout when the limit exceeds runner capacity; owner caps limits or exempts control children.
-- **K5 security review** of the digest history (decides trusted option B).
-- **Slice 12 trigger:** confirm >100,000 pinned children per tenant or >10% of `instances`.
+- ~~**K5 security review** of the digest history~~: owner approved trusted option B; implemented (slice 11).
+- ~~**Slice 12 trigger**~~: replaced by the owner; pruning runs every pass on exactly the children retention would already have deleted (slice 12).
 - **Per slice:** cancel-reason source (8), trusted digest backfill (5), `/steps` pairing rewrite if duplication confirmed (13).
 
 ### Slice 0: Risk spikes and gates (G0)
@@ -355,7 +355,7 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 
 **Risks.**
 - Advisory-lock contention on parented launches (measured by the S0.4 launch-fence race loop).
-- Pinned rows grow under long-lived parents; slice 12 pruning waits for >100k per tenant or >10% of `instances`.
+- Pinned rows grow under long-lived parents; slice 12 prunes each one's bulky data once it is past retention by its own finish, and keeps the row.
 
 ### Slice 9: Durable instance waits
 
@@ -432,28 +432,32 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 **Goal.** Parked runs survive image cleanup, recompiles, control (if K5 approves), trusted-agent and binary upgrades, and host ABI changes.
 **Depends on.** Slice 5 (approved-digest history, per-call check), slice 8 (retention, `NOT EXISTS instance_launches` guard), slice 10 (parking), patch D.
 - **Image cleanup** (`runtara-environment/src/image_cleanup_worker.rs`): ensure slice 8's guard exists, or protected images fill the batch.
-- **Trusted pins, option B, gated by K5** (`runtara-component-host/src/trusted.rs`): accept a non-revoked `approved_builtin_artifacts` pin only on `Wake`/`Resume` (paused waits: decision 4), never `Start`; run current bytes. K5 rejects: skip B; post-wake calls fail with `TRUSTED_VERSION_REQUIRED`.
+- **Trusted pins, option B** (implemented, owner-approved; `runtara-component-host/src/trusted.rs`): accept a non-revoked `approved_builtin_artifacts` pin only on `Wake`/`Resume` (paused waits: decision 4), never `Start`; run current bytes.
+  - *As built.* Boot records the installed trusted pins in `approved_builtin_artifacts` (environment migration `20260927000300_approved_trusted_artifacts` widens its pin check to `runtara:trusted-artifacts/…`) and hands the approved, non-revoked ones to `TrustedExecutor::set_approved_history` (`ApprovedBuiltins::install_trusted`). `TrustedExecutor::admits` runs before any credential lookup: installed pin on any launch; otherwise an approved earlier pin of the same agent only when `TrustedLaunch` is `Wake`/`Resume`; everything else `TRUSTED_VERSION_REQUIRED`. The launch kind is host authority: `LaunchOptions.launch_kind` (from the launch queue row) sets `PersistenceRuntimeHost::with_trusted_launch`, children read it through their scoped runtime host (`RuntimeHost::trusted_launch`, default `Start`, wrappers delegate); the guest never supplies it. Readiness stays installed-only (`ApprovedBuiltins::pins` excludes trusted pins), so starts recompile. Revoking a trusted pin (effective next boot) cuts off parked runs on it; revoking the installed pin denies every call to that agent (`TrustedExecutor::set_revoked_pins`), like a revoked control digest.
+  - *Security reasoning.* The pin selects no bytes: only installed, operator-approved bytes run, in the same fresh restricted store. Credentials are still resolved by the run's host-supplied tenant, the connection and its allowed types. A start can never use the history, so old pins cannot spread to new runs, and a never-approved or revoked pin is refused on every launch. The only relaxation is the version-compatibility gate for runs that already parked under an approved version, and revocation is the operator's switch for it.
 - **ABI rule** (`runtara-workflow-wit/src/lib.rs` + README): every shipped host version stays linked (lifecycle 0.1/0.2, runtime 0.3/0.4, connection-resolver 0.1, control, workflow-operation and agent-suspension 0.1.0, builtin/trusted pins); approved rows only revoked; released WIT never edited, only versioned.
 **Tests.**
 - New `runtara-environment/tests/image_cleanup_db_test.rs` (`db-integration-tests`): parked and pinned-child images survive; no batch starvation.
 - `control_wait_runner_test.rs` (`scoped-workflow-integration-tests`): resume on bound image after recompile; control upgrade loads via history (if K5 rejects: installed digests only, and the test asserts the old-pin parent is not ready); revocation fails the call, not the load.
 - New `runtara-component-host/src/workflow/frozen_abi_tests.rs`: WAT fixtures link frozen `control/api`, `control/executor`, `workflow-operation/scope`, `agent-suspension/context` @0.1.0.
-- Trusted B unit tests (if K5 approves): old pin works on Wake/Resume; Start, revoked, unapproved fail.
+- Trusted B tests: `trusted.rs` unit `earlier_approved_pins_run_installed_bytes_only_on_wake_or_resume` and `tests/trusted.rs` `approved_earlier_pin_presigns_only_when_a_parked_run_continues` (real S3 signer): old pin works on Wake/Resume; Start, revoked, unapproved fail with zero credential lookups. `approved_builtins` db test: trusted pins share the history but never count as control/readiness pins. `e2e/test_trusted_pin_upgrade.sh`: the run parked on the old S3 version wakes and presigns after the upgrade.
 - E2E stage 6 (`STAGES=6 e2e/test_control_agent.sh`): bundle swap while parked; `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS=1` keeps the package; trusted parents per B.
 - New `e2e/test_control_upgrade.sh` (bin+bundle N, N+1; not in `run_all.sh`): parked parents survive binary N to N+1.
 **Done when.** Package survives cleanup until terminal; V-fmt, V-gate, V-build, V-env, V-host, V-scoped, V-exec (if B), stage 6, upgrade script green.
 **Risks.** Same-source builds share digests: force scratch version bumps, assert digests differ. Guard scans unindexed `instance_launches(image_id)`; index only if measured.
 
-### Slice 12: Pruning pinned children (optional, deferred)
-- **Goal.** Strip bulky data of old pinned terminal children; keep the `instances` row. Only if slice 8's log shows >100k pinned or >10% of rows (owner confirms).
+### Slice 12: Pruning pinned children (implemented)
+- **Goal.** Strip bulky data of old pinned terminal children; keep the `instances` row.
+- **Trigger (owner-adapted).** No threshold: every retention pass prunes exactly the pinned children retention would already have deleted had they not been pinned (terminal, finished before `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS` by their own `finished_at`, parent exists and is not terminal). A child of a recently finished parent is left to retention, which deletes it soon.
+- **As built.** `Persistence::prune_pinned_terminal(older_than, after, limit) -> PrunePage { pruned, next }` (default no-op; memory and Postgres implement it). Postgres (`ops_common/ops/retention.rs`): keyset page read without locks, then one transaction per page that locks the still-terminal children `FOR NO KEY UPDATE` and runs the full variant: deletes `checkpoints`, `pending_signals`, `pending_checkpoint_signals`, closed `instance_input_requests`, `instance_input_parks`, `invocation_attempts`, `invocation_root_leases`; NULLs `input` and `stderr` (not `OF status`, so no terminal trigger fires). Kept: the row and outcome, events, accepted input receipts (send-signal replay), control receipts, waits, continuations. `pruned` counts only children that still had something to prune, so a rerun reports 0. `db_cleanup_worker.rs` runs it after `cleanup_old_instances` with the same cutoff and batch size and logs `pruned_children`.
 - **Depends on.** Slice 8 (pin, cursor, log), slice 9 (wait check).
 - **runtara-core** `persistence/mod.rs`: `prune_pinned_terminal(older_than, after, limit)`.
 - **runtara-store-postgres** `retention.rs`: slice 8 pin inverted, keyset cursor, one txn per batch.
 - Light first: drop `checkpoints`, NULL `stderr`. Full: also signals, closed input requests, parks, leases, attempts, NULL `input` (keep `accepted`).
 - **runtara-environment** `db_cleanup_worker.rs`: prune after `cleanup_old_instances`, no new env var; log `pruned_children`.
 - **Tests.** `conformance.rs` (both backends): only old pinned rows pruned, get/wait unchanged, rerun no-op; `db_cleanup_worker_test.rs` (`db-integration-tests`): order, cursor.
-- **Done when.** Trigger fired; V-fmt, V-gate, V-core, V-pg, V-env green.
-- **Risks.** Full variant losing `send-signal` receipts; pruned data not inspectable.
+- **Done when.** V-fmt, V-gate, V-core, V-pg, V-env green (conformance `run_prune_pinned_sequence` on both backends; `db_cleanup_worker_test.rs` `pinned_children_are_pruned_after_deletion_with_a_cursor`).
+- **Risks.** Full variant losing `send-signal` receipts (accepted requests are kept; conformance asserts replay); pruned data not inspectable.
 
 ### Slice 13: Surfaces and docs closeout
 

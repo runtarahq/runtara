@@ -18,7 +18,12 @@
 //!   approved is refused at load.
 //! - **Approved rows are only revoked.** `approved_builtin_artifacts` rows are
 //!   never deleted or rewritten, so an artifact pinning an older approved
-//!   control version still loads after an upgrade.
+//!   control version still loads after an upgrade. The same history records
+//!   every installed trusted (S3, Azure) version: a run parked on an older,
+//!   still approved trusted pin that is woken or resumed calls the installed
+//!   bytes; a start under it, or any launch under a revoked or never
+//!   approved pin, fails with `TRUSTED_VERSION_REQUIRED` before any
+//!   credential lookup.
 //! - **Released WIT is never edited, only versioned.** Wasmtime lifts records,
 //!   variants and enums exactly, so adding a case or field in place breaks
 //!   every artifact built against the old shape. A change is a new package

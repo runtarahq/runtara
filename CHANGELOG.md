@@ -292,9 +292,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `20260926000100_compiled_trusted_pins`), and a workflow whose recorded pin is
   no longer installed recompiles when it next becomes ready. A parent built on
   a stale published workflow-agent recovers once the agent is republished.
+- **Runs parked on an older trusted agent version keep working after an
+  upgrade.** Boot now records the installed S3 and Azure trusted versions in
+  the approved history (`approved_builtin_artifacts`, environment migration
+  `20260927000300_approved_trusted_artifacts`). When a run parked under an
+  older, still approved version is woken or resumed (paused waits included),
+  its trusted calls run the installed bytes instead of failing with
+  `TRUSTED_VERSION_REQUIRED`. A new start under an older pin still fails (and
+  readiness still recompiles it), as does any launch under a revoked or never
+  approved pin, always before any credential lookup. Revoking the installed
+  version itself denies every call to that agent until a new version is
+  installed. The launch kind comes
+  from the durable launch queue, never from the workflow; the pin never
+  chooses which bytes run, and credentials are still resolved per tenant,
+  connection and type. To cut off runs parked on a version, revoke its pin
+  (`revoked_at`); it takes effect at the next boot.
+- **Finished children kept for a live parent are pruned.** Each cleanup pass,
+  after deleting, strips a finished child that retention keeps only because
+  its parent is still running or parked, once it is past
+  `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS` by its own finish: its checkpoints,
+  signals, closed input requests, invocation state, input and stderr are
+  removed. Its row and outcome (status, output, error, parent link, run label),
+  events and accepted input receipts stay, so `get`, `wait` and replayed
+  `send-signal` calls answer as before. No new setting; the pass logs
+  `pruned_children`. A pruned child's checkpoints and input can no longer be
+  inspected.
 - **Upgrading is one-way.** This release migrates the runtime database
   (`032`-`042`) and the environment and server databases (`20260926000100`,
-  `20260926000200`, `20260927000000`-`20260927000200`), adds
+  `20260926000200`, `20260927000000`-`20260927000300`), adds
   `termination_reason` labels (`start_gate_failed`, `waiting_instances`) and
   stores control state (parent links, admission outcomes, command receipts,
   instance waits, agent continuations) that older servers do not read.

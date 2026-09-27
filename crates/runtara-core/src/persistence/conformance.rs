@@ -3105,3 +3105,311 @@ pub async fn run_retention_pin_sequence<P: Persistence>(backend: &P) {
         .await
         .unwrap();
 }
+
+/// Pruning strips a pinned terminal child that retention would already have
+/// deleted, had its parent not been live, and leaves everything `get` and
+/// `wait` read: only old pinned rows are pruned (not a fresh child, a running
+/// child, or a child of a finished parent), the outcome, parent link, run
+/// label and accepted input receipt survive, and a rerun changes nothing.
+pub async fn run_prune_pinned_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::inputs::{
+        InputAuthority, InputError, InputRequestSpec, InputState, ValidatedInputResponse,
+    };
+    use crate::persistence::waits::{WaitMode, WaitSpec};
+    use crate::persistence::{ParentLink, RetentionCursor};
+    use serde_json::json;
+
+    let tenant_name = format!("prune-{}", Uuid::new_v4());
+    let tenant = tenant_name.as_str();
+    let pause = || tokio::time::sleep(std::time::Duration::from_millis(15));
+    let running = |id: String| async move {
+        backend
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        id
+    };
+    let top = |id: String| async move {
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, None, None)
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let child = |id: String, parent: String| async move {
+        let link = ParentLink {
+            parent_instance_id: parent,
+            parent_close_policy: "cancel".into(),
+            admitted_at: Utc::now(),
+        };
+        assert!(
+            backend
+                .try_register_child_instance(
+                    &id,
+                    tenant,
+                    Some(b"{\"bulky\":\"input\"}"),
+                    Some("child label"),
+                    &link
+                )
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let finish = |id: String| async move {
+        backend
+            .complete_instance(
+                CompleteInstanceParams::new(&id, CoreInstanceStatus::Completed)
+                    .with_output(b"{\"answer\":42}")
+                    .with_stderr("noisy stderr"),
+            )
+            .await
+            .unwrap();
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .expect("a terminal run has finished_at")
+    };
+    // One whole pass from `start`, in pages of `limit`.
+    let prune = |cutoff: chrono::DateTime<Utc>, start: RetentionCursor, limit: i64| async move {
+        let mut pruned = 0u64;
+        let mut pages = 0usize;
+        let mut after = Some(start);
+        loop {
+            let page = backend
+                .prune_pinned_terminal(cutoff, after.as_ref(), limit)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(page.pruned as i64 <= limit);
+            pruned += page.pruned;
+            match page.next {
+                Some(next) => {
+                    assert!(
+                        after.as_ref().is_none_or(|prev| (
+                            next.finished_at,
+                            next.instance_id.as_bytes()
+                        ) > (
+                            prev.finished_at,
+                            prev.instance_id.as_bytes()
+                        )),
+                        "the cursor must advance"
+                    );
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        (pruned, pages)
+    };
+
+    let sentinel = top(Uuid::new_v4().to_string()).await;
+    let start = RetentionCursor {
+        finished_at: finish(sentinel.clone()).await,
+        instance_id: sentinel.clone(),
+    };
+    pause().await;
+
+    let parent = running(top(Uuid::new_v4().to_string()).await).await;
+    let ended_parent = top(Uuid::new_v4().to_string()).await;
+
+    // The old pinned child, with something in every table a prune clears.
+    let old = running(child(Uuid::new_v4().to_string(), parent.clone()).await).await;
+    backend
+        .save_checkpoint(&old, "cp-1", b"checkpoint state")
+        .await
+        .unwrap();
+    backend
+        .put_custom_signal(&old, "raw-address", b"raw payload")
+        .await
+        .unwrap();
+    let inputs = backend.input_requests().expect("managed inputs required");
+    let root = InputAuthority::Root {
+        tenant_id: tenant.into(),
+        instance_id: old.clone(),
+    };
+    let spec = |n: u32| InputRequestSpec {
+        signal_id: format!("{old}/wait/iteration/{n}"),
+        response_schema: Some(json!({"answer": {"type": "string", "required": true}})),
+        metadata: json!({"step_id": "ask"}),
+        deadline: None,
+    };
+    let (answered, abandoned) = (spec(1), spec(2));
+    inputs.register_input(&root, &answered).await.unwrap();
+    inputs.register_input(&root, &abandoned).await.unwrap();
+    let response =
+        ValidatedInputResponse::new(&answered, "operation-1", &json!({"answer": "yes"})).unwrap();
+    let receipt = inputs.accept_input(tenant, &old, &response).await.unwrap();
+    let fences = backend
+        .invocation_fences()
+        .expect("invocation fences required");
+    let lease = fences
+        .claim_invocation_lease(tenant, &old, "launch-one", None)
+        .await
+        .unwrap();
+    fences
+        .begin_invocation_attempt(&lease, "agent/path", "start-1")
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&old, crate::domain::SignalType::Pause, b"")
+        .await
+        .unwrap();
+    let old_finished = finish(old.clone()).await;
+
+    // A child of a finished parent (retention's), and a running child.
+    let released = child(Uuid::new_v4().to_string(), ended_parent.clone()).await;
+    finish(released.clone()).await;
+    finish(ended_parent.clone()).await;
+    let busy = running(child(Uuid::new_v4().to_string(), parent.clone()).await).await;
+    pause().await;
+    // Pinned, but not yet past retention by its own finish.
+    let fresh = child(Uuid::new_v4().to_string(), parent.clone()).await;
+    let fresh_finished = finish(fresh.clone()).await;
+    let cutoff = fresh_finished - Duration::milliseconds(5);
+    assert!(old_finished < cutoff);
+
+    // The parent waits on the old child; the wait resolved at once.
+    let waits = backend.instance_waits().expect("instance waits required");
+    let wait_spec = WaitSpec::new([old.clone()], WaitMode::All, None);
+    let before_wait = waits
+        .register_or_evaluate(tenant, &parent, "op-prune", &wait_spec)
+        .await
+        .unwrap();
+    assert!(before_wait.resolution().is_some());
+    let before = backend.get_instance(&old).await.unwrap().unwrap();
+    assert!(before.input.is_some());
+
+    let (pruned, pages) = prune(cutoff, start.clone(), 1).await;
+    assert!(pruned >= 1, "the old pinned child is pruned");
+    assert!(pages >= 2, "a limit of 1 pages the pass");
+
+    // What the prune removed.
+    assert_eq!(
+        backend
+            .count_checkpoints(&old, None, None, None)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        backend
+            .load_checkpoint(&old, "cp-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        backend
+            .get_custom_signal(&old, "raw-address")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(backend.get_pending_signal(&old).await.unwrap().is_none());
+    assert_eq!(
+        inputs
+            .get_input(tenant, &old, &abandoned.request_id())
+            .await,
+        Err(InputError::NotFound),
+        "a closed input request is pruned"
+    );
+    assert!(
+        fences
+            .get_invocation_lease(tenant, &old)
+            .await
+            .unwrap()
+            .is_none(),
+        "the invocation lease is pruned"
+    );
+
+    // What `get`, `wait` and a replayed `send-signal` still read.
+    let after = backend.get_instance(&old).await.unwrap().unwrap();
+    assert!(after.input.is_none(), "the input is cleared");
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.output, before.output);
+    assert_eq!(after.error, before.error);
+    assert_eq!(after.termination_reason, before.termination_reason);
+    assert_eq!(after.finished_at, before.finished_at);
+    assert_eq!(after.parent, before.parent);
+    assert_eq!(after.run_label, before.run_label);
+    assert_eq!(after.tenant_id, before.tenant_id);
+    assert_eq!(
+        waits.poll_wait(tenant, &parent, "op-prune").await.unwrap(),
+        before_wait,
+        "the wait reads the same result"
+    );
+    assert!(matches!(
+        inputs
+            .get_input(tenant, &old, &answered.request_id())
+            .await
+            .unwrap()
+            .state,
+        InputState::Accepted { .. }
+    ));
+    assert_eq!(
+        inputs
+            .replay_input(
+                tenant,
+                &old,
+                &answered.request_id(),
+                "operation-1",
+                response.replay_identity()
+            )
+            .await
+            .unwrap(),
+        Some(receipt),
+        "the accepted receipt survives"
+    );
+
+    // Only old pinned rows.
+    for (id, why) in [
+        (&fresh, "a child not yet past its own retention"),
+        (&released, "a child of a finished parent (retention's)"),
+        (&busy, "a running child"),
+    ] {
+        assert!(
+            backend
+                .get_instance(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .input
+                .is_some(),
+            "{why} is not pruned"
+        );
+    }
+
+    // A rerun is a no-op: the page holding the old child prunes nothing.
+    let page = backend
+        .prune_pinned_terminal(
+            cutoff,
+            Some(&RetentionCursor {
+                finished_at: old_finished,
+                instance_id: String::new(),
+            }),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.pruned, 0, "a pruned child has nothing left to prune");
+    assert!(
+        page.next
+            .as_ref()
+            .is_some_and(|next| next.instance_id == old),
+        "the rerun reads the old child again"
+    );
+    let again = backend.get_instance(&old).await.unwrap().unwrap();
+    assert_eq!(again.output, before.output);
+    assert_eq!(again.status, before.status);
+
+    backend
+        .delete_instances_batch(&[sentinel, parent, ended_parent, old, released, busy, fresh])
+        .await
+        .unwrap();
+}

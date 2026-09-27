@@ -609,6 +609,237 @@ async fn one_stale_trusted_pin_fails_only_its_own_agent_calls() -> anyhow::Resul
     Ok(())
 }
 
+/// A host runtime that only reports its launch kind: what the environment's
+/// runtime host hands a woken, resumed or started run.
+struct LaunchHost(runtara_component_host::trusted::TrustedLaunch);
+#[async_trait::async_trait]
+impl runtara_component_host::runtime_host::RuntimeHost for LaunchHost {
+    fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
+        self.0
+    }
+    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        Err("unused".into())
+    }
+    fn instance_id(&self) -> Result<String, String> {
+        Ok("launch-host".into())
+    }
+    async fn complete(&self, _: Vec<u8>) -> Result<(), String> {
+        Err("unused".into())
+    }
+    async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
+        Err("unused".into())
+    }
+    async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        Err("unused".into())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn get_checkpoint(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn checkpoint(
+        &self,
+        _: String,
+        _: Vec<u8>,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        Err("unused".into())
+    }
+    async fn handle_checkpoint_signal(&self, _: String, _: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _: String,
+        _: u32,
+        _: Option<String>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(&self, _: String, _: Vec<u8>, _: u64) -> Result<(), String> {
+        Err("unused".into())
+    }
+}
+
+/// Child scopes like [`Scopes`], whose runtime reports `launch`.
+struct LaunchScopes(runtara_component_host::trusted::TrustedLaunch);
+impl runtara_component_host::InvocationScopeFactory for LaunchScopes {
+    fn prepare_child(
+        &self,
+        _: &runtara_component_host::execution_host::StartRequest,
+    ) -> Result<
+        runtara_component_host::ChildInvocationScope,
+        runtara_component_host::execution_host::ExecutionError,
+    > {
+        let launch = self.0;
+        Ok(runtara_component_host::ChildInvocationScope {
+            lifecycle: None,
+            execution: None,
+            make_spec: Box::new(move |_| {
+                Ok(runtara_component_host::WorkflowRunSpec {
+                    trusted_instance: None,
+                    trusted_tenant: Some("tenant-a".into()),
+                    env: Default::default(),
+                    stderr: None,
+                    timeout: Duration::from_secs(10),
+                    cancel: None,
+                    limits: Default::default(),
+                    runtime: Some(Arc::new(LaunchHost(launch))),
+                }
+                .into())
+            }),
+        })
+    }
+}
+
+/// Trusted pins, option B, on the real S3 signer: a package pinned to an
+/// earlier s3-storage version that is in the approved history presigns on the
+/// installed bytes when its run is woken or resumed, and fails with
+/// TRUSTED_VERSION_REQUIRED on a start. A pin that is not in the history
+/// (never approved, or revoked and so left out at boot) fails on every
+/// launch. No refused call resolves credentials.
+#[tokio::test(flavor = "multi_thread")]
+async fn approved_earlier_pin_presigns_only_when_a_parked_run_continues() -> anyhow::Result<()> {
+    use runtara_component_host::execution_host::{
+        Entry, InvocationContext, InvocationLauncher, StartRequest,
+    };
+    use runtara_component_host::trusted::TrustedLaunch;
+    use runtara_component_host::{PreparedInvocationLauncher, WorkflowExecutor};
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+    use wasmtime::component::Component;
+
+    let (bundle, dispatcher, credentials) = dispatcher().await?;
+    let trusted = dispatcher.trusted_executor();
+    let engine = runtara_component_host::build_engine(&Default::default())?;
+    let executor = Arc::new(WorkflowExecutor::new(engine.clone())?);
+    executor.set_trusted_executor(trusted.clone())?;
+    let bytes = std::fs::read(bundle.path().join("runtara_agent_s3_storage.wasm"))?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    // What a metadata-only upgrade leaves a parked run pinned to.
+    let earlier =
+        runtara_dsl::agent_meta::trusted_artifact_import("s3-storage", &digest, &"f".repeat(64));
+    let never_approved =
+        runtara_dsl::agent_meta::trusted_artifact_import("s3-storage", &digest, &"e".repeat(64));
+    let installed: Vec<String> = trusted.artifact_pins().map(str::to_owned).collect();
+    assert!(!installed.contains(&earlier) && !installed.contains(&never_approved));
+    trusted.set_approved_history(installed.into_iter().chain([earlier.clone()]));
+
+    let child = Component::new(&engine, &bytes)?;
+    let prepare = |root_pin: &str| {
+        let root = Component::new(
+            &engine,
+            format!(
+                r#"(component (import "{root_pin}" (instance))
+            (core module $m (func (export "run") (result i32) i32.const 0))
+            (core instance $m (instantiate $m))
+            (func $run (result (result)) (canon lift (core func $m "run")))
+            (instance $api (export "run" (func $run)))
+            (export "wasi:cli/run@0.2.3" (instance $api)))"#
+            ),
+        );
+        let executor = executor.clone();
+        let child = child.clone();
+        let digest = digest.clone();
+        async move {
+            executor
+                .prepare_precompiled_package(
+                    runtara_component_host::precompile::CompiledWorkflowPackage {
+                        control_importers: Default::default(),
+                        root: root?,
+                        artifacts: BTreeMap::from([(digest.clone(), child)]),
+                        bindings: vec![runtara_workflow_wit::isolation_package::Binding {
+                            id: "s3".into(),
+                            artifact: digest,
+                            interface: "runtara:agent-s3-storage/capabilities@0.4.0".into(),
+                        }],
+                        invocations: None,
+                    },
+                )
+                .await
+        }
+    };
+    let tasks =
+        runtara_component_host::isolated_tasks::IsolatedTasks::new(engine.clone(), 2, 1024 * 1024)
+            .unwrap();
+    let mut resolved = credentials.calls.load(Ordering::SeqCst);
+    for (root_pin, launch, admitted) in [
+        (&earlier, TrustedLaunch::Wake, true),
+        (&earlier, TrustedLaunch::Resume, true),
+        (&earlier, TrustedLaunch::Start, false),
+        (&never_approved, TrustedLaunch::Wake, false),
+        (&never_approved, TrustedLaunch::Resume, false),
+    ] {
+        let prepared = prepare(root_pin).await?;
+        let launcher = PreparedInvocationLauncher::new(
+            executor.clone(),
+            prepared.child_catalog().unwrap().clone(),
+            Arc::new(LaunchScopes(launch)),
+        )?;
+        let invocation = launcher
+            .prepare(StartRequest {
+                binding: "s3".into(),
+                entry: Entry::Capability(CAP.into()),
+                context: InvocationContext {
+                    path: "sign".into(),
+                    attempt: 1,
+                },
+                input: serde_json::to_vec(&json!({"bucket":"uploads", "key":"report.csv",
+                "operation":"download", "_connection":{"connection_id":"s3"}}))?,
+            })
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let id = tasks
+            .spawn_managed(invocation.run, invocation.cleanup, invocation.lifecycle)
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(15), tasks.join(id))
+            .await?
+            .unwrap();
+        let outcome = format!("{:?}", result.outcome());
+        if admitted {
+            let runtara_component_host::InvokeExit::Completed(output) = result.outcome() else {
+                panic!("{launch:?} under {root_pin}: {outcome}")
+            };
+            let output = String::from_utf8_lossy(output);
+            assert!(output.contains("X-Amz-Signature="), "{output}");
+            assert!(!output.contains("synthetic-secret"));
+            resolved += 1;
+        } else {
+            assert!(
+                outcome.contains("TRUSTED_VERSION_REQUIRED"),
+                "{launch:?} under {root_pin}: {outcome}"
+            );
+        }
+        assert_eq!(
+            credentials.calls.load(Ordering::SeqCst),
+            resolved,
+            "{launch:?} under {root_pin}: credentials resolve only for an admitted call"
+        );
+        tasks.release(id).await.unwrap();
+    }
+    tasks.shutdown().await.unwrap();
+    Ok(())
+}
+
 #[path = "trusted/emulators.rs"]
 mod emulators;
 

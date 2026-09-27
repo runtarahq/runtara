@@ -383,6 +383,10 @@ impl RuntimeHost for ScopedRuntimeHost {
         self.live()?;
         Ok(Some(self.input.clone()))
     }
+    fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
+        self.owner.root.trusted_launch()
+    }
+
     fn instance_id(&self) -> Result<String, String> {
         self.live()?;
         Ok(self.owner.root.instance_id.clone())

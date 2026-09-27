@@ -478,8 +478,10 @@ impl WorkflowExecutor {
         // Empty instance imports describe dependencies, and Wasmtime does not
         // require a linker definition for them, so a pin for a trusted
         // version this host no longer runs still links. That artifact's
-        // trusted calls fail with TRUSTED_VERSION_REQUIRED before any
-        // credential lookup; everything else in it keeps running.
+        // trusted calls are decided per call (`TrustedExecutor::admits`):
+        // TRUSTED_VERSION_REQUIRED before any credential lookup, except a
+        // wake or resume under an approved earlier pin, which runs the
+        // installed bytes; everything else in it keeps running.
         let pins = self.trusted_pins(component);
         if component
             .component_type()
@@ -954,6 +956,7 @@ impl WorkflowExecutor {
                     tenant: spec.trusted_tenant.clone().unwrap_or_default(),
                     deadline: tokio::time::Instant::now() + spec.timeout,
                     pins: Some(self.trusted_pins(pre.instance_pre().component())),
+                    launch: trusted_launch(spec.runtime.as_ref()),
                 }),
             // The retired `wasi:cli/run` entry cannot suspend.
             control_executor: None,
@@ -1297,6 +1300,7 @@ impl WorkflowExecutor {
                             .clone()
                             .unwrap_or_else(|| self.trusted_pins(pre.component())),
                     ),
+                    launch: trusted_launch(spec.runtime.as_ref()),
                 }),
             control_executor: self.control.get().cloned().map(|executor| {
                 crate::control_executor::ControlCall {
@@ -1669,6 +1673,14 @@ fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {
         };
         cache.remove(&oldest);
     }
+}
+
+/// The launch kind trusted calls of this run are judged by: the host's, from
+/// the run's runtime host, and `Start` (the strictest) without one.
+fn trusted_launch(
+    runtime: Option<&Arc<dyn crate::runtime_host::RuntimeHost>>,
+) -> crate::trusted::TrustedLaunch {
+    runtime.map_or_else(Default::default, |runtime| runtime.trusted_launch())
 }
 
 impl crate::trusted::TrustedCaller for WorkflowState {

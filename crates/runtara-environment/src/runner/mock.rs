@@ -309,6 +309,7 @@ mod tests {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
         }
     }

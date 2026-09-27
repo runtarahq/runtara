@@ -628,6 +628,19 @@ impl Drop for ManagedPrecompileChild {
 }
 
 /// Operational capacity checks read only the semaphore.
+/// The trusted-call launch kind of a durable launch kind.
+fn trusted_launch(
+    kind: crate::launch_queue::LaunchKind,
+) -> runtara_component_host::trusted::TrustedLaunch {
+    use crate::launch_queue::LaunchKind;
+    use runtara_component_host::trusted::TrustedLaunch;
+    match kind {
+        LaunchKind::Start => TrustedLaunch::Start,
+        LaunchKind::Wake => TrustedLaunch::Wake,
+        LaunchKind::Resume => TrustedLaunch::Resume,
+    }
+}
+
 fn compute_occupancy(limit: usize, available: usize) -> RunnerOccupancy {
     RunnerOccupancy {
         limit: limit as u64,
@@ -810,7 +823,10 @@ impl EmbeddedWasmRunner {
         // A guest that asks for its input through the host interface gets the
         // same bytes the launch already has, rather than a second read of what
         // was just written. Unset on wake/resume, so those still read the store.
-        .with_prepersisted_input(prepared_input);
+        .with_prepersisted_input(prepared_input)
+        // Host authority for trusted calls under an earlier approved pin:
+        // only a wake or resume of a parked run may make them.
+        .with_trusted_launch(trusted_launch(options.launch_kind));
         // Share the run's cancel flag: it is how the host stops a guest that
         // woke from an interrupted sleep and ignored the cancel, without
         // routing the cancel through the guest's catchable error channel.
@@ -2212,6 +2228,7 @@ mod tests {
             checkpoint_id: Some("checkpoint-env".into()),
             env: HashMap::new(),
             prepersisted_input: None,
+            launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
         };
         let env = runner.merged_env(&options);

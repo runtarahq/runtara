@@ -482,6 +482,7 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await

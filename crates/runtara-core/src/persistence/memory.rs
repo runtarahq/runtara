@@ -253,6 +253,49 @@ fn retention_pinned(store: &Store, instance: &InstanceRecord, older_than: DateTi
         .is_some_and(|link| !parent_released(store, &link.parent_instance_id, older_than))
 }
 
+/// Strip a pinned terminal child down to what `get` and `wait` read (see
+/// `Persistence::prune_pinned_terminal`). Returns whether anything changed.
+fn prune_instance(store: &mut Store, id: &str) -> bool {
+    use crate::persistence::inputs::InputState;
+    let mut changed = false;
+    let mut note = |before: usize, after: usize| changed |= before != after;
+    let n = store.checkpoints.len();
+    store.checkpoints.retain(|c| c.instance_id != id);
+    note(n, store.checkpoints.len());
+    let n = store.signals.len();
+    store.signals.remove(id);
+    note(n, store.signals.len());
+    let n = store.custom_signals.len();
+    store.custom_signals.retain(|(inst, _), _| inst != id);
+    note(n, store.custom_signals.len());
+    let n = store.input_requests.len();
+    store.input_requests.retain(|(inst, _), request| {
+        inst != id || !matches!(request.state, InputState::Closed { .. })
+    });
+    note(n, store.input_requests.len());
+    let n = store.input_parks.len();
+    store.input_parks.remove(id);
+    note(n, store.input_parks.len());
+    let n = store.invocation_leases.len();
+    store.invocation_leases.remove(id);
+    note(n, store.invocation_leases.len());
+    let n = store.invocation_attempts.len();
+    store
+        .invocation_attempts
+        .retain(|a| a.fence.lease.instance_id != id);
+    note(n, store.invocation_attempts.len());
+    // Postgres keeps the parent path on the attempt row, so it goes with it.
+    let n = store.invocation_parents.len();
+    store.invocation_parents.retain(|(inst, _), _| inst != id);
+    note(n, store.invocation_parents.len());
+    if let Some(instance) = store.instances.get_mut(id)
+        && instance.input.take().is_some()
+    {
+        changed = true;
+    }
+    changed
+}
+
 /// The parent no longer pins its children: it is gone, or terminal and
 /// finished before `older_than`.
 fn parent_released(store: &Store, parent_instance_id: &str, older_than: DateTime<Utc>) -> bool {
@@ -1141,6 +1184,58 @@ impl Persistence for InMemoryPersistence {
         Ok(page)
     }
 
+    /// Pinned terminal children of live parents, oldest first, pruned in
+    /// place (see the trait). One store lock per page stands in for the
+    /// transaction.
+    async fn prune_pinned_terminal(
+        &self,
+        older_than: DateTime<Utc>,
+        after: Option<&crate::persistence::RetentionCursor>,
+        limit: i64,
+    ) -> Result<crate::persistence::PrunePage, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut page: Vec<(DateTime<Utc>, String)> = store
+            .instances
+            .values()
+            .filter(|i| i.status.is_terminal())
+            .filter(|i| {
+                i.parent.as_ref().is_some_and(|link| {
+                    store
+                        .instances
+                        .get(&link.parent_instance_id)
+                        .is_some_and(|p| p.tenant_id == i.tenant_id && !p.status.is_terminal())
+                })
+            })
+            .filter_map(|i| {
+                i.finished_at
+                    .filter(|t| *t < older_than)
+                    .map(|finished| (finished, i.instance_id.clone()))
+            })
+            .filter(|(finished, id)| {
+                after.is_none_or(|cursor| {
+                    (*finished, id.as_bytes()) > (cursor.finished_at, cursor.instance_id.as_bytes())
+                })
+            })
+            .collect();
+        page.sort_by(|(a, x), (b, y)| (a, x.as_bytes()).cmp(&(b, y.as_bytes())));
+        page.truncate(limit.max(0) as usize);
+        let mut result = crate::persistence::PrunePage::default();
+        for (_, id) in &page {
+            if prune_instance(&mut store, id) {
+                result.pruned += 1;
+            }
+        }
+        if limit > 0 && page.len() as i64 == limit {
+            result.next = page
+                .last()
+                .map(|(finished, id)| crate::persistence::RetentionCursor {
+                    finished_at: *finished,
+                    instance_id: id.clone(),
+                });
+        }
+        Ok(result)
+    }
+
     async fn delete_external_outcomes_older_than(
         &self,
         older_than: DateTime<Utc>,
@@ -1528,6 +1623,7 @@ mod tests {
         crate::persistence::conformance::run_parent_link_sequence(&backend).await;
         crate::persistence::conformance::run_external_outcome_sequence(&backend).await;
         crate::persistence::conformance::run_retention_pin_sequence(&backend).await;
+        crate::persistence::conformance::run_prune_pinned_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
     }

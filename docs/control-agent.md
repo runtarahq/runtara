@@ -225,7 +225,24 @@ version by setting `revoked_at`, effective at the next boot. After that, calls
 through the revoked version are `CONTROL_DENIED`, new launches of workflows
 pinning it are not ready, and runs already parked on it still load and fail at
 their next control call. A run pinned to an older, still approved version
-keeps working after an upgrade. Composed artifacts whose other agents import
+keeps working after an upgrade.
+
+Trusted built-ins (S3, Azure presigning) share that history (trusted pins,
+option B). Boot records the installed `runtara:trusted-artifacts/…` pins in
+`approved_builtin_artifacts` too. A trusted call from a workflow whose
+artifact pins an older version of that agent is admitted only when the run
+continues a parked run, that is its launch is a wake or a resume (paused
+waits included), and only if that older pin is approved and not revoked; it
+then runs the installed bytes. A start under an older pin, and any launch
+under a revoked or never approved pin, fails with `TRUSTED_VERSION_REQUIRED`
+before any credential is resolved. The launch kind comes from the durable
+launch queue row through the host's runtime object, never from the guest, and
+defaults to start. Compilation readiness still needs the installed pin, so new
+runs recompile. Why this is safe: the pin never chooses the bytes (only
+installed, operator-approved bytes run), credentials are still resolved by
+tenant, connection and type for the calling run, a start can never use the
+history, and revocation (effective at the next boot) is the operator's switch
+to cut off runs parked on a version. Composed artifacts whose other agents import
 `runtara:control` or `runtara:workflow-operation` are refused at preparation.
 
 Mutations and `wait` run inside a compiler-emitted operation scope
@@ -239,7 +256,18 @@ bytes as before.
   terminal and both are past `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS` (one level
   deep; a missing parent counts as terminal) and logs
   `pinned_terminal_children` per pass. The fenced outcome of a child that never
-  launched follows the same rule. Cleanup does not delete admission rows
+  launched follows the same rule.
+- **Pruning pinned children:** after deleting, the same pass prunes every
+  child it had to keep only because its parent is still live (terminal, past
+  retention by its own finish, parent not terminal): it drops the child's
+  checkpoints, lifecycle and custom signals, closed input requests, input
+  park, invocation lease and attempts, and clears `input` and `stderr`. The
+  `instances` row stays with its outcome (status, output, error, termination
+  reason, parent link, run label, metadata), as do its events and accepted
+  input receipts, so `get`, `wait` and a replayed `send-signal` answer as
+  before. Keyset cursor, one transaction per `RUNTARA_DB_CLEANUP_BATCH_SIZE`
+  page, no new setting; logs `pruned_children`, and a rerun prunes nothing.
+  Pruned checkpoints and input are no longer inspectable. Cleanup does not delete admission rows
   (`execution_requests`), so the per-parent label and replay constraints hold
   for the parent's lifetime.
 - **Per-run state:** command receipts (`instance_control_receipts`), waits
@@ -408,9 +436,12 @@ purposes:
 
 Pinning is one level deep: a finished child can no longer read its own
 children, so those follow normal retention. A pinned child only needs its
-outcome (status, output, error, and the metadata `get` returns). Cleanup may
-remove its checkpoints, step events, and debug data on the normal schedule and
-keep the instance row with its outcome until the parent is terminal.
+outcome (status, output, error, and the metadata `get` returns). Once it is
+past retention by its own finish, cleanup prunes it (see Retention above):
+checkpoints, signals, closed input requests, invocation state, `input` and
+`stderr` go; the instance row with its outcome, its events and its accepted
+input receipts stay until the parent is terminal. Step-debug events age out
+on their own window as for any run.
 
 ## Durable wait contract
 
@@ -684,10 +715,46 @@ and `RUNTARA_INSTANCE_ID` into every guest environment
 (`runtara-component-host/src/host_state.rs`). Raw `wasi:http` is denied, but a
 typed control service makes the internal URL unnecessary to expose.
 
-Before building `wait`, prototype parallel approvals on existing signals: each
-approval instance signals the parent on completion, and the parent waits on
-each signal in turn. If the self-wake picks up a signal that arrived first,
-this covers the headline use case without new wake machinery.
+### Signals-only parallel approvals (S0.1)
+
+The prototype suggested before building `wait` was: each approval run signals
+the parent when it finishes, and the parent waits on each signal in turn. It
+does not work, because an early signal is refused rather than kept.
+
+Tested on 2026-09-27 on an isolated live server
+([e2e/test_control_signals_only.sh](../e2e/test_control_signals_only.sh)). The
+parent is durable and runs `WaitForSignal finance`, then `WaitForSignal legal`:
+
+1. The parent parks on `finance`. Its only open request is `finance`.
+2. `legal` is answered through `POST /api/runtime/signals/{instanceId}`. The
+   request ID is computed in advance as `sha256` of legal's signal ID, which
+   differs from finance's only by the step ID. The response is `404
+   INPUT_NOT_FOUND`. Using the step ID `legal` as the request ID gives the
+   same result. The parent stays parked on `finance`.
+3. `finance` is answered (200). The parent then parks on `legal` with no
+   answer: the request ID matches the computed one, so the early answer was
+   aimed correctly and was dropped, not held.
+4. `legal` is answered again, with the operation ID of the refused attempt.
+   It is accepted, since a refused submission leaves no receipt. The parent
+   completes with both answers.
+
+What signals alone can and cannot do:
+
+- **Can:** collect several answers when they arrive in the order the parent
+  waits for them, with validation, replay by operation ID, and store-freeing
+  parking while waiting.
+- **Cannot:** accept an answer to a wait that has not opened yet. Core
+  `submit_input` requires the request to be registered, and only the step that
+  is waiting registers one. Nothing buffers a signal for a later step, and no
+  raw signal path remains (`send_custom_signal` has no callers). An approval
+  that finishes early must keep retrying until the parent reaches its step,
+  which needs a retry loop and a way to know when to stop. A parent also cannot
+  wait on "whichever finishes first", or on "all of them" in any order.
+
+This is why `control:wait` exists. It waits on the children's terminal
+states, which are recorded on each child whenever it finishes. A child that
+finished before the parent reached its wait counts at once, so arrival order
+does not matter, and both `all` and `any` can be expressed.
 
 ## Decided
 

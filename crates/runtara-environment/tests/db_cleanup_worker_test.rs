@@ -1164,3 +1164,179 @@ async fn images_held_by_launches_do_not_starve_cleanup() {
         .await
         .unwrap();
 }
+
+/// status, input, output, stderr, run label, parent, checkpoints, custom signals.
+type PrunedRow = (
+    String,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+);
+
+/// Slice 12: after deleting what retention may delete, a pass prunes the
+/// pinned terminal children it had to keep (terminal and past retention by
+/// their own finish, parent still live). Their row and outcome stay; their
+/// checkpoints, custom signals, `input` and `stderr` go. A child of an old,
+/// ended parent is deleted, not pruned; a recent child and a running child
+/// are untouched. The prune pages with the batch-size cursor, and a rerun
+/// prunes nothing.
+#[tokio::test]
+async fn pinned_children_are_pruned_after_deletion_with_a_cursor() {
+    skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
+    const PINNED: usize = 5;
+    let pool = get_test_pool().await.expect("Failed to get test pool");
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let tenant_id = format!("prune-{}", Uuid::new_v4());
+    let parent = format!("{tenant_id}-parent");
+    let ended_parent = format!("{tenant_id}-ended-parent");
+    create_test_instance(&pool, &parent, &tenant_id, "", "running", None).await;
+    create_test_instance(
+        &pool,
+        &ended_parent,
+        &tenant_id,
+        "",
+        "completed",
+        Some(Utc::now() - ChronoDuration::days(35)),
+    )
+    .await;
+    let child = |id: &str, parent: &str, status: &str, finished_days: Option<i64>| {
+        let (pool, tenant_id) = (pool.clone(), tenant_id.clone());
+        let (id, parent, status) = (id.to_owned(), parent.to_owned(), status.to_owned());
+        async move {
+            sqlx::query(
+                "INSERT INTO instances (instance_id, tenant_id, status, created_at, finished_at, \
+                                        parent_instance_id, parent_close_policy, admitted_at, \
+                                        input, output, stderr, run_label) \
+                 VALUES ($1, $2, $3::instance_status, NOW() - INTERVAL '41 days', \
+                         NOW() - make_interval(days => $5::int), $4, 'cancel', \
+                         NOW() - INTERVAL '41 days', 'bulky input'::bytea, \
+                         '{\"answer\":42}'::bytea, 'noisy stderr', 'label')",
+            )
+            .bind(&id)
+            .bind(&tenant_id)
+            .bind(&status)
+            .bind(&parent)
+            .bind(finished_days.map(|d| d as i32))
+            .execute(&pool)
+            .await
+            .expect("seed child");
+            sqlx::query(
+                "INSERT INTO pending_checkpoint_signals (instance_id, checkpoint_id, payload) \
+                 VALUES ($1, 'raw', 'payload'::bytea)",
+            )
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("seed custom signal");
+            create_checkpoint(&pool, &id, "cp-1").await;
+            id
+        }
+    };
+    let mut pinned = Vec::new();
+    for i in 0..PINNED {
+        pinned.push(
+            child(
+                &format!("{tenant_id}-pinned-{i}"),
+                &parent,
+                "completed",
+                Some(40),
+            )
+            .await,
+        );
+    }
+    let released = child(
+        &format!("{tenant_id}-released"),
+        &ended_parent,
+        "failed",
+        Some(39),
+    )
+    .await;
+    let fresh = child(&format!("{tenant_id}-fresh"), &parent, "completed", Some(1)).await;
+    let busy = child(&format!("{tenant_id}-busy"), &parent, "running", None).await;
+
+    let worker = DbCleanupWorker::new(
+        pool.clone(),
+        persistence,
+        DbCleanupWorkerConfig {
+            enabled: true,
+            poll_interval: Duration::from_secs(3600),
+            max_age: Duration::from_secs(30 * 24 * 3600),
+            batch_size: 2,
+            debug_event_max_age: None,
+        },
+    );
+    let stats = worker.run_once().await.expect("retention pass");
+    eprintln!("prune pass: {stats:?}");
+
+    // Deletion first: the child of the old, ended parent is gone, not pruned.
+    assert!(!instance_exists(&pool, &released).await);
+    assert!(stats.deleted >= 1);
+    // The pinned children are still pinned for deletion, and pruned.
+    assert!(stats.pinned_terminal_children >= PINNED as u64);
+    assert!(stats.pruned_children >= PINNED as u64, "{stats:?}");
+    assert!(
+        stats.prune_pages >= PINNED.div_ceil(2) as u64,
+        "a batch size of 2 pages the prune: {stats:?}"
+    );
+    let row = |id: String| {
+        let pool = pool.clone();
+        async move {
+            let row: PrunedRow =
+                sqlx::query_as(
+                    "SELECT status::text, input, output, stderr, run_label, parent_instance_id, \
+                            (SELECT count(*) FROM checkpoints c WHERE c.instance_id = i.instance_id), \
+                            (SELECT count(*) FROM pending_checkpoint_signals s WHERE s.instance_id = i.instance_id) \
+                     FROM instances i WHERE instance_id = $1",
+                )
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+            row
+        }
+    };
+    for id in &pinned {
+        let (status, input, output, stderr, label, parent_id, checkpoints, signals) =
+            row(id.clone()).await;
+        assert_eq!(status, "completed");
+        assert_eq!(
+            output.as_deref(),
+            Some(br#"{"answer":42}"#.as_slice()),
+            "{id}: outcome kept"
+        );
+        assert_eq!(label.as_deref(), Some("label"));
+        assert_eq!(parent_id.as_deref(), Some(parent.as_str()));
+        assert!(
+            input.is_none() && stderr.is_none(),
+            "{id}: input and stderr cleared"
+        );
+        assert_eq!(
+            (checkpoints, signals),
+            (0, 0),
+            "{id}: checkpoints and signals dropped"
+        );
+    }
+    for id in [&fresh, &busy] {
+        let (_, input, _, stderr, _, _, checkpoints, signals) = row(id.clone()).await;
+        assert!(input.is_some() && stderr.is_some(), "{id} is not pruned");
+        assert_eq!((checkpoints, signals), (1, 1), "{id} is not pruned");
+    }
+
+    // A rerun prunes nothing and changes nothing.
+    let again = worker.run_once().await.expect("second pass");
+    assert_eq!(again.pruned_children, 0, "{again:?}");
+    let (status, _, output, ..) = row(pinned[0].clone()).await;
+    assert_eq!(status, "completed");
+    assert!(output.is_some());
+
+    sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

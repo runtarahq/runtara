@@ -262,6 +262,15 @@ pub trait RuntimeHost: Send + Sync {
     fn now_ms(&self) -> Result<u64, String> {
         wall_clock_now_ms()
     }
+
+    /// How the host launched this run, which decides whether a trusted call
+    /// under an earlier approved pin may run (`TrustedExecutor::admits`).
+    /// Host authority, never read from the guest. The default is the
+    /// strictest, `Start`; a host that relaunches parked runs overrides it,
+    /// and a wrapper must delegate.
+    fn trusted_launch(&self) -> crate::trusted::TrustedLaunch {
+        crate::trusted::TrustedLaunch::Start
+    }
 }
 
 /// Milliseconds since the UNIX epoch (the default `now-ms` implementation).

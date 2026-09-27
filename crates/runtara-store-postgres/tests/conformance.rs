@@ -39,6 +39,7 @@ async fn postgres_backend_passes_conformance_sequence() {
     runtara_core::persistence::conformance::run_parent_link_sequence(&backend).await;
     runtara_core::persistence::conformance::run_external_outcome_sequence(&backend).await;
     runtara_core::persistence::conformance::run_retention_pin_sequence(&backend).await;
+    runtara_core::persistence::conformance::run_prune_pinned_sequence(&backend).await;
     runtara_core::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
     runtara_core::persistence::conformance::run_wake_reason_sequence(&backend).await;
 }
