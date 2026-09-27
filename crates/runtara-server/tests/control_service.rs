@@ -543,3 +543,705 @@ async fn identity_calls_need_a_run_and_the_service_binds_late() {
         InstanceStatus::Pending
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mutations: identity, decision D1, receipts, audit
+// ---------------------------------------------------------------------------
+
+use runtara_component_host::control_host::{CancelRequest, CommandOutcome, SendSignalRequest};
+use runtara_server::api::services::control::{Relation, RelationResolver, control_operation_id};
+
+/// Relations a test declares; everything else is `other`, the caller itself.
+#[derive(Default)]
+struct Lineage(std::collections::HashMap<(String, String), Relation>);
+
+#[async_trait::async_trait]
+impl RelationResolver for Lineage {
+    async fn relation(
+        &self,
+        _tenant: &str,
+        caller: &str,
+        target: &str,
+    ) -> Result<Relation, runtara_component_host::control_host::ControlError> {
+        Ok(if caller == target {
+            Relation::SelfCall
+        } else {
+            self.0
+                .get(&(caller.to_owned(), target.to_owned()))
+                .copied()
+                .unwrap_or(Relation::Other)
+        })
+    }
+}
+
+fn scoped(tenant: &str, caller: &str, operation: &str) -> ControlAuthority {
+    ControlAuthority {
+        tenant: tenant.into(),
+        caller: Some(caller.into()),
+        operation: Some(format!("{:0>64}", operation)),
+    }
+}
+
+fn signal(instance: &str, step: &str, key: Option<&str>, payload: Value) -> SendSignalRequest {
+    SendSignalRequest {
+        instance_id: instance.into(),
+        signal_id: step.into(),
+        action_key: key.map(str::to_owned),
+        request_id: None,
+        payload: serde_json::to_vec(&payload).unwrap(),
+    }
+}
+
+impl Fixture {
+    /// `self.control` with `relations` and, when given, an audit database.
+    fn control_with(&self, relations: Lineage, audit: Option<sqlx::PgPool>) -> NativeControl {
+        let mut control =
+            NativeControl::new(Some(self.tenant.clone())).with_relations(Arc::new(relations));
+        if let Some(pool) = audit {
+            control = control.with_audit(pool);
+        }
+        control.install(Arc::new(RuntimeClient::new(
+            Arc::new(EnvironmentHandlerState::new(
+                self.pool.clone(),
+                self.persistence.clone(),
+                Arc::new(MockRunner::new()),
+                std::env::temp_dir(),
+            )),
+            RuntimeClientConfig::new(Default::default()),
+        )));
+        control
+    }
+
+    async fn park(&self, id: &str) {
+        self.persistence
+            .update_instance_status(id, Core::Suspended, None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE instances SET termination_reason = 'sleeping', sleep_until = NOW() + INTERVAL '1 hour', wake_reason = 'timer' WHERE instance_id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn request_state(&self, id: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT state, operation_id FROM instance_input_requests WHERE instance_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn mutations_need_a_run_then_an_operation_scope() {
+    let fx = Fixture::new().await;
+    let caller = fx.run("caller", &fx.tenant).await;
+    let child = fx.run("child", &fx.tenant).await;
+    let unscoped = [
+        authority(&fx.tenant, None),
+        ControlAuthority {
+            operation: Some("a".repeat(64)),
+            ..authority(&fx.tenant, None)
+        },
+    ];
+    for me in &unscoped {
+        assert_eq!(
+            fx.control.pause(me, child.clone()).await.unwrap_err().code,
+            ControlErrorCode::RequiresInstance
+        );
+    }
+    let no_operation = authority(&fx.tenant, Some(&caller));
+    for code in [
+        fx.control
+            .send_signal(&no_operation, signal(&child, "approve", None, json!({})))
+            .await
+            .unwrap_err()
+            .code,
+        fx.control
+            .cancel(
+                &no_operation,
+                CancelRequest {
+                    instance_id: child.clone(),
+                    reason: None,
+                    grace_ms: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .code,
+        fx.control
+            .pause(&no_operation, child.clone())
+            .await
+            .unwrap_err()
+            .code,
+        fx.control
+            .resume(&no_operation, child.clone())
+            .await
+            .unwrap_err()
+            .code,
+    ] {
+        assert_eq!(code, ControlErrorCode::RequiresOperation);
+    }
+}
+
+/// Decision D1 for the lifecycle commands, and their outcomes on a child:
+/// a waiting child pauses at once (D4), a paused child resumes, a parked
+/// child cancels at once; each replay of an operation answers from its
+/// receipt and changed arguments conflict.
+#[tokio::test]
+async fn lifecycle_commands_reach_children_only_and_replay_from_receipts() {
+    let fx = Fixture::new().await;
+    let caller = fx.run("caller", &fx.tenant).await;
+    let child = fx.run("child", &fx.tenant).await;
+    let stranger = fx.run("stranger", &fx.tenant).await;
+    let parent = fx.run("parent", &fx.tenant).await;
+    let mut lineage = Lineage::default();
+    lineage
+        .0
+        .insert((caller.clone(), child.clone()), Relation::Child);
+    lineage
+        .0
+        .insert((caller.clone(), parent.clone()), Relation::Ancestor);
+    let control = fx.control_with(lineage, None);
+
+    // Until slice 7 the real service relates every other run as `other`.
+    for (target, code) in [
+        (child.clone(), ControlErrorCode::NotChild),
+        (caller.clone(), ControlErrorCode::Invalid),
+    ] {
+        assert_eq!(
+            fx.control
+                .pause(&scoped(&fx.tenant, &caller, "1"), target)
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+    }
+    for (target, code) in [
+        (stranger.clone(), ControlErrorCode::NotChild),
+        (parent.clone(), ControlErrorCode::Denied),
+        (caller.clone(), ControlErrorCode::Invalid),
+    ] {
+        assert_eq!(
+            control
+                .resume(&scoped(&fx.tenant, &caller, "2"), target)
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+    }
+
+    // Pause a waiting child: immediate (D4).
+    fx.park(&child).await;
+    let paused = control
+        .pause(&scoped(&fx.tenant, &caller, "3"), child.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (paused.outcome, paused.replayed),
+        (CommandOutcome::Applied, false)
+    );
+    let detail = control
+        .get(&authority(&fx.tenant, None), child.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.instance.suspension_reason,
+        Some(SuspensionReason::Paused)
+    );
+    // The same operation replays from its receipt; another target conflicts.
+    let replay = control
+        .pause(&scoped(&fx.tenant, &caller, "3"), child.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (replay.outcome, replay.replayed),
+        (CommandOutcome::Applied, true)
+    );
+    let stranger_child = fx.run("other-child", &fx.tenant).await;
+    let mut lineage = Lineage::default();
+    lineage
+        .0
+        .insert((caller.clone(), child.clone()), Relation::Child);
+    lineage
+        .0
+        .insert((caller.clone(), stranger_child.clone()), Relation::Child);
+    let control = fx.control_with(lineage, None);
+    assert_eq!(
+        control
+            .pause(&scoped(&fx.tenant, &caller, "3"), stranger_child.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::ReplayConflict
+    );
+    assert_eq!(
+        control
+            .pause(&scoped(&fx.tenant, &caller, "4"), child.clone())
+            .await
+            .unwrap()
+            .outcome,
+        CommandOutcome::Unchanged
+    );
+
+    // Resume: only an explicitly paused child relaunches.
+    fx.park(&stranger_child).await;
+    assert_eq!(
+        control
+            .resume(&scoped(&fx.tenant, &caller, "5"), stranger_child.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::NotPaused,
+        "a waiting child is not resumed early"
+    );
+    let resumed = control
+        .resume(&scoped(&fx.tenant, &caller, "6"), child.clone())
+        .await
+        .unwrap();
+    assert_eq!(resumed.outcome, CommandOutcome::Applied);
+    let kind: String = sqlx::query_scalar(
+        "SELECT kind FROM instance_launches WHERE instance_id = $1 AND state = 'queued'",
+    )
+    .bind(&child)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(kind, "resume");
+
+    // Cancel a parked child with a reason: it ends at once and the command
+    // carries the reason; a finished child is already terminal.
+    let invalid = control
+        .cancel(
+            &scoped(&fx.tenant, &caller, "7"),
+            CancelRequest {
+                instance_id: stranger_child.clone(),
+                reason: None,
+                grace_ms: Some(3_600_001),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code, ControlErrorCode::Invalid);
+    let cancelled = control
+        .cancel(
+            &scoped(&fx.tenant, &caller, "8"),
+            CancelRequest {
+                instance_id: stranger_child.clone(),
+                reason: Some("approval withdrawn".into()),
+                grace_ms: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancelled.outcome, CommandOutcome::Applied);
+    let (status, payload): (String, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT i.status::text, s.payload FROM instances i JOIN pending_signals s USING (instance_id) WHERE i.instance_id = $1",
+    )
+    .bind(&stranger_child)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "cancelled");
+    assert_eq!(payload.as_deref(), Some(b"approval withdrawn".as_slice()));
+    let again = control
+        .cancel(
+            &scoped(&fx.tenant, &caller, "9"),
+            CancelRequest {
+                instance_id: stranger_child.clone(),
+                reason: None,
+                grace_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.outcome, CommandOutcome::AlreadyTerminal);
+    // A terminal child cannot pause; the failed attempt leaves no receipt.
+    assert_eq!(
+        control
+            .pause(&scoped(&fx.tenant, &caller, "10"), stranger_child.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::NotPausable
+    );
+    let receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instance_control_receipts WHERE caller_instance_id = $1 AND state = 'pending'",
+    )
+    .bind(&caller)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(receipts, 0, "receipts are success-only");
+}
+
+/// `send-signal` answers the one open request of a step, opted in with
+/// `action.key` outside the lineage, once per operation: a replay returns the
+/// same request, changed arguments conflict, and a crash between the answer
+/// and its receipt re-applies without answering twice.
+#[tokio::test]
+async fn send_signal_answers_once_per_operation() {
+    let fx = Fixture::new().await;
+    let caller = fx.run("caller", &fx.tenant).await;
+    let target = fx.run("approver", &fx.tenant).await;
+    fx.wait_for_signal(
+        &target,
+        "approve",
+        Some("finance"),
+        json!({"approved": {"type": "boolean", "required": true}}),
+    )
+    .await;
+    let control = fx.control_with(Lineage::default(), None);
+    let me = scoped(&fx.tenant, &caller, "1");
+
+    for (request, code) in [
+        (
+            signal(&target, "approve", None, json!({"approved": true})),
+            ControlErrorCode::Denied,
+        ),
+        (
+            signal(&target, "approve", Some("legal"), json!({"approved": true})),
+            ControlErrorCode::NotWaiting,
+        ),
+        (
+            signal(
+                &target,
+                "reject",
+                Some("finance"),
+                json!({"approved": true}),
+            ),
+            ControlErrorCode::NotWaiting,
+        ),
+        (
+            signal(
+                &caller,
+                "approve",
+                Some("finance"),
+                json!({"approved": true}),
+            ),
+            ControlErrorCode::Invalid,
+        ),
+        (
+            signal(
+                &target,
+                "approve",
+                Some("finance"),
+                json!({"approved": "yes"}),
+            ),
+            ControlErrorCode::Invalid,
+        ),
+    ] {
+        assert_eq!(
+            control.send_signal(&me, request).await.unwrap_err().code,
+            code
+        );
+    }
+    assert_eq!(fx.request_state(&target).await.0, "open");
+
+    let sent = control
+        .send_signal(
+            &me,
+            signal(
+                &target,
+                "approve",
+                Some("finance"),
+                json!({"approved": true}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!sent.replayed);
+    let (state, operation) = fx.request_state(&target).await;
+    assert_eq!(state, "accepted");
+    assert_eq!(
+        operation.as_deref(),
+        Some(control_operation_id(&caller, me.operation.as_deref().unwrap()).as_str())
+    );
+
+    let replay = control
+        .send_signal(
+            &me,
+            signal(
+                &target,
+                "approve",
+                Some("finance"),
+                json!({"approved": true}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (replay.request_id.as_str(), replay.replayed),
+        (sent.request_id.as_str(), true)
+    );
+    assert_eq!(
+        control
+            .send_signal(
+                &me,
+                signal(
+                    &target,
+                    "approve",
+                    Some("finance"),
+                    json!({"approved": false})
+                ),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::ReplayConflict
+    );
+    // Another operation finds nothing open.
+    assert_eq!(
+        control
+            .send_signal(
+                &scoped(&fx.tenant, &caller, "2"),
+                signal(
+                    &target,
+                    "approve",
+                    Some("finance"),
+                    json!({"approved": true})
+                ),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::NotWaiting
+    );
+
+    // A crash after the answer but before its receipt completed.
+    sqlx::query("UPDATE instance_control_receipts SET state = 'pending', result = NULL, completed_at = NULL WHERE caller_instance_id = $1")
+        .bind(&caller)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let reapplied = control
+        .send_signal(
+            &me,
+            signal(
+                &target,
+                "approve",
+                Some("finance"),
+                json!({"approved": true}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (reapplied.request_id.as_str(), reapplied.replayed),
+        (sent.request_id.as_str(), true),
+        "the re-application finds its own answer instead of answering again"
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM instance_control_receipts WHERE caller_instance_id = $1",
+    )
+    .bind(&caller)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "completed");
+
+    // Several open requests of one step are ambiguous without a request id.
+    let looped = fx.run("looped", &fx.tenant).await;
+    for iteration in ["a", "b"] {
+        fx.persistence
+            .update_instance_status(&looped, Core::Running, None)
+            .await
+            .unwrap();
+        fx.persistence
+            .input_requests()
+            .unwrap()
+            .register_input(
+                &InputAuthority::Root {
+                    tenant_id: fx.tenant.clone(),
+                    instance_id: looped.clone(),
+                },
+                &InputRequestSpec {
+                    signal_id: format!("{looped}/loop/{iteration}/approve"),
+                    response_schema: None,
+                    metadata: json!({"step_id": "approve", "action_key": "finance"}),
+                    deadline: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let ambiguous = signal(&looped, "approve", Some("finance"), json!({}));
+    assert_eq!(
+        control
+            .send_signal(&scoped(&fx.tenant, &caller, "3"), ambiguous)
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::Ambiguous
+    );
+    let first = fx
+        .control
+        .list_pending_signals(
+            &authority(&fx.tenant, None),
+            signals(SignalScope::Instance(looped.clone()), 10),
+        )
+        .await
+        .unwrap()
+        .items
+        .remove(0);
+    let mut picked = signal(&looped, "approve", Some("finance"), json!({}));
+    picked.request_id = Some(first.request_id.clone());
+    assert_eq!(
+        control
+            .send_signal(&scoped(&fx.tenant, &caller, "4"), picked)
+            .await
+            .unwrap()
+            .request_id,
+        first.request_id
+    );
+}
+
+/// Public submission paths refuse control's reserved `control:` space.
+#[tokio::test]
+async fn public_submissions_refuse_the_control_prefix() {
+    let fx = Fixture::new().await;
+    let target = fx.run("approver", &fx.tenant).await;
+    fx.wait_for_signal(&target, "approve", None, json!({}))
+        .await;
+    let runtime = RuntimeClient::new(
+        Arc::new(EnvironmentHandlerState::new(
+            fx.pool.clone(),
+            fx.persistence.clone(),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )),
+        RuntimeClientConfig::new(Default::default()),
+    );
+    let request = runtara_core::persistence::inputs::request_id(&format!("{target}/root/approve"));
+    assert_eq!(
+        runtime
+            .submit_input_response(&fx.tenant, &target, &request, "control:forged", &json!({}),)
+            .await
+            .unwrap_err(),
+        runtara_core::persistence::inputs::InputError::InvalidRequest
+    );
+    assert_eq!(fx.request_state(&target).await.0, "open");
+    runtime
+        .submit_input_response(&fx.tenant, &target, &request, "ui-1", &json!({}))
+        .await
+        .unwrap();
+}
+
+/// The public API's pause and resume: a waiting run pauses at once (D4), and
+/// failed or cancelled runs are not resumable.
+#[tokio::test]
+async fn public_pause_is_immediate_for_waiting_runs_and_resume_refuses_terminal_runs() {
+    use runtara_server::workers::execution_engine::{
+        CommandEffect, PauseOutcome, ResumeOutcome, pause_for, resume_for,
+    };
+    let fx = Fixture::new().await;
+    let runtime = RuntimeClient::new(
+        Arc::new(EnvironmentHandlerState::new(
+            fx.pool.clone(),
+            fx.persistence.clone(),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )),
+        RuntimeClientConfig::new(Default::default()),
+    );
+    let waiting = fx.run("waiting", &fx.tenant).await;
+    fx.wait_for_signal(&waiting, "approve", None, json!({}))
+        .await;
+    assert!(matches!(
+        pause_for(&runtime, &fx.tenant, &waiting).await.unwrap(),
+        PauseOutcome::Paused {
+            effect: CommandEffect::Applied,
+            ..
+        }
+    ));
+    assert!(matches!(
+        pause_for(&runtime, &fx.tenant, &waiting).await.unwrap(),
+        PauseOutcome::AlreadyPaused
+    ));
+    // The public resume relaunches any suspended run.
+    assert!(matches!(
+        resume_for(&runtime, &fx.tenant, &waiting, false)
+            .await
+            .unwrap(),
+        ResumeOutcome::Resumed { .. }
+    ));
+    for status in [Core::Failed, Core::Cancelled] {
+        let done = fx.run(&format!("{status:?}"), &fx.tenant).await;
+        fx.complete(&done, status, None, None).await;
+        assert!(matches!(
+            resume_for(&runtime, &fx.tenant, &done, false)
+                .await
+                .unwrap(),
+            ResumeOutcome::NotResumable { .. }
+        ));
+    }
+    // Another tenant's run is not found.
+    let foreign = fx.run("foreign", "another-tenant").await;
+    assert!(pause_for(&runtime, &fx.tenant, &foreign).await.is_err());
+}
+
+/// Every mutation attempt is audited, successes and refusals alike, without
+/// the signal payload.
+#[tokio::test]
+async fn mutations_are_audited_without_payloads() {
+    static SERVER_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+    let fx = Fixture::new().await;
+    let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
+        .expect("the audit test needs TEST_RUNTARA_SERVER_DATABASE_URL");
+    let audit = sqlx::PgPool::connect(&url).await.unwrap();
+    SERVER_MIGRATOR.run(&audit).await.unwrap();
+    let caller = fx.run("caller", &fx.tenant).await;
+    let target = fx.run("approver", &fx.tenant).await;
+    fx.wait_for_signal(&target, "approve", Some("finance"), json!({}))
+        .await;
+    let control = fx.control_with(Lineage::default(), Some(audit.clone()));
+    control
+        .send_signal(
+            &scoped(&fx.tenant, &caller, "1"),
+            signal(
+                &target,
+                "approve",
+                Some("finance"),
+                json!({"secret": "s3cr3t"}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        control
+            .cancel(
+                &scoped(&fx.tenant, &caller, "2"),
+                CancelRequest {
+                    instance_id: target.clone(),
+                    reason: None,
+                    grace_ms: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::NotChild
+    );
+    let rows: Vec<(String, Option<String>, Value)> = sqlx::query_as(
+        "SELECT event_type, resource_id, payload FROM audit_events WHERE tenant_id = $1 ORDER BY created_at",
+    )
+    .bind(&fx.tenant)
+    .fetch_all(&audit)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].0, "control.send_signal");
+    assert_eq!(rows[0].1.as_deref(), Some(target.as_str()));
+    assert_eq!(rows[0].2["callerInstanceId"], caller);
+    assert_eq!(rows[0].2["outcome"], "accepted");
+    assert_eq!(rows[1].0, "control.cancel");
+    assert_eq!(rows[1].2["error"], "not-child");
+    for (_, _, payload) in &rows {
+        assert!(!payload.to_string().contains("s3cr3t"), "{payload}");
+    }
+}

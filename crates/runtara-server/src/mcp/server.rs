@@ -269,7 +269,9 @@ impl SmoMcpServer {
         tools::executions::get_step_summaries(self, params.0).await
     }
 
-    #[tool(description = "Stop a running execution instance.")]
+    #[tool(
+        description = "Stop a running execution instance. data.outcome is applied (a waiting or queued run ended at once), requested (a running run stops at its next checkpoint, forced after 5 s) or already_terminal."
+    )]
     async fn stop_execution(
         &self,
         params: Parameters<tools::executions::StopExecutionParams>,
@@ -277,7 +279,9 @@ impl SmoMcpServer {
         tools::executions::stop_execution(self, params.0).await
     }
 
-    #[tool(description = "Pause a running execution instance. The execution can be resumed later.")]
+    #[tool(
+        description = "Pause an execution instance. A waiting run (parked on a timer, a signal or a restart) pauses immediately (data.outcome applied) and no timer or signal resumes it until resume_execution; a running run pauses at its next checkpoint (requested). The execution can be resumed later."
+    )]
     async fn pause_execution(
         &self,
         params: Parameters<tools::executions::PauseExecutionParams>,
@@ -285,7 +289,9 @@ impl SmoMcpServer {
         tools::executions::pause_execution(self, params.0).await
     }
 
-    #[tool(description = "Resume a paused execution instance.")]
+    #[tool(
+        description = "Resume a paused (suspended) execution instance. Failed, cancelled and completed runs are not resumable (400 Instance not resumable); replay them instead."
+    )]
     async fn resume_execution(
         &self,
         params: Parameters<tools::executions::ResumeExecutionParams>,
@@ -1235,7 +1241,7 @@ impl ServerHandler for SmoMcpServer {
                 **Edge fields**: Use `fromStep` and `toStep` (not `fromStepId`/`toStepId`) in executionPlan edges.\n\
                 **Conditional routing**: Put the predicate in the Conditional step's `condition` field, then connect outgoing edges with labels `\"true\"` and `\"false\"`. Do not put `condition` on edges from a Conditional step, and do not route those edges via `steps.<conditionalId>.outputs.result`; that boolean is for inspection/later mappings only.\n\
                 **Agent steps**: Must have `agentId` and `capabilityId` (not `agent`/`capability`). Use get_agent to discover IDs. capabilityId uses the hyphenated `id` (e.g., 'http-request'), NOT the underscored `name`.\n\
-                **Control agent** (`agentId: \"control\"`, every tier): `get` reads one run of this tenant (output inlined up to 1 MiB, error up to 64 KiB, else `outputOmitted`/`errorOmitted` with `outputBytes`); `query` pages runs by `createdAtMs`/`finishedAtMs` (`pageSize` 1-100, pass `nextPageToken` back as `pageToken`); `list-pending-signals` lists open WaitForSignal requests of one `instanceId` or `workflowId` (`signalId` is the waiting step's id). Failures carry `CONTROL_*` codes (`CONTROL_NOT_FOUND`, `CONTROL_INVALID`, `CONTROL_REQUIRES_INSTANCE`, retryable `CONTROL_UNAVAILABLE`). `test_capability` runs reads tenant-wide; caller-relative filters (`callerChildren`, `children`) need a real run and answer `CONTROL_REQUIRES_INSTANCE` there. Control steps run at the top level, in branch arms, sequential loops and embeds (parallel windows serialize them), never as AI-agent tools or in WaitForSignal `onWait`.\n\
+                **Control agent** (`agentId: \"control\"`, every tier): `get` reads one run of this tenant (output inlined up to 1 MiB, error up to 64 KiB, else `outputOmitted`/`errorOmitted` with `outputBytes`); `query` pages runs by `createdAtMs`/`finishedAtMs` (`pageSize` 1-100, pass `nextPageToken` back as `pageToken`); `list-pending-signals` lists open WaitForSignal requests of one `instanceId` or `workflowId` (`signalId` is the waiting step's id). Mutations run only inside a workflow run (`test_capability` answers `CONTROL_REQUIRES_INSTANCE`) and are replay-safe per step: a retried or replayed step never applies twice (`replayed: true`), and different arguments on replay are `CONTROL_REPLAY_CONFLICT`. `send-signal` answers the one open request of a WaitForSignal step (`instanceId`, `signalId`, optional `requestId`, `payload` validated against the response schema; `CONTROL_NOT_WAITING`, `CONTROL_AMBIGUOUS`, `CONTROL_ALREADY_ANSWERED`) of a child, an ancestor, or any run whose request opted in with `action.key` when the step passes the same `actionKey` (else `CONTROL_DENIED`). `cancel` (`reason`, `graceMs` 0-3600000, default 5000), `pause` and `resume` reach direct children only (`CONTROL_NOT_CHILD`; an ancestor is `CONTROL_DENIED`); no mutation may target the calling run (`CONTROL_INVALID`). Their `outcome` is `requested`, `applied` (a waiting child pauses immediately), `unchanged` or `already_terminal`; `resume` relaunches only an explicitly paused child (`CONTROL_NOT_PAUSED`). The parent link arrives with `start`; until then only the `action.key` opt-in reaches another run. Failures carry `CONTROL_*` codes (`CONTROL_NOT_FOUND`, `CONTROL_INVALID`, `CONTROL_REQUIRES_INSTANCE`, retryable `CONTROL_UNAVAILABLE`). `test_capability` runs reads tenant-wide; caller-relative filters (`callerChildren`, `children`) need a real run and answer `CONTROL_REQUIRES_INSTANCE` there. Control steps run at the top level, in branch arms, sequential loops and embeds (parallel windows serialize them), never as AI-agent tools or in WaitForSignal `onWait`.\n\
                 **Step types**: Finish, Agent, Conditional, Split, Switch, EmbedWorkflow, While, Log, Connection, Error, Filter, GroupBy, Delay, WaitForSignal (no Start type).\n\
                 **Error step authoring**: Error does NOT accept `inputMapping`. Author static `code`, `message`, `category`, and `severity` directly on the step; `message` is a literal string with no reference/template interpolation. Put dynamic mappings in `context`, for example `{\"id\":\"fail\",\"stepType\":\"Error\",\"code\":\"PREP_FAILED\",\"message\":\"Preparation failed after cleanup\",\"category\":\"permanent\",\"context\":{\"original_error\":{\"valueType\":\"reference\",\"value\":\"steps.__error\"}}}`. This emits a new static error envelope and preserves the captured error as context/attributes; it is not a literal rethrow.\n\
                 **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. The captured error is exposed to mapping-capable fields (such as Agent/Finish `inputMapping` and Error/Log `context`) and edge conditions at `steps.__error.*` (alias `steps.error.*`); the bare `__error.*` root also resolves for back-compat but is not typo-checked. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `steps.__error.code`, `steps.__error.message`, `steps.__error.category`, `steps.__error.severity`, `steps.__error.attributes`, and `steps.__error.stepId`; referencing `steps.__error` preserves the full envelope. The envelope survives successful handler steps, but a later handled failure replaces it, so persist/snapshot the original before cleanup if it must survive cleanup failures. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\

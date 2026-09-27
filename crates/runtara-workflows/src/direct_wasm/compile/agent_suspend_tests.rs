@@ -14,8 +14,9 @@ use super::*;
 use runtara_component_host::InvokeRunResult;
 use runtara_component_host::control_executor::ControlExecutor;
 use runtara_component_host::control_host::{
-    ControlAuthority, ControlError, ControlHost, InstanceStatus, TargetOutcome, TerminalResult,
-    WaitMode, WaitPoll, WaitProgress, WaitRequest, WaitResolution, WaitSettled,
+    CancelRequest, CommandOutcome, CommandResult, ControlAuthority, ControlError, ControlErrorCode,
+    ControlHost, InstanceStatus, TargetOutcome, TerminalResult, WaitMode, WaitPoll, WaitProgress,
+    WaitRequest, WaitResolution, WaitSettled,
 };
 use runtara_component_host::lifecycle::WorkflowWake;
 // This test module is itself named `agent_suspend`; name the emitter module.
@@ -474,15 +475,55 @@ async fn each_site_binds_its_interface_and_a_relaunch_delivers_the_continuation(
     Ok(())
 }
 
-/// A control service whose one wait settles on its second poll.
+/// A control service whose one wait settles on its second poll, and whose
+/// `cancel` records the operation each call ran under (the first call on
+/// target `flaky` fails retryably).
 #[derive(Default)]
 struct FakeControl {
     registrations: Mutex<Vec<(ControlAuthority, WaitRequest)>>,
     polls: Mutex<Vec<(ControlAuthority, String)>>,
+    cancels: Mutex<Vec<(Option<String>, String)>>,
+}
+
+impl FakeControl {
+    /// The operations `cancel` saw for `target`, in call order.
+    fn operations(&self, target: &str) -> Vec<String> {
+        self.cancels
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, id)| id == target)
+            .map(|(operation, _)| operation.clone().expect("every control call is scoped"))
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
 impl ControlHost for FakeControl {
+    async fn cancel(
+        &self,
+        authority: &ControlAuthority,
+        request: CancelRequest,
+    ) -> Result<CommandResult, ControlError> {
+        let first_flaky = {
+            let mut cancels = self.cancels.lock().unwrap();
+            cancels.push((authority.operation.clone(), request.instance_id.clone()));
+            request.instance_id == "flaky"
+                && cancels.iter().filter(|(_, id)| id == "flaky").count() == 1
+        };
+        if first_flaky {
+            return Err(ControlError::new(
+                ControlErrorCode::Unavailable,
+                "transient",
+            ));
+        }
+        Ok(CommandResult {
+            instance_id: request.instance_id,
+            outcome: CommandOutcome::Applied,
+            replayed: false,
+        })
+    }
+
     async fn wait(
         &self,
         authority: &ControlAuthority,
@@ -608,6 +649,150 @@ async fn the_composed_control_copy_forwards_to_the_host_executor() -> anyhow::Re
     assert!(polls.iter().all(|(authority, id)| id == "wait-1"
         && authority.operation.as_deref() == Some(op_hash.as_str())));
     assert!(host.continuations.lock().unwrap().is_empty());
+    Ok(())
+}
+
+fn cancel_step(id: &str, target: &str, retries: u32) -> Value {
+    json!({"id": id, "stepType": "Agent", "agentId": "control", "capabilityId": "cancel",
+        "maxRetries": retries, "retryDelay": 0, "timeout": STEP_TIMEOUT_MS,
+        "inputMapping": {"instanceId": {"valueType": "immediate", "value": target},
+            "graceMs": {"valueType": "immediate", "value": 0}}})
+}
+
+/// One step, then Finish.
+fn single_step(step: Value) -> Value {
+    let id = step["id"].as_str().unwrap().to_owned();
+    json!({"entryPoint": id, "steps": {id.clone(): step,
+        "finish": {"id": "finish", "stepType": "Finish"}},
+        "executionPlan": [{"fromStep": id, "toStep": "finish"}]})
+}
+
+/// The operation identity of a control step, emitted by the compiler even
+/// when the step is not durable: each Split iteration and each embedding is
+/// its own operation, and every retry attempt of one step keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn operation_keys_are_distinct_per_iteration_and_embed_and_stable_on_retry()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let embed = |id: &str| {
+        json!({"id": id, "stepType": "EmbedWorkflow", "childWorkflowId": "child",
+            "childVersion": "latest"})
+    };
+    let graph = json!({"durable": false, "entryPoint": "each", "steps": {
+        "each": {"id": "each", "stepType": "Split",
+            "config": {"value": {"valueType": "immediate", "value": [1, 2]}},
+            "subgraph": single_step(cancel_step("stop", "loop-child", 0))},
+        "flaky": cancel_step("flaky", "flaky", 2),
+        "embed-a": embed("embed-a"),
+        "embed-b": embed("embed-b"),
+        "finish": {"id": "finish", "stepType": "Finish"}},
+        "executionPlan": [{"fromStep": "each", "toStep": "flaky"},
+            {"fromStep": "flaky", "toStep": "embed-a"},
+            {"fromStep": "embed-a", "toStep": "embed-b"},
+            {"fromStep": "embed-b", "toStep": "finish"}]});
+    let child = |step: &str| crate::ChildWorkflowInput {
+        step_id: step.into(),
+        workflow_id: "child".into(),
+        version_requested: "latest".into(),
+        version_resolved: 1,
+        execution_graph: serde_json::from_value(single_step(cancel_step(
+            "stop",
+            "embedded-child",
+            0,
+        )))
+        .expect("child graph"),
+    };
+    let mut compiled = crate::direct_wasm::compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "operations".into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: serde_json::from_value(graph)?,
+        child_workflows: vec![child("embed-a"), child("embed-b")],
+        output_dir: dir.path().into(),
+        track_events: false,
+        agent_catalog: Some(Arc::new(
+            runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![control_info()?]),
+        )),
+        agent_slug: None,
+    })?;
+    compose_direct_workflow_with_extra_dirs(
+        &mut compiled,
+        components_dir().to_str().expect("utf-8 components dir"),
+        &[],
+    )?;
+    let fake = Arc::new(FakeControl::default());
+    let run = launch(
+        &compiled,
+        Arc::new(Host::new()),
+        Some(control_executor(fake.clone())?),
+    )
+    .await?;
+    assert!(
+        matches!(run.exit, InvokeExit::Completed(_)),
+        "{:?}",
+        run.exit
+    );
+
+    let iterations = fake.operations("loop-child");
+    let retries = fake.operations("flaky");
+    let embeds = fake.operations("embedded-child");
+    assert_eq!(iterations.len(), 2, "{iterations:?}");
+    assert_ne!(
+        iterations[0], iterations[1],
+        "each iteration is its own operation"
+    );
+    assert_eq!(
+        retries.len(),
+        2,
+        "one failed attempt, one retry: {retries:?}"
+    );
+    assert_eq!(retries[0], retries[1], "a retry is the same operation");
+    assert_eq!(embeds.len(), 2, "{embeds:?}");
+    assert_ne!(embeds[0], embeds[1], "each embedding is its own operation");
+    let all: std::collections::BTreeSet<_> =
+        iterations.iter().chain(&retries).chain(&embeds).collect();
+    assert_eq!(all.len(), 5);
+    assert!(all.iter().all(|op| op.len() == 64));
+    Ok(())
+}
+
+/// A durable control step whose result checkpoint fails replays under the
+/// same operation, so the service can answer the replay from its receipt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fault_replay_reuses_the_operation_key() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut graph = single_step(cancel_step("stop", "child-1", 0));
+    graph["durable"] = json!(true);
+    let compiled = compile_graph(dir.path(), graph, vec![control_info()?], &[])?;
+    let fake = Arc::new(FakeControl::default());
+    let host = Arc::new(Host::new());
+    // The lookup probe is a checkpoint write too; fail only the result save.
+    *host.checkpoint_fault.lock().unwrap() = Some(CheckpointFault {
+        pattern: "stop".into(),
+        write: true,
+        skip: 1,
+        remaining: 1,
+    });
+    let first = launch(
+        &compiled,
+        host.clone(),
+        Some(control_executor(fake.clone())?),
+    )
+    .await?;
+    assert!(
+        !matches!(first.exit, InvokeExit::Completed(_)),
+        "the lost result checkpoint fails the run: {:?}",
+        first.exit
+    );
+    let second = launch(&compiled, host, Some(control_executor(fake.clone())?)).await?;
+    assert!(
+        matches!(second.exit, InvokeExit::Completed(_)),
+        "{:?}",
+        second.exit
+    );
+    let operations = fake.operations("child-1");
+    assert_eq!(operations.len(), 2, "{operations:?}");
+    assert_eq!(operations[0], operations[1]);
     Ok(())
 }
 

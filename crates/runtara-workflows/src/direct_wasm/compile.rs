@@ -1106,6 +1106,7 @@ pub fn compile_direct_workflow_composed_configured(
         result.component_artifacts.has_connections,
         &Default::default(),
         &result.component_artifacts.suspending_agents.clone(),
+        result.component_artifacts.operation_scope,
         result.component_artifacts.has_timers,
         result.component_artifacts.needs_monotonic_clock,
     );
@@ -1445,6 +1446,7 @@ fn compile_direct_workflow_inner(
         has_connections,
         &scoped_agents,
         &manifest.suspending_agent_ids(),
+        manifest.has_operation_scoped_sites(),
         super::plan::needs_cooperative_timers(&manifest),
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
     );
@@ -1641,6 +1643,7 @@ fn emit_direct_component(
         has_connections,
         scoped_agents,
         &manifest.suspending_agent_ids(),
+        manifest.has_operation_scoped_sites(),
         super::plan::needs_cooperative_timers(manifest),
         core_config.static_data.needs_monotonic_clock(),
     )?;
@@ -1704,6 +1707,7 @@ fn build_direct_component_resolve_configured(
         has_connections,
         &Default::default(),
         &Default::default(),
+        false,
         // Structural tests use a superset world; production derives this from
         // the actual manifest, including Agent-free composite retry waits.
         !omit_runtime,
@@ -1721,9 +1725,12 @@ fn build_direct_component_resolve_scoped(
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
     suspending_agents: &std::collections::BTreeSet<String>,
+    operation_scope: bool,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
+    // Control sites need the scope without any suspending agent.
+    let operation_scope = operation_scope || !suspending_agents.is_empty();
     let mut resolve = Resolve::default();
     if needs_monotonic_clock {
         resolve
@@ -1791,7 +1798,7 @@ fn build_direct_component_resolve_scoped(
                 .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
                 .map_err(component_error)?;
         }
-        if !suspending_agents.is_empty() {
+        if operation_scope {
             // The suspension types, then the operation scope that `use`s them.
             resolve
                 .push_str(
@@ -1854,7 +1861,7 @@ fn build_direct_component_resolve_scoped(
             runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
         ));
     }
-    if !suspending_agents.is_empty() {
+    if operation_scope {
         workflow_wit.push_str(&format!(
             "    import {};\n",
             runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME

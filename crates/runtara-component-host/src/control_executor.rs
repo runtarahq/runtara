@@ -439,7 +439,7 @@ pub(crate) fn add_control_executor_to_linker(
                     state.control_executor.clone().map(|call| {
                         (
                             call,
-                            operation.as_ref().map(|op| op.op_hash.clone()),
+                            operation.as_ref().map(|op| op.identity.op_hash.clone()),
                             operation.and_then(|op| op.continuation),
                             deadline,
                         )

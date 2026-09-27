@@ -1483,6 +1483,252 @@ pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
     );
 }
 
+/// Decision D4: a pending pause of a parked instance applies at once. The run
+/// stays suspended with no suspension reason and no wake, so a waiting timer
+/// cannot relaunch it; a running guest keeps its command.
+pub async fn run_parked_pause_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus as Status, SignalType as Kind};
+    let id = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "pause-contract")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, Status::Running, None)
+        .await
+        .unwrap();
+    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
+    assert!(
+        backend
+            .pause_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a running guest pauses at its next checkpoint"
+    );
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_some());
+    // The guest parks on a timer before it read the pause.
+    backend
+        .update_instance_status(&id, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend
+        .schedule_wake(
+            &id,
+            Utc::now() + Duration::hours(1),
+            crate::domain::WakeReason::Timer,
+        )
+        .await
+        .unwrap();
+    let paused = backend
+        .pause_suspended_instances(Some(&id), 1)
+        .await
+        .unwrap();
+    assert_eq!(paused.len(), 1);
+    assert_eq!(
+        (paused[0].instance_id.as_str(), paused[0].tenant_id.as_str()),
+        (id.as_str(), "pause-contract")
+    );
+    let instance = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(instance.status, Status::Suspended);
+    assert!(instance.sleep_until.is_none(), "no wake relaunches it");
+    assert!(instance.termination_reason.is_none() && instance.wake_reason.is_none());
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+    assert!(
+        backend
+            .pause_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an applied pause is not applied twice"
+    );
+
+    // A pending cancel is never consumed as a pause.
+    let cancelled = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&cancelled, "pause-contract")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&cancelled, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&cancelled, Kind::Cancel, b"")
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .pause_suspended_instances(Some(&cancelled), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Recovery finds a parked pause the request path did not apply.
+    let recovered = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&recovered, "pause-recovery")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&recovered, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&recovered, Kind::Pause, b"")
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .pause_suspended_instances(None, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let swept = backend.pause_suspended_instances(None, 1000).await.unwrap();
+    assert!(
+        swept
+            .iter()
+            .any(|instance| instance.instance_id == recovered)
+    );
+    assert!(
+        !swept
+            .iter()
+            .any(|instance| instance.instance_id == cancelled)
+    );
+    backend
+        .delete_instances_batch(&[id, cancelled, recovered])
+        .await
+        .unwrap();
+}
+
+/// Intent-first, success-only control receipts keyed by caller and
+/// operation, deleted with their caller.
+pub async fn run_control_receipt_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::control_receipts::{BeginReceipt, ControlIntent, ControlReceiptState};
+    let receipts = backend
+        .control_receipts()
+        .expect("a durable backend provides control receipts");
+    let caller = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&caller, "receipts")
+        .await
+        .unwrap();
+    let operation = "a".repeat(64);
+    let intent = ControlIntent {
+        command: "cancel".into(),
+        target_instance_id: "child-1".into(),
+        fingerprint: "v1:first".into(),
+        detail: serde_json::json!({"graceMs": 5000}),
+    };
+    assert!(
+        receipts
+            .receipt_by_operation(&caller, &operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let BeginReceipt::Started(started) =
+        receipts.begin(&caller, &operation, &intent).await.unwrap()
+    else {
+        panic!("the first begin records the intent");
+    };
+    assert_eq!(started.state, ControlReceiptState::Pending);
+    assert_eq!(started.intent, intent);
+    assert!(started.result.is_none() && started.completed_at.is_none());
+
+    // A crash between intent and outcome: the replay finds the pending
+    // intent as recorded, even when it now asks for something else.
+    let changed = ControlIntent {
+        fingerprint: "v1:second".into(),
+        ..intent.clone()
+    };
+    let BeginReceipt::Existing(existing) =
+        receipts.begin(&caller, &operation, &changed).await.unwrap()
+    else {
+        panic!("a second begin returns the existing receipt");
+    };
+    assert_eq!(existing.intent.fingerprint, "v1:first");
+    assert_eq!(existing.state, ControlReceiptState::Pending);
+
+    // Failure discards the pending intent, so a retry starts afresh.
+    assert!(receipts.discard(&caller, &operation).await.unwrap());
+    assert!(!receipts.discard(&caller, &operation).await.unwrap());
+    assert!(matches!(
+        receipts.begin(&caller, &operation, &changed).await.unwrap(),
+        BeginReceipt::Started(receipt) if receipt.intent.fingerprint == "v1:second"
+    ));
+
+    // Success is final: the first result wins and discard keeps it.
+    let result = serde_json::json!({"outcome": "requested"});
+    let completed = receipts
+        .complete(&caller, &operation, &result)
+        .await
+        .unwrap();
+    assert_eq!(completed.state, ControlReceiptState::Completed);
+    assert_eq!(completed.result.as_ref(), Some(&result));
+    assert!(completed.completed_at.is_some());
+    let again = receipts
+        .complete(
+            &caller,
+            &operation,
+            &serde_json::json!({"outcome": "applied"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.result.as_ref(), Some(&result));
+    assert!(!receipts.discard(&caller, &operation).await.unwrap());
+    assert!(matches!(
+        receipts.begin(&caller, &operation, &intent).await.unwrap(),
+        BeginReceipt::Existing(receipt) if receipt.state == ControlReceiptState::Completed
+    ));
+
+    // Receipts are per caller.
+    let other = Uuid::new_v4().to_string();
+    backend.register_instance(&other, "receipts").await.unwrap();
+    assert!(
+        receipts
+            .receipt_by_operation(&other, &operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        receipts
+            .complete(&other, &operation, &result)
+            .await
+            .is_err()
+    );
+    // A missing caller and malformed keys are refused.
+    assert!(
+        receipts
+            .begin(&Uuid::new_v4().to_string(), &operation, &intent)
+            .await
+            .is_err()
+    );
+    assert!(receipts.begin(&caller, "", &intent).await.is_err());
+    assert!(
+        receipts
+            .begin(&caller, &"x".repeat(129), &intent)
+            .await
+            .is_err()
+    );
+
+    // They go with their caller.
+    backend
+        .delete_instances_batch(std::slice::from_ref(&caller))
+        .await
+        .unwrap();
+    assert!(
+        receipts
+            .receipt_by_operation(&caller, &operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    backend.delete_instances_batch(&[other]).await.unwrap();
+}
+
 /// Observable lifecycle matrix shared by every backend. Expected values are
 /// specified independently of the pure policy implementation.
 pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {

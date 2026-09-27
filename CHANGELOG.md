@@ -31,6 +31,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a component or core module, or whose agents import
   `runtara:workflow-operation`, are now refused at preparation.
 
+- **The `control` agent answers signals and pauses, resumes and cancels
+  runs from a workflow.** `send-signal` answers the one open request of a
+  WaitForSignal step, validated against its response schema, for a child, an
+  ancestor, or any run whose request opted in with `action.key` when the step
+  passes the same `actionKey`; `cancel` (reason, grace 0-3600 s, default 5 s),
+  `pause` and `resume` reach direct children only, and nothing targets the
+  calling run. The parent link arrives with `start`, so until then only the
+  `action.key` opt-in reaches another run. Each mutation step runs in a
+  compiler-emitted operation scope (`runtara:workflow-operation`), durable or
+  not, so a retried or replayed step never applies twice: its receipt is kept
+  per calling run and step operation (runtime migration
+  `034_instance_control_receipts`, deleted with the caller), a replay returns
+  `replayed: true`, and different arguments are `CONTROL_REPLAY_CONFLICT`.
+  Signals it sends carry `control:` operation ids, a prefix now refused on
+  every public submission path (signals, report actions, sessions,
+  channels). Every attempt is recorded in `audit_events`
+  (`control.send_signal`, `control.cancel`, …) without payloads. Workflows
+  without control or suspending steps compile to the same bytes as before.
+
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
   self-signed or private-CA certificate with full verification;
@@ -102,6 +121,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the eager-pass behavior described above.
 
 ### Changed
+
+- **Pausing a waiting run pauses it immediately** (public API, MCP and
+  control). A run parked on a timer, a WaitForSignal or a restart used to
+  report `already paused` and resume on its own when its wait ended; it now
+  becomes explicitly paused at once, loses its wake, and only an explicit
+  resume relaunches it. Answers to its signals are kept and seen after the
+  resume. The stop, pause and resume responses now carry `data.outcome`
+  (`requested`, `applied`, `unchanged` or `already_terminal`), and each is
+  scoped to the caller's tenant. Resuming a failed or cancelled run returns
+  400 `Instance not resumable` (`code: NotResumable`) instead of trying to
+  relaunch it; replay it instead. When a pause and a resume race, the latest
+  one wins.
 
 - **Run labels accept up to 1024 bytes** (was 250), still printable ASCII with
   at least one non-space character, on start, the `runLabel` filter, reports

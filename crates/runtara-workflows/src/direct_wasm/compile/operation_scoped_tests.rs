@@ -251,3 +251,80 @@ fn a_branch_group_with_a_control_step_runs_sequentially() {
         scoped.parallel_pools
     );
 }
+
+fn world_and_logic(result: &DirectCompilationResult) -> (String, Vec<u8>) {
+    (
+        fs::read_to_string(&result.world_wit_path).expect("world"),
+        fs::read(&result.workflow_logic_wasm_path).expect("workflow logic"),
+    )
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// A control site imports the operation scope, durable or not, and lays out
+/// the `AGENT_OPERATION_SCOPE` step error its refused enter raises.
+#[test]
+fn control_sites_import_the_operation_scope_even_when_not_durable() {
+    for durable in [true, false] {
+        let mut graph = single(agent("stop", "control", "get"));
+        graph["durable"] = json!(durable);
+        let result = compile(graph, WorkflowAbi::InvokeHostImports).expect("compiles");
+        let (world, logic) = world_and_logic(&result);
+        assert!(
+            world.contains(&format!(
+                "import {};",
+                runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+            )),
+            "durable={durable}: {world}"
+        );
+        assert!(
+            !world.contains("suspendable"),
+            "a non-suspending site keeps the capabilities import only: {world}"
+        );
+        assert!(
+            contains(&logic, b"AGENT_OPERATION_SCOPE"),
+            "durable={durable}"
+        );
+        assert!(contains(
+            &logic,
+            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME.as_bytes()
+        ));
+    }
+}
+
+/// Workflows without operation-scoped sites keep their exact artifact: no
+/// scope import, no scope error in the static data, and a world identical to
+/// the one the compiler emitted before scoped sites existed.
+#[test]
+fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
+    let result = compile(
+        single(agent("plain", "utils", "plain")),
+        WorkflowAbi::InvokeHostImports,
+    )
+    .expect("compiles");
+    let (world, logic) = world_and_logic(&result);
+    assert!(!world.contains("workflow-operation"), "{world}");
+    assert!(!contains(&logic, b"workflow-operation"));
+    assert!(!contains(&logic, b"AGENT_OPERATION_SCOPE"));
+    assert!(!result.component_artifacts.operation_scope);
+    // The same world as the unscoped emitter produces from its inputs alone.
+    let artifacts = crate::direct_wasm::component::emit_direct_component_artifacts_scoped(
+        &["utils".to_string()],
+        RuntimeBinding::HostImport,
+        WorkflowAbi::InvokeHostImports,
+        false,
+        None,
+        &Default::default(),
+        false,
+        &Default::default(),
+        &Default::default(),
+        false,
+        result.component_artifacts.has_timers,
+        result.component_artifacts.needs_monotonic_clock,
+    );
+    assert_eq!(artifacts.world_wit, result.component_artifacts.world_wit);
+}

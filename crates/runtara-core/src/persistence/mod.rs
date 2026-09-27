@@ -19,6 +19,9 @@ pub mod invocations;
 /// Authoritative external input requests and immutable acceptance receipts.
 pub mod inputs;
 
+/// Intent-first, success-only receipts of control mutations.
+pub mod control_receipts;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -146,6 +149,9 @@ pub struct CancelledInstance {
     /// Tenant to notify when releasing execution admission.
     pub tenant_id: String,
 }
+
+/// Instance whose pending pause was applied without a running guest.
+pub type PausedInstance = CancelledInstance;
 
 /// Pending custom signal scoped to a specific checkpoint.
 #[derive(Debug, Clone)]
@@ -465,6 +471,12 @@ pub trait Persistence: Send + Sync {
     /// reject absence rather than use check-then-write persistence. Legacy calls
     /// are unchanged.
     fn invocation_fences(&self) -> Option<&dyn invocations::InvocationFences> {
+        None
+    }
+
+    /// Optional receipts of control mutations. Control fails closed without
+    /// them rather than mutating without replay safety.
+    fn control_receipts(&self) -> Option<&dyn control_receipts::ControlReceipts> {
         None
     }
 
@@ -816,6 +828,24 @@ pub trait Persistence: Send + Sync {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<CancelledInstance>, CoreError>;
+
+    /// Atomically pause suspended instances with pending pause commands
+    /// (decision D4: a parked run pauses immediately): acknowledge the exact
+    /// command, keep the instance suspended, and clear its suspension reason
+    /// and wake, so no timer or signal relaunches it until an explicit resume.
+    /// Returns only newly paused instances; running and terminal instances
+    /// keep their command. `Some(id)` targets an API request; `None` recovers
+    /// interrupted delivery in bounded batches.
+    async fn pause_suspended_instances(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: i64,
+    ) -> Result<Vec<PausedInstance>, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "pause_suspended_instances".into(),
+            details: "parked pause is not implemented by this backend".into(),
+        })
+    }
 
     /// Replace the retained value at an instance/checkpoint address. Last write
     /// wins; every successful write receives a fresh signal ID, even for identical

@@ -473,12 +473,19 @@ pub struct LaunchRepository {
 }
 
 /// The caller owns the launch row. Lock the root before deciding whether a
-/// pause invalidated this wake; queue cleanup must not fail a paused execution.
+/// pause invalidated this wake or resume; queue cleanup must not fail a paused
+/// execution.
+///
+/// The latest request wins. Enqueuing a resume stamps `wake_reason =
+/// manual_resume` and an applied pause clears it, so a paused root (suspended
+/// with no wake reason) under a resume generation means the pause came after
+/// the resume, and the resume is discarded. A resume after the pause restamps
+/// the reason and launches.
 async fn discard_paused_wake(
     db: &mut sqlx::PgConnection,
     launch: &LaunchRow,
 ) -> Result<bool, sqlx::Error> {
-    if launch.kind != "wake" {
+    if !matches!(launch.kind.as_str(), "wake" | "resume") {
         return Ok(false);
     }
     let target: Option<(String, Option<String>)> = sqlx::query_as(

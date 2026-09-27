@@ -12,6 +12,7 @@
 //! A single mutex covers the whole store, which is what makes the claim and
 //! guard operations atomic.
 
+mod control_receipts;
 mod inputs;
 mod invocations;
 
@@ -48,6 +49,8 @@ struct Store {
     /// One pending signal per instance.
     signals: HashMap<String, SignalRecord>,
     custom_signals: HashMap<(String, String), CustomSignalRecord>,
+    control_receipts:
+        HashMap<(String, String), crate::persistence::control_receipts::ControlReceipt>,
     /// Stands in for a sequence: the only monotonic id source a store without
     /// one has to invent.
     next_id: i64,
@@ -161,6 +164,52 @@ impl InMemoryPersistence {
     }
 }
 
+impl InMemoryPersistence {
+    /// Apply a parked-command policy (`cancel_parked`, `pause_parked`) to
+    /// suspended instances holding that pending command.
+    fn apply_parked(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+        decide: fn(CoreInstanceStatus, Option<crate::lifecycle::Command<'_>>) -> Decision,
+    ) -> Result<Vec<crate::persistence::CancelledInstance>, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut candidates: Vec<_> = store
+            .instances
+            .values()
+            .filter(|instance| instance_id.is_none_or(|id| id == instance.instance_id))
+            .filter_map(|instance| {
+                let Decision::Applied(effects) = decide(
+                    instance.status,
+                    store
+                        .signals
+                        .get(&instance.instance_id)
+                        .map(SignalRecord::command),
+                ) else {
+                    return None;
+                };
+                Some((
+                    instance.instance_id.clone(),
+                    instance.tenant_id.clone(),
+                    effects,
+                ))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.truncate(limit.max(0) as usize);
+        let now = Utc::now();
+        let mut cancelled = Vec::new();
+        for (id, tenant_id, effects) in candidates {
+            store.apply_transition(&id, effects, now)?;
+            cancelled.push(crate::persistence::CancelledInstance {
+                instance_id: id,
+                tenant_id,
+            });
+        }
+        Ok(cancelled)
+    }
+}
+
 /// Statuses that stamp `finished_at`.
 fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
     matches!(
@@ -179,6 +228,12 @@ impl Persistence for InMemoryPersistence {
     }
 
     fn invocation_fences(&self) -> Option<&dyn crate::persistence::invocations::InvocationFences> {
+        Some(self)
+    }
+
+    fn control_receipts(
+        &self,
+    ) -> Option<&dyn crate::persistence::control_receipts::ControlReceipts> {
         Some(self)
     }
 
@@ -547,40 +602,15 @@ impl Persistence for InMemoryPersistence {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::persistence::CancelledInstance>, CoreError> {
-        let mut store = self.store.lock().unwrap();
-        let mut candidates: Vec<_> = store
-            .instances
-            .values()
-            .filter(|instance| instance_id.is_none_or(|id| id == instance.instance_id))
-            .filter_map(|instance| {
-                let Decision::Applied(effects) = lifecycle::cancel_parked(
-                    instance.status,
-                    store
-                        .signals
-                        .get(&instance.instance_id)
-                        .map(SignalRecord::command),
-                ) else {
-                    return None;
-                };
-                Some((
-                    instance.instance_id.clone(),
-                    instance.tenant_id.clone(),
-                    effects,
-                ))
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        candidates.truncate(limit.max(0) as usize);
-        let now = Utc::now();
-        let mut cancelled = Vec::new();
-        for (id, tenant_id, effects) in candidates {
-            store.apply_transition(&id, effects, now)?;
-            cancelled.push(crate::persistence::CancelledInstance {
-                instance_id: id,
-                tenant_id,
-            });
-        }
-        Ok(cancelled)
+        self.apply_parked(instance_id, limit, lifecycle::cancel_parked)
+    }
+
+    async fn pause_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::persistence::PausedInstance>, CoreError> {
+        self.apply_parked(instance_id, limit, lifecycle::pause_parked)
     }
 
     async fn put_custom_signal(
@@ -886,6 +916,7 @@ impl Persistence for InMemoryPersistence {
             store.input_parks.remove(id);
             store.custom_signals.retain(|(inst, _), _| inst != id);
             store.input_requests.retain(|(inst, _), _| inst != id);
+            store.control_receipts.retain(|(caller, _), _| caller != id);
             store.invocation_leases.remove(id);
             store
                 .invocation_parents
@@ -1213,6 +1244,8 @@ mod tests {
         crate::persistence::conformance::run_conformance_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
+        crate::persistence::conformance::run_parked_pause_sequence(&backend).await;
+        crate::persistence::conformance::run_control_receipt_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
     }

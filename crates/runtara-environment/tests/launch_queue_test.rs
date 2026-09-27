@@ -2340,3 +2340,111 @@ async fn obsolete_wake_cleanup_preserves_explicit_pause() {
     }
     context.cleanup().await;
 }
+
+/// The latest of a pause and a resume wins: a pause applied while a resume
+/// generation is still queued discards that resume at the start gate without
+/// failing the root, and a resume after the pause launches.
+#[tokio::test]
+async fn a_pause_after_a_queued_resume_wins_and_a_later_resume_launches() {
+    use runtara_core::domain::{InstanceStatus, SignalType, WakeReason};
+    let context = TestContext::new().await.unwrap();
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    // Explicitly paused: suspended with no reason and no wake.
+    set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+
+    let resume_id = Uuid::new_v4().to_string();
+    assert!(matches!(
+        repository
+            .enqueue(request(
+                &fixture,
+                &resume_id,
+                LaunchKind::Resume,
+                Duration::from_secs(60)
+            ))
+            .await
+            .unwrap(),
+        EnqueueOutcome::Enqueued(_)
+    ));
+    let claim = repository
+        .claim_ready("resume-race", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    repository
+        .begin_start(&resume_id, "resume-race", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The pause lands while the resume waits at its start gate.
+    persistence
+        .insert_signal(&fixture.instance_id, SignalType::Pause, b"")
+        .await
+        .unwrap();
+    assert_eq!(
+        persistence
+            .pause_suspended_instances(Some(&fixture.instance_id), 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repository
+            .mark_running(&resume_id, "resume-race", claim.attempt_count)
+            .await
+            .unwrap()
+            .is_none(),
+        "the earlier resume is discarded"
+    );
+    let launch = repository.get(&resume_id).await.unwrap().unwrap();
+    assert_eq!(launch.state, LaunchState::Suspended);
+    let root = persistence
+        .get_instance(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.status, InstanceStatus::Suspended);
+    assert!(root.wake_reason.is_none() && root.error.is_none());
+
+    // A resume after the pause is the latest request and launches.
+    let later = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &later,
+            LaunchKind::Resume,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+    let claim = repository
+        .claim_ready("resume-race", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    repository
+        .begin_start(&later, "resume-race", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        repository
+            .mark_running(&later, "resume-race", claim.attempt_count)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let root = persistence
+        .get_instance(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.status, InstanceStatus::Running);
+    assert_eq!(root.wake_reason, Some(WakeReason::ManualResume));
+    context.cleanup().await;
+}

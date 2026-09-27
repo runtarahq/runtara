@@ -123,6 +123,21 @@ impl DirectWorkflowManifest {
         sites
     }
 
+    /// Whether an operation-scoped (suspending or control) call site exists
+    /// anywhere in the root graph, its nested graphs or its embedded children.
+    /// Only then does the workflow import `runtara:workflow-operation/scope`,
+    /// so every other artifact keeps its exact bytes.
+    pub fn has_operation_scoped_sites(&self) -> bool {
+        fn any(graph: &DirectGraphManifest) -> bool {
+            graph.agents.iter().any(|agent| agent.operation_scoped)
+                || graph
+                    .steps
+                    .iter()
+                    .any(|step| step.nested_graphs.iter().any(|nested| any(&nested.graph)))
+        }
+        any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
+    }
+
     /// Agent ids with a suspending call site anywhere in the root graph, its
     /// nested graphs or its embedded children. Each is imported through both
     /// `capabilities` and `suspendable`.

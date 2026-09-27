@@ -446,17 +446,53 @@ impl EnvironmentClient {
     /// Resume a suspended instance.
     #[instrument(skip(self), fields(instance_id = %instance_id))]
     pub async fn resume_instance(&self, instance_id: &str) -> Result<()> {
-        info!("Resuming instance");
+        match self.resume_instance_with(instance_id, false).await? {
+            None => Ok(()),
+            Some((_, error)) => failed_unless(false, "RESUME_FAILED", Some(error)),
+        }
+    }
+
+    /// Resume a suspended instance; with `require_paused`, only an explicitly
+    /// paused one. `Some((rejection, message))` when it was refused.
+    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    pub async fn resume_instance_with(
+        &self,
+        instance_id: &str,
+        require_paused: bool,
+    ) -> Result<Option<(Option<handlers::ResumeRejection>, String)>> {
+        info!(require_paused, "Resuming instance");
 
         let resp = handlers::handle_resume_instance(
             &self.state,
             ResumeInstanceRequest {
                 instance_id: instance_id.to_string(),
+                require_paused,
             },
         )
         .await?;
+        Ok((!resp.success).then(|| {
+            (
+                resp.rejection,
+                resp.error.unwrap_or_else(|| "Unknown error".to_string()),
+            )
+        }))
+    }
 
-        failed_unless(resp.success, "RESUME_FAILED", resp.error)
+    /// Pause an instance; a parked one pauses at once (decision D4).
+    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    pub async fn pause_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<handlers::PauseInstanceOutcome> {
+        info!("Pausing instance");
+        Ok(handlers::handle_pause_instance(&self.state, instance_id).await?)
+    }
+
+    /// Receipts of control mutations, when the runtime store provides them.
+    pub fn control_receipts(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::control_receipts::ControlReceipts> {
+        self.state.persistence.control_receipts()
     }
 
     // =========================================================================

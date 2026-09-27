@@ -8689,11 +8689,11 @@ export class Api<
       }),
 
     /**
-     * @description Sends a pause signal to the instance. The instance will checkpoint its state and suspend execution until resumed.
+     * @description A waiting run (parked on a timer, a signal or a restart) pauses immediately: `data.outcome` is `applied` and no timer or signal resumes it until an explicit resume. A running run pauses at its next checkpoint (`requested`). An already paused run is `unchanged`.
      *
      * @tags workflow-controller
      * @name PauseInstanceHandler
-     * @summary Pause a running workflow instance
+     * @summary Pause a workflow instance
      * @request POST:/api/runtime/workflows/instances/{instance_id}/pause
      */
     pauseInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
@@ -8721,7 +8721,7 @@ export class Api<
       }),
 
     /**
-     * @description Sends a resume signal to the instance. The instance will resume execution from its last checkpoint.
+     * @description Relaunches a suspended instance from its last checkpoint (`data.outcome` `applied`). Failed, cancelled and completed runs are not resumable (400 `Instance not resumable`); use replay to run them again.
      *
      * @tags workflow-controller
      * @name ResumeInstanceHandler
@@ -8756,7 +8756,7 @@ export class Api<
       }),
 
     /**
-     * No description
+     * @description `data.outcome` is `applied` when the run ended at once (a parked or queued run), `requested` when a running run stops cooperatively (forced after 5 s), and `already_terminal` when it had already finished.
      *
      * @tags workflow-controller
      * @name StopInstanceHandler

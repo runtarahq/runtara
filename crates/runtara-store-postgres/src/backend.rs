@@ -435,6 +435,77 @@ async fn put_custom_signal(
 // op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
 // (crate::ops_common::ops::{instances, sleep}).
 
+impl PostgresPersistence {
+    /// Apply a parked-command policy (`cancel_parked`, `pause_parked`) to
+    /// suspended instances holding that pending command, in one transaction.
+    async fn apply_parked(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+        signal_type: &str,
+        decide: fn(
+            runtara_core::domain::InstanceStatus,
+            Option<runtara_core::lifecycle::Command<'_>>,
+        ) -> runtara_core::lifecycle::Decision,
+    ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
+        use runtara_core::lifecycle::Decision;
+        let mut tx = self.pool.begin().await.db()?;
+        // Candidate predicates narrow the indexed scan; core policy is evaluated
+        // against locked instances and commands before any writes are applied.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT i.instance_id, i.tenant_id, i.status::text
+            FROM instances i JOIN pending_signals s USING (instance_id)
+            WHERE i.status = 'suspended' AND s.signal_type::text = $3
+              AND s.acknowledged_at IS NULL AND ($1::text IS NULL OR i.instance_id = $1)
+            ORDER BY i.instance_id LIMIT $2 FOR UPDATE OF i SKIP LOCKED
+        "#,
+        )
+        .bind(instance_id)
+        .bind(limit.max(0))
+        .bind(signal_type)
+        .fetch_all(&mut *tx)
+        .await
+        .db()?;
+        let ids: Vec<_> = rows.iter().map(|r| r.0.clone()).collect();
+        let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
+        let commands: std::collections::HashMap<_, _> = commands
+            .iter()
+            .map(|c| (c.instance_id.as_str(), c.command()))
+            .collect();
+        let mut groups: Vec<(runtara_core::lifecycle::Transition, Vec<String>)> = Vec::new();
+        let mut cancelled = Vec::new();
+        for (id, tenant_id, status) in rows {
+            let status = crate::encoding::status_from_str(&status).db()?;
+            if let Decision::Applied(effects) = decide(status, commands.get(id.as_str()).copied()) {
+                if let Some((_, ids)) = groups.iter_mut().find(|(effect, _)| *effect == effects) {
+                    ids.push(id.clone());
+                } else {
+                    groups.push((effects, vec![id.clone()]));
+                }
+                cancelled.push(runtara_core::persistence::CancelledInstance {
+                    instance_id: id,
+                    tenant_id,
+                });
+            }
+        }
+        for (effects, ids) in &groups {
+            crate::lifecycle::apply_transition(&mut tx, ids, *effects).await?;
+        }
+        tx.commit().await.db()?;
+        for (effects, ids) in groups {
+            if effects.report_completion
+                && let Some(sink) = &self.metrics_sink
+            {
+                for id in ids {
+                    report_completion(sink.as_ref(), &self.pool, &id).await;
+                }
+            }
+        }
+        Ok(cancelled)
+    }
+}
+
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
     fn input_requests(&self) -> Option<&dyn runtara_core::persistence::inputs::InputRequests> {
@@ -444,6 +515,12 @@ impl Persistence for PostgresPersistence {
     fn invocation_fences(
         &self,
     ) -> Option<&dyn runtara_core::persistence::invocations::InvocationFences> {
+        Some(self)
+    }
+
+    fn control_receipts(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::control_receipts::ControlReceipts> {
         Some(self)
     }
 
@@ -681,62 +758,27 @@ impl Persistence for PostgresPersistence {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
-        use runtara_core::lifecycle::{self, Decision};
-        let mut tx = self.pool.begin().await.db()?;
-        // Candidate predicates narrow the indexed scan; core policy is evaluated
-        // against locked instances and commands before any writes are applied.
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            r#"
-            SELECT i.instance_id, i.tenant_id, i.status::text
-            FROM instances i JOIN pending_signals s USING (instance_id)
-            WHERE i.status = 'suspended' AND s.signal_type = 'cancel'
-              AND s.acknowledged_at IS NULL AND ($1::text IS NULL OR i.instance_id = $1)
-            ORDER BY i.instance_id LIMIT $2 FOR UPDATE OF i SKIP LOCKED
-        "#,
+        self.apply_parked(
+            instance_id,
+            limit,
+            "cancel",
+            runtara_core::lifecycle::cancel_parked,
         )
-        .bind(instance_id)
-        .bind(limit.max(0))
-        .fetch_all(&mut *tx)
         .await
-        .db()?;
-        let ids: Vec<_> = rows.iter().map(|r| r.0.clone()).collect();
-        let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
-        let commands: std::collections::HashMap<_, _> = commands
-            .iter()
-            .map(|c| (c.instance_id.as_str(), c.command()))
-            .collect();
-        let mut groups: Vec<(runtara_core::lifecycle::Transition, Vec<String>)> = Vec::new();
-        let mut cancelled = Vec::new();
-        for (id, tenant_id, status) in rows {
-            let status = crate::encoding::status_from_str(&status).db()?;
-            if let Decision::Applied(effects) =
-                lifecycle::cancel_parked(status, commands.get(id.as_str()).copied())
-            {
-                if let Some((_, ids)) = groups.iter_mut().find(|(effect, _)| *effect == effects) {
-                    ids.push(id.clone());
-                } else {
-                    groups.push((effects, vec![id.clone()]));
-                }
-                cancelled.push(runtara_core::persistence::CancelledInstance {
-                    instance_id: id,
-                    tenant_id,
-                });
-            }
-        }
-        for (effects, ids) in &groups {
-            crate::lifecycle::apply_transition(&mut tx, ids, *effects).await?;
-        }
-        tx.commit().await.db()?;
-        for (effects, ids) in groups {
-            if effects.report_completion
-                && let Some(sink) = &self.metrics_sink
-            {
-                for id in ids {
-                    report_completion(sink.as_ref(), &self.pool, &id).await;
-                }
-            }
-        }
-        Ok(cancelled)
+    }
+
+    async fn pause_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<runtara_core::persistence::PausedInstance>, CoreError> {
+        self.apply_parked(
+            instance_id,
+            limit,
+            "pause",
+            runtara_core::lifecycle::pause_parked,
+        )
+        .await
     }
 
     async fn put_custom_signal(

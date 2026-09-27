@@ -119,6 +119,54 @@ impl ControlHost for FakeControl {
         })
     }
 
+    async fn send_signal(
+        &self,
+        authority: &ControlAuthority,
+        request: SendSignalRequest,
+    ) -> Result<SendSignalResult, ControlError> {
+        self.record("send-signal", authority);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request.payload).unwrap(),
+            json!({"approved": true})
+        );
+        requires_run(authority)?;
+        Ok(SendSignalResult {
+            request_id: "req-1".into(),
+            replayed: false,
+        })
+    }
+
+    async fn cancel(
+        &self,
+        authority: &ControlAuthority,
+        request: CancelRequest,
+    ) -> Result<CommandResult, ControlError> {
+        self.record("cancel", authority);
+        assert_eq!(request.grace_ms, Some(0));
+        requires_run(authority)?;
+        Ok(command(request.instance_id))
+    }
+
+    async fn pause(
+        &self,
+        authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        self.record("pause", authority);
+        requires_run(authority)?;
+        Ok(command(instance_id))
+    }
+
+    async fn resume(
+        &self,
+        authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        self.record("resume", authority);
+        requires_run(authority)?;
+        Ok(command(instance_id))
+    }
+
     async fn wait(
         &self,
         authority: &ControlAuthority,
@@ -140,6 +188,26 @@ impl ControlHost for FakeControl {
             remaining: vec!["a".into()],
             deadline_ms: None,
         }))
+    }
+}
+
+/// The service's own first checks, which a test invocation (a tenant, no
+/// calling run) fails.
+fn requires_run(authority: &ControlAuthority) -> Result<(), ControlError> {
+    if authority.caller.is_none() {
+        return Err(ControlError::new(
+            ControlErrorCode::RequiresInstance,
+            "needs a calling run",
+        ));
+    }
+    Ok(())
+}
+
+fn command(instance_id: String) -> CommandResult {
+    CommandResult {
+        instance_id,
+        outcome: CommandOutcome::Applied,
+        replayed: false,
     }
 }
 
@@ -287,6 +355,61 @@ async fn errors_surface_as_control_codes_and_suspensions_are_refused() {
         "CONTROL_DENIED"
     );
     assert_eq!(harness.fake.calls.lock().unwrap().len(), before);
+}
+
+/// The mutations validate their arguments before the host, and reach the
+/// service with the tenant but no calling run or operation in a test
+/// invocation, which the service refuses with `requires-instance`.
+#[tokio::test(flavor = "multi_thread")]
+async fn mutations_validate_then_need_a_run() {
+    let harness = harness().await;
+    for (capability, input) in [
+        (
+            "send-signal",
+            json!({"instanceId": "", "signalId": "approve"}),
+        ),
+        (
+            "cancel",
+            json!({"instanceId": "child", "graceMs": 3_600_001}),
+        ),
+        ("pause", json!({"instanceId": " "})),
+        ("resume", json!({"instanceId": ""})),
+    ] {
+        assert_eq!(
+            code(&test(&harness, capability, input).await),
+            "CONTROL_INVALID",
+            "{capability}"
+        );
+    }
+    assert!(
+        harness.fake.calls.lock().unwrap().is_empty(),
+        "invalid arguments never reach the host"
+    );
+    for (capability, input) in [
+        (
+            "send-signal",
+            json!({"instanceId": "child", "signalId": "approve", "actionKey": "finance",
+                "payload": {"approved": true}}),
+        ),
+        ("cancel", json!({"instanceId": "child", "graceMs": 0})),
+        ("pause", json!({"instanceId": "child"})),
+        ("resume", json!({"instanceId": "child"})),
+    ] {
+        assert_eq!(
+            code(&test(&harness, capability, input).await),
+            "CONTROL_REQUIRES_INSTANCE",
+            "{capability}"
+        );
+    }
+    let calls = harness.fake.calls.lock().unwrap();
+    let names: Vec<_> = calls.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["send-signal", "cancel", "pause", "resume"]);
+    assert!(calls.iter().all(|(_, authority)| authority
+        == &ControlAuthority {
+            tenant: "tenant-a".into(),
+            caller: None,
+            operation: None,
+        }));
 }
 
 /// The forwarding exports of a plain agent instance (the linker the

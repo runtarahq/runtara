@@ -34,6 +34,8 @@ async fn postgres_backend_passes_conformance_sequence() {
     run_conformance_sequence(&backend).await;
     runtara_core::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
     runtara_core::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
+    runtara_core::persistence::conformance::run_parked_pause_sequence(&backend).await;
+    runtara_core::persistence::conformance::run_control_receipt_sequence(&backend).await;
     runtara_core::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
     runtara_core::persistence::conformance::run_wake_reason_sequence(&backend).await;
 }

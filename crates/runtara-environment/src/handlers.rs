@@ -983,6 +983,23 @@ async fn stop_after_handle_retired(
 pub struct ResumeInstanceRequest {
     /// Instance ID to resume.
     pub instance_id: String,
+    /// Refuse anything but an explicitly paused instance (control `resume`):
+    /// a run parked on a timer or a signal is not relaunched early.
+    pub require_paused: bool,
+}
+
+/// Why a resume was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeRejection {
+    /// No such instance.
+    NotFound,
+    /// The instance is not suspended.
+    NotSuspended {
+        /// Its status.
+        status: String,
+    },
+    /// `require_paused` and the instance is suspended without being paused.
+    NotPaused,
 }
 
 /// Response from resuming an instance.
@@ -991,6 +1008,8 @@ pub struct ResumeInstanceResponse {
     pub success: bool,
     /// Error message if failed.
     pub error: Option<String>,
+    /// Set when the instance's state refused the resume.
+    pub rejection: Option<ResumeRejection>,
 }
 
 /// Handle resume instance request.
@@ -1009,6 +1028,7 @@ pub async fn handle_resume_instance(
             return Ok(ResumeInstanceResponse {
                 success: false,
                 error: Some(format!("Instance '{}' not found", request.instance_id)),
+                rejection: Some(ResumeRejection::NotFound),
             });
         }
     };
@@ -1024,6 +1044,18 @@ pub async fn handle_resume_instance(
                 "Cannot resume instance in '{}' state (must be suspended)",
                 status
             )),
+            rejection: Some(ResumeRejection::NotSuspended { status }),
+        });
+    }
+    if request.require_paused
+        && !explicitly_paused(state, &request.instance_id)
+            .await?
+            .is_some_and(|(_, paused)| paused)
+    {
+        return Ok(ResumeInstanceResponse {
+            success: false,
+            error: Some("Instance is not explicitly paused".into()),
+            rejection: Some(ResumeRejection::NotPaused),
         });
     }
 
@@ -1038,6 +1070,7 @@ pub async fn handle_resume_instance(
             return Ok(ResumeInstanceResponse {
                 success: false,
                 error: Some("Instance has no associated image".to_string()),
+                rejection: None,
             });
         }
     };
@@ -1075,6 +1108,7 @@ pub async fn handle_resume_instance(
             Ok(ResumeInstanceResponse {
                 success: true,
                 error: None,
+                rejection: None,
             })
         }
         Ok(EnqueueOutcome::SingleInstanceActive) => Ok(ResumeInstanceResponse {
@@ -1083,10 +1117,12 @@ pub async fn handle_resume_instance(
                 "Resume deferred because this single-instance workflow already has active work"
                     .to_string(),
             ),
+            rejection: None,
         }),
         Err(error) => Ok(ResumeInstanceResponse {
             success: false,
             error: Some(format!("Resume could not be queued: {error}")),
+            rejection: None,
         }),
     }
 }
@@ -1745,7 +1781,102 @@ pub async fn handle_send_signal(
             );
         }
     }
+    if signal_type == runtara_core::domain::SignalType::Pause {
+        // Decision D4: a parked (waiting) run pauses now instead of at a
+        // checkpoint it would reach only after its wait ends. A run locked by
+        // a concurrent transition keeps the command for the recovery pass.
+        state
+            .persistence
+            .pause_suspended_instances(Some(instance_id), 1)
+            .await?;
+    }
     Ok(SendSignalOutcome::Delivered)
+}
+
+/// What a pause request did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PauseInstanceOutcome {
+    /// A parked run paused at once (decision D4).
+    Applied,
+    /// A running or launching run pauses at its next checkpoint.
+    Requested,
+    /// The run was already explicitly paused.
+    Unchanged,
+    /// The run finished; nothing changed.
+    NotPausable {
+        /// Its terminal status.
+        status: String,
+    },
+    /// No such instance.
+    InstanceNotFound,
+}
+
+/// Whether a stored instance is explicitly paused: suspended with neither a
+/// suspension reason nor a wake ([`crate::control_reads::is_explicitly_paused`]).
+async fn explicitly_paused(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+) -> Result<Option<(CoreInstanceStatus, bool)>> {
+    Ok(state
+        .persistence
+        .get_instance(instance_id)
+        .await?
+        .map(|instance| {
+            let wake_reason = instance
+                .wake_reason
+                .map(runtara_store_postgres::encoding::wake_reason_to_str);
+            (
+                instance.status,
+                crate::control_reads::is_explicitly_paused(
+                    instance.status,
+                    instance.termination_reason.as_deref(),
+                    wake_reason,
+                ),
+            )
+        }))
+}
+
+/// Pause an instance and report what happened. A parked run pauses at once
+/// (decision D4), in the public API and in control alike; a running one is
+/// asked to pause at its next checkpoint.
+#[instrument(skip(state))]
+pub async fn handle_pause_instance(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+) -> Result<PauseInstanceOutcome> {
+    let Some((status, paused)) = explicitly_paused(state, instance_id).await? else {
+        return Ok(PauseInstanceOutcome::InstanceNotFound);
+    };
+    if status.is_terminal() {
+        return Ok(PauseInstanceOutcome::NotPausable {
+            status: crate::core_types::status_name(status).to_owned(),
+        });
+    }
+    if paused {
+        return Ok(PauseInstanceOutcome::Unchanged);
+    }
+    match handle_send_signal(state, instance_id, "pause", None).await? {
+        SendSignalOutcome::Delivered => {}
+        SendSignalOutcome::InstanceNotFound => {
+            return Ok(PauseInstanceOutcome::InstanceNotFound);
+        }
+        SendSignalOutcome::NotSignalable { status } => {
+            return Ok(PauseInstanceOutcome::NotPausable { status });
+        }
+        SendSignalOutcome::UnknownSignalType { signal_type } => {
+            return Err(crate::error::Error::Other(format!(
+                "pause is not a known signal type: {signal_type}"
+            )));
+        }
+    }
+    Ok(match explicitly_paused(state, instance_id).await? {
+        Some((_, true)) => PauseInstanceOutcome::Applied,
+        Some((status, false)) if status.is_terminal() => PauseInstanceOutcome::NotPausable {
+            status: crate::core_types::status_name(status).to_owned(),
+        },
+        Some((_, false)) => PauseInstanceOutcome::Requested,
+        None => PauseInstanceOutcome::InstanceNotFound,
+    })
 }
 
 /// What happened to a custom signal.

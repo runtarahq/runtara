@@ -178,6 +178,9 @@ pub struct DirectComponentArtifacts {
     pub agent_components: Vec<DirectAgentComponentRequirement>,
     /// Agents imported through `suspendable` as well as `capabilities`.
     pub suspending_agents: std::collections::BTreeSet<String>,
+    /// Whether an operation-scoped site imports
+    /// `runtara:workflow-operation/scope`.
+    pub operation_scope: bool,
 }
 
 /// Emit the direct workflow component scaffolding.
@@ -278,6 +281,7 @@ pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
         &Default::default(),
         false,
         false,
+        false,
     )
 }
 
@@ -292,6 +296,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
     suspending_agents: &std::collections::BTreeSet<String>,
+    operation_scope: bool,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> DirectComponentArtifacts {
@@ -316,6 +321,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
             has_connections,
             scoped_agents,
             suspending_agents,
+            operation_scope,
             needs_timers,
             needs_monotonic_clock,
         ),
@@ -329,6 +335,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
         shared_components,
         agent_components: agents.iter().map(|agent| agent_component(agent)).collect(),
         suspending_agents: suspending_agents.clone(),
+        operation_scope,
     }
 }
 
@@ -362,6 +369,7 @@ fn emit_world_wit(
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
     suspending_agents: &std::collections::BTreeSet<String>,
+    operation_scope: bool,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> String {
@@ -387,7 +395,7 @@ fn emit_world_wit(
             runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
         ));
     }
-    if !suspending_agents.is_empty() {
+    if operation_scope || !suspending_agents.is_empty() {
         out.push_str(&format!(
             "    import {};\n",
             runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME

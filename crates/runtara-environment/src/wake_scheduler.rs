@@ -259,6 +259,16 @@ impl WakeScheduler {
             );
         }
 
+        // Recover pauses whose request-path application lost a row-lock race
+        // (decision D4: a parked run pauses without waiting for its wake).
+        if let Err(error) = self
+            .persistence
+            .pause_suspended_instances(None, self.config.batch_size)
+            .await
+        {
+            warn!(%error, "Parked pause recovery failed");
+        }
+
         if let Some(inputs) = self.persistence.input_requests() {
             inputs
                 .reconcile_input_wakes(self.config.batch_size.clamp(0, u32::MAX as i64) as u32)

@@ -41,7 +41,7 @@ use super::{
     DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
     DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL, DIRECT_RETRY_PARK_STATE_LEN_LOCAL,
     DIRECT_RETRY_PARK_STATE_PTR_LOCAL, DIRECT_RUN_RETPTR_OFFSET, DirectCompileError,
-    DirectCoreFunctionIndices, DirectWorkflowManifest,
+    DirectCoreFunctionIndices, DirectCoreStaticData, DirectWorkflowManifest,
 };
 use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
 use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
@@ -326,20 +326,58 @@ fn check_graph(
     Ok(())
 }
 
-/// `scope.enter(checkpoint-key, 1, true)`; a host failure fails the workflow.
+/// `scope.enter(checkpoint-key, attempt, load)` before the site's invoke,
+/// which runs its deadline check first. `attempt` is the retry-attempt local
+/// of a retrying site (attempt 1 otherwise); only a suspending site loads its
+/// continuation.
+///
+/// A refused enter becomes the step error `AGENT_OPERATION_SCOPE` in the
+/// retptr area, so the ordinary error path (onError, retry classification)
+/// runs without an invoke. This opens an `if … else`: the caller emits the
+/// invoke into the `else` arm and closes it with [`emit_entered_end`], then
+/// leaves with [`emit_after_invoke`] or [`emit_exit`].
 pub(super) fn emit_enter(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    key_ptr_local: u32,
-    key_len_local: u32,
+    static_data: &DirectCoreStaticData,
+    key: (u32, u32),
+    attempt_local: Option<u32>,
+    load: bool,
 ) {
-    body.instruction(&Instruction::LocalGet(key_ptr_local));
-    body.instruction(&Instruction::LocalGet(key_len_local));
-    body.instruction(&Instruction::I32Const(FIRST_ATTEMPT));
-    body.instruction(&Instruction::I32Const(1)); // load the continuation
+    body.instruction(&Instruction::LocalGet(key.0));
+    body.instruction(&Instruction::LocalGet(key.1));
+    match attempt_local {
+        Some(local) => body.instruction(&Instruction::LocalGet(local)),
+        None => body.instruction(&Instruction::I32Const(FIRST_ATTEMPT)),
+    };
+    body.instruction(&Instruction::I32Const(i32::from(load)));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.operation_scope().enter));
-    return_if_retptr_error(body, indices);
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    let segment = static_data
+        .operation_scope_error
+        .as_ref()
+        .expect("an operation-scoped site lays out its scope error");
+    super::agent_deadline::error_info(
+        body,
+        segment.offset,
+        crate::direct_wasm::static_data::AGENT_OPERATION_SCOPE_FIELDS,
+    );
+    body.instruction(&Instruction::Else);
+}
+
+/// Close the `if … else` [`emit_enter`] opened, after the invoke.
+pub(super) fn emit_entered_end(body: &mut WasmFunction) {
+    body.instruction(&Instruction::End);
+}
+
+/// `scope.exit(false)` after a non-suspending scoped site's invoke, on every
+/// outcome: it has no continuation to discard, and a refused enter left no
+/// operation to leave (the host ignores it).
+pub(super) fn emit_exit(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::Call(indices.operation_scope().exit));
 }
 
 /// Consume a `suspendable.invoke` result left in the retptr area.

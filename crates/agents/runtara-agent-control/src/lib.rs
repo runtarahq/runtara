@@ -11,6 +11,12 @@
 //!
 //! Reads: `get`, `query` and `list-pending-signals` cover the caller's
 //! tenant; identity and caller-relative filters need a calling instance.
+//! Mutations: `send-signal` answers an open `WaitForSignal` request of a
+//! child, an ancestor, or a request that opted in with `action.key`;
+//! `cancel`, `pause` and `resume` reach direct children only; none may target
+//! the calling run. Each is replay-safe under the step's operation identity,
+//! which the compiler emits and the host keeps, so a retried or replayed step
+//! never applies twice.
 //! `wait` registers a host-owned wait once, keeps the wait id as its
 //! continuation, and polls it on every re-invocation until the wait settles.
 
@@ -18,6 +24,7 @@ use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_agent_suspension::{SuspendContext, Suspendable, Wake};
 use runtara_control_contract::ErrorCode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Version tag of the `wait` continuation.
 const CONTINUATION_VERSION: u32 = runtara_control_contract::CONTROL_CONTINUATION_V1;
@@ -645,6 +652,260 @@ pub async fn list_pending_signals(
     host::list_pending_signals(input, scope).await
 }
 
+// ---------------------------------------------------------------------------
+// Mutations
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Send Signal Input")]
+pub struct SendSignalInput {
+    #[field(
+        display_name = "Instance ID",
+        description = "The waiting run: a child or ancestor of this run, or any run whose request opted in with action.key"
+    )]
+    pub instance_id: String,
+    #[field(
+        display_name = "Signal ID",
+        description = "The waiting WaitForSignal step id"
+    )]
+    pub signal_id: String,
+    #[field(
+        display_name = "Action Key",
+        description = "The request's action.key; required to answer a run outside this run's lineage"
+    )]
+    #[serde(default)]
+    pub action_key: Option<String>,
+    #[field(
+        display_name = "Request ID",
+        description = "Pick one of several open requests (from List Pending Signals)"
+    )]
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[field(
+        display_name = "Payload",
+        description = "The response; it must match the request's response schema"
+    )]
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Send Signal Output")]
+pub struct SendSignalOutput {
+    #[field(display_name = "Request ID", description = "The answered request")]
+    pub request_id: String,
+    #[field(
+        display_name = "Replayed",
+        description = "This step had already answered it; nothing new was sent"
+    )]
+    pub replayed: bool,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Cancel Run Input")]
+pub struct CancelInput {
+    #[field(
+        display_name = "Instance ID",
+        description = "A direct child of this run"
+    )]
+    pub instance_id: String,
+    #[field(
+        display_name = "Reason",
+        description = "Why it is cancelled (at most 1024 bytes)"
+    )]
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[field(
+        display_name = "Grace (ms)",
+        description = "Cooperative grace before the stop is forced, 0-3600000",
+        default = "5000"
+    )]
+    #[serde(default)]
+    pub grace_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Run Input")]
+pub struct RunInput {
+    #[field(
+        display_name = "Instance ID",
+        description = "A direct child of this run"
+    )]
+    pub instance_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Command Output")]
+pub struct CommandOutput {
+    #[field(display_name = "Instance ID", description = "The target run")]
+    pub instance_id: String,
+    #[field(
+        display_name = "Outcome",
+        description = "requested (applies at the run's next checkpoint), applied (took effect at once), unchanged or already_terminal"
+    )]
+    pub outcome: String,
+    #[field(
+        display_name = "Replayed",
+        description = "This step had already issued the command; nothing new happened"
+    )]
+    pub replayed: bool,
+}
+
+fn require_id(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(invalid(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+#[capability(
+    module = "control",
+    id = "send-signal",
+    display_name = "Send Signal",
+    description = "Answer an open WaitForSignal request of a child, an ancestor, or a run whose request opted in with action.key. Replay-safe: a retried step answers once.",
+    side_effects = true,
+    tags = "runtime:requires-run",
+    errors(
+        permanent(
+            "CONTROL_INVALID",
+            "Malformed arguments, the calling run as target, or a payload that does not match the response schema"
+        ),
+        permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent(
+            "CONTROL_DENIED",
+            "The target is outside this run's lineage and its request did not opt in with this action.key"
+        ),
+        permanent("CONTROL_NOT_WAITING", "No open request waits on that signal"),
+        permanent(
+            "CONTROL_AMBIGUOUS",
+            "Several open requests wait on that signal; pass a requestId"
+        ),
+        permanent(
+            "CONTROL_ALREADY_ANSWERED",
+            "Another operation already answered the request"
+        ),
+        permanent(
+            "CONTROL_REPLAY_CONFLICT",
+            "This step already ran with different arguments"
+        ),
+        permanent("CONTROL_REQUIRES_INSTANCE", "Only works inside a run"),
+        permanent("CONTROL_REQUIRES_OPERATION", "Only works in a compiled workflow step"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn send_signal(input: SendSignalInput) -> Result<SendSignalOutput, String> {
+    require_id("instanceId", &input.instance_id)?;
+    require_id("signalId", &input.signal_id)?;
+    host::send_signal(input).await
+}
+
+#[capability(
+    module = "control",
+    id = "cancel",
+    display_name = "Cancel Run",
+    description = "Cancel a direct child: cooperatively, then forced after the grace period. A parked or queued child ends at once.",
+    side_effects = true,
+    tags = "runtime:requires-run",
+    errors(
+        permanent("CONTROL_INVALID", "Malformed arguments or the calling run as target"),
+        permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent("CONTROL_NOT_CHILD", "The target is not a direct child of this run"),
+        permanent("CONTROL_DENIED", "The target is an ancestor of this run"),
+        permanent(
+            "CONTROL_REPLAY_CONFLICT",
+            "This step already ran with different arguments"
+        ),
+        permanent("CONTROL_REQUIRES_INSTANCE", "Only works inside a run"),
+        permanent("CONTROL_REQUIRES_OPERATION", "Only works in a compiled workflow step"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn cancel(input: CancelInput) -> Result<CommandOutput, String> {
+    require_id("instanceId", &input.instance_id)?;
+    if runtara_control_contract::cancel_grace_ms(input.grace_ms).is_none() {
+        return Err(invalid(format!(
+            "graceMs must be 0-{}",
+            runtara_control_contract::MAX_CANCEL_GRACE_MS
+        )));
+    }
+    host::cancel(input).await
+}
+
+#[capability(
+    module = "control",
+    id = "pause",
+    display_name = "Pause Run",
+    description = "Pause a direct child. A waiting child pauses at once; a running one at its next checkpoint.",
+    side_effects = true,
+    tags = "runtime:requires-run",
+    errors(
+        permanent("CONTROL_INVALID", "Malformed arguments or the calling run as target"),
+        permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent("CONTROL_NOT_CHILD", "The target is not a direct child of this run"),
+        permanent("CONTROL_DENIED", "The target is an ancestor of this run"),
+        permanent("CONTROL_NOT_PAUSABLE", "The run has not started or has finished"),
+        permanent(
+            "CONTROL_REPLAY_CONFLICT",
+            "This step already ran with different arguments"
+        ),
+        permanent("CONTROL_REQUIRES_INSTANCE", "Only works inside a run"),
+        permanent("CONTROL_REQUIRES_OPERATION", "Only works in a compiled workflow step"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn pause(input: RunInput) -> Result<CommandOutput, String> {
+    require_id("instanceId", &input.instance_id)?;
+    host::pause(input.instance_id).await
+}
+
+#[capability(
+    module = "control",
+    id = "resume",
+    display_name = "Resume Run",
+    description = "Resume an explicitly paused direct child. It never answers a WaitForSignal request.",
+    side_effects = true,
+    tags = "runtime:requires-run",
+    errors(
+        permanent("CONTROL_INVALID", "Malformed arguments or the calling run as target"),
+        permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent("CONTROL_NOT_CHILD", "The target is not a direct child of this run"),
+        permanent("CONTROL_DENIED", "The target is an ancestor of this run"),
+        permanent("CONTROL_NOT_PAUSED", "The run is not explicitly paused"),
+        permanent(
+            "CONTROL_REPLAY_CONFLICT",
+            "This step already ran with different arguments"
+        ),
+        permanent("CONTROL_REQUIRES_INSTANCE", "Only works inside a run"),
+        permanent("CONTROL_REQUIRES_OPERATION", "Only works in a compiled workflow step"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn resume(input: RunInput) -> Result<CommandOutput, String> {
+    require_id("instanceId", &input.instance_id)?;
+    host::resume(input.instance_id).await
+}
+
 /// Host control calls. Real only in the host executor's store.
 #[cfg(target_arch = "wasm32")]
 mod host {
@@ -820,6 +1081,65 @@ mod host {
         })
     }
 
+    fn command(result: types::CommandResult) -> super::CommandOutput {
+        super::CommandOutput {
+            instance_id: result.instance_id,
+            outcome: match result.outcome {
+                types::CommandOutcome::Requested => "requested",
+                types::CommandOutcome::Applied => "applied",
+                types::CommandOutcome::Unchanged => "unchanged",
+                types::CommandOutcome::AlreadyTerminal => "already_terminal",
+            }
+            .into(),
+            replayed: result.replayed,
+        }
+    }
+
+    pub(super) async fn send_signal(
+        input: super::SendSignalInput,
+    ) -> Result<super::SendSignalOutput, String> {
+        let payload = serde_json::to_vec(&input.payload)
+            .map_err(|_| super::invalid("payload must be JSON".into()))?;
+        let result = api::send_signal(types::SendSignalRequest {
+            instance_id: input.instance_id,
+            signal_id: input.signal_id,
+            action_key: input.action_key,
+            request_id: input.request_id,
+            payload,
+        })
+        .await
+        .map_err(control_error)?;
+        Ok(super::SendSignalOutput {
+            request_id: result.request_id,
+            replayed: result.replayed,
+        })
+    }
+
+    pub(super) async fn cancel(input: super::CancelInput) -> Result<super::CommandOutput, String> {
+        api::cancel(types::CancelRequest {
+            instance_id: input.instance_id,
+            reason: input.reason,
+            grace_ms: input.grace_ms,
+        })
+        .await
+        .map(command)
+        .map_err(control_error)
+    }
+
+    pub(super) async fn pause(instance_id: String) -> Result<super::CommandOutput, String> {
+        api::pause(instance_id)
+            .await
+            .map(command)
+            .map_err(control_error)
+    }
+
+    pub(super) async fn resume(instance_id: String) -> Result<super::CommandOutput, String> {
+        api::resume(instance_id)
+            .await
+            .map(command)
+            .map_err(control_error)
+    }
+
     pub(super) async fn register_wait(ids: Vec<String>, all: bool) -> Result<String, String> {
         let mode = if all {
             types::WaitMode::All
@@ -893,6 +1213,24 @@ mod host {
         Err(unavailable())
     }
 
+    pub(super) async fn send_signal(
+        _input: super::SendSignalInput,
+    ) -> Result<super::SendSignalOutput, String> {
+        Err(unavailable())
+    }
+
+    pub(super) async fn cancel(_input: super::CancelInput) -> Result<super::CommandOutput, String> {
+        Err(unavailable())
+    }
+
+    pub(super) async fn pause(_instance_id: String) -> Result<super::CommandOutput, String> {
+        Err(unavailable())
+    }
+
+    pub(super) async fn resume(_instance_id: String) -> Result<super::CommandOutput, String> {
+        Err(unavailable())
+    }
+
     pub(super) async fn register_wait(_ids: Vec<String>, _all: bool) -> Result<String, String> {
         Err(unavailable())
     }
@@ -918,6 +1256,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "ListPendingSignalsOutput",
             &__OUTPUT_META_ListPendingSignalsOutput,
         ),
+        ("SendSignalOutput", &__OUTPUT_META_SendSignalOutput),
+        ("CommandOutput", &__OUTPUT_META_CommandOutput),
     ]);
     AgentInfo {
         id: runtara_dsl::agent_meta::CONTROL_AGENT_ID.into(),
@@ -946,6 +1286,30 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 &output_types,
             ),
             capability_to_api_with_types(
+                &__CAPABILITY_META_SEND_SIGNAL,
+                Some(&__INPUT_META_SendSignalInput),
+                Some(&__OUTPUT_META_SendSignalOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_CANCEL,
+                Some(&__INPUT_META_CancelInput),
+                Some(&__OUTPUT_META_CommandOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_PAUSE,
+                Some(&__INPUT_META_RunInput),
+                Some(&__OUTPUT_META_CommandOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_RESUME,
+                Some(&__INPUT_META_RunInput),
+                Some(&__OUTPUT_META_CommandOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
                 &__CAPABILITY_META_WAIT,
                 Some(&__INPUT_META_WaitInput),
                 Some(&__OUTPUT_META_WaitOutput),
@@ -958,7 +1322,16 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 runtara_agent_macro::agent_component!(
     agent = "control",
     control_executor = true,
-    capabilities = [get, query, list_pending_signals, wait],
+    capabilities = [
+        get,
+        query,
+        list_pending_signals,
+        send_signal,
+        cancel,
+        pause,
+        resume,
+        wait
+    ],
     suspending = [wait],
 );
 
@@ -971,10 +1344,113 @@ mod tests {
         let info = agent_info();
         assert_eq!(info.id, "control");
         let ids: Vec<_> = info.capabilities.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["get", "query", "list-pending-signals", "wait"]);
-        let wait = &info.capabilities[3];
+        assert_eq!(
+            ids,
+            [
+                "get",
+                "query",
+                "list-pending-signals",
+                "send-signal",
+                "cancel",
+                "pause",
+                "resume",
+                "wait"
+            ]
+        );
+        let wait = &info.capabilities[7];
         assert!(wait.suspends);
         assert!(!wait.trusted);
+    }
+
+    #[test]
+    fn mutations_have_side_effects_and_need_a_run() {
+        let info = agent_info();
+        for mutation in &info.capabilities[3..7] {
+            assert!(mutation.has_side_effects, "{}", mutation.id);
+            assert!(!mutation.suspends, "{}", mutation.id);
+            assert!(
+                mutation
+                    .tags
+                    .iter()
+                    .any(|tag| tag == runtara_control_contract::REQUIRES_RUN_TAG),
+                "{}: {:?}",
+                mutation.id,
+                mutation.tags
+            );
+            let codes: Vec<_> = mutation
+                .known_errors
+                .iter()
+                .map(|e| e.code.as_str())
+                .collect();
+            for code in [
+                "CONTROL_REQUIRES_INSTANCE",
+                "CONTROL_REQUIRES_OPERATION",
+                "CONTROL_REPLAY_CONFLICT",
+                "CONTROL_UNAVAILABLE",
+            ] {
+                assert!(codes.contains(&code), "{}: {codes:?}", mutation.id);
+            }
+            let known = runtara_control_contract::ErrorCode::all_agent_codes();
+            assert!(codes.iter().all(|code| known.contains(code)), "{codes:?}");
+        }
+    }
+
+    #[test]
+    fn a_signal_payload_is_any_json() {
+        let info = serde_json::to_value(agent_info()).unwrap();
+        let send = info["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|capability| capability["id"] == "send-signal")
+            .unwrap();
+        let payload = send["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == "payload")
+            .unwrap();
+        assert_eq!(payload["type"], "any", "{payload}");
+    }
+
+    #[test]
+    fn mutation_arguments_are_validated_before_the_host() {
+        let send = |input: serde_json::Value| {
+            futures_lite_block_on(send_signal(serde_json::from_value(input).unwrap()))
+        };
+        assert!(
+            send(serde_json::json!({"instanceId": " ", "signalId": "approve"}))
+                .unwrap_err()
+                .contains("CONTROL_INVALID")
+        );
+        assert!(
+            send(serde_json::json!({"instanceId": "child", "signalId": ""}))
+                .unwrap_err()
+                .contains("CONTROL_INVALID")
+        );
+        let cancel_with = |grace: u64| {
+            futures_lite_block_on(cancel(CancelInput {
+                instance_id: "child".into(),
+                reason: None,
+                grace_ms: Some(grace),
+            }))
+        };
+        assert!(
+            cancel_with(3_600_001)
+                .unwrap_err()
+                .contains("CONTROL_INVALID")
+        );
+        // In range, the call reaches the (native, absent) host.
+        assert!(cancel_with(0).unwrap_err().contains("CONTROL_UNAVAILABLE"));
+        let empty = || RunInput {
+            instance_id: String::new(),
+        };
+        for error in [
+            futures_lite_block_on(pause(empty())).unwrap_err(),
+            futures_lite_block_on(resume(empty())).unwrap_err(),
+        ] {
+            assert!(error.contains("CONTROL_INVALID"));
+        }
     }
 
     #[test]

@@ -1340,9 +1340,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Control runs only the dispatcher bundle's control bytes, on every tier
     // (decision D5). Boot approves those and the compile bundle's, which may
     // differ; the service binds to the runtime once it exists.
-    let native_control = Arc::new(api::services::control::NativeControl::new(Some(
-        tenant_id.clone(),
-    )));
+    let native_control = Arc::new(
+        api::services::control::NativeControl::new(Some(tenant_id.clone()))
+            .with_audit(pool.clone()),
+    );
     let control_boot = match component_dispatcher
         .as_ref()
         .and_then(|dispatcher| dispatcher.control_executor())

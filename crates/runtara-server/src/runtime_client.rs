@@ -28,6 +28,11 @@ use tracing::{debug, info, warn};
 
 use crate::observability::trace_context;
 
+/// Default cooperative grace before a stop is forced.
+pub const DEFAULT_STOP_GRACE_SECONDS: u32 = 5;
+/// Longest grace a stop accepts.
+pub const MAX_STOP_GRACE_SECONDS: u32 = 3600;
+
 /// Errors that can occur when interacting with the runtime
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -201,6 +206,31 @@ fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
     }
 }
 
+/// Operation ids with this prefix are control's own; no public submission
+/// path (signals, report actions, sessions, channels) may use them.
+pub const CONTROL_OPERATION_PREFIX: &str = "control:";
+
+/// Whether a caller-supplied operation id falls in control's reserved space.
+pub fn is_reserved_operation_id(operation: &str) -> bool {
+    operation.starts_with(CONTROL_OPERATION_PREFIX)
+}
+
+fn refuse_reserved_operation(
+    operation: &str,
+) -> runtara_core::persistence::inputs::InputResult<()> {
+    if is_reserved_operation_id(operation) {
+        return Err(runtara_core::persistence::inputs::InputError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn control_operation_only(operation: &str) -> runtara_core::persistence::inputs::InputResult<()> {
+    if !is_reserved_operation_id(operation) {
+        return Err(runtara_core::persistence::inputs::InputError::InvalidRequest);
+    }
+    Ok(())
+}
+
 impl RuntimeClient {
     /// Complete tenant/workflow association set for managed request pagination.
     pub async fn workflow_input_instances(
@@ -283,6 +313,7 @@ impl RuntimeClient {
     }
 
     /// Submit through the same validated acceptance path for all transports.
+    /// The `control:` operation prefix is reserved for control's own answers.
     pub async fn submit_input_response(
         &self,
         tenant: &str,
@@ -293,6 +324,7 @@ impl RuntimeClient {
     ) -> runtara_core::persistence::inputs::InputResult<
         runtara_core::persistence::inputs::InputReceipt,
     > {
+        refuse_reserved_operation(operation)?;
         self.client
             .submit_input_response(tenant, instance, request, operation, payload)
             .await
@@ -309,6 +341,7 @@ impl RuntimeClient {
     ) -> runtara_core::persistence::inputs::InputResult<
         Option<runtara_core::persistence::inputs::InputReceipt>,
     > {
+        refuse_reserved_operation(operation)?;
         self.client
             .replay_contextual_input_response(tenant, instance, request, operation, context)
             .await
@@ -327,6 +360,46 @@ impl RuntimeClient {
     ) -> runtara_core::persistence::inputs::InputResult<
         runtara_core::persistence::inputs::InputReceipt,
     > {
+        refuse_reserved_operation(operation)?;
+        self.client
+            .submit_contextual_input_response(
+                tenant, instance, request, operation, payload, context,
+            )
+            .await
+    }
+
+    /// Control's `send-signal`: replay of its own `control:` operation.
+    pub(crate) async fn replay_control_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        Option<runtara_core::persistence::inputs::InputReceipt>,
+    > {
+        control_operation_only(operation)?;
+        self.client
+            .replay_contextual_input_response(tenant, instance, request, operation, context)
+            .await
+    }
+
+    /// Control's `send-signal`: validated acceptance under its own
+    /// `control:` operation and `InputAcceptanceContext("control", …)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn submit_control_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &serde_json::Value,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        control_operation_only(operation)?;
         self.client
             .submit_contextual_input_response(
                 tenant, instance, request, operation, payload, context,
@@ -627,18 +700,76 @@ impl RuntimeClient {
 
     /// Request cooperative cancellation with the default whole-run abort grace.
     pub async fn stop_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        let sdk = &self.client;
+        self.stop_instance_with(
+            instance_id,
+            DEFAULT_STOP_GRACE_SECONDS,
+            "Stopped by runtara-server",
+        )
+        .await
+    }
 
+    /// Request cooperative cancellation, forcing the stop after `grace_seconds`
+    /// (0-3600). `reason` travels with the cancel command.
+    pub async fn stop_instance_with(
+        &self,
+        instance_id: &str,
+        grace_seconds: u32,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        if grace_seconds > MAX_STOP_GRACE_SECONDS {
+            return Err(RuntimeError::SdkError(format!(
+                "the stop grace period is at most {MAX_STOP_GRACE_SECONDS} seconds"
+            )));
+        }
         let options = crate::runtime_types::StopInstanceOptions::new(instance_id)
-            .with_grace_period(5)
-            .with_reason("Stopped by runtara-server");
+            .with_grace_period(grace_seconds)
+            .with_reason(reason);
 
-        sdk.stop_instance(options)
+        self.client
+            .stop_instance(options)
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
 
-        info!(instance_id = %instance_id, "Requested workflow cancellation with abort grace");
+        info!(instance_id = %instance_id, grace_seconds, "Requested workflow cancellation with abort grace");
         Ok(())
+    }
+
+    /// Pause an instance and report what the pause did (decision D4: a parked
+    /// run pauses at once).
+    pub async fn pause_instance_outcome(
+        &self,
+        instance_id: &str,
+    ) -> Result<runtara_environment::handlers::PauseInstanceOutcome, RuntimeError> {
+        self.client
+            .pause_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Resume a suspended instance; with `require_paused`, only an explicitly
+    /// paused one. `Some((rejection, message))` when refused.
+    pub async fn resume_instance_with(
+        &self,
+        instance_id: &str,
+        require_paused: bool,
+    ) -> Result<
+        Option<(
+            Option<runtara_environment::handlers::ResumeRejection>,
+            String,
+        )>,
+        RuntimeError,
+    > {
+        self.client
+            .resume_instance_with(instance_id, require_paused)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Receipts of control mutations, when the runtime store provides them.
+    pub fn control_receipts(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::control_receipts::ControlReceipts> {
+        self.client.control_receipts()
     }
 
     /// Count a tenant's instances in the given statuses.

@@ -12,9 +12,20 @@
 #              restarts, control calls are denied and the pinned workflow no
 #              longer becomes ready.
 #
-# Later stages (mutations, start, ownership, waits) are added by their slices.
+#   2  MUTATIONS a workflow's send-signal step answers another run's open
+#              WaitForSignal request that opted in with action.key; the
+#              server is SIGKILLed while the sender sits in a durable Delay,
+#              and the replay answers from its receipt instead of answering
+#              twice. Pausing a waiting run through the public API pauses it
+#              immediately; resuming a failed run is NotResumable; cancel and
+#              pause of a run that is not a child are CONTROL_NOT_CHILD; the
+#              public signal path refuses control's reserved `control:`
+#              operation ids.
 #
-# Usage:  STAGES=1 ./e2e/test_control_agent.sh
+# Later stages (start, ownership, waits) are added by their slices. Stage 1
+# ends by revoking the control approval, so it runs after every other stage.
+#
+# Usage:  STAGES=1,2 ./e2e/test_control_agent.sh
 #
 # Prereqs: Postgres + docker (isolated Valkey), a built runtara-server, and
 # prebuilt components (scripts/build-agent-components.sh).
@@ -29,8 +40,8 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-STAGES="${STAGES:-1}"
-IMPLEMENTED_STAGES="1"
+STAGES="${STAGES:-1,2}"
+IMPLEMENTED_STAGES="1,2"
 for stage in ${STAGES//,/ }; do
     case ",${IMPLEMENTED_STAGES}," in
         *",${stage},"*) ;;
@@ -82,6 +93,14 @@ api_post() {
 stop_server() {
     if [ -n "${SERVER_PID}" ]; then
         kill "${SERVER_PID}" 2>/dev/null || true
+        wait "${SERVER_PID}" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+}
+
+crash_server() {
+    if [ -n "${SERVER_PID}" ]; then
+        kill -9 "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
         SERVER_PID=""
     fi
@@ -353,7 +372,132 @@ if stage_enabled 1; then
     RESP=$(test_control get "{\"instanceId\": \"${DONE}\"}")
     echo "${RESP}" | grep -q '"total":42' || { print_error "Tenant-scoped test read failed: ${RESP}"; exit 1; }
     print_success "NOT_FOUND, INVALID and UNSUPPORTED from runs; REQUIRES_INSTANCE from a test invocation ✓"
+fi
 
+if stage_enabled 2; then
+    # -----------------------------------------------------------------------
+    # Stage 2: mutations.
+    # -----------------------------------------------------------------------
+    input_request() {
+        psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+            "SELECT state || '|' || request_id || '|' || COALESCE(operation_id, '') FROM instance_input_requests WHERE instance_id = '$1'"
+    }
+    APPROVAL_GRAPH=$(jq -n '{
+        name: "control-approval", durable: true, entryPoint: "approve",
+        steps: { approve: { id: "approve", stepType: "WaitForSignal", name: "Approve",
+                            pollIntervalMs: 500,
+                            responseSchema: { approved: { type: "boolean", required: true } },
+                            action: { key: "finance" } },
+                 finish: { id: "finish", stepType: "Finish", inputMapping: {
+                     decision: { valueType: "reference", value: "steps.approve.outputs" } } } },
+        executionPlan: [ { fromStep: "approve", toStep: "finish" } ],
+        variables: {}, inputSchema: {}, outputSchema: {}
+    }')
+    read -r APPROVAL_WF _ <<< "$(make_workflow control-approval "${APPROVAL_GRAPH}")"
+    APPROVER=$(launch "${APPROVAL_WF}")
+    [ "$(wait_status "${APPROVER}" suspended 120)" = "suspended" ] || { print_error "Approver did not park: $(instance_row "${APPROVER}")"; exit 1; }
+
+    print_step "Stage 2: a send-signal step answers the approver, then the server is SIGKILLed..."
+    # The answer step is not durable, so every replay re-invokes it and only
+    # the operation receipt keeps it from answering twice.
+    ANSWER_STEP=$(jq -n '{
+        id: "answer", stepType: "Agent", agentId: "control", capabilityId: "send-signal",
+        maxRetries: 0, durable: false, inputMapping: {
+            instanceId: { valueType: "reference", value: "data.target" },
+            signalId: { valueType: "immediate", value: "approve" },
+            actionKey: { valueType: "immediate", value: "finance" },
+            payload: { valueType: "immediate", value: { approved: true } } } }')
+    SENDER_GRAPH=$(jq -n --argjson answer "${ANSWER_STEP}" '{
+        name: "control-sender", durable: true, entryPoint: "answer",
+        steps: { answer: $answer,
+                 hold: { id: "hold", stepType: "Delay",
+                         durationMs: { valueType: "immediate", value: 8000 } },
+                 finish: { id: "finish", stepType: "Finish", inputMapping: {
+                     answer: { valueType: "reference", value: "steps.answer.outputs" } } } },
+        executionPlan: [ { fromStep: "answer", toStep: "hold" }, { fromStep: "hold", toStep: "finish" } ],
+        variables: {}, outputSchema: {},
+        inputSchema: { target: { type: "string", required: true } }
+    }')
+    read -r SENDER_WF _ <<< "$(make_workflow control-sender "${SENDER_GRAPH}")"
+    SENDER=$(launch "${SENDER_WF}" "$(jq -nc --arg t "${APPROVER}" '{target: $t}')")
+    ACCEPTED=""
+    for _ in {1..60}; do
+        ACCEPTED=$(input_request "${APPROVER}")
+        case "${ACCEPTED}" in accepted*) break ;; esac
+        sleep 1
+    done
+    case "${ACCEPTED}" in accepted*"|control:"*) ;; *) print_error "The approver was not answered under a control: operation: '${ACCEPTED}' $(instance_row "${SENDER}")"; exit 1 ;; esac
+    REQUEST_ID=$(echo "${ACCEPTED}" | cut -d'|' -f2)
+    OPERATION_ID=$(echo "${ACCEPTED}" | cut -d'|' -f3)
+    echo "  answered ${REQUEST_ID} as ${OPERATION_ID}"
+    crash_server
+    start_server
+    [ "$(wait_status "${SENDER}" completed 180)" = "completed" ] || { print_error "Sender did not finish after the crash: $(instance_row "${SENDER}")"; exit 1; }
+    OUT=$(instance_output "${SENDER}")
+    echo "  sender output: ${OUT}"
+    [ "$(echo "${OUT}" | jq -r '.answer.requestId')" = "${REQUEST_ID}" ] || { print_error "The replay answered another request"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.answer.replayed')" = "true" ] || { print_error "The replayed answer step should report replayed: ${OUT}"; exit 1; }
+    [ "$(input_request "${APPROVER}")" = "${ACCEPTED}" ] || { print_error "The request changed after the replay: $(input_request "${APPROVER}")"; exit 1; }
+    RECEIPTS=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT count(*) || '|' || string_agg(state, ',') FROM instance_control_receipts WHERE caller_instance_id = '${SENDER}'")
+    [ "${RECEIPTS}" = "1|completed" ] || { print_error "Expected one completed receipt, got '${RECEIPTS}'"; exit 1; }
+    [ "$(wait_status "${APPROVER}" completed 120)" = "completed" ] || { print_error "Approver did not finish: $(instance_row "${APPROVER}")"; exit 1; }
+    instance_output "${APPROVER}" | grep -q '"approved":true' || { print_error "Approver saw another answer: $(instance_output "${APPROVER}")"; exit 1; }
+    AUDIT=$(psql_quiet -d "${TEST_DB_SERVER}" -c \
+        "SELECT count(*) FROM audit_events WHERE tenant_id = '${TENANT}' AND event_type = 'control.send_signal' AND resource_id = '${APPROVER}' AND payload::text NOT LIKE '%approved%'")
+    [ "${AUDIT}" -ge 1 ] || { print_error "send-signal was not audited without its payload"; exit 1; }
+    print_success "send-signal answered once across a SIGKILL replay (replayed: true, one receipt) ✓"
+
+    print_step "Stage 2: pausing a waiting run is immediate; resume relaunches it..."
+    PAUSED=$(launch "${APPROVAL_WF}")
+    [ "$(wait_status "${PAUSED}" suspended 120)" = "suspended" ] || { print_error "Run did not park: $(instance_row "${PAUSED}")"; exit 1; }
+    RESP=$(api_post "/workflows/instances/${PAUSED}/pause" '{}')
+    [ "$(echo "${RESP}" | jq -r '.data.outcome')" = "applied" ] || { print_error "Pause of a waiting run should apply at once: ${RESP}"; exit 1; }
+    REASON=$(test_control get "{\"instanceId\": \"${PAUSED}\"}" | jq -r '.output.instance.suspensionReason // .result.instance.suspensionReason // empty')
+    [ "${REASON}" = "paused" ] || { print_error "Expected suspensionReason paused, got '${REASON}'"; exit 1; }
+    RESP=$(api_post "/workflows/instances/${PAUSED}/pause" '{}')
+    [ "$(echo "${RESP}" | jq -r '.data.outcome')" = "unchanged" ] || { print_error "A second pause should be unchanged: ${RESP}"; exit 1; }
+    RESP=$(api_post "/workflows/instances/${PAUSED}/resume" '{}')
+    [ "$(echo "${RESP}" | jq -r '.data.outcome')" = "applied" ] || { print_error "Resume failed: ${RESP}"; exit 1; }
+    print_success "A waiting run paused at once (applied, suspensionReason paused) and resumed ✓"
+
+    print_step "Stage 2: lifecycle commands reach children only; the reserved prefix is refused..."
+    for cap in cancel pause; do
+        STEP=$(jq -n --arg cap "${cap}" '{
+            id: "command", stepType: "Agent", agentId: "control", capabilityId: $cap,
+            maxRetries: 0, inputMapping: {
+                instanceId: { valueType: "reference", value: "data.target" } } }')
+        GRAPH=$(jq -n --argjson step "${STEP}" --arg name "control-${cap}-probe" '{
+            name: $name, durable: true, entryPoint: "command",
+            steps: { command: $step, finish: { id: "finish", stepType: "Finish" } },
+            executionPlan: [ { fromStep: "command", toStep: "finish" } ],
+            variables: {}, outputSchema: {},
+            inputSchema: { target: { type: "string", required: true } }
+        }')
+        read -r CMD_WF _ <<< "$(make_workflow "control-${cap}-probe" "${GRAPH}")"
+        RUN=$(launch "${CMD_WF}" "$(jq -nc --arg t "${PAUSED}" '{target: $t}')")
+        [ "$(wait_status "${RUN}" failed 120)" = "failed" ] || { print_error "${cap} of a non-child should fail: $(instance_row "${RUN}")"; exit 1; }
+        instance_row "${RUN}" | grep -q "CONTROL_NOT_CHILD" || { print_error "Expected CONTROL_NOT_CHILD from ${cap}: $(instance_row "${RUN}")"; exit 1; }
+        FAILED_RUN="${RUN}"
+    done
+    [ "$(instance_status "${PAUSED}")" != "cancelled" ] || { print_error "A refused cancel still cancelled the run"; exit 1; }
+    CODE=$(test_control pause "{\"instanceId\": \"${PAUSED}\"}" | error_code)
+    [ "${CODE}" = "CONTROL_REQUIRES_INSTANCE" ] || { print_error "A test invocation of pause should need a run, got '${CODE}'"; exit 1; }
+    RESP=$(curl -sS -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+        -d '{}' "${API}/workflows/instances/${FAILED_RUN}/resume")
+    [ "${RESP}" = "400" ] || { print_error "Resuming a failed run should be 400 NotResumable, got ${RESP}"; exit 1; }
+    OPEN=$(launch "${APPROVAL_WF}")
+    [ "$(wait_status "${OPEN}" suspended 120)" = "suspended" ] || { print_error "Run did not park: $(instance_row "${OPEN}")"; exit 1; }
+    OPEN_REQUEST=$(input_request "${OPEN}" | cut -d'|' -f2)
+    RESP=$(curl -sS -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+        -d "{\"requestId\": \"${OPEN_REQUEST}\", \"operationId\": \"control:forged\", \"payload\": {\"approved\": true}}" \
+        "${API}/signals/${OPEN}")
+    [ "${RESP}" = "400" ] || { print_error "A public control: operation id should be refused, got ${RESP}"; exit 1; }
+    case "$(input_request "${OPEN}")" in open*) ;; *) print_error "The forged answer was accepted"; exit 1 ;; esac
+    print_success "cancel/pause of a non-child: CONTROL_NOT_CHILD; failed run NotResumable; control: prefix refused ✓"
+fi
+
+if stage_enabled 1; then
     print_step "Revoking the approved control digest and restarting..."
     psql_quiet -d "${TEST_DB_RUNTIME}" -c \
         "UPDATE approved_builtin_artifacts SET revoked_at = now(), revoked_reason = 'e2e' WHERE pin = '${APPROVED}'" >/dev/null

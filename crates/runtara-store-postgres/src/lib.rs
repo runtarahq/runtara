@@ -24,6 +24,7 @@ pub mod rows;
 pub mod encoding;
 
 mod backend;
+mod control_receipts;
 mod dialect;
 mod inputs;
 mod invocations;
