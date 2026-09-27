@@ -83,7 +83,7 @@ async fn agent_tool_closes_headers_and_body_and_gives_next_call_a_fresh_budget()
             vec![Child::Success, Child::Body],
         ] {
             let dir = tempfile::tempdir()?;
-            let compiled = compiled_agent(dir.path(), durable, 400, None)?;
+            let compiled = compiled_agent(dir.path(), durable, PENDING_BUDGET_MS, None)?;
             let host = Arc::new(Host::new());
             let mut server = scripted(host.clone(), operations, 2).await?;
             let exit = invoke_with_outbound(&compiled, host, server.outbound()).await?;
@@ -127,7 +127,14 @@ async fn agent_tool_root_cancel_and_parent_timeout_bypass_model_feedback() -> an
     for durable in [false, true] {
         for cancel in [false, true] {
             let dir = tempfile::tempdir()?;
-            let compiled = compiled_agent(dir.path(), durable, 5_000, (!cancel).then_some(400))?;
+            // The parent's budget must reach the child request; the tool's
+            // own budget never ends first.
+            let compiled = compiled_agent(
+                dir.path(),
+                durable,
+                60_000,
+                (!cancel).then_some(PENDING_BUDGET_MS),
+            )?;
             let host = Arc::new(Host::new());
             let mut server = scripted(
                 host.clone(),
@@ -163,7 +170,7 @@ async fn agent_tool_root_cancel_and_parent_timeout_bypass_model_feedback() -> an
 #[tokio::test]
 async fn agent_tool_completed_calls_replay_after_pause_without_reinvoking() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let compiled = compiled_agent(dir.path(), true, 200, None)?;
+    let compiled = compiled_agent(dir.path(), true, PENDING_BUDGET_MS, None)?;
     let host = Arc::new(Host::new());
     host.clock_override.store(1_000, Ordering::SeqCst);
     *host.checkpoint_signal.lock().unwrap() = Some("runtara:v2:[\"agent\",".into());
@@ -205,7 +212,8 @@ async fn agent_tool_completed_calls_replay_after_pause_without_reinvoking() -> a
         .collect::<Vec<_>>();
     assert_eq!(budgets.len(), 2);
     assert!(
-        budgets.contains(&1_200) && budgets.contains(&10_200),
+        budgets.contains(&(1_000 + PENDING_BUDGET_MS))
+            && budgets.contains(&(10_000 + PENDING_BUDGET_MS)),
         "{budgets:?}"
     );
     Ok(())
@@ -233,7 +241,7 @@ async fn agent_tool_maximum_budget_and_provider_errors_preserve_results() -> any
 async fn agent_tool_pending_budget_survives_pause_without_granting_extra_time() -> anyhow::Result<()>
 {
     let dir = tempfile::tempdir()?;
-    let compiled = compiled_agent(dir.path(), true, 200, None)?;
+    let compiled = compiled_agent(dir.path(), true, PENDING_BUDGET_MS, None)?;
     let host = Arc::new(Host::new());
     host.clock_override.store(1_000, Ordering::SeqCst);
     *host.checkpoint_signal.lock().unwrap() = Some("runtara:v2:[\"agent-deadline\",".into());
@@ -251,7 +259,10 @@ async fn agent_tool_pending_budget_survives_pause_without_granting_extra_time() 
     assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
     assert_eq!(server.children.load(Ordering::SeqCst), 0);
     *host.checkpoint_signal.lock().unwrap() = None;
-    host.clock_override.store(1_200, Ordering::SeqCst);
+    // Exactly the first call's persisted budget has elapsed; the second call
+    // still needs a live budget long enough to reach the provider.
+    host.clock_override
+        .store(1_000 + PENDING_BUDGET_MS, Ordering::SeqCst);
     let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
     server.check().await?;
     assert!(matches!(exit, InvokeExit::Completed(_)), "{exit:?}");
