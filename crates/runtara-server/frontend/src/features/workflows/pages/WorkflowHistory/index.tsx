@@ -74,6 +74,7 @@ import { ReplayView } from '@/features/workflows/components/Replay';
 import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
 import { Spinner } from '@/shared/components/ui/spinner';
 import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
+import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import {
   canResume,
   suspendedStatusLabel,
@@ -978,12 +979,7 @@ function WorkflowHistoryContent() {
                             {step.stepName || step.stepId}
                           </span>
                         </button>
-                        <Badge variant={statusDisplay.badgeVariant}>
-                          {statusDisplay.spin && (
-                            <Spinner className="mr-1 size-3" />
-                          )}
-                          {statusDisplay.label}
-                        </Badge>
+                        <StepStatusBadge status={step.status} />
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">

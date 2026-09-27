@@ -21,6 +21,7 @@ import {
   runDetailPath,
   runLookupQueryParams,
 } from '../utils/run-links';
+import { shortRunId } from '../utils/column-layout';
 
 type ExecutionsPage = Awaited<ReturnType<typeof getAllExecutions>>;
 
@@ -55,14 +56,17 @@ export function RunStatusPill({
 /**
  * Link to the run whose `control:start` step started this one. The detail
  * route needs the parent's workflow, so the parent is looked up by id; until
- * then (or when it is gone) the bare id is shown.
+ * then (or when it is gone) the bare id is shown. `compact` (table cells)
+ * narrows the name and shortens the id; the full id is the hover text.
  */
 export function ParentRunLink({
   parentInstanceId,
   className,
+  compact = false,
 }: {
   parentInstanceId?: string | null;
   className?: string;
+  compact?: boolean;
 }) {
   const { data } = useCustomQuery<ExecutionsPage>({
     queryKey: queryKeys.executions.list(
@@ -78,13 +82,15 @@ export function ParentRunLink({
   }
 
   const parent = findRun(data?.content, parentInstanceId);
+  const idText = compact ? shortRunId(parentInstanceId) : parentInstanceId;
+  const maxWidth = compact ? 'max-w-36' : 'max-w-60';
   if (!parent?.workflowId) {
     return (
       <span
         className={cn('font-mono text-xs text-muted-foreground', className)}
         title={parentInstanceId}
       >
-        {parentInstanceId}
+        {idText}
       </span>
     );
   }
@@ -98,11 +104,16 @@ export function ParentRunLink({
       )}
       title={parentInstanceId}
     >
-      <span className="max-w-60 truncate font-medium">
+      <span className={cn(maxWidth, 'truncate font-medium')}>
         {executionDisplayName(parent)}
       </span>
-      <span className="max-w-60 truncate font-mono text-xs text-muted-foreground">
-        {parentInstanceId}
+      <span
+        className={cn(
+          maxWidth,
+          'truncate font-mono text-xs text-muted-foreground'
+        )}
+      >
+        {idText}
       </span>
     </Link>
   );

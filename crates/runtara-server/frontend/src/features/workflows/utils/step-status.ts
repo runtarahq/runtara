@@ -12,7 +12,13 @@ export interface StepStatusDisplay {
   /** Text color class for inline status text. */
   textClass: string;
   spin: boolean;
+  /** Hover text explaining the status, when it needs one. */
+  title?: string;
 }
+
+/** Hover text for a parked step. */
+export const SUSPENDED_STEP_TITLE =
+  'Parked until its run resumes (a control wait, a durable Delay or a signal wait)';
 
 export function stepStatusDisplay(
   status: string | null | undefined
@@ -49,6 +55,7 @@ export function stepStatusDisplay(
         rowClass: 'border-warning/50 bg-warning/5',
         textClass: 'text-warning',
         spin: false,
+        title: SUSPENDED_STEP_TITLE,
       };
     default:
       return {

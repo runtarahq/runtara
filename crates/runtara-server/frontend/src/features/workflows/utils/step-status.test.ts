@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stepStatusDisplay } from './step-status';
+import { SUSPENDED_STEP_TITLE, stepStatusDisplay } from './step-status';
 
 describe('stepStatusDisplay', () => {
   it('renders a suspended step as its own non-running, non-failed state', () => {
@@ -8,6 +8,7 @@ describe('stepStatusDisplay', () => {
       label: 'Suspended',
       badgeVariant: 'warning',
       spin: false,
+      title: SUSPENDED_STEP_TITLE,
     });
     expect(suspended.badgeVariant).not.toBe(
       stepStatusDisplay('running').badgeVariant

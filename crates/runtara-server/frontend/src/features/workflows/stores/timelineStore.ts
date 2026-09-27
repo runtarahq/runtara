@@ -96,7 +96,7 @@ export const useTimelineStore = create<TimelineState>()(
 
           // Update max timestamp if new steps extend the timeline
           for (const step of steps) {
-            const endTime = step.absoluteStartMs + (step.durationMs || 0);
+            const endTime = step.absoluteStartMs + step.spanMs;
             if (endTime > state.maxTimestamp) {
               state.maxTimestamp = endTime;
               state.totalDuration = state.maxTimestamp - state.minTimestamp;

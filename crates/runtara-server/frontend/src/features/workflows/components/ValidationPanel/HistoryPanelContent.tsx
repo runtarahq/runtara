@@ -34,7 +34,7 @@ import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { resolvePayloadForCopy } from '@/shared/utils/truncated-payload';
 import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
 import { Spinner } from '@/shared/components/ui/spinner';
-import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
+import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import {
   canResume,
   suspendedStatusLabel,
@@ -352,8 +352,6 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
 function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const statusDisplay = stepStatusDisplay(step.status);
-
   const hasError = step.error != null;
   const errorString = hasError
     ? typeof step.error === 'string'
@@ -408,13 +406,11 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
             : '-'}
         </td>
         <td className="px-3 py-1.5 text-right">
-          <Badge
-            variant={statusDisplay.badgeVariant}
+          <StepStatusBadge
+            status={step.status}
             className="px-1.5 py-0 text-3xs"
-          >
-            {statusDisplay.spin && <Spinner className="mr-0.5 size-2.5" />}
-            {statusDisplay.label}
-          </Badge>
+            spinnerClassName="mr-0.5 size-2.5"
+          />
         </td>
       </tr>
 

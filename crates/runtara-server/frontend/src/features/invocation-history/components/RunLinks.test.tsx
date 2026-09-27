@@ -57,6 +57,35 @@ describe('Started by / Parent', () => {
   });
 });
 
+describe('compact Parent cell', () => {
+  const PARENT = '77c7a528-0dba-4afa-9680-d5112c38bf1c';
+
+  it('shortens the id and keeps the full id as hover text', () => {
+    query.mockReturnValue({
+      data: { content: [item(PARENT, { workflowName: 'ui-approvals' })] },
+    });
+    withRouter(<ParentRunLink parentInstanceId={PARENT} compact />);
+    const link = screen.getByRole('link');
+    expect(link).toHaveAttribute('title', PARENT);
+    expect(link).toHaveAttribute(
+      'href',
+      `/workflows/wf-${PARENT}/history/${PARENT}`
+    );
+    expect(screen.getByText('77c7a528…')).toBeInTheDocument();
+    expect(screen.queryByText(PARENT)).not.toBeInTheDocument();
+    expect(screen.getByText('ui-approvals')).toHaveClass(
+      'max-w-36',
+      'truncate'
+    );
+  });
+
+  it('shows the short id while the parent is unresolved', () => {
+    query.mockReturnValue({ data: undefined });
+    withRouter(<ParentRunLink parentInstanceId={PARENT} compact />);
+    expect(screen.getByText('77c7a528…')).toHaveAttribute('title', PARENT);
+  });
+});
+
 describe('Child runs', () => {
   it('lists the children the run started, filtered by parentInstanceId', () => {
     query.mockReturnValue({

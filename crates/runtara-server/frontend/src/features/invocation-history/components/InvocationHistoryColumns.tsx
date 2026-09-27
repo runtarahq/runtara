@@ -13,6 +13,33 @@ import { ResumeButton } from '@/features/workflows/components/ResumeButton';
 import { StopButton } from '@/features/workflows/components/StopButton';
 import { canResume } from '@/features/workflows/utils/suspension';
 import { ParentRunLink, RunStatusPill } from './RunLinks';
+import {
+  responsiveColumnClass,
+  type InvocationColumnId,
+} from '../utils/column-layout';
+
+/** Column meta that hides a lower-priority column on narrower viewports. */
+const responsiveMeta = (columnId: InvocationColumnId) => {
+  const className = responsiveColumnClass(columnId);
+  return { headerClassName: className, cellClassName: className };
+};
+
+/**
+ * Date over time on two lines, so the Started/Completed columns stay narrow.
+ * The full timestamp is the hover text.
+ */
+const dateTimeCell = (value: string) => {
+  return (
+    <div className="flex flex-col" title={formatDate(value)}>
+      <span className="text-sm text-foreground">
+        {formatDate(value, 'dd MMM, yyyy')}
+      </span>
+      <span className="text-xs text-muted-foreground">
+        {formatDate(value, 'p')}
+      </span>
+    </div>
+  );
+};
 
 // Helper to format duration. A negative value is meaningless (it comes from a
 // stale suspend `finished_at` predating a resumed run's `started_at`); render
@@ -55,7 +82,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               to={`/workflows/${workflowId}`}
               className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary"
             >
-              <span className="max-w-80 truncate" title={workflowName}>
+              <span className="max-w-60 truncate" title={workflowName}>
                 {workflowName}
               </span>
               <ExternalLink className="size-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
@@ -66,7 +93,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             </span>
           )}
           {row.original.runLabel && row.original.workflowName && (
-            <span className="text-xs text-muted-foreground">
+            <span
+              className="max-w-60 truncate text-xs text-muted-foreground"
+              title={row.original.workflowName}
+            >
               {row.original.workflowName}
             </span>
           )}
@@ -83,15 +113,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     enableSorting: true,
     cell: ({ row }) => {
       const createdAt: string = row.getValue('createdAt');
-      return (
-        <span className="text-sm text-foreground">{formatDate(createdAt)}</span>
-      );
+      return dateTimeCell(createdAt);
     },
   },
   {
     accessorKey: 'completedAt',
     header: 'Completed',
     enableSorting: true,
+    meta: responsiveMeta('completedAt'),
     cell: ({ row }) => {
       const completedAt = row.original.completedAt;
       // A non-terminal row (running/suspended/…) has no real completion time;
@@ -100,11 +129,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       if (!completedAt || isActiveStatus(row.original.status)) {
         return <span className="text-sm text-muted-foreground">-</span>;
       }
-      return (
-        <span className="text-sm text-foreground">
-          {formatDate(completedAt)}
-        </span>
-      );
+      return dateTimeCell(completedAt);
     },
   },
   {
@@ -144,14 +169,16 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     accessorKey: 'parentInstanceId',
     header: 'Parent',
     enableSorting: false,
+    meta: responsiveMeta('parentInstanceId'),
     cell: ({ row }) => (
-      <ParentRunLink parentInstanceId={row.original.parentInstanceId} />
+      <ParentRunLink parentInstanceId={row.original.parentInstanceId} compact />
     ),
   },
   {
     accessorKey: 'executionDurationSeconds',
     header: 'Duration',
     enableSorting: false,
+    meta: responsiveMeta('executionDurationSeconds'),
     cell: ({ row }) => {
       const duration = row.original.executionDurationSeconds;
       const colorClass = getDurationColorClass(duration);
@@ -170,6 +197,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     accessorKey: 'version',
     header: 'Version',
     enableSorting: false,
+    meta: responsiveMeta('version'),
     cell: ({ row }) => {
       const version = row.original.version;
       return version !== undefined ? (
