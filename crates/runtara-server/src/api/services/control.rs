@@ -23,8 +23,15 @@
 //! - `get` and `query(parent)` include children still in admission as
 //!   `queued`; `query(parent)` merges them with the launched ones in one
 //!   runtime read paged by admission time.
-//! - `wait` and `poll-wait` answer `requires-instance` without a calling
-//!   instance and `unsupported` otherwise until their slice lands.
+//! - `wait` registers a durable instance wait of the caller's operation on
+//!   direct children (the wait id is the operation's `op_hash`) and
+//!   `poll-wait` reads it; both need a calling instance, then an operation.
+//!   Targets are authorized before anything registers: over 1000 is
+//!   `too-large`, an unknown id `not-found`, an ancestor `denied`, any other
+//!   non-child `not-child`. Children whose admission ended without a launch
+//!   get their fenced outcome first (`unavailable` if that fails), so they
+//!   read `not-started` or `cancelled`. A registered target whose rows are
+//!   gone is an explicit `not-found`, never a silent outcome.
 //!
 //! The service is late-bound: the executor exists before the embedded
 //! runtime and the execution engine do, so a call waits up to
@@ -39,8 +46,8 @@ use runtara_component_host::control_host::{
     CancelRequest, CommandResult, ControlAuthority, ControlError, ControlErrorCode, ControlHost,
     InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentFilter, PendingSignal,
     PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest, SendSignalResult,
-    SignalScope, SortField, SortOrder, StartRequest, StartResult, SuspensionReason, TerminalResult,
-    WaitPoll, WaitRequest,
+    SignalScope, SortField, SortOrder, StartRequest, StartResult, SuspensionReason, TargetOutcome,
+    TerminalResult, WaitMode, WaitPoll, WaitProgress, WaitRequest, WaitResolution, WaitSettled,
 };
 use runtara_control_contract as contract;
 use runtara_environment::control_reads::ControlInstance;
@@ -58,6 +65,7 @@ use runtara_core::persistence::control_receipts::{
     BeginReceipt, ControlIntent, ControlReceipt, ControlReceiptState, ControlReceipts,
 };
 use runtara_core::persistence::inputs::{InputError, InputRequest, InputState};
+use runtara_core::persistence::waits::{TargetState, WaitError, WaitSpec, WaitView};
 use runtara_environment::control_reads::{AdmittedChild, ChildOrder, ChildOutcomes, ControlChild};
 use sha2::{Digest, Sha256};
 
@@ -1199,20 +1207,12 @@ fn not_found() -> ControlError {
     ControlError::new(ControlErrorCode::NotFound, "no such run in this tenant")
 }
 
-/// Identity operations and caller-relative filters: `requires-instance`
-/// without a calling instance, else not available in this build.
-fn identity_call(authority: &ControlAuthority, what: &str) -> ControlError {
-    if authority.caller.is_none() {
-        ControlError::new(
-            ControlErrorCode::RequiresInstance,
-            format!("{what} needs a calling run"),
-        )
-    } else {
-        ControlError::new(
-            ControlErrorCode::Unsupported,
-            format!("{what} is not available in this build"),
-        )
-    }
+/// Caller-relative filters without a calling instance: `requires-instance`.
+fn identity_call(what: &str) -> ControlError {
+    ControlError::new(
+        ControlErrorCode::RequiresInstance,
+        format!("{what} needs a calling run"),
+    )
 }
 
 fn check_id(field: &str, value: &str) -> Result<(), ControlError> {
@@ -1294,6 +1294,7 @@ fn suspension_reason(row: &ControlInstance) -> Option<SuspensionReason> {
     }
     match row.termination_reason.as_deref() {
         Some("waiting_signal") => Some(SuspensionReason::WaitingSignal),
+        Some("waiting_instances") => Some(SuspensionReason::WaitingInstances),
         Some("sleeping") => Some(SuspensionReason::Sleeping),
         Some("shutdown_requested" | "environment_restart") => Some(SuspensionReason::Shutdown),
         _ => None,
@@ -1439,6 +1440,11 @@ fn wit_policy(
 /// The terminal result of a run read with the `get` caps: values over their
 /// cap are omitted and flagged, never truncated.
 fn terminal(row: &ControlInstance) -> TerminalResult {
+    terminal_capped(row, contract::GET_ERROR_INLINE_BYTES)
+}
+
+/// [`terminal`] for a row read with an error cap of `error_cap` bytes.
+fn terminal_capped(row: &ControlInstance, error_cap: usize) -> TerminalResult {
     if !row.status.is_terminal() {
         return TerminalResult {
             output: None,
@@ -1459,7 +1465,7 @@ fn terminal(row: &ControlInstance) -> TerminalResult {
     let error_omitted = row.error_bytes.is_some() && error.is_none();
     // The JSON-string wrapping can grow an error past its inline cap.
     let (error, error_omitted) = match error {
-        Some(bytes) if bytes.len() > contract::GET_ERROR_INLINE_BYTES => (None, true),
+        Some(bytes) if bytes.len() > error_cap => (None, true),
         other => (other, error_omitted),
     };
     TerminalResult {
@@ -1682,7 +1688,7 @@ impl ControlHost for NativeControl {
                 authority
                     .caller
                     .clone()
-                    .ok_or_else(|| identity_call(authority, "a caller filter"))?,
+                    .ok_or_else(|| identity_call("a caller filter"))?,
             ),
             Some(ParentFilter::Instance(id)) => {
                 check_id("parent", id)?;
@@ -1775,7 +1781,7 @@ impl ControlHost for NativeControl {
                 let caller = authority
                     .caller
                     .as_deref()
-                    .ok_or_else(|| identity_call(authority, "a children scope"))?;
+                    .ok_or_else(|| identity_call("a children scope"))?;
                 let instances = runtime
                     .parent_input_instances(tenant, caller)
                     .await
@@ -1978,18 +1984,373 @@ impl ControlHost for NativeControl {
     async fn wait(
         &self,
         authority: &ControlAuthority,
-        _request: WaitRequest,
+        request: WaitRequest,
     ) -> Result<String, ControlError> {
-        Err(identity_call(authority, "wait"))
+        let tenant = self.tenant(authority)?;
+        let (caller, operation) = mutation_identity(authority, "wait")?;
+        let result = self.run_wait(tenant, caller, operation, request).await;
+        self.audit(
+            tenant,
+            caller,
+            operation,
+            Mutation::Wait,
+            caller,
+            &result
+                .as_ref()
+                .map(|(_, replayed)| ("registered".to_owned(), *replayed))
+                .map_err(Clone::clone),
+        )
+        .await;
+        result.map(|(wait_id, _)| wait_id)
     }
 
     async fn poll_wait(
         &self,
         authority: &ControlAuthority,
-        _wait_id: String,
+        wait_id: String,
     ) -> Result<WaitPoll, ControlError> {
-        Err(identity_call(authority, "poll-wait"))
+        let tenant = self.tenant(authority)?;
+        let (caller, operation) = mutation_identity(authority, "poll-wait")?;
+        check_id("waitId", &wait_id)?;
+        if wait_id != operation {
+            return Err(ControlError::new(
+                ControlErrorCode::Denied,
+                "the wait belongs to another operation",
+            ));
+        }
+        let runtime = self.runtime().await?;
+        let view = self
+            .current_wait(&runtime, tenant, caller, &wait_id)
+            .await?;
+        wait_poll(&runtime, tenant, view).await
     }
+}
+
+impl NativeControl {
+    /// `wait`: validate, answer a replay from the operation's registered
+    /// wait, authorize every target, then register.
+    async fn run_wait(
+        &self,
+        tenant: &str,
+        caller: &str,
+        operation: &str,
+        request: WaitRequest,
+    ) -> Result<(String, bool), ControlError> {
+        let mut ids = request.instance_ids;
+        ids.sort();
+        ids.dedup();
+        if ids.len() > contract::MAX_WAIT_TARGETS {
+            return Err(ControlError::new(
+                ControlErrorCode::TooLarge,
+                format!(
+                    "a wait names at most {} distinct children",
+                    contract::MAX_WAIT_TARGETS
+                ),
+            ));
+        }
+        for id in &ids {
+            check_id("instanceIds", id)?;
+        }
+        let deadline = time("deadlineMs", request.deadline_ms)?;
+        let mode = match request.mode {
+            WaitMode::All => runtara_core::persistence::waits::WaitMode::All,
+            WaitMode::Any => runtara_core::persistence::waits::WaitMode::Any,
+        };
+        let spec = WaitSpec::new(ids, mode, deadline);
+        let runtime = self.runtime().await?;
+        // A replay of the operation: its wait is registered already.
+        match runtime.poll_instance_wait(tenant, caller, operation).await {
+            Ok(view) if view.record.fingerprint == spec.fingerprint() => {
+                return Ok((operation.to_owned(), true));
+            }
+            Ok(_) => return Err(wait_error(WaitError::Conflict)),
+            Err(WaitError::NotFound | WaitError::Closed | WaitError::TargetGone(_)) => {}
+            Err(error) => return Err(wait_error(error)),
+        }
+        self.authorize_wait_targets(&runtime, tenant, caller, spec.targets())
+            .await?;
+        runtime
+            .register_instance_wait(tenant, caller, operation, &spec)
+            .await
+            .map_err(wait_error)?;
+        Ok((operation.to_owned(), false))
+    }
+
+    /// Every target must exist in the tenant and be a direct child of the
+    /// caller. Children whose admission ended without a launch get their
+    /// fenced outcome first, so the wait reads them as finished.
+    async fn authorize_wait_targets(
+        &self,
+        runtime: &RuntimeClient,
+        tenant: &str,
+        caller: &str,
+        targets: &[String],
+    ) -> Result<(), ControlError> {
+        if targets.iter().any(|target| target == caller) {
+            return Err(refused(ControlErrorCode::Invalid, Mutation::Wait));
+        }
+        let read = |_| unavailable("the wait's targets could not be read");
+        let mut parents: std::collections::HashMap<String, Option<String>> = runtime
+            .wait_target_statuses(tenant, targets)
+            .await
+            .map_err(read)?
+            .into_iter()
+            .map(|target| (target.instance_id, target.parent_instance_id))
+            .collect();
+        let unknown: Vec<&String> = targets
+            .iter()
+            .filter(|target| !parents.contains_key(*target))
+            .collect();
+        if !unknown.is_empty() {
+            self.settle_admission_outcomes(runtime, tenant, caller)
+                .await?;
+            for target in unknown {
+                // Still in admission, or ended with an outcome published now.
+                let parent = match self.admitted_child(tenant, target).await? {
+                    Some(request) => request.parent_instance_id,
+                    None => return Err(not_found()),
+                };
+                parents.insert(target.clone(), parent);
+            }
+        }
+        let mut lineage: Option<Vec<(String, Option<String>)>> = None;
+        for target in targets {
+            let parent = parents.get(target).cloned().flatten();
+            let relation = if parent.as_deref() == Some(caller) {
+                Relation::Child
+            } else if let Some(relations) = &self.relations {
+                relations.relation(tenant, caller, target).await?
+            } else {
+                if lineage.is_none() {
+                    lineage = Some(
+                        runtime
+                            .control_lineage(tenant, caller)
+                            .await
+                            .map_err(|_| unavailable("the run's lineage could not be read"))?,
+                    );
+                }
+                relate(
+                    caller,
+                    target,
+                    parent.as_deref(),
+                    lineage.as_deref().unwrap_or_default(),
+                )
+            };
+            decide(Mutation::Wait, relation, false)
+                .map_err(|code| refused(code, Mutation::Wait))?;
+        }
+        Ok(())
+    }
+
+    /// Publish, under the launch fence, the outcomes of the caller's children
+    /// whose admission ended without a launch. A failure is `unavailable`.
+    async fn settle_admission_outcomes(
+        &self,
+        runtime: &RuntimeClient,
+        tenant: &str,
+        caller: &str,
+    ) -> Result<(), ControlError> {
+        let Some(engine) = self.installed_engine() else {
+            return Ok(());
+        };
+        let failed = |_| unavailable("the children's outcomes could not be published");
+        for pending in engine
+            .outbox()
+            .unpublished_outcomes_of(tenant, caller)
+            .await
+            .map_err(failed)?
+        {
+            crate::workers::control_children::settle_outcome(engine.outbox(), runtime, &pending)
+                .await
+                .map_err(|_| unavailable("the children's outcomes could not be published"))?;
+        }
+        Ok(())
+    }
+
+    /// The caller's wait, evaluated now. A target the runtime has no rows
+    /// for is a child still in admission, one whose ended admission gets its
+    /// outcome published here, or one whose rows are gone: an explicit
+    /// `not-found`, never a silent outcome.
+    async fn current_wait(
+        &self,
+        runtime: &RuntimeClient,
+        tenant: &str,
+        caller: &str,
+        wait_id: &str,
+    ) -> Result<WaitView, ControlError> {
+        let mut settled = false;
+        loop {
+            let view = runtime
+                .poll_instance_wait(tenant, caller, wait_id)
+                .await
+                .map_err(wait_error)?;
+            let unknown: Vec<&str> = view
+                .remaining
+                .iter()
+                .filter(|target| target.state == TargetState::Unknown)
+                .map(|target| target.instance_id.as_str())
+                .collect();
+            if unknown.is_empty() {
+                return Ok(view);
+            }
+            let mut ended = false;
+            for target in unknown {
+                match self.admitted_child(tenant, target).await? {
+                    Some(request) if request.in_admission() => {}
+                    Some(request) if !settled && request.outcome.is_some() => ended = true,
+                    _ => {
+                        return Err(ControlError::new(
+                            ControlErrorCode::NotFound,
+                            format!("target {target} of this wait is no longer retained"),
+                        ));
+                    }
+                }
+            }
+            if !ended {
+                return Ok(view);
+            }
+            self.settle_admission_outcomes(runtime, tenant, caller)
+                .await?;
+            settled = true;
+        }
+    }
+}
+
+fn wait_error(error: WaitError) -> ControlError {
+    match error {
+        WaitError::NotFound => ControlError::new(
+            ControlErrorCode::NotFound,
+            "no wait is registered for this operation",
+        ),
+        WaitError::Closed => ControlError::new(
+            ControlErrorCode::WaitClosed,
+            "the wait was closed or released",
+        ),
+        WaitError::Conflict => ControlError::new(
+            ControlErrorCode::ReplayConflict,
+            "this operation already waits on other children or in another mode",
+        ),
+        WaitError::TooLarge => ControlError::new(
+            ControlErrorCode::TooLarge,
+            format!(
+                "a wait names at most {} distinct children",
+                contract::MAX_WAIT_TARGETS
+            ),
+        ),
+        WaitError::Invalid(message) => invalid(message),
+        WaitError::Inactive => invalid("the calling run has finished"),
+        WaitError::TargetGone(target) => ControlError::new(
+            ControlErrorCode::NotFound,
+            format!("target {target} of this wait is no longer retained"),
+        ),
+        WaitError::Storage(_) => unavailable("instance waits are unavailable"),
+    }
+}
+
+/// The WIT read of a wait: finished targets in finish order with their
+/// results under the wait caps (256 KiB output and 16 KiB error per target,
+/// 3 MiB across the wait, in that order, so a replayed poll inlines the
+/// same values), the remaining ids, and the persisted deadline.
+async fn wait_poll(
+    runtime: &RuntimeClient,
+    tenant: &str,
+    view: WaitView,
+) -> Result<WaitPoll, ControlError> {
+    let launched: Vec<String> = view
+        .finished
+        .iter()
+        .filter(|target| matches!(target.state, TargetState::Instance { .. }))
+        .map(|target| target.instance_id.clone())
+        .collect();
+    let mut rows: std::collections::HashMap<String, ControlInstance> = runtime
+        .control_instances_by_id(
+            tenant,
+            &launched,
+            contract::WAIT_OUTPUT_INLINE_BYTES,
+            contract::WAIT_ERROR_INLINE_BYTES,
+        )
+        .await
+        .map_err(|_| unavailable("the wait's results could not be read"))?
+        .into_iter()
+        .map(|row| (row.instance_id.clone(), row))
+        .collect();
+    let mut budget = contract::WAIT_TOTAL_INLINE_BYTES;
+    let mut finished = Vec::with_capacity(view.finished.len());
+    for target in &view.finished {
+        finished.push(match &target.state {
+            TargetState::Outcome {
+                outcome,
+                published_at,
+            } => TargetOutcome {
+                instance_id: target.instance_id.clone(),
+                status: outcome_status(*outcome),
+                finished_at_ms: Some(millis(*published_at)),
+                terminal: no_terminal(),
+            },
+            _ => {
+                let row = rows.remove(&target.instance_id).ok_or_else(|| {
+                    ControlError::new(
+                        ControlErrorCode::NotFound,
+                        format!(
+                            "target {} of this wait is no longer retained",
+                            target.instance_id
+                        ),
+                    )
+                })?;
+                let mut result = terminal_capped(&row, contract::WAIT_ERROR_INLINE_BYTES);
+                if let Some(output) = &result.output {
+                    if output.len() > budget {
+                        result.output = None;
+                        result.output_omitted = true;
+                    } else {
+                        budget -= output.len();
+                    }
+                }
+                if let Some(error) = &result.error {
+                    if error.len() > budget {
+                        result.error = None;
+                        result.error_omitted = true;
+                    } else {
+                        budget -= error.len();
+                    }
+                }
+                TargetOutcome {
+                    instance_id: row.instance_id.clone(),
+                    status: status(row.status),
+                    finished_at_ms: row.finished_at.map(millis),
+                    terminal: result,
+                }
+            }
+        });
+    }
+    let progress = WaitProgress {
+        mode: match view.record.mode {
+            runtara_core::persistence::waits::WaitMode::All => WaitMode::All,
+            runtara_core::persistence::waits::WaitMode::Any => WaitMode::Any,
+        },
+        finished,
+        remaining: view
+            .remaining
+            .iter()
+            .map(|target| target.instance_id.clone())
+            .collect(),
+        deadline_ms: view.record.deadline.map(millis),
+    };
+    Ok(match view.resolution() {
+        None => WaitPoll::Pending(progress),
+        Some(resolution) => WaitPoll::Settled(WaitSettled {
+            resolution: match resolution {
+                runtara_core::persistence::waits::WaitResolution::Satisfied => {
+                    WaitResolution::Satisfied
+                }
+                runtara_core::persistence::waits::WaitResolution::Deadline => {
+                    WaitResolution::Deadline
+                }
+                runtara_core::persistence::waits::WaitResolution::Empty => WaitResolution::Empty,
+            },
+            progress,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -2223,14 +2584,32 @@ mod tests {
     }
 
     #[test]
-    fn identity_calls_need_a_caller_then_wait_for_their_slice() {
+    fn caller_filters_need_a_caller() {
         assert_eq!(
-            identity_call(&authority(None), "wait").code,
+            identity_call("a caller filter").code,
             ControlErrorCode::RequiresInstance
         );
+    }
+
+    #[test]
+    fn wait_errors_map_to_control_codes() {
+        use runtara_core::persistence::waits::WaitError as E;
+        for (error, code) in [
+            (E::NotFound, ControlErrorCode::NotFound),
+            (E::Closed, ControlErrorCode::WaitClosed),
+            (E::Conflict, ControlErrorCode::ReplayConflict),
+            (E::TooLarge, ControlErrorCode::TooLarge),
+            (E::Invalid("x".into()), ControlErrorCode::Invalid),
+            (E::Inactive, ControlErrorCode::Invalid),
+            (E::TargetGone("t".into()), ControlErrorCode::NotFound),
+            (E::Storage("down".into()), ControlErrorCode::Unavailable),
+        ] {
+            assert_eq!(wait_error(error).code, code);
+        }
         assert_eq!(
-            identity_call(&authority(Some("parent")), "wait").code,
-            ControlErrorCode::Unsupported
+            runtara_core::persistence::waits::MAX_WAIT_TARGETS,
+            contract::MAX_WAIT_TARGETS,
+            "the store and the contract agree on the target cap"
         );
     }
 

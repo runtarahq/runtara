@@ -846,6 +846,79 @@ impl RuntimeClient {
         self.client.control_receipts()
     }
 
+    fn waits(
+        &self,
+    ) -> runtara_core::persistence::waits::WaitResult<
+        &dyn runtara_core::persistence::waits::InstanceWaits,
+    > {
+        self.client.instance_waits().ok_or_else(|| {
+            runtara_core::persistence::waits::WaitError::Storage(
+                "the runtime store has no instance waits".into(),
+            )
+        })
+    }
+
+    /// Register (or read back) the wait of `waiter`'s operation `wait_id`.
+    pub async fn register_instance_wait(
+        &self,
+        tenant: &str,
+        waiter: &str,
+        wait_id: &str,
+        spec: &runtara_core::persistence::waits::WaitSpec,
+    ) -> runtara_core::persistence::waits::WaitResult<runtara_core::persistence::waits::WaitView>
+    {
+        self.waits()?
+            .register_or_evaluate(tenant, waiter, wait_id, spec)
+            .await
+    }
+
+    /// Evaluate a registered wait now.
+    pub async fn poll_instance_wait(
+        &self,
+        tenant: &str,
+        waiter: &str,
+        wait_id: &str,
+    ) -> runtara_core::persistence::waits::WaitResult<runtara_core::persistence::waits::WaitView>
+    {
+        self.waits()?.poll_wait(tenant, waiter, wait_id).await
+    }
+
+    /// Close a wait; `false` when it was unknown or already closed.
+    pub async fn close_instance_wait(
+        &self,
+        tenant: &str,
+        waiter: &str,
+        wait_id: &str,
+    ) -> runtara_core::persistence::waits::WaitResult<bool> {
+        self.waits()?.close_wait(tenant, waiter, wait_id).await
+    }
+
+    /// The narrow status read that authorizes a wait's targets.
+    pub async fn wait_target_statuses(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+    ) -> Result<Vec<runtara_environment::control_reads::WaitTargetStatus>, RuntimeError> {
+        self.client
+            .wait_target_statuses(tenant, instance_ids)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Control's capped read of several runs of `tenant`.
+    pub async fn control_instances_by_id(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Vec<runtara_environment::control_reads::ControlInstance>, RuntimeError> {
+        self.client
+            .control_instances_by_id(tenant, instance_ids, output_cap, error_cap)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     /// Count a tenant's instances in the given statuses.
     ///
     /// The admission gate wants a number. Asking for it via a list-with-limit-1

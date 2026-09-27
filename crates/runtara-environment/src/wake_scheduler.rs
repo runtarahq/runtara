@@ -340,6 +340,18 @@ impl WakeScheduler {
                 })?;
         }
 
+        // Wakes of runs parked on instance waits that a finishing target
+        // could not stamp at once (its waiter was held), or that a crash
+        // lost: nudges every poll, every parked wait on one poll in twelve.
+        // A failure here must not hold up due timers.
+        if let Some(waits) = self.persistence.instance_waits()
+            && let Err(error) = waits
+                .reconcile_wait_wakes(self.config.batch_size.clamp(0, u32::MAX as i64) as u32)
+                .await
+        {
+            warn!(%error, "Instance wait wake recovery failed");
+        }
+
         // Claims as it selects: back-to-back polls would otherwise keep
         // re-selecting rows whose per-instance claim had not landed yet.
         // Every record returned is already owned by this caller.

@@ -580,6 +580,37 @@ impl EnvironmentClient {
         self.state.persistence.control_receipts()
     }
 
+    /// Durable instance waits, when the runtime store provides them.
+    pub fn instance_waits(&self) -> Option<&dyn runtara_core::persistence::waits::InstanceWaits> {
+        self.state.persistence.instance_waits()
+    }
+
+    /// The narrow status read that authorizes a wait's targets.
+    pub async fn wait_target_statuses(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+    ) -> Result<Vec<runtara_environment::control_reads::WaitTargetStatus>> {
+        Ok(self
+            .instances()
+            .wait_target_statuses(tenant, instance_ids)
+            .await?)
+    }
+
+    /// Control's capped read of several runs of `tenant`.
+    pub async fn control_instances_by_id(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Vec<runtara_environment::control_reads::ControlInstance>> {
+        Ok(self
+            .instances()
+            .control_instances_by_id(tenant, instance_ids, output_cap, error_cap)
+            .await?)
+    }
+
     // =========================================================================
     // Signal operations
     // =========================================================================

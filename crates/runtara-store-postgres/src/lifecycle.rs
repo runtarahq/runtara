@@ -67,6 +67,7 @@ fn reason_label(reason: SuspensionReason) -> &'static str {
         SuspensionReason::Shutdown => "shutdown_requested",
         SuspensionReason::Sleeping => "sleeping",
         SuspensionReason::WaitingSignal => "waiting_signal",
+        SuspensionReason::WaitingInstances => "waiting_instances",
     }
 }
 

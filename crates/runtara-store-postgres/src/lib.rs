@@ -34,5 +34,6 @@ mod invocations;
 mod lifecycle;
 mod ops_common;
 mod vocabulary;
+mod waits;
 
 pub use backend::{PostgresPersistence, load_latest_checkpoint};

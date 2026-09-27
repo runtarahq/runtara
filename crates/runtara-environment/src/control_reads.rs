@@ -192,6 +192,27 @@ impl ControlChild {
     }
 }
 
+/// What a wait target is, as [`InstanceRepository::wait_target_statuses`]
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitTargetKind {
+    /// A launched run in this status.
+    Launched(InstanceStatus),
+    /// A child that never launched, with its published outcome.
+    Outcome(ExternalOutcomeKind),
+}
+
+/// One wait target of the tenant and its parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitTargetStatus {
+    /// The target's instance id.
+    pub instance_id: String,
+    /// The run that started it, if any.
+    pub parent_instance_id: Option<String>,
+    /// What it is.
+    pub state: WaitTargetKind,
+}
+
 /// How [`InstanceRepository::control_children`] orders a parent's children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildOrder {
@@ -477,6 +498,79 @@ impl InstanceRepository {
             .fetch_optional(self.pool())
             .await?;
         row.map(decode).transpose()
+    }
+
+    /// The runs of `tenant` among `instance_ids`, each with its output and
+    /// error inlined only when at most `output_cap` / `error_cap` bytes, in
+    /// no particular order. Missing and foreign ids are simply absent.
+    pub async fn control_instances_by_id(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Vec<ControlInstance>> {
+        let sql = format!(
+            "SELECT {}{FROM} WHERE i.instance_id = ANY($1) AND i.tenant_id = $2",
+            columns(output_cap as i64, error_cap as i64)
+        );
+        let rows: Vec<Row> = sqlx::query_as(&sql)
+            .bind(instance_ids)
+            .bind(tenant)
+            .fetch_all(self.pool())
+            .await?;
+        rows.into_iter().map(decode).collect()
+    }
+
+    /// The narrow status read a control `wait` authorizes its targets with:
+    /// for each of `instance_ids` that is a run of `tenant` or a published
+    /// never-launched outcome of it, its parent and what it is. Ids with
+    /// neither are absent. An instance row wins over an outcome.
+    pub async fn wait_target_statuses(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+    ) -> Result<Vec<WaitTargetStatus>> {
+        type StatusRow = (String, Option<String>, Option<String>, Option<String>);
+        let rows: Vec<StatusRow> = sqlx::query_as(
+            "SELECT t.id, COALESCE(i.parent_instance_id, o.parent_instance_id), \
+                    i.status::TEXT, o.outcome \
+             FROM unnest($1::text[]) AS t(id) \
+             LEFT JOIN instances AS i ON i.instance_id = t.id AND i.tenant_id = $2 \
+             LEFT JOIN instance_external_outcomes AS o \
+               ON o.instance_id = t.id AND o.tenant_id = $2 \
+             WHERE i.instance_id IS NOT NULL OR o.instance_id IS NOT NULL",
+        )
+        .bind(instance_ids)
+        .bind(tenant)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|(instance_id, parent_instance_id, status, outcome)| {
+                let state = match (status, outcome) {
+                    (Some(status), _) => WaitTargetKind::Launched(
+                        runtara_store_postgres::encoding::status_from_str(&status)?,
+                    ),
+                    (None, Some(outcome)) => WaitTargetKind::Outcome(
+                        ExternalOutcomeKind::parse(&outcome).ok_or_else(|| {
+                            crate::error::Error::Other(format!(
+                                "unknown external outcome '{outcome}'"
+                            ))
+                        })?,
+                    ),
+                    (None, None) => {
+                        return Err(crate::error::Error::Other(format!(
+                            "wait target '{instance_id}' has neither a run nor an outcome"
+                        )));
+                    }
+                };
+                Ok(WaitTargetStatus {
+                    instance_id,
+                    parent_instance_id,
+                    state,
+                })
+            })
+            .collect()
     }
 
     /// A page of runs matching `options` (which must carry the tenant), with

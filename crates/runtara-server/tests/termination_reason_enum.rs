@@ -34,6 +34,7 @@ fn every_variant() -> Vec<TerminationReason> {
         Sleeping,
         Orphaned,
         WaitingSignal,
+        WaitingInstances,
         ShutdownRequested,
         EnvironmentRestart,
         LaunchQueueTimeout,
@@ -42,8 +43,8 @@ fn every_variant() -> Vec<TerminationReason> {
     for reason in &all {
         match reason {
             Completed | ApplicationError | Crashed | Timeout | HeartbeatTimeout | Cancelled
-            | Aborted | Paused | Sleeping | Orphaned | WaitingSignal | ShutdownRequested
-            | EnvironmentRestart | LaunchQueueTimeout | StartGateFailed => {}
+            | Aborted | Paused | Sleeping | Orphaned | WaitingSignal | WaitingInstances
+            | ShutdownRequested | EnvironmentRestart | LaunchQueueTimeout | StartGateFailed => {}
         }
     }
     all

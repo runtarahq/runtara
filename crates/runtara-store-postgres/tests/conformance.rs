@@ -1706,3 +1706,343 @@ async fn managed_inputs_follow_external_terminal_transactions() {
         assert!(root.wake_reason.is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Durable instance waits
+// ---------------------------------------------------------------------------
+
+/// Forget a parked waiter's wake as a crash before its stamp would: back on
+/// its timer, no wake claim, no nudges.
+fn lose_wake_hook(
+    pool: PgPool,
+) -> impl Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync
+{
+    move |waiter: String| {
+        let pool = pool.clone();
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE instances SET sleep_until = clock_timestamp() + INTERVAL '1 hour', \
+                 wake_reason = 'timer' WHERE instance_id = $1",
+            )
+            .bind(&waiter)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE instance_input_parks SET wake_scheduled = FALSE WHERE instance_id = $1",
+            )
+            .bind(&waiter)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE instance_wait_targets SET wake_pending = FALSE WHERE waiter_instance_id = $1",
+            )
+            .bind(&waiter)
+            .execute(&pool)
+            .await
+            .unwrap();
+        })
+    }
+}
+
+#[tokio::test]
+async fn instance_wait_conformance() {
+    use runtara_core::persistence::conformance::waits;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    waits::run_all(&backend).await;
+    let hook = lose_wake_hook(pool);
+    waits::reconciler_rotation(&backend, &hook).await;
+}
+
+/// A waiter parked on a wait over `targets` (children of the waiter), with
+/// its park deadline an hour out.
+async fn parked_waiter(
+    backend: &PostgresPersistence,
+    tenant: &str,
+    targets: &[&str],
+    mode: runtara_core::persistence::waits::WaitMode,
+) -> String {
+    use runtara_core::{
+        domain::InstanceStatus,
+        lifecycle::{ParkReason, ParkRequest},
+        persistence::{ParentLink, ParkTargets, Persistence, waits::WaitSpec},
+    };
+    let waiter = format!("{tenant}-waiter");
+    backend.register_instance(&waiter, tenant).await.unwrap();
+    backend
+        .update_instance_status(&waiter, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    for target in targets {
+        backend
+            .try_register_child_instance(
+                target,
+                tenant,
+                None,
+                None,
+                &ParentLink {
+                    parent_instance_id: waiter.clone(),
+                    parent_close_policy: "cancel".into(),
+                    admitted_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(target, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+    }
+    backend
+        .instance_waits()
+        .unwrap()
+        .register_or_evaluate(
+            tenant,
+            &waiter,
+            "op",
+            &WaitSpec::new(targets.iter().map(|t| t.to_string()), mode, None),
+        )
+        .await
+        .unwrap();
+    backend
+        .park_instance_on_targets(
+            &waiter,
+            ParkRequest {
+                reason: ParkReason::Instances,
+                deadline: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            },
+            ParkTargets {
+                signal_ids: &[],
+                wait_ids: &["op".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+    waiter
+}
+
+async fn wake_of(pool: &PgPool, waiter: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT wake_reason FROM instances WHERE instance_id = $1 AND sleep_until <= clock_timestamp()",
+    )
+    .bind(waiter)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .flatten()
+}
+
+/// Raw SQL terminal writes (the Environment's launch-queue writers do this)
+/// wake the parked waiter in their own commit, for instance rows and for
+/// published outcomes alike; a rolled-back write wakes nobody.
+#[tokio::test]
+async fn raw_terminal_writes_wake_waiters_in_commit() {
+    use runtara_core::persistence::waits::WaitMode;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    for status in ["completed", "failed", "cancelled"] {
+        let tenant = format!("raw-{status}-{}", uuid::Uuid::new_v4());
+        let target = format!("{tenant}-child");
+        let waiter = parked_waiter(&backend, &tenant, &[&target], WaitMode::All).await;
+        assert_eq!(wake_of(&pool, &waiter).await, None);
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE instances SET status = $2::instance_status WHERE instance_id = $1")
+            .bind(&target)
+            .bind(status)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(wake_of(&pool, &waiter).await, None, "rolled back");
+        sqlx::query("UPDATE instances SET status = $2::instance_status WHERE instance_id = $1")
+            .bind(&target)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            wake_of(&pool, &waiter).await.as_deref(),
+            Some("instances_terminal"),
+            "{status} wakes the waiter in its own commit"
+        );
+    }
+    // A never-launched child's outcome, inserted raw.
+    let tenant = format!("raw-outcome-{}", uuid::Uuid::new_v4());
+    let waiter = format!("{tenant}-waiter");
+    let unlaunched = format!("{tenant}-unlaunched");
+    {
+        use runtara_core::{
+            domain::InstanceStatus,
+            lifecycle::{ParkReason, ParkRequest},
+            persistence::{ParkTargets, Persistence, waits::WaitSpec},
+        };
+        backend.register_instance(&waiter, &tenant).await.unwrap();
+        backend
+            .update_instance_status(&waiter, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        backend
+            .instance_waits()
+            .unwrap()
+            .register_or_evaluate(
+                &tenant,
+                &waiter,
+                "op",
+                &WaitSpec::new([unlaunched.clone()], WaitMode::Any, None),
+            )
+            .await
+            .unwrap();
+        backend
+            .park_instance_on_targets(
+                &waiter,
+                ParkRequest {
+                    reason: ParkReason::Instances,
+                    deadline: None,
+                },
+                ParkTargets {
+                    signal_ids: &[],
+                    wait_ids: &["op".to_string()],
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(wake_of(&pool, &waiter).await, None);
+    sqlx::query(
+        "INSERT INTO instance_external_outcomes \
+         (instance_id, tenant_id, parent_instance_id, outcome, admitted_at) \
+         VALUES ($1, $2, $3, 'not_started', clock_timestamp())",
+    )
+    .bind(&unlaunched)
+    .bind(&tenant)
+    .bind(&waiter)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        wake_of(&pool, &waiter).await.as_deref(),
+        Some("instances_terminal")
+    );
+}
+
+/// A finishing run never waits on a waiter someone holds: the terminal write
+/// commits at once and leaves a nudge, which the reconciler turns into the
+/// wake once the waiter is free. An instance row beats an outcome.
+#[tokio::test]
+async fn finishing_runs_never_block_on_locked_waiters() {
+    use runtara_core::persistence::{Persistence, waits::WaitMode};
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let tenant = format!("locked-{}", uuid::Uuid::new_v4());
+    let target = format!("{tenant}-child");
+    let waiter = parked_waiter(&backend, &tenant, &[&target], WaitMode::Any).await;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM instances WHERE instance_id = $1 FOR UPDATE")
+        .bind(&waiter)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut finisher = pool.acquire().await.unwrap();
+    sqlx::query("SET statement_timeout = '2s'")
+        .execute(&mut *finisher)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    sqlx::query("UPDATE instances SET status = 'completed' WHERE instance_id = $1")
+        .bind(&target)
+        .execute(&mut *finisher)
+        .await
+        .expect("the terminal write must not wait for the locked waiter");
+    sqlx::query("SET statement_timeout = 0")
+        .execute(&mut *finisher)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let nudged: bool = sqlx::query_scalar(
+        "SELECT bool_or(wake_pending) FROM instance_wait_targets WHERE waiter_instance_id = $1",
+    )
+    .bind(&waiter)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(nudged, "the skipped stamp leaves a nudge");
+    // The reconciler skips the held waiter, then wakes it once free.
+    let waits = backend.instance_waits().unwrap();
+    waits.reconcile_wait_wakes(1000).await.unwrap();
+    holder.rollback().await.unwrap();
+    assert_eq!(wake_of(&pool, &waiter).await, None);
+    waits.reconcile_wait_wakes(1000).await.unwrap();
+    assert_eq!(
+        wake_of(&pool, &waiter).await.as_deref(),
+        Some("instances_terminal")
+    );
+
+    // The core row wins over an outcome published beside it.
+    let tenant = format!("row-wins-{}", uuid::Uuid::new_v4());
+    let target = format!("{tenant}-child");
+    let waiter = parked_waiter(&backend, &tenant, &[&target], WaitMode::Any).await;
+    sqlx::query(
+        "INSERT INTO instance_external_outcomes \
+         (instance_id, tenant_id, parent_instance_id, outcome, admitted_at) \
+         VALUES ($1, $2, $3, 'cancelled', clock_timestamp())",
+    )
+    .bind(&target)
+    .bind(&tenant)
+    .bind(&waiter)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for _ in 0..runtara_core::persistence::waits::FULL_RECONCILE_EVERY {
+        waits.reconcile_wait_wakes(1000).await.unwrap();
+    }
+    assert_eq!(wake_of(&pool, &waiter).await, None, "the running row wins");
+    let view = waits.poll_wait(&tenant, &waiter, "op").await.unwrap();
+    assert!(view.finished.is_empty());
+    backend
+        .delete_instances_batch(&[waiter, target])
+        .await
+        .unwrap();
+}
+
+/// Migration 040 replaced 024's unnamed wake-reason CHECK with the named one
+/// (validated by 041), which admits `instances_terminal` and nothing unknown.
+#[tokio::test]
+async fn the_unnamed_wake_reason_check_is_replaced() {
+    use runtara_core::persistence::Persistence;
+    let (pool, _container) = postgres_test_pool().await;
+    let checks: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT conname::text, convalidated FROM pg_constraint \
+         WHERE conrelid = 'instances'::regclass AND contype = 'c' \
+           AND pg_get_constraintdef(oid) LIKE '%wake_reason%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        checks,
+        [("instances_wake_reason_valid".to_string(), true)],
+        "one named, validated wake-reason CHECK"
+    );
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend.register_instance(&id, "wake-check").await.unwrap();
+    sqlx::query("UPDATE instances SET wake_reason = 'instances_terminal' WHERE instance_id = $1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = sqlx::query("UPDATE instances SET wake_reason = 'bogus' WHERE instance_id = $1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .as_database_error()
+            .is_some_and(|e| e.constraint() == Some("instances_wake_reason_valid")),
+        "{refused}"
+    );
+    backend.delete_instances_batch(&[id]).await.unwrap();
+}

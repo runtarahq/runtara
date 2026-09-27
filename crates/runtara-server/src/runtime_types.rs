@@ -128,6 +128,8 @@ pub enum TerminationReason {
     Orphaned,
     /// Suspended while parked on a signal (`WaitForSignal`).
     WaitingSignal,
+    /// Suspended while parked on durable instance waits (control `wait`).
+    WaitingInstances,
     /// Suspended after acknowledging a shutdown request.
     ShutdownRequested,
     /// Suspended by an environment restart, to be recovered.
@@ -157,6 +159,7 @@ impl TerminationReason {
             "sleeping" => Some(Self::Sleeping),
             "orphaned" => Some(Self::Orphaned),
             "waiting_signal" => Some(Self::WaitingSignal),
+            "waiting_instances" => Some(Self::WaitingInstances),
             "shutdown_requested" => Some(Self::ShutdownRequested),
             "environment_restart" => Some(Self::EnvironmentRestart),
             "launch_queue_timeout" => Some(Self::LaunchQueueTimeout),
@@ -179,6 +182,7 @@ impl TerminationReason {
             Self::Sleeping => "sleeping",
             Self::Orphaned => "orphaned",
             Self::WaitingSignal => "waiting_signal",
+            Self::WaitingInstances => "waiting_instances",
             Self::ShutdownRequested => "shutdown_requested",
             Self::EnvironmentRestart => "environment_restart",
             Self::LaunchQueueTimeout => "launch_queue_timeout",
@@ -1496,6 +1500,7 @@ mod tests {
             "sleeping",
             "orphaned",
             "waiting_signal",
+            "waiting_instances",
             "shutdown_requested",
             "environment_restart",
             "launch_queue_timeout",
@@ -1517,6 +1522,7 @@ mod tests {
                 | TerminationReason::Sleeping
                 | TerminationReason::Orphaned
                 | TerminationReason::WaitingSignal
+                | TerminationReason::WaitingInstances
                 | TerminationReason::ShutdownRequested
                 | TerminationReason::EnvironmentRestart
                 | TerminationReason::LaunchQueueTimeout

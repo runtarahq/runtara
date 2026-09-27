@@ -2450,3 +2450,107 @@ async fn a_pause_after_a_queued_resume_wins_and_a_later_resume_launches() {
     assert_eq!(root.wake_reason, Some(WakeReason::ManualResume));
     context.cleanup().await;
 }
+
+/// The launch queue terminalizes runs with raw SQL (queue expiry, pre-start
+/// cancellation). A run parked on an instance wait over such a run is woken
+/// by that very commit, through the finish trigger.
+#[tokio::test]
+async fn launch_queue_terminal_writers_wake_instance_waiters() {
+    use runtara_core::domain::{InstanceStatus, WakeReason};
+    use runtara_core::lifecycle::{ParkReason, ParkRequest};
+    use runtara_core::persistence::ParkTargets;
+    use runtara_core::persistence::waits::{WaitMode, WaitSpec};
+    let context = TestContext::new().await.expect("test database must start");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+
+    async fn parked_waiter(persistence: &PostgresPersistence, target: &LaunchFixture) -> String {
+        let waiter = format!("{}-waiter", target.instance_id);
+        persistence
+            .register_instance(&waiter, &target.tenant_id)
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&waiter, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        persistence
+            .instance_waits()
+            .unwrap()
+            .register_or_evaluate(
+                &target.tenant_id,
+                &waiter,
+                "op",
+                &WaitSpec::new([target.instance_id.clone()], WaitMode::All, None),
+            )
+            .await
+            .unwrap();
+        persistence
+            .park_instance_on_targets(
+                &waiter,
+                ParkRequest {
+                    reason: ParkReason::Instances,
+                    deadline: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                },
+                ParkTargets {
+                    signal_ids: &[],
+                    wait_ids: &["op".to_string()],
+                },
+            )
+            .await
+            .unwrap();
+        waiter
+    }
+    async fn woken(persistence: &PostgresPersistence, waiter: &str) -> bool {
+        let row = persistence.get_instance(waiter).await.unwrap().unwrap();
+        row.wake_reason == Some(WakeReason::InstancesTerminal)
+            && row.sleep_until.is_some_and(|at| at <= chrono::Utc::now())
+    }
+
+    // Queue expiry.
+    let expiring = fixture(&context).await;
+    let waiter = parked_waiter(&persistence, &expiring).await;
+    repository
+        .enqueue(request(
+            &expiring,
+            Uuid::new_v4().to_string(),
+            LaunchKind::Start,
+            Duration::ZERO,
+        ))
+        .await
+        .unwrap();
+    assert!(!woken(&persistence, &waiter).await);
+    assert_eq!(repository.expire_due(16).await.unwrap().len(), 1);
+    assert_eq!(
+        instance_result(&context.pool, &expiring.instance_id)
+            .await
+            .0,
+        "failed"
+    );
+    assert!(
+        woken(&persistence, &waiter).await,
+        "expiry wakes the waiter"
+    );
+
+    // Cancellation before start.
+    let cancelled = fixture(&context).await;
+    let waiter = parked_waiter(&persistence, &cancelled).await;
+    let launch_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &cancelled,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository.cancel_before_start(&launch_id).await.unwrap(),
+        CancelOutcome::Cancelled(_)
+    ));
+    assert!(
+        woken(&persistence, &waiter).await,
+        "a pre-start cancel wakes the waiter"
+    );
+}

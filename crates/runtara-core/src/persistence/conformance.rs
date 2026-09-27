@@ -1849,7 +1849,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
             }
             backend.delete_instances_batch(&[id]).await.unwrap();
         }
-        for reason in [ParkReason::Timer, ParkReason::Signal] {
+        for reason in [ParkReason::Timer, ParkReason::Signal, ParkReason::Instances] {
             for with_deadline in [false, true] {
                 let id = Uuid::new_v4().to_string();
                 backend
@@ -1880,10 +1880,10 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                     assert_eq!(after.status, S::Suspended);
                     assert_eq!(
                         after.termination_reason.as_deref(),
-                        Some(if reason == ParkReason::Timer {
-                            "sleeping"
-                        } else {
-                            "waiting_signal"
+                        Some(match reason {
+                            ParkReason::Timer => "sleeping",
+                            ParkReason::Signal => "waiting_signal",
+                            ParkReason::Instances => "waiting_instances",
                         })
                     );
                     assert_eq!(
@@ -1933,6 +1933,7 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
         WakeReason::CustomSignal,
         WakeReason::ManualResume,
         WakeReason::Recovery,
+        WakeReason::InstancesTerminal,
     ] {
         let id = uuid::Uuid::new_v4().to_string();
         backend
@@ -2742,6 +2743,10 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
 
 /// Authoritative managed-input lifecycle and acceptance conformance.
 pub mod inputs;
+
+/// Durable instance-wait conformance: resolution, replay, deadline,
+/// lifecycle, park and reconciler rotation.
+pub mod waits;
 
 /// External outcomes are fenced against launches: the first publication
 /// wins, a published outcome refuses the child's launch, and an existing

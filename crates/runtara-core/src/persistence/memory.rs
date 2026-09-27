@@ -15,6 +15,7 @@
 mod control_receipts;
 mod inputs;
 mod invocations;
+mod waits;
 
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 use crate::lifecycle::{
@@ -53,6 +54,8 @@ struct Store {
         HashMap<(String, String), crate::persistence::control_receipts::ControlReceipt>,
     /// Fenced outcomes of children that never launched, by instance id.
     external_outcomes: HashMap<String, crate::persistence::ExternalOutcomeRecord>,
+    /// Instance waits by `(waiter, wait_id)`.
+    instance_waits: HashMap<(String, String), waits::MemWait>,
     /// Stands in for a sequence: the only monotonic id source a store without
     /// one has to invent.
     next_id: i64,
@@ -79,6 +82,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<(), CoreError> {
         let instance = self.instance_mut(instance_id)?;
+        let was_terminal = instance.status.is_terminal();
         if let Some(status) = effects.status {
             instance.status = status;
         }
@@ -98,6 +102,7 @@ impl Store {
                         SuspensionReason::Shutdown => "shutdown_requested",
                         SuspensionReason::Sleeping => "sleeping",
                         SuspensionReason::WaitingSignal => "waiting_signal",
+                        SuspensionReason::WaitingInstances => "waiting_instances",
                     }
                     .into(),
                 )
@@ -134,6 +139,9 @@ impl Store {
         self.revoke_inactive_execution(instance_id);
         if self.instances[instance_id].status.is_terminal() {
             inputs::close_root(self, instance_id, now);
+            if !was_terminal {
+                waits::target_finished(self, instance_id, now);
+            }
         }
         if effects.acknowledge {
             self.signals
@@ -157,12 +165,33 @@ impl Store {
 #[derive(Default)]
 pub struct InMemoryPersistence {
     store: Mutex<Store>,
+    /// Polls of `reconcile_wait_wakes`, which runs its full pass on one in
+    /// every `FULL_RECONCILE_EVERY`.
+    wait_polls: std::sync::atomic::AtomicU64,
 }
 
 impl InMemoryPersistence {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test hook: forget a parked waiter's wake as a crash before its stamp
+    /// would (back on its timer, no wake claim, no nudges).
+    #[cfg(test)]
+    fn lose_wait_wake(&self, waiter: &str) {
+        let mut store = self.store.lock().unwrap();
+        let root = store.instances.get_mut(waiter).unwrap();
+        root.sleep_until = Some(Utc::now() + chrono::Duration::hours(1));
+        root.wake_reason = Some(crate::domain::WakeReason::Timer);
+        if let Some(park) = store.input_parks.get_mut(waiter) {
+            park.wake_scheduled = false;
+        }
+        for ((owner, _), wait) in store.instance_waits.iter_mut() {
+            if owner == waiter {
+                wait.nudged.clear();
+            }
+        }
     }
 }
 
@@ -255,6 +284,10 @@ fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
 #[async_trait]
 impl Persistence for InMemoryPersistence {
     fn input_requests(&self) -> Option<&dyn crate::persistence::inputs::InputRequests> {
+        Some(self)
+    }
+
+    fn instance_waits(&self) -> Option<&dyn crate::persistence::waits::InstanceWaits> {
         Some(self)
     }
 
@@ -405,13 +438,15 @@ impl Persistence for InMemoryPersistence {
         if store.external_outcomes.contains_key(&outcome.instance_id) {
             return Ok(PublishOutcome::AlreadyPublished);
         }
+        let now = Utc::now();
         store.external_outcomes.insert(
             outcome.instance_id.clone(),
             crate::persistence::ExternalOutcomeRecord {
                 outcome: outcome.clone(),
-                published_at: Utc::now(),
+                published_at: now,
             },
         );
+        waits::target_finished(&mut store, &outcome.instance_id, now);
         Ok(PublishOutcome::Published)
     }
 
@@ -448,6 +483,7 @@ impl Persistence for InMemoryPersistence {
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         let inst = store.instance_mut(instance_id)?;
+        let was_terminal = inst.status.is_terminal();
         inst.status = status;
         if let Some(at) = started_at {
             inst.started_at = Some(at);
@@ -460,7 +496,11 @@ impl Persistence for InMemoryPersistence {
         }
         store.revoke_inactive_execution(instance_id);
         if status.is_terminal() {
-            inputs::close_root(&mut store, instance_id, Utc::now());
+            let now = Utc::now();
+            inputs::close_root(&mut store, instance_id, now);
+            if !was_terminal {
+                waits::target_finished(&mut store, instance_id, now);
+            }
         }
         Ok(())
     }
@@ -494,6 +534,7 @@ impl Persistence for InMemoryPersistence {
             return Ok(false);
         }
 
+        let was_terminal = inst.status.is_terminal();
         inst.status = params.status;
         // Replaced: a transition that carries no output or error clears the
         // previous one, so a failure cannot be read as still holding a stale
@@ -515,7 +556,11 @@ impl Persistence for InMemoryPersistence {
         }
         store.revoke_inactive_execution(params.instance_id);
         if params.status.is_terminal() {
-            inputs::close_root(&mut store, params.instance_id, Utc::now());
+            let now = Utc::now();
+            inputs::close_root(&mut store, params.instance_id, now);
+            if !was_terminal {
+                waits::target_finished(&mut store, params.instance_id, now);
+            }
         }
         Ok(true)
     }
@@ -712,20 +757,45 @@ impl Persistence for InMemoryPersistence {
         request: crate::lifecycle::ParkRequest,
         signals: &[String],
     ) -> Result<Decision, CoreError> {
+        self.park_instance_on_targets(
+            instance_id,
+            request,
+            crate::persistence::ParkTargets {
+                signal_ids: signals,
+                wait_ids: &[],
+            },
+        )
+        .await
+    }
+
+    async fn park_instance_on_targets(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+        targets: crate::persistence::ParkTargets<'_>,
+    ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
         let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
         if let Decision::Applied(effects) = decision {
             let now = Utc::now();
             store.apply_transition(instance_id, effects, now)?;
-            if request.reason == lifecycle::ParkReason::Signal && !signals.is_empty() {
+            let signals =
+                request.reason == lifecycle::ParkReason::Signal && !targets.signal_ids.is_empty();
+            if signals || !targets.wait_ids.is_empty() {
                 store.input_parks.insert(
                     instance_id.into(),
                     inputs::InputPark {
-                        signals: signals.to_vec(),
+                        signals: targets.signal_ids.to_vec(),
                         wake_scheduled: false,
+                        waits: targets.wait_ids.to_vec(),
                     },
                 );
+            }
+            if signals {
                 inputs::schedule_accepted(&mut store, instance_id, now, true);
+            }
+            if !targets.wait_ids.is_empty() {
+                waits::park_on(&mut store, instance_id, targets.wait_ids, now);
             }
         }
         Ok(decision)
@@ -1102,6 +1172,7 @@ impl Persistence for InMemoryPersistence {
             store.custom_signals.retain(|(inst, _), _| inst != id);
             store.input_requests.retain(|(inst, _), _| inst != id);
             store.control_receipts.retain(|(caller, _), _| caller != id);
+            store.instance_waits.retain(|(waiter, _), _| waiter != id);
             store.invocation_leases.remove(id);
             store
                 .invocation_parents
@@ -1436,6 +1507,21 @@ mod tests {
         crate::persistence::conformance::run_retention_pin_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    }
+
+    /// Durable instance waits, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_instance_wait_contract() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::waits::run_all(backend.as_ref()).await;
+        let hook = backend.clone();
+        let lose_wake = move |waiter: String| {
+            let backend = hook.clone();
+            Box::pin(async move { backend.lose_wait_wake(&waiter) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        };
+        crate::persistence::conformance::waits::reconciler_rotation(backend.as_ref(), &lose_wake)
+            .await;
     }
 
     /// Publishing a never-launched child's outcome and launching it race to

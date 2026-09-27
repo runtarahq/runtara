@@ -88,6 +88,7 @@ pub fn wake_reason_to_str(value: runtara_core::domain::WakeReason) -> &'static s
         WakeReason::CustomSignal => "custom_signal",
         WakeReason::ManualResume => "manual_resume",
         WakeReason::Recovery => "recovery",
+        WakeReason::InstancesTerminal => "instances_terminal",
     }
 }
 
@@ -99,6 +100,7 @@ pub fn wake_reason_from_str(value: &str) -> Result<runtara_core::domain::WakeRea
         "custom_signal" => Ok(WakeReason::CustomSignal),
         "manual_resume" => Ok(WakeReason::ManualResume),
         "recovery" => Ok(WakeReason::Recovery),
+        "instances_terminal" => Ok(WakeReason::InstancesTerminal),
         _ => Err(sqlx::Error::Decode("unrecognized wake reason".into())),
     }
 }
@@ -148,5 +150,18 @@ mod tests {
         for invalid in ["", "unknown", "INVALID"] {
             assert!(event_type_from_str(invalid).is_err());
         }
+        for label in [
+            "timer",
+            "custom_signal",
+            "manual_resume",
+            "recovery",
+            "instances_terminal",
+        ] {
+            assert_eq!(
+                wake_reason_to_str(wake_reason_from_str(label).unwrap()),
+                label
+            );
+        }
+        assert!(wake_reason_from_str("unknown").is_err());
     }
 }

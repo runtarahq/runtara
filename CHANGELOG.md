@@ -103,6 +103,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `instances`) and the server database (`20260927000200`: a partial index on
   `execution_requests`).
 
+- **Durable instance waits for control.** The runtime can now park a run
+  until its children finish (`all` or `any`, with an optional deadline),
+  without holding a runner: the wait is recorded per calling step, resolved
+  once (a replayed `any` keeps its choice, the first deadline stands), and
+  the run is woken in the same commit as the child that satisfies it, by
+  any writer including raw SQL; a wake that could not be stamped at once is
+  recovered by the wake scheduler, and a paused run is never woken. The
+  control service's `wait` and `poll-wait` operations register and read such
+  waits for direct children (at most 1000; results inlined up to 256 KiB of
+  output and 16 KiB of error per child, 3 MiB per wait); the `control`
+  agent's `wait` capability arrives in a later release. **Upgrade note:** the
+  first boot migrates the runtime database (`039`: termination reason
+  `waiting_instances`; `040`: `instance_waits`, `instance_wait_targets`,
+  `instance_input_parks.wait_ids`, three triggers on finishing runs, and a
+  named wake-reason CHECK replacing the unnamed one from `024`; `041`
+  validates it).
+
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
   self-signed or private-CA certificate with full verification;

@@ -25,6 +25,8 @@ pub enum SuspensionReason {
     Sleeping,
     /// Execution awaits a durable custom signal.
     WaitingSignal,
+    /// Execution awaits other instances through durable instance waits.
+    WaitingInstances,
 }
 
 /// A requested wake time, resolved by the backend's transaction clock.
@@ -215,6 +217,9 @@ pub enum ParkReason {
     Timer,
     /// Waiting for a custom signal, optionally with a timeout.
     Signal,
+    /// Waiting for other instances (durable instance waits), optionally
+    /// with a timeout.
+    Instances,
 }
 
 /// A durable suspension requested by an exiting guest.
@@ -239,6 +244,7 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
         reason: Change::Set(match request.reason {
             ParkReason::Timer => SuspensionReason::Sleeping,
             ParkReason::Signal => SuspensionReason::WaitingSignal,
+            ParkReason::Instances => SuspensionReason::WaitingInstances,
         }),
         wake: request.deadline.map_or(Change::Keep, |deadline| {
             Change::Set(WakeDeadline::At(deadline))
@@ -451,7 +457,7 @@ mod tests {
     fn parking_requires_running_and_preserves_unrelated_fields() {
         let deadline = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         for status in STATUSES {
-            for reason in [ParkReason::Timer, ParkReason::Signal] {
+            for reason in [ParkReason::Timer, ParkReason::Signal, ParkReason::Instances] {
                 for wake in [None, Some(deadline)] {
                     let decision = park(
                         status,
@@ -473,10 +479,10 @@ mod tests {
                     assert_eq!(effects.event, None);
                     assert_eq!(
                         effects.reason,
-                        Change::Set(if reason == ParkReason::Timer {
-                            SuspensionReason::Sleeping
-                        } else {
-                            SuspensionReason::WaitingSignal
+                        Change::Set(match reason {
+                            ParkReason::Timer => SuspensionReason::Sleeping,
+                            ParkReason::Signal => SuspensionReason::WaitingSignal,
+                            ParkReason::Instances => SuspensionReason::WaitingInstances,
                         })
                     );
                     assert_eq!(

@@ -1342,6 +1342,10 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 ///   (the wake scheduler relaunches at the deadline).
 /// - `on-signal` with NO deadline → suspended, `sleep_until` left NULL; the
 ///   custom-signal waker stamps it when the signal arrives (the only wake path).
+/// - `instance_waits` (the durable instance waits the run's suspensions
+///   registered) → parked `waiting_instances` on them, in the same
+///   transaction that evaluates them: a wait that already resolved wakes the
+///   run at once, and a target finishing later wakes it then.
 /// - only `on-resume` (breakpoint/drain pause) → left untouched: those recorded
 ///   `status=suspended` inline via their ack, and stamping `sleep_until` would
 ///   wrongly schedule an immediate wake.
@@ -1349,19 +1353,20 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 /// The park is `if_running`-guarded (a guest that already reported a terminal
 /// complete/fail must not be resurrected as suspended — the same race guard
 /// `handle_instance_event`'s suspend path uses), and stamps a
-/// `termination_reason` marker naming the wake shape: `waiting_signal` for
-/// on-signal parks (the ONLY rows the custom-signal waker may relaunch — a
-/// pause/breakpoint suspend has no marker and must never be signal-woken) or
-/// `sleeping` for pure timed parks. Relaunch clears the marker with the
-/// running transition.
+/// `termination_reason` marker naming the wake shape: `waiting_instances` for
+/// parks on instance waits, `waiting_signal` for on-signal parks (the ONLY
+/// rows the custom-signal waker may relaunch — a pause/breakpoint suspend has
+/// no marker and must never be signal-woken) or `sleeping` for pure timed
+/// parks. Relaunch clears the marker with the running transition.
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+    instance_waits: &[String],
 ) {
     let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
     let deadline_ms = earliest_wake_deadline_ms(wakes);
-    if deadline_ms.is_none() && !has_on_signal_wake(wakes) {
+    if deadline_ms.is_none() && !has_on_signal_wake(wakes) && instance_waits.is_empty() {
         // Pure on-resume: already handled by the ack path.
         return;
     }
@@ -1376,7 +1381,9 @@ async fn park_invoke_suspend(
         );
     }
     let request = ParkRequest {
-        reason: if has_on_signal_wake(wakes) {
+        reason: if !instance_waits.is_empty() {
+            ParkReason::Instances
+        } else if has_on_signal_wake(wakes) {
             ParkReason::Signal
         } else {
             ParkReason::Timer
@@ -1388,7 +1395,14 @@ async fn park_invoke_suspend(
         .map(str::to_owned)
         .collect();
     match persistence
-        .park_instance_on_signals(instance_id, request, &signals)
+        .park_instance_on_targets(
+            instance_id,
+            request,
+            runtara_core::persistence::ParkTargets {
+                signal_ids: &signals,
+                wait_ids: instance_waits,
+            },
+        )
         .await
     {
         Ok(Decision::Applied(_)) => {}
@@ -1406,7 +1420,9 @@ async fn park_invoke_suspend(
     }
     // Close the arrival-before-park race. Later arrivals observe suspended state
     // and schedule their own immediate wake. Never overwrite it with the timer.
-    wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+    if request.reason == ParkReason::Signal {
+        wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+    }
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
@@ -1657,7 +1673,13 @@ impl Runner for EmbeddedWasmRunner {
                         // Store-freeing durable sleep: the guest exited with a
                         // timed wake instead of blocking; park it so the wake
                         // scheduler relaunches at the deadline.
-                        park_invoke_suspend(persistence.as_ref(), &instance_id, wakes).await;
+                        park_invoke_suspend(
+                            persistence.as_ref(),
+                            &instance_id,
+                            wakes,
+                            &run.instance_waits,
+                        )
+                        .await;
                     }
                     InvokeExit::Failed(_) => {
                         warn!(instance_id = %instance_id, "Embedded workflow run returned error");
@@ -2292,6 +2314,7 @@ mod tests {
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::At(deadline_ms)],
+            &[],
         )
         .await;
 
@@ -2327,6 +2350,7 @@ mod tests {
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnResume],
+            &[],
         )
         .await;
 
@@ -2359,6 +2383,7 @@ mod tests {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: None,
             })],
+            &[],
         )
         .await;
 
@@ -2405,6 +2430,7 @@ mod tests {
                 checkpoint_id: "raced-sig".into(),
                 deadline_ms: None,
             })],
+            &[],
         )
         .await;
 
@@ -2446,6 +2472,7 @@ mod tests {
                 checkpoint_id: "quiet-sig".into(),
                 deadline_ms: None,
             })],
+            &[],
         )
         .await;
 
@@ -2484,6 +2511,7 @@ mod tests {
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::At(1_900_000_000_000u64)],
+            &[],
         )
         .await;
 
@@ -2503,6 +2531,115 @@ mod tests {
         );
     }
 
+    /// The run's registered instance waits park it `waiting_instances` on
+    /// its timed wake (the wait's deadline): the timer stays the fallback,
+    /// and the target finishing wakes the run at once, in its own commit.
+    /// A wait that already resolved wakes the run from the park itself.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn park_attaches_instance_waits_and_a_finish_wakes_the_run() {
+        use runtara_core::persistence::waits::{WaitMode, WaitSpec};
+        let (persistence, waiter) = running_instance().await;
+        let tenant = persistence
+            .get_instance(&waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let register_child = |name: &str| format!("{waiter}-{name}");
+        let children = [register_child("a"), register_child("b")];
+        for child in &children {
+            persistence
+                .try_register_child_instance(
+                    child,
+                    &tenant,
+                    None,
+                    None,
+                    &runtara_core::persistence::ParentLink {
+                        parent_instance_id: waiter.clone(),
+                        parent_close_policy: "cancel".into(),
+                        admitted_at: chrono::Utc::now(),
+                    },
+                )
+                .await
+                .unwrap();
+            persistence
+                .update_instance_status(child, CoreInstanceStatus::Running, None)
+                .await
+                .unwrap();
+        }
+        let waits = persistence.instance_waits().expect("instance waits");
+        waits
+            .register_or_evaluate(
+                &tenant,
+                &waiter,
+                "op-wait",
+                &WaitSpec::new(children.iter().cloned(), WaitMode::Any, None),
+            )
+            .await
+            .unwrap();
+        let deadline_ms = 1_960_000_000_000u64;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &waiter,
+            &[WorkflowWake::At(deadline_ms)],
+            &["op-wait".to_string()],
+        )
+        .await;
+        let parked = persistence.get_instance(&waiter).await.unwrap().unwrap();
+        assert_eq!(parked.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            parked.termination_reason.as_deref(),
+            Some("waiting_instances")
+        );
+        assert_eq!(
+            parked.sleep_until.map(|at| at.timestamp_millis() as u64),
+            Some(deadline_ms),
+            "the wait's deadline is the timed fallback"
+        );
+        persistence
+            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
+                &children[1],
+                CoreInstanceStatus::Completed,
+            ))
+            .await
+            .unwrap();
+        let woken = persistence.get_instance(&waiter).await.unwrap().unwrap();
+        assert_eq!(
+            woken.wake_reason,
+            Some(runtara_core::domain::WakeReason::InstancesTerminal)
+        );
+        assert!(woken.sleep_until.is_some_and(|at| at <= chrono::Utc::now()));
+
+        // Relaunched and parked again on the now-resolved wait: the park
+        // wakes it by itself.
+        persistence
+            .update_instance_status(
+                &waiter,
+                CoreInstanceStatus::Running,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .unwrap();
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &waiter,
+            &[WorkflowWake::At(deadline_ms)],
+            &["op-wait".to_string()],
+        )
+        .await;
+        let again = persistence.get_instance(&waiter).await.unwrap().unwrap();
+        assert_eq!(again.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            again.wake_reason,
+            Some(runtara_core::domain::WakeReason::InstancesTerminal)
+        );
+        assert!(again.sleep_until.is_some_and(|at| at <= chrono::Utc::now()));
+        let mut ids = children.to_vec();
+        ids.push(waiter);
+        persistence.delete_instances_batch(&ids).await.unwrap();
+    }
+
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_stamps_on_signal_timeout_deadline_as_the_fallback() {
@@ -2515,6 +2652,7 @@ mod tests {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: Some(deadline_ms),
             })],
+            &[],
         )
         .await;
 

@@ -52,6 +52,9 @@ pub enum WakeReason {
     ManualResume,
     /// Execution is being recovered after shutdown or host failure.
     Recovery,
+    /// Instances a parked run waits on reached the state its wait asked for
+    /// (see [`crate::persistence::waits`]).
+    InstancesTerminal,
 }
 
 /// An event in an instance's persisted timeline.

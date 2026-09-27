@@ -22,6 +22,9 @@ pub mod inputs;
 /// Intent-first, success-only receipts of control mutations.
 pub mod control_receipts;
 
+/// Durable instance waits: a run parks until other runs finish.
+pub mod waits;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -191,6 +194,17 @@ pub enum PublishOutcome {
     AlreadyPublished,
     /// The id has an instance row: the launch won, and nothing was written.
     Launched,
+}
+
+/// What a parked run can be woken by, besides its deadline: the custom
+/// signals it waits on and the instance waits
+/// ([`waits::InstanceWaits`]) it registered.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParkTargets<'a> {
+    /// Signal ids of a [`crate::lifecycle::ParkReason::Signal`] park.
+    pub signal_ids: &'a [String],
+    /// Wait ids of a [`crate::lifecycle::ParkReason::Instances`] park.
+    pub wait_ids: &'a [String],
 }
 
 /// Longest external-outcome reason a backend stores.
@@ -653,6 +667,12 @@ pub trait Persistence: Send + Sync {
         None
     }
 
+    /// Optional durable instance waits. Control's `wait` fails closed
+    /// without them.
+    fn instance_waits(&self) -> Option<&dyn waits::InstanceWaits> {
+        None
+    }
+
     /// Insert a new instance row for `instance_id`, owned by `tenant_id`, in
     /// its initial pending state.
     ///
@@ -1048,6 +1068,36 @@ pub trait Persistence: Send + Sync {
             });
         }
         self.park_instance(instance_id, request).await
+    }
+
+    /// Park with every target that can wake this execution, in one step:
+    /// [`Self::park_instance_on_signals`] for `targets.signal_ids`, plus the
+    /// instance waits `targets.wait_ids` of a
+    /// [`crate::lifecycle::ParkReason::Instances`] park.
+    ///
+    /// In the park's own transaction a backend with instance waits evaluates
+    /// each wait (persisting a resolution the first time) and schedules an
+    /// immediate wake when one already resolved, is closed or is missing, so
+    /// a target that finished between the wait's registration and this park
+    /// is never lost. Later, a target finishing wakes the parked run when
+    /// its wait holds; a paused run (no suspension reason) is never woken.
+    ///
+    /// Without wait ids this is exactly [`Self::park_instance_on_signals`];
+    /// backends without instance waits refuse wait ids.
+    async fn park_instance_on_targets(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+        targets: ParkTargets<'_>,
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        if !targets.wait_ids.is_empty() {
+            return Err(CoreError::PersistenceError {
+                operation: "park_instance_on_targets".into(),
+                details: "instance waits are not implemented by this backend".into(),
+            });
+        }
+        self.park_instance_on_signals(instance_id, request, targets.signal_ids)
+            .await
     }
 
     /// Atomically cancel suspended instances with pending cancel commands, clear

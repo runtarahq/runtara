@@ -24,6 +24,9 @@ use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink
 pub struct PostgresPersistence {
     pub(crate) pool: PgPool,
     metrics_sink: Option<Arc<dyn InstanceMetricsSink>>,
+    /// Polls of `reconcile_wait_wakes`, which runs its full pass on one in
+    /// every `FULL_RECONCILE_EVERY`.
+    pub(crate) wait_polls: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PostgresPersistence {
@@ -35,6 +38,7 @@ impl PostgresPersistence {
         Self {
             pool,
             metrics_sink: None,
+            wait_polls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -524,6 +528,10 @@ impl Persistence for PostgresPersistence {
         Some(self)
     }
 
+    fn instance_waits(&self) -> Option<&dyn runtara_core::persistence::waits::InstanceWaits> {
+        Some(self)
+    }
+
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
         Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }
@@ -828,24 +836,53 @@ impl Persistence for PostgresPersistence {
         request: runtara_core::lifecycle::ParkRequest,
         signals: &[String],
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+        self.park_instance_on_targets(
+            instance_id,
+            request,
+            runtara_core::persistence::ParkTargets {
+                signal_ids: signals,
+                wait_ids: &[],
+            },
+        )
+        .await
+    }
+
+    async fn park_instance_on_targets(
+        &self,
+        instance_id: &str,
+        request: runtara_core::lifecycle::ParkRequest,
+        targets: runtara_core::persistence::ParkTargets<'_>,
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
         let decision = runtara_core::lifecycle::park(status, request);
         if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
             crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
-            if request.reason == runtara_core::lifecycle::ParkReason::Signal && !signals.is_empty()
-            {
+            let signals = request.reason == runtara_core::lifecycle::ParkReason::Signal
+                && !targets.signal_ids.is_empty();
+            if signals || !targets.wait_ids.is_empty() {
                 sqlx::query(
-                    "INSERT INTO instance_input_parks (instance_id, signal_ids) VALUES ($1,$2)",
+                    "INSERT INTO instance_input_parks (instance_id, signal_ids, wait_ids) VALUES ($1,$2,$3)",
                 )
                 .bind(instance_id)
-                .bind(signals)
+                .bind(targets.signal_ids)
+                .bind(targets.wait_ids)
                 .execute(&mut *tx)
                 .await
                 .db()?;
+            }
+            if signals {
                 crate::inputs::schedule_accepted(&mut tx, instance_id, true)
                     .await
                     .db()?;
+            }
+            if !targets.wait_ids.is_empty() {
+                crate::waits::park_on(&mut tx, instance_id, targets.wait_ids)
+                    .await
+                    .map_err(|error| CoreError::PersistenceError {
+                        operation: "park_instance_on_targets".into(),
+                        details: error.to_string(),
+                    })?;
             }
         }
         tx.commit().await.db()?;

@@ -1062,3 +1062,130 @@ async fn parent_close_cascade_stops_cancel_children_once_after_a_crash() {
         cleanup(&pool, &id(name)).await;
     }
 }
+
+/// A run parked on an instance wait whose target finished while the waiter's
+/// row was held (so the finish could only leave a nudge) and whose holder
+/// then crashed is woken by the next scheduler, exactly once: a restarted
+/// scheduler polling on finds nothing more to wake.
+#[tokio::test]
+async fn a_wake_lost_before_its_stamp_is_recovered_once_after_a_crash() {
+    use runtara_core::lifecycle::{ParkReason, ParkRequest};
+    use runtara_core::persistence::waits::{WaitMode, WaitSpec};
+    use runtara_core::persistence::{ParentLink, ParkTargets};
+    let (pool, _context) = get_test_pool().await;
+    let tenant = format!("wait-crash-{}", Uuid::new_v4());
+    let image = create_test_image(&pool, &tenant).await;
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let waiter = format!("{tenant}-waiter");
+    let child = format!("{tenant}-child");
+    create_test_instance(&pool, &waiter, &tenant, &image).await;
+    update_test_instance_status(&pool, &waiter, "running", Some("before-wait")).await;
+    persistence
+        .try_register_child_instance(
+            &child,
+            &tenant,
+            None,
+            None,
+            &ParentLink {
+                parent_instance_id: waiter.clone(),
+                parent_close_policy: "cancel".into(),
+                admitted_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    update_test_instance_status(&pool, &child, "running", None).await;
+    let waits = persistence.instance_waits().unwrap();
+    waits
+        .register_or_evaluate(
+            &tenant,
+            &waiter,
+            "op",
+            &WaitSpec::new([child.clone()], WaitMode::All, None),
+        )
+        .await
+        .unwrap();
+    persistence
+        .park_instance_on_targets(
+            &waiter,
+            ParkRequest {
+                reason: ParkReason::Instances,
+                deadline: Some(Utc::now() + chrono::Duration::hours(1)),
+            },
+            ParkTargets {
+                signal_ids: &[],
+                wait_ids: &["op".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+
+    // The child finishes while another transaction holds the waiter; that
+    // transaction then dies (a crash before the stamp).
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM instances WHERE instance_id = $1 FOR UPDATE")
+        .bind(&waiter)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    update_test_instance_status(&pool, &child, "completed", None).await;
+    holder.rollback().await.unwrap();
+    let parked = persistence.get_instance(&waiter).await.unwrap().unwrap();
+    assert!(
+        parked.sleep_until.is_some_and(|at| at > Utc::now()),
+        "no wake was stamped"
+    );
+
+    let launches = || {
+        let pool = pool.clone();
+        let waiter = waiter.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM instance_launches WHERE instance_id = $1 AND kind = 'wake'",
+            )
+            .bind(&waiter)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for restart in 0..2 {
+        let scheduler = WakeScheduler::new(
+            pool.clone(),
+            persistence.clone(),
+            WakeSchedulerConfig {
+                poll_interval: Duration::from_millis(50),
+                batch_size: 10,
+                ..Default::default()
+            },
+        );
+        let shutdown = scheduler.shutdown_handle();
+        let task = tokio::spawn(scheduler.run());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && launches().await == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Keep polling past the full pass (every 12th poll).
+        tokio::time::sleep(Duration::from_millis(50 * 30)).await;
+        shutdown.notify_one();
+        task.await.unwrap();
+        assert_eq!(
+            launches().await,
+            1,
+            "restart {restart}: the waiter is woken exactly once"
+        );
+    }
+    let woken = persistence.get_instance(&waiter).await.unwrap().unwrap();
+    assert_eq!(
+        woken.wake_reason,
+        Some(runtara_core::domain::WakeReason::InstancesTerminal)
+    );
+    sqlx::query("DELETE FROM instance_launches WHERE instance_id = $1")
+        .bind(&waiter)
+        .execute(&pool)
+        .await
+        .unwrap();
+    cleanup(&pool, &child).await;
+    cleanup(&pool, &waiter).await;
+    cleanup_image(&pool, &image).await;
+}
