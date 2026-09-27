@@ -71,7 +71,7 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 ## Still open
 - **Composed binding:** does any deployment set `RUNTARA_DIRECT_RUNTIME_BINDING=composed`? Until ops answers, slice 1 does not fail closed; slices 4 and 13 add a release note.
 - **Launch-queue timeout:** children and woken parents can hit the 300 s timeout when the limit exceeds runner capacity; owner caps limits or exempts control children.
-- ~~**K5 security review** of the digest history~~: owner approved trusted option B; implemented (slice 11).
+- ~~**K5 security review** of the digest history~~: trusted option B implemented (slice 11) and security-reviewed 2026-09-28: approved with no findings (guest cannot set launch kind, pins or bytes; Start never reads history; `admits` precedes every credential lookup; revocation fails closed; migration keeps the append-only trigger).
 - ~~**Slice 12 trigger**~~: replaced by the owner; pruning runs every pass on exactly the children retention would already have deleted (slice 12).
 - **Per slice:** cancel-reason source (8), trusted digest backfill (5), `/steps` pairing rewrite if duplication confirmed (13).
 
