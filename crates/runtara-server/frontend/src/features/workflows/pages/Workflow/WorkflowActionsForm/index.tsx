@@ -23,7 +23,10 @@ import {
   Pause,
   CheckCircle2,
   XCircle,
+  Hourglass,
 } from 'lucide-react';
+import type { SuspensionReason } from '@/generated/RuntaraRuntimeApi';
+import { waitingStatusText } from '@/features/workflows/utils/suspension';
 
 const { schema, initialValues } = form;
 
@@ -73,6 +76,9 @@ type Props = {
   compilationStatus?: CompilationToolbarStatus;
   onDebugExecute?: () => void;
   isSuspended?: boolean;
+  /** Why a suspended run is waiting (signal, child runs, timer, recovery).
+   *  Set only when the run is not stopped at a breakpoint. */
+  waitingReason?: SuspensionReason | null;
   onResume?: () => void;
   isResuming?: boolean;
   hasBreakpoints?: boolean;
@@ -98,6 +104,7 @@ export function WorkflowActionsForm(props: Props) {
     compilationStatus,
     onDebugExecute,
     isSuspended,
+    waitingReason,
     onResume,
     isResuming,
     hasBreakpoints,
@@ -218,23 +225,27 @@ export function WorkflowActionsForm(props: Props) {
                 <div className="flex items-center gap-2 px-1">
                   {isSuspended ? (
                     <Pause className="size-3.5 text-warning" />
+                  ) : waitingReason ? (
+                    <Hourglass className="size-3.5 text-warning" />
                   ) : (
                     <Lock className="size-3.5 text-muted-foreground" />
                   )}
                   <span className="text-xs font-medium text-foreground">
                     {isSuspended
                       ? 'Paused at breakpoint'
-                      : isExecutionActive
-                        ? 'Execution in progress'
-                        : executionStats?.status === 'completed'
-                          ? 'Completed'
-                          : executionStats?.status === 'failed'
-                            ? 'Execution failed'
-                            : executionStats?.status === 'timeout'
-                              ? 'Execution timed out'
-                              : executionStats?.status === 'cancelled'
-                                ? 'Execution cancelled'
-                                : 'Execution in progress'}
+                      : waitingReason
+                        ? waitingStatusText(waitingReason)
+                        : isExecutionActive
+                          ? 'Execution in progress'
+                          : executionStats?.status === 'completed'
+                            ? 'Completed'
+                            : executionStats?.status === 'failed'
+                              ? 'Execution failed'
+                              : executionStats?.status === 'timeout'
+                                ? 'Execution timed out'
+                                : executionStats?.status === 'cancelled'
+                                  ? 'Execution cancelled'
+                                  : 'Execution in progress'}
                   </span>
                   {executionStats?.executionDuration !== undefined &&
                     executionStats?.executionDuration !== null && (

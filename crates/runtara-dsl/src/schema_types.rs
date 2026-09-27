@@ -15,7 +15,7 @@
 // including module.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.1.0";
+pub const DSL_VERSION: &str = "3.2.0";
 
 // ============================================================================
 // Root Types

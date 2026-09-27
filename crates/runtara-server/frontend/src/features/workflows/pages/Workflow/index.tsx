@@ -45,6 +45,10 @@ import {
 } from '@/features/workflows/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
+import {
+  isAtBreakpoint,
+  isWaitingSuspension,
+} from '@/features/workflows/utils/suspension';
 import { ExecutionStatus, MemoryTier } from '@/generated/RuntaraRuntimeApi';
 
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
@@ -913,12 +917,14 @@ export function Workflow() {
       updateInstanceStatus(executionInstanceData.status);
     }
 
-    // Detect suspended state (breakpoint hit in debug execution)
+    // Detect a stop at a breakpoint (or an explicit pause) in a debug
+    // execution. Only a `paused` suspension counts: a run parked on a signal,
+    // child runs or a timer is waiting and wakes on its own, so it must not
+    // offer breakpoint Continue.
     // NOTE: this block must NOT early-return — the node status mapping below must always run.
-    if (
-      executionInstanceData.status === 'suspended' &&
-      !justResumedRef.current
-    ) {
+    const atBreakpoint = isAtBreakpoint(executionInstanceData);
+    const waitingSuspension = isWaitingSuspension(executionInstanceData);
+    if (atBreakpoint && !justResumedRef.current) {
       // Look for the LATEST breakpoint_hit event
       const events = executionStepEventsData?.data?.events;
       if (events) {
@@ -952,9 +958,13 @@ export function Workflow() {
         setSuspended(true, null);
         refetchStepEvents();
       }
-    } else if (executionInstanceData.status !== 'suspended') {
-      // Status is not suspended — clear the justResumed guard and suspended state
-      if (justResumedRef.current) {
+    } else if (!atBreakpoint) {
+      // Not stopped at a breakpoint — clear the justResumed guard once the run
+      // has left the suspended state, and drop any breakpoint state.
+      if (
+        justResumedRef.current &&
+        executionInstanceData.status !== 'suspended'
+      ) {
         justResumedRef.current = false;
       }
       if (isSuspended) {
@@ -1032,10 +1042,16 @@ export function Workflow() {
         }
       }
 
-      // Update node statuses for all processed steps
+      // Update node statuses for all processed steps. A step still open while
+      // the run waits (signal, child runs, timer) is parked, not running.
       const executedStepIds = new Set(processedSteps.keys());
       for (const [stepId, stepData] of processedSteps) {
-        updateNodeStatus(stepId, stepData);
+        updateNodeStatus(
+          stepId,
+          waitingSuspension && stepData.status === 'running'
+            ? { ...stepData, status: 'suspended' }
+            : stepData
+        );
       }
 
       // After mapping all step events, apply Suspended highlight to the current breakpoint step.
@@ -1103,7 +1119,9 @@ export function Workflow() {
         const status = step.finished
           ? 'completed'
           : step.started
-            ? 'running'
+            ? waitingSuspension
+              ? 'suspended'
+              : 'running'
             : isExecutionTerminal
               ? executionInstanceData.status
               : 'queued';
@@ -2223,6 +2241,11 @@ export function Workflow() {
               }
               onDebugExecute={handleDebugExecuteServer}
               isSuspended={isSuspended}
+              waitingReason={
+                isWaitingSuspension(executionInstanceData)
+                  ? executionInstanceData?.suspensionReason
+                  : null
+              }
               onResume={handleResume}
               isResuming={resumeMutation.isPending}
               hasBreakpoints={hasBreakpoints}

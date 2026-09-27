@@ -2752,6 +2752,10 @@ pub mod waits;
 /// fence, idempotent delete, cascade and isolation.
 pub mod continuations;
 
+/// Paired-record rule: one record per (correlation, scope), from the first
+/// start to the first end after it (S,S,E; S,E,S,E; E,S,E).
+pub mod paired;
+
 /// External outcomes are fenced against launches: the first publication
 /// wins, a published outcome refuses the child's launch, and an existing
 /// instance row refuses the publication.

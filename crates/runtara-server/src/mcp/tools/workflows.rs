@@ -444,6 +444,117 @@ pub async fn get_workflow_authoring_schema(
     json_result(workflow_authoring_schema(&agent_id, &capability_id))
 }
 
+/// The control agent's author reference, the same text as the "As built"
+/// section of `docs/control-agent.md`. Every number comes from
+/// `runtara-control-contract` or `runtara-agent-suspension`.
+pub(crate) fn control_agent_reference() -> serde_json::Value {
+    use runtara_agent_suspension::{
+        AGENT_CONTINUATION_REJECTED, AGENT_INVALID_SUSPENSION, MAX_CONTINUATION_BYTES,
+    };
+    use runtara_control_contract as c;
+    let kib = |bytes: usize| bytes / 1024;
+    let mib = |bytes: usize| bytes / (1024 * 1024);
+    serde_json::json!({
+        "agentId": runtara_dsl::agent_meta::CONTROL_AGENT_ID,
+        "availability": "Every pricing tier, whatever the agent allowlist says. Mutations and wait only run as steps of a workflow run: test_capability answers CONTROL_REQUIRES_INSTANCE for capabilities tagged runtime:requires-run.",
+        "capabilities": {
+            "start": "Durably admit a child run of another workflow and return {instanceId, workflowId, version, runLabel, replayed} once it is accepted, without waiting for it.",
+            "get": "Read one run of the tenant: status, suspensionReason, parentInstanceId, output or error.",
+            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission.",
+            "list-pending-signals": "List open WaitForSignal requests of one run, a workflow, or the calling run's children.",
+            "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
+            "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
+            "pause": "Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint.",
+            "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request.",
+            "wait": "Park the calling run, without holding a runner, until direct children finish (all) or the first does (any), or the optional deadline passes."
+        },
+        "authorization": [
+            "Reads (get, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
+            "wait, cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
+            "send-signal answers a child, an ancestor, or any run whose WaitForSignal request opted in with action.key when the step passes the same actionKey; anything else is CONTROL_DENIED.",
+            "No mutation may target the calling run (CONTROL_INVALID). Tenant, caller and operation come from the host, never from step inputs."
+        ],
+        "start": {
+            "inputs": "workflowId (an id, not a slug), optional version (default: the current version, fixed at admission), inputs ({data, variables}, validated against the child's input schema), optional runLabel, and a required parentClosePolicy (cancel, which the editor preselects, or leave_running).",
+            "runLabel": format!("At most {} bytes of printable ASCII. It names one child per parent for the parent's whole lifetime: reusing it from another step or iteration is CONTROL_LABEL_CONFLICT, and a retry of a failed child needs a new label. Other parents, and runs without a parent, may reuse it.", c::MAX_RUN_LABEL_BYTES),
+            "depth": format!("Lineage is capped at depth {} (a top-level run is depth 1): a run at depth {} cannot start a child (CONTROL_INVALID).", c::MAX_LINEAGE_DEPTH, c::MAX_LINEAGE_DEPTH),
+            "fastFailure": "A missing workflow or version is CONTROL_NOT_FOUND and a permanently failed compilation CONTROL_NOT_RUNNABLE. A workflow not compiled yet is admitted and launches once it compiles, until the admission deadline (then the child fails with launch_deadline_not_compiled).",
+            "parentLink": "The child records the calling run as parentInstanceId, reported by get, query, the executions API and the invocation history."
+        },
+        "capacity": {
+            "rule": "Children count against the tenant concurrency limit (MAX_CONCURRENT_EXECUTIONS, or the maxConcurrentExecutions entitlement if lower), which counts only starting and running runs: a parked run gives its slot back.",
+            "controlShare": format!("Control-started children may hold at most max(1, floor(0.8 x limit)) slots (limit 10 -> {}, limit 5 -> {}), so outside triggers keep headroom.", c::control_share(10), c::control_share(5)),
+            "atTheShare": format!("start fails with retryable {} carrying a retry hint of {}-{} s; set maxRetries on the step to try again.", c::CONTROL_CAPACITY_RATE_LIMITED, c::CAPACITY_RETRY_MIN_MS / 1000, c::CAPACITY_RETRY_MAX_MS / 1000),
+            "unsatisfiable": format!("With a limit of at most 1 the calling run holds the only slot, so start fails permanently with {} (the server warns at boot).", c::CONTROL_CAPACITY_UNSATISFIABLE)
+        },
+        "statuses": {
+            "values": ["queued", "pending", "running", "suspended", "completed", "failed", "cancelled", "not_started"],
+            "queued": "A child still in admission: accepted by start, not launched yet. It can be cancelled but not paused or resumed.",
+            "not_started": "A child that never launched: its one fenced outcome is not_started or cancelled. get and query report it; the public executions list does not.",
+            "suspensionReason": "For a suspended run: paused (explicitly paused, only a resume relaunches it), waiting_signal, waiting_instances (a control wait), sleeping or shutdown. The executions API reports the same as suspensionReason.",
+            "terminal": "completed, failed and cancelled (including execution timeout). A child's failure is outcome data, never a retryable control error."
+        },
+        "wait": {
+            "inputs": format!("instanceIds (direct children, at most {}), mode all (default) or any, optional deadline in epoch milliseconds.", c::MAX_WAIT_TARGETS),
+            "output": "{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, output or error}], remaining: [ids]}.",
+            "semantics": [
+                "all settles when every target is terminal, any when at least one is; repeat any with remaining to process results as they arrive.",
+                "An empty instanceIds returns resolution empty at once. Already finished targets count at once.",
+                "Too many, missing, non-child or ancestor targets fail the step and register nothing.",
+                "The deadline is a business timeout: the wait returns resolution deadline with what finished; it never cancels children.",
+                "The step timeout is the hard cap: it fails the step with AGENT_TIMEOUT even while parked, and follows onError.",
+                "The run parks without holding a runner or a concurrency slot and survives restarts; the wake is recorded in the same commit as the child that satisfies it.",
+                "The wait registers once per step operation: a replayed any keeps its choice, and the first deadline stands."
+            ],
+            "stepRequirements": format!("The step must be durable (E028) and set timeout > 0 ms (E029); a timeout of at most {} ms times out instead of parking (W078).", runtara_dsl::step_context_rules::SUSPEND_DEADLINE_MARGIN_MS)
+        },
+        "limits": {
+            "inputBytes": format!("{} MiB per control call", mib(c::MAX_INPUT_BYTES)),
+            "getOutputInline": format!("{} MiB output, {} KiB error, else outputOmitted/errorOmitted with the size", mib(c::GET_OUTPUT_INLINE_BYTES), kib(c::GET_ERROR_INLINE_BYTES)),
+            "pageSize": format!("{}-{} (default 20) for query and list-pending-signals", c::PAGE_SIZE_MIN, c::PAGE_SIZE_MAX),
+            "waitTargets": c::MAX_WAIT_TARGETS,
+            "waitInline": format!("{} KiB output and {} KiB error per child, {} MiB per wait; larger values are omitted and flagged", kib(c::WAIT_OUTPUT_INLINE_BYTES), kib(c::WAIT_ERROR_INLINE_BYTES), mib(c::WAIT_TOTAL_INLINE_BYTES)),
+            "runLabelBytes": c::MAX_RUN_LABEL_BYTES,
+            "lineageDepth": c::MAX_LINEAGE_DEPTH,
+            "cancelGraceMs": format!("0-{} (default {})", c::MAX_CANCEL_GRACE_MS, c::DEFAULT_CANCEL_GRACE_MS),
+            "parentCloseGraceMs": c::PARENT_CLOSE_GRACE_MS,
+            "continuationBytes": format!("{} KiB of suspension state per step operation and attempt", kib(MAX_CONTINUATION_BYTES)),
+            "controlCallMs": format!("{} ms per control call, below the step's own timeout (CONTROL_TIMEOUT)", c::EXECUTION_TIME_LIMIT_MS)
+        },
+        "replay": {
+            "identity": "Each control step call has an operation identity: the step plus its loop position. A retried attempt, a crash recovery and a resumed run replay the same identity.",
+            "table": [
+                {"capability": "get, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
+                {"capability": "start", "onReplay": "Returns the same child (replayed: true), also after a crash between admission and the checkpoint. Other arguments are CONTROL_REPLAY_CONFLICT."},
+                {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."},
+                {"capability": "wait", "onReplay": "Reads the wait it registered: same targets, deadline and, for any, the same choice. Other targets or mode are CONTROL_REPLAY_CONFLICT."}
+            ],
+            "suspension": format!("A suspending step keeps at most {} KiB of state per operation and attempt; a failed step discards it, so a retry starts afresh ({} when a capability refuses its saved state, {} when the host refuses a suspension).", kib(MAX_CONTINUATION_BYTES), AGENT_CONTINUATION_REJECTED, AGENT_INVALID_SUSPENSION)
+        },
+        "validation": {
+            "E028": "A suspending step (control wait) is not durable.",
+            "E029": "A suspending step has no timeout, or timeout 0.",
+            "E131": "A suspending step sits in an onError region, a WaitForSignal onWait, or an AiAgent tool or memory target.",
+            "E132": "A control step sits in a WaitForSignal onWait, or an AiAgent tool or memory target.",
+            "W073": "A Split's parallelism is ignored: its body holds an operation-scoped step (or another shape that forces sequential execution).",
+            "W074": "A control start in a Split or While uses a literal runLabel; the second iteration fails with CONTROL_LABEL_CONFLICT.",
+            "W075": "A control or suspending step in a parallel Split or an unconditioned branch group; that region runs serialized.",
+            "W076": "A control or suspending step under a retrying Split or EmbedWorkflow; a region retry replays the operation's first outcome.",
+            "W077": "A control start whose workflowId is not a literal; the target is only checked when the step runs.",
+            "W078": format!("A suspending step's timeout is at most {} ms, so it times out instead of parking.", runtara_dsl::step_context_rules::SUSPEND_DEADLINE_MARGIN_MS),
+            "publishing": "A workflow with control or suspending steps (or embedding one) cannot be published as a workflow-agent, and the composed runtime binding (RUNTARA_DIRECT_RUNTIME_BINDING=composed) cannot compile it."
+        },
+        "lifecycle": [
+            format!("parentClosePolicy cancel cancels a still-running child whenever its parent ends (completed, failed, cancelled, or gone), with a {} s grace, even when the parent crashed or was stopped from outside; leave_running leaves it alone. A suspended parent has not ended.", c::PARENT_CLOSE_GRACE_MS / 1000),
+            "Pausing a waiting run (parked on a timer, a signal or its children) pauses it at once, in control and in the public API; it loses its wake, and only an explicit resume relaunches it. Signal answers and finished children are kept and seen after the resume.",
+            "Pausing a parent does not pause its children, and neither an any result nor a wait deadline cancels the remaining children; cancel them explicitly.",
+            "A finished child stays readable through get and wait until its parent is terminal (one level deep), then follows normal retention.",
+            "Cancellation is not rollback of the child's business side effects."
+        ],
+        "errorCodes": c::ErrorCode::all_agent_codes()
+    })
+}
+
 /// Build the canonical workflow-authoring schema returned by
 /// `get_workflow_authoring_schema`. Extracted as a pure function so the advertised
 /// condition-operator enum can be drift-tested against `ConditionOperator`
@@ -600,6 +711,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             }
         ],
         "operationScopedSteps": runtara_dsl::step_context_rules::step_context_rules_json(),
+        "controlAgent": control_agent_reference(),
         "completeExamples": {
             "conditionalBranching": {
                 "name": "Route empty input",
@@ -1750,6 +1862,109 @@ mod tests {
 
         serde_json::from_value::<runtara_dsl::Step>(error["example"].clone())
             .expect("advertised Error example must parse as a real Error step");
+    }
+
+    /// The control reference quotes the contract's numbers and codes, not
+    /// copies of them: a changed cap or a new error code must show up here.
+    #[test]
+    fn control_reference_matches_the_contract() {
+        use runtara_control_contract as c;
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let reference = &schema["controlAgent"];
+        assert_eq!(reference, &control_agent_reference());
+        let limits = &reference["limits"];
+        assert_eq!(limits["waitTargets"], c::MAX_WAIT_TARGETS);
+        assert_eq!(limits["runLabelBytes"], c::MAX_RUN_LABEL_BYTES);
+        assert_eq!(limits["lineageDepth"], c::MAX_LINEAGE_DEPTH);
+        assert_eq!(limits["parentCloseGraceMs"], c::PARENT_CLOSE_GRACE_MS);
+        assert_eq!(c::MAX_LINEAGE_DEPTH, 16, "decision D6");
+        assert_eq!(c::control_share(10), 8, "decision D5: 0.8 of the limit");
+        assert_eq!(c::control_share(1), 1);
+        assert!(!c::capacity_satisfiable(1));
+        assert_eq!(runtara_agent_suspension::MAX_CONTINUATION_BYTES, 64 * 1024);
+        let text = reference.to_string();
+        for needle in [
+            format!("{}-{} (default {})", c::PAGE_SIZE_MIN, c::PAGE_SIZE_MAX, 20),
+            format!(
+                "0-{} (default {})",
+                c::MAX_CANCEL_GRACE_MS,
+                c::DEFAULT_CANCEL_GRACE_MS
+            ),
+            format!("at depth {}", c::MAX_LINEAGE_DEPTH),
+            "max(1, floor(0.8 x limit))".to_string(),
+            "64 KiB".to_string(),
+            runtara_agent_suspension::AGENT_CONTINUATION_REJECTED.to_string(),
+        ] {
+            assert!(text.contains(&needle), "{needle} missing from {text}");
+        }
+        // Every agent-facing code is listed, and the prose names the ones an
+        // author has to handle.
+        let codes: Vec<_> = reference["errorCodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect();
+        assert_eq!(codes, c::ErrorCode::all_agent_codes());
+        for code in [
+            c::CONTROL_CAPACITY_RATE_LIMITED,
+            c::CONTROL_CAPACITY_UNSATISFIABLE,
+            c::CONTROL_REQUIRES_INSTANCE,
+            "CONTROL_REPLAY_CONFLICT",
+            "CONTROL_LABEL_CONFLICT",
+            "CONTROL_NOT_CHILD",
+            "CONTROL_DENIED",
+            "CONTROL_NOT_FOUND",
+            "CONTROL_NOT_RUNNABLE",
+            "CONTROL_NOT_PAUSED",
+        ] {
+            assert!(text.contains(code), "{code} missing from the prose");
+        }
+        // The validation codes match the step-context rules.
+        let validation = reference["validation"].as_object().unwrap();
+        for rule in runtara_dsl::step_context_rules::STEP_CONTEXT_RULES {
+            for code in [rule.suspending.code(), rule.control.code()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(validation.contains_key(code), "{code} not explained");
+            }
+        }
+        assert!(validation.contains_key("W073"));
+        // Statuses and suspension reasons are the control agent's vocabulary.
+        assert_eq!(
+            reference["statuses"]["values"],
+            serde_json::json!([
+                "queued",
+                "pending",
+                "running",
+                "suspended",
+                "completed",
+                "failed",
+                "cancelled",
+                "not_started"
+            ])
+        );
+        for reason in [
+            "paused",
+            "waiting_signal",
+            "waiting_instances",
+            "sleeping",
+            "shutdown",
+        ] {
+            let label = serde_json::to_value(
+                serde_json::from_value::<crate::types::SuspensionReason>(serde_json::json!(reason))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(label, reason);
+            assert!(
+                reference["statuses"]["suspensionReason"]
+                    .as_str()
+                    .unwrap()
+                    .contains(reason)
+            );
+        }
     }
 
     #[test]

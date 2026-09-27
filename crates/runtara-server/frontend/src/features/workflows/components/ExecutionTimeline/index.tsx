@@ -46,6 +46,7 @@ import {
 } from '@/features/workflows/queries';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
 import { isActiveStatus } from '@/shared/utils/status-display';
+import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
 import { getRunEventsEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { Spinner } from '@/shared/components/ui/spinner';
 
@@ -190,6 +191,8 @@ const statusTextClasses: Record<string, string> = {
   failed: 'text-destructive',
   pending: 'text-muted-foreground',
   waiting: 'text-warning',
+  // Unfinished while its run is suspended (parked wait, Delay, signal).
+  suspended: 'text-warning',
 };
 
 const formatTime = (ms: number | null | undefined): string => {
@@ -626,13 +629,9 @@ function ExecutionTimelineContent({
                     </span>
                     <Badge
                       variant={
-                        displayStatus === 'completed'
-                          ? 'default'
-                          : displayStatus === 'waiting'
-                            ? 'outline'
-                            : displayStatus === 'running'
-                              ? 'secondary'
-                              : 'destructive'
+                        displayStatus === 'waiting'
+                          ? 'outline'
+                          : stepStatusDisplay(step.status).badgeVariant
                       }
                       className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-warning text-warning' : ''}`}
                     >

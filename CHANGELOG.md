@@ -26,8 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approved history. The server approves its bundles' control bytes at boot
   (runtime table `approved_builtin_artifacts`, migration
   `20260927000000`); an operator revokes a version by setting `revoked_at`,
-  which takes effect at the next boot, after which calls are denied and
-  workflows pinning it no longer become ready. Composed artifacts that import
+  which takes effect at the next boot, after which calls through it are
+  `CONTROL_DENIED` and workflows pinning it no longer become ready. Runs
+  already parked on a revoked version still load and fail at their next
+  control call, and a run pinned to an older, still approved version keeps
+  working after the control agent is upgraded. Composed artifacts that import
   a component or core module, or whose agents import
   `runtara:workflow-operation`, are now refused at preparation.
 
@@ -113,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control service's `wait` and `poll-wait` operations register and read such
   waits for direct children (at most 1000; results inlined up to 256 KiB of
   output and 16 KiB of error per child, 3 MiB per wait); the `control`
-  agent's `wait` capability arrives in a later release. **Upgrade note:** the
+  agent's `wait` capability below is built on them. **Upgrade note:** the
   first boot migrates the runtime database (`039`: termination reason
   `waiting_instances`; `040`: `instance_waits`, `instance_wait_targets`,
   `instance_input_parks.wait_ids`, three triggers on finishing runs, and a
@@ -145,6 +148,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state). **Upgrade note:** the first boot migrates the runtime database
   (`042_agent_continuations`: `instance_agent_continuations`, deleted with
   its run).
+
+- **Parked and pinned runs survive cleanup and upgrades.** Image cleanup
+  keeps the compiled package of a parked run and of a child its parent still
+  pins, and a parent parked on `wait` resumes after the server binary or the
+  control agent bundle is upgraded: every shipped host interface version
+  stays linked (the released `runtara:control`, `runtara:workflow-operation`
+  and `runtara:agent-suspension` 0.1.0 interfaces are frozen and tested), and
+  approved control versions are only ever revoked, never deleted.
+- **Control and suspension across the surfaces.** The executions API reports
+  `WorkflowInstanceDto.suspensionReason` (`paused`, `waiting_signal`,
+  `waiting_instances`, `sleeping` or `shutdown`) for a suspended run, and the
+  step summaries endpoint (`GET /api/runtime/workflows/{id}/instances/{iid}/steps`,
+  MCP `get_step_summaries`) reports an unfinished step of a suspended run as
+  `suspended` and accepts `status=suspended`. The invocation history gains a
+  Parent column and filter, the execution detail shows who started a run and
+  its child runs, Resume is offered only for an explicitly paused run, the
+  step editor marks suspending capabilities and asks for their timeout and
+  durability, and a capability that only works inside a run cannot be tested
+  from the editor. MCP `test_capability` answers `CONTROL_REQUIRES_INSTANCE`
+  for such capabilities without running them, `add_agent_step` takes
+  `timeout` and `durable` and hints what a suspending capability needs, and
+  `get_workflow_authoring_schema` carries the control agent reference
+  (`controlAgent`), also in `docs/control-agent.md`.
 
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
@@ -219,8 +245,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Pausing a waiting run pauses it immediately** (public API, MCP and
-  control). A run parked on a timer, a WaitForSignal or a restart used to
-  report `already paused` and resume on its own when its wait ended; it now
+  control). A run parked on a timer, a WaitForSignal, a restart or (with
+  control) its children used to report `already paused` and resume on its own
+  when its wait ended; it now
   becomes explicitly paused at once, loses its wake, and only an explicit
   resume relaunches it. Answers to its signals are kept and seen after the
   resume. The stop, pause and resume responses now carry `data.outcome`
@@ -258,6 +285,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be published as workflow-agents, and **the `composed` runtime binding
   (`RUNTARA_DIRECT_RUNTIME_BINDING=composed`) cannot compile them**; compile
   them with the default host-imported runtime.
+- **Trusted agent pins are checked at the call, not at load.** A trusted
+  agent upgrade no longer stops workflows that pin the previous version from
+  loading; their trusted calls fail with `TRUSTED_VERSION_REQUIRED` before any
+  credential lookup. Compiles record their trusted pins (server migration
+  `20260926000100_compiled_trusted_pins`), and a workflow whose recorded pin is
+  no longer installed recompiles when it next becomes ready. A parent built on
+  a stale published workflow-agent recovers once the agent is republished.
+- **Upgrading is one-way.** This release migrates the runtime database
+  (`032`-`042`) and the environment and server databases (`20260926000100`,
+  `20260926000200`, `20260927000000`-`20260927000200`), adds
+  `termination_reason` labels (`start_gate_failed`, `waiting_instances`) and
+  stores control state (parent links, admission outcomes, command receipts,
+  instance waits, agent continuations) that older servers do not read.
+  Migrations are forward-only: do not downgrade past this release. A
+  downgraded server would not decode those labels, would strand runs parked
+  on a control `wait`, and would re-run the compile burst below.
 - **Agent components are now held to an import allowlist at composition.** A
   bundled or third-party agent component may import only `wasi:*`,
   `runtara:agent/types@*` and the host interfaces the component host links
@@ -349,6 +392,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Step summaries list each step once.** A resumed run replays its
+  completed steps and re-enters a parked one, which emitted their start and
+  end events again, so `GET .../instances/{iid}/steps` repeated those steps
+  (up to four rows for one step). Each step and scope is now one row, from
+  its first start to the first end after it; a step parked in a Delay or
+  `wait` keeps its original start time.
+- **A guest error carrying the reserved `__rt_on_signal__` code no longer
+  parks its parent.** Like the other reserved codes it is remapped so the
+  step fails, and agent guests no longer receive `RUNTARA_HTTP_URL` in their
+  environment.
 - **A run whose start gate fails now fails promptly** instead of later as
   `launch_queue_timeout`. The instance row records termination reason
   `start_gate_failed`. That label was written without ever existing in the

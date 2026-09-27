@@ -912,9 +912,62 @@ pub struct AddAgentStepParams {
     )]
     pub connection_id: Option<String>,
     #[schemars(
+        description = "Step timeout in milliseconds: the step's hard deadline, retries and parked time included. Required (> 0) when the capability suspends (E029), e.g. control `wait`."
+    )]
+    pub timeout: Option<u64>,
+    #[schemars(
+        description = "Step durability; omit to inherit the workflow setting. A suspending capability must stay durable (E028), so never pass false for one."
+    )]
+    pub durable: Option<bool>,
+    #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
     )]
     pub path: Option<Vec<String>>,
+}
+
+/// The Agent step `add_agent_step` creates, and the hint it returns, from its
+/// parameters and the capability's metadata. A suspending capability's hint
+/// names what validation will demand (E028/E029) and where it may not sit.
+fn agent_step_and_hint(
+    params: &AddAgentStepParams,
+    capability: &serde_json::Value,
+) -> (serde_json::Value, String) {
+    let mut step = serde_json::json!({
+        "id": params.step_id,
+        "stepType": "Agent",
+        "name": params.step_name,
+        "agentId": params.agent_id,
+        "capabilityId": params.capability_id,
+    });
+    if let Some(ref conn_id) = params.connection_id
+        && !conn_id.is_empty()
+    {
+        step["connectionId"] = serde_json::Value::String(conn_id.clone());
+    }
+    if let Some(timeout) = params.timeout {
+        step["timeout"] = serde_json::json!(timeout);
+    }
+    if let Some(durable) = params.durable {
+        step["durable"] = serde_json::json!(durable);
+    }
+    let mut hint = "Use set_mapping to map each expected input to a reference or value".to_string();
+    if capability["suspends"].as_bool() == Some(true) {
+        let mut missing = Vec::new();
+        if params.durable == Some(false) {
+            missing.push("remove durable: false (E028)");
+        }
+        if params.timeout.is_none_or(|timeout| timeout == 0) {
+            missing.push("set timeout > 0 in ms (E029)");
+        }
+        hint.push_str(&format!(
+            ". This capability suspends: the run parks without a runner until it wakes, so the step must stay durable and set a timeout above {} ms (its hard deadline, parked time included); it may not sit in onError, onWait or AiAgent tools (E131), and parallel windows run it serialized (W075)",
+            runtara_dsl::step_context_rules::SUSPEND_DEADLINE_MARGIN_MS
+        ));
+        if !missing.is_empty() {
+            hint.push_str(&format!(". Still needed: {}", missing.join(", ")));
+        }
+    }
+    (step, hint)
 }
 
 fn truncate_large_strings(value: &mut serde_json::Value) {
@@ -2984,18 +3037,7 @@ pub async fn add_agent_step(
     }
 
     // Build step definition
-    let mut step = serde_json::json!({
-        "id": params.step_id,
-        "stepType": "Agent",
-        "name": params.step_name,
-        "agentId": params.agent_id,
-        "capabilityId": params.capability_id,
-    });
-    if let Some(ref conn_id) = params.connection_id
-        && !conn_id.is_empty()
-    {
-        step["connectionId"] = serde_json::Value::String(conn_id.clone());
-    }
+    let (step, hint) = agent_step_and_hint(&params, &cap_result);
 
     // Add the step
     let (_guard, mut graph, latest, current) =
@@ -3082,7 +3124,8 @@ pub async fn add_agent_step(
         "onErrorStep": params.on_error_step,
         "connectionId": params.connection_id,
         "expectedInputs": expected_inputs,
-        "hint": "Use set_mapping to map each expected input to a reference or value",
+        "suspends": cap_result["suspends"].as_bool() == Some(true),
+        "hint": hint,
     }))
 }
 
@@ -3790,5 +3833,56 @@ mod patch_tests {
             normalized.get("stepType").and_then(|v| v.as_str()),
             Some("Conditional")
         );
+    }
+}
+
+#[cfg(test)]
+mod add_agent_step_tests {
+    use super::*;
+
+    fn params(timeout: Option<u64>, durable: Option<bool>) -> AddAgentStepParams {
+        serde_json::from_value(serde_json::json!({
+            "workflow_id": "wf",
+            "step_id": "wait",
+            "step_name": "Wait for approvals",
+            "agent_id": "control",
+            "capability_id": "wait",
+            "timeout": timeout,
+            "durable": durable,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn timeout_and_durable_land_on_the_step_and_parse_as_an_agent_step() {
+        let (step, _) =
+            agent_step_and_hint(&params(Some(600_000), Some(true)), &serde_json::json!({}));
+        assert_eq!(step["timeout"], 600_000);
+        assert_eq!(step["durable"], true);
+        let parsed: runtara_dsl::Step = serde_json::from_value(step).unwrap();
+        let runtara_dsl::Step::Agent(agent) = parsed else {
+            panic!("an Agent step");
+        };
+        assert_eq!(agent.timeout, Some(600_000));
+        assert_eq!(agent.durable, Some(true));
+
+        let (step, _) = agent_step_and_hint(&params(None, None), &serde_json::json!({}));
+        assert!(step.get("timeout").is_none() && step.get("durable").is_none());
+    }
+
+    #[test]
+    fn a_suspending_capability_hints_what_validation_demands() {
+        let suspends = serde_json::json!({"id": "wait", "suspends": true});
+        let (_, hint) = agent_step_and_hint(&params(None, Some(false)), &suspends);
+        assert!(hint.contains("suspends"), "{hint}");
+        assert!(hint.contains("E028") && hint.contains("E029"), "{hint}");
+        assert!(hint.contains("Still needed"), "{hint}");
+
+        let (_, hint) = agent_step_and_hint(&params(Some(60_000), None), &suspends);
+        assert!(hint.contains("suspends"), "{hint}");
+        assert!(!hint.contains("Still needed"), "{hint}");
+
+        let (_, hint) = agent_step_and_hint(&params(None, None), &serde_json::json!({"id": "get"}));
+        assert!(!hint.contains("suspends"), "{hint}");
     }
 }

@@ -113,6 +113,34 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.2.0",
+                "date": "2026-09-27",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "agent",
+                        "description": "Built-in control agent (agentId 'control', every tier): start, get, query, list-pending-signals, send-signal, cancel, pause, resume and wait on other runs. start requires parentClosePolicy (cancel or leave_running) and records the child's parentInstanceId; runLabel is unique per parent. The full reference is controlAgent in the workflow authoring schema."
+                    },
+                    {
+                        "type": "added",
+                        "component": "capability-metadata",
+                        "description": "Capabilities may declare suspends (they park the run without a runner, like control wait) and the runtime:requires-run tag (they only run as steps of a workflow run)."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "A suspending Agent step must be durable (E028) and set timeout > 0 (E029), and may not sit in onError, WaitForSignal onWait or AiAgent tools/memory (E131); a control step may not sit in onWait or AiAgent tools/memory (E132). Warnings W074 (literal runLabel on start in a loop), W075 (serialized in a parallel region), W076 (under a retrying Split or EmbedWorkflow), W077 (non-literal start workflowId) and W078 (suspending timeout within the 1 s margin); W073 now also covers operation-scoped steps in a parallel Split.",
+                        "migration": "Make suspending steps durable with a timeout, and move control or suspending steps out of the rejected contexts. Workflows without such steps are unaffected."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-field",
+                        "description": "Agent step timeout is the hard deadline of a suspending step, parked time included; runLabel accepts up to 1024 bytes."
+                    }
+                ]
+            },
+            {
                 "version": "3.1.0",
                 "date": "2026-07-26",
                 "breaking": true,

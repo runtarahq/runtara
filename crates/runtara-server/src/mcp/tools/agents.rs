@@ -155,6 +155,20 @@ pub async fn test_capability(
     validate_path_param("capability_id", &params.capability_id)?;
     require_agent(server, &params.agent_id)?;
     let inputs = normalize_json_arg(params.inputs, "inputs")?;
+    // A capability tagged `runtime:requires-run` needs a calling run (and a
+    // step operation), which a test invocation never has; answer without
+    // spending a test run on it.
+    let capability = api_get(
+        server,
+        &format!(
+            "/api/runtime/agents/{}/capabilities/{}",
+            params.agent_id, params.capability_id
+        ),
+    )
+    .await?;
+    if requires_run(&capability) {
+        return json_result(requires_run_result(&params.capability_id));
+    }
     let mut body = serde_json::json!({
         "input": inputs,
     });
@@ -173,9 +187,49 @@ pub async fn test_capability(
     json_result(result)
 }
 
+/// Whether a capability's metadata carries
+/// [`runtara_control_contract::REQUIRES_RUN_TAG`].
+fn requires_run(capability: &serde_json::Value) -> bool {
+    capability["tags"].as_array().is_some_and(|tags| {
+        tags.iter()
+            .any(|tag| tag.as_str() == Some(runtara_control_contract::REQUIRES_RUN_TAG))
+    })
+}
+
+/// The test response for a run-only capability, in the shape of the test
+/// endpoint (`error` is `CODE: message`).
+fn requires_run_result(capability_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "error": format!(
+            "{}: {capability_id} only runs as a step of a workflow run; add it with add_agent_step and execute the workflow",
+            runtara_control_contract::CONTROL_REQUIRES_INSTANCE
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_only_capabilities_answer_requires_instance_without_running() {
+        let run_only =
+            serde_json::json!({"id": "wait", "tags": ["runtime:requires-run"], "suspends": true});
+        assert!(requires_run(&run_only));
+        assert!(!requires_run(&serde_json::json!({"id": "get"})));
+        assert!(!requires_run(
+            &serde_json::json!({"id": "x", "tags": ["memory:read"]})
+        ));
+        let result = requires_run_result("wait");
+        assert_eq!(result["success"], false);
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("CONTROL_REQUIRES_INSTANCE: wait ")
+        );
+    }
 
     fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
         let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();

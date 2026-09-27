@@ -1358,6 +1358,11 @@ fn payload_str(event: &EventRecord, key: &str) -> Option<String> {
 /// A start and an end are the same record when their correlation values match
 /// *and* their scopes match, so the same step id inside two different loop
 /// iterations stays two records.
+///
+/// Each (correlation, scope) is one record, however often it was emitted: a
+/// resumed run replays its completed steps and re-enters a parked one, which
+/// emits their start (and end) again. The record opens at the first start and
+/// closes at the first end after it; later starts and ends are replays.
 fn pair_records(
     store: &Store,
     instance_id: &str,
@@ -1374,12 +1379,18 @@ fn pair_records(
     let ends = of_subtype(vocabulary.end_subtype());
 
     let mut records = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for start in of_subtype(vocabulary.start_subtype()) {
         let correlation_id = payload_str(start, vocabulary.correlation_key()).unwrap_or_default();
         let scope_id = payload_str(start, "scope_id");
+        if !seen.insert((correlation_id.clone(), scope_id.clone())) {
+            continue;
+        }
 
         let end = ends.iter().find(|e| {
-            payload_str(e, vocabulary.correlation_key()).unwrap_or_default() == correlation_id
+            e.id > start.id
+                && payload_str(e, vocabulary.correlation_key()).unwrap_or_default()
+                    == correlation_id
                 && payload_str(e, "scope_id") == scope_id
         });
 
@@ -1519,6 +1530,13 @@ mod tests {
         crate::persistence::conformance::run_retention_pin_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    }
+
+    /// The paired-record rule, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_paired_record_rule() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::paired::run_all(&backend).await;
     }
 
     /// Agent continuations, on the in-memory backend.

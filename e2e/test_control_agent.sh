@@ -48,8 +48,10 @@
 #              (`all`); it parks without a runner slot (an outside trigger
 #              still runs), one answer does not wake it, the second does, in
 #              either order, and it finishes with both results in answer
-#              order. Pausing a parked parent holds it while its children
-#              finish (D4); `any` with leave_running returns on the first
+#              order; while parked its wait step reads `suspended` (the
+#              run's suspensionReason `waiting_instances`), and after the
+#              resume every step reports one row. Pausing a parked parent
+#              holds it while its children finish (D4); `any` with leave_running returns on the first
 #              answer and the sibling survives (D3); a business deadline
 #              settles with what finished; a SIGKILL restart while parked
 #              resumes; non-durable, untimed and onError waits are E028,
@@ -201,6 +203,9 @@ start_server() {
 }
 
 instance_status() { curl -sS "${API}/workflows/instances/$1" | jq -r '.data.status // .status // empty'; }
+instance_suspension_reason() { curl -sS "${API}/workflows/instances/$1" | jq -r '.data.suspensionReason // .suspensionReason // empty'; }
+# Step summaries of run $2 of workflow $1 (extra query in $3), oldest first.
+step_rows() { curl -sS "${API}/workflows/$1/instances/$2/steps?sortOrder=asc${3:-}" | jq -c '.data.steps'; }
 instance_row() {
     psql_quiet -d "${TEST_DB_RUNTIME}" -c \
         "SELECT COALESCE(status::text,''), COALESCE(convert_from(output, 'UTF8'),''), COALESCE(error,'') FROM instances WHERE instance_id = '$1'"
@@ -1065,6 +1070,15 @@ if stage_enabled 5; then
         [ "$(busy_runs)" = "0" ] || { print_error "A parked parent or approval holds a slot: $(busy_runs) busy"; exit 1; }
         REASON=$(test_control get "{\"instanceId\": \"${PARENT}\"}" | jq -r '.output.instance.suspensionReason // .result.instance.suspensionReason // empty')
         [ "${REASON}" = "waiting_instances" ] || { print_error "Expected suspensionReason waiting_instances, got '${REASON}'"; exit 1; }
+        REASON=$(instance_suspension_reason "${PARENT}")
+        [ "${REASON}" = "waiting_instances" ] || { print_error "The executions API should report suspensionReason waiting_instances, got '${REASON}'"; exit 1; }
+        # The parked wait step reads suspended, and status=suspended finds it.
+        WAIT_ROWS=$(step_rows "${ALL_WF}" "${PARENT}" | jq -c '[.[] | select(.stepId == "wait") | .status]')
+        [ "${WAIT_ROWS}" = '["suspended"]' ] || { print_error "The parked wait step should read suspended once: ${WAIT_ROWS}"; exit 1; }
+        SUSPENDED=$(step_rows "${ALL_WF}" "${PARENT}" "&status=suspended" | jq -c '[.[].stepId]')
+        [ "${SUSPENDED}" = '["wait"]' ] || { print_error "status=suspended should find the wait step: ${SUSPENDED}"; exit 1; }
+        [ "$(step_rows "${ALL_WF}" "${PARENT}" "&status=running" | jq 'length')" = "0" ] \
+            || { print_error "status=running should find nothing in a suspended run"; exit 1; }
         if [ "${order}" = "finance-first" ]; then FIRST="${FINANCE}"; SECOND="${LEGAL}"; else FIRST="${LEGAL}"; SECOND="${FINANCE}"; fi
         answer "${FIRST}" true
         [ "$(wait_status "${FIRST}" completed 90)" = "completed" ] || { print_error "The first approval did not finish: $(instance_row "${FIRST}")"; exit 1; }
@@ -1083,7 +1097,11 @@ if stage_enabled 5; then
             || { print_error "The settled wait was not released"; exit 1; }
         [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM instance_agent_continuations WHERE instance_id = '${PARENT}'")" = "0" ] \
             || { print_error "The continuation was not released"; exit 1; }
-        print_success "Both approvals answered (${order}): the parent parked slot-free and resumed with both results ✓"
+        # The replayed steps and the re-entered wait step report one row each.
+        ROWS=$(step_rows "${ALL_WF}" "${PARENT}" | jq -c 'group_by(.stepId) | map({key: .[0].stepId, value: (map(.status) | join(","))}) | from_entries')
+        [ "${ROWS}" = '{"finance":"completed","finish":"completed","legal":"completed","wait":"completed"}' ] \
+            || { print_error "Each step should report one completed row after the resume: ${ROWS}"; exit 1; }
+        print_success "Both approvals answered (${order}): the parent parked slot-free, its wait step read suspended, and it resumed with both results and one row per step ✓"
     done
 
     print_step "Stage 5: pausing a parked parent holds it (D4)..."
@@ -1099,6 +1117,8 @@ if stage_enabled 5; then
     [ "$(instance_status "${PARENT}")" = "suspended" ] || { print_error "A paused parent was woken by its children: $(instance_row "${PARENT}")"; exit 1; }
     REASON=$(test_control get "{\"instanceId\": \"${PARENT}\"}" | jq -r '.output.instance.suspensionReason // .result.instance.suspensionReason // empty')
     [ "${REASON}" = "paused" ] || { print_error "Expected suspensionReason paused, got '${REASON}'"; exit 1; }
+    REASON=$(instance_suspension_reason "${PARENT}")
+    [ "${REASON}" = "paused" ] || { print_error "The executions API should report suspensionReason paused, got '${REASON}'"; exit 1; }
     RESP=$(api_post "/workflows/instances/${PARENT}/resume" '{}')
     [ "$(echo "${RESP}" | jq -r '.data.outcome')" = "applied" ] || { print_error "Resume failed: ${RESP}"; exit 1; }
     [ "$(wait_status "${PARENT}" completed 120)" = "completed" ] || { print_error "The resumed parent did not finish: $(instance_row "${PARENT}")"; exit 1; }

@@ -86,7 +86,9 @@ pub struct GetStepSummariesParams {
     pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
-    #[schemars(description = "Filter by status (running, completed, failed)")]
+    #[schemars(
+        description = "Filter by status (running, suspended, completed, failed). An unfinished step reads suspended while its run is suspended."
+    )]
     pub status: Option<String>,
     #[schemars(description = "Max results (default 100)")]
     pub limit: Option<i64>,

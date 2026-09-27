@@ -82,6 +82,8 @@ pub struct InstanceDetail {
     pub cpu_usage_usec: Option<u64>,
     /// Why the instance stopped.
     pub termination_reason: Option<String>,
+    /// Pending wake of a suspended instance.
+    pub wake_reason: Option<String>,
     /// Guest exit code.
     pub exit_code: Option<i32>,
 }
@@ -111,6 +113,10 @@ pub struct InstanceListItem {
     pub finished_at: Option<DateTime<Utc>>,
     /// Whether a failure message is recorded.
     pub has_error: bool,
+    /// Why the instance stopped or parked.
+    pub termination_reason: Option<String>,
+    /// Pending wake of a suspended instance.
+    pub wake_reason: Option<String>,
 }
 
 /// What an instance was launched from, as `instance_images` recorded it.
@@ -278,6 +284,7 @@ impl InstanceRepository {
             memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
             cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
             termination_reason: inst.termination_reason,
+            wake_reason: inst.wake_reason,
             exit_code: inst.exit_code,
         }))
     }
@@ -305,6 +312,8 @@ impl InstanceRepository {
                         started_at: inst.started_at,
                         finished_at: inst.finished_at,
                         has_error: inst.error.is_some(),
+                        termination_reason: inst.termination_reason,
+                        wake_reason: inst.wake_reason,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,

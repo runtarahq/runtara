@@ -8,6 +8,7 @@ import { queryKeys } from '@/shared/queries/query-keys';
 import { getAgentDetails, ExtendedAgent } from '@/features/workflows/queries';
 import { CapabilityInfo } from '@/generated/RuntaraRuntimeApi';
 import { NodeFormContext } from './NodeFormContext';
+import { SuspendsBadge } from '@/features/workflows/components/CapabilityBadges';
 import { useMultipleAgentDetails } from '@/features/workflows/hooks';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled } from '@/shared/entitlements';
@@ -417,6 +418,7 @@ export function CapabilityPickerModal({
                                 {result.capability.displayName ||
                                   result.capability.name}
                               </span>
+                              <SuspendsBadge capability={result.capability} />
                               {!result.isSupported && (
                                 <span className="rounded bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
                                   Coming Soon
@@ -477,6 +479,7 @@ export function CapabilityPickerModal({
                           <span className="font-medium">
                             {capability.displayName || capability.name}
                           </span>
+                          <SuspendsBadge capability={capability} />
                           {isCurrent && (
                             <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs font-medium text-primary">
                               Current

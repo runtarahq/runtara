@@ -34,6 +34,11 @@ import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { resolvePayloadForCopy } from '@/shared/utils/truncated-payload';
 import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
+import {
+  canResume,
+  suspendedStatusLabel,
+} from '@/features/workflows/utils/suspension';
 
 interface HistoryPanelContentProps {
   workflowId: string;
@@ -235,7 +240,11 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                     <button
                       type="button"
                       className="inline-flex size-5 items-center justify-center rounded text-warning hover:bg-warning/10 hover:text-warning"
-                      title="Reattach — resume debugging"
+                      title={
+                        canResume(instance)
+                          ? 'Reattach — resume debugging'
+                          : 'Reattach'
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
                         const store = useExecutionStore.getState();
@@ -252,11 +261,15 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                       <Bug className="size-3" />
                     </button>
                   )}
-                  <Badge variant={statusInfo.variant} className="text-3xs">
+                  <Badge
+                    variant={statusInfo.variant}
+                    className="text-3xs"
+                    title={suspendedStatusLabel(instance) ?? undefined}
+                  >
                     {isActive && statusInfo.showSpinner && (
                       <Spinner className="mr-1 size-2.5" />
                     )}
-                    {statusInfo.text}
+                    {suspendedStatusLabel(instance) ?? statusInfo.text}
                   </Badge>
                 </div>
               </div>
@@ -339,9 +352,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
 function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const isRunning = step.status === 'running';
-  const isCompleted = step.status === 'completed';
-  const isFailed = step.status === 'failed';
+  const statusDisplay = stepStatusDisplay(step.status);
 
   const hasError = step.error != null;
   const errorString = hasError
@@ -355,25 +366,11 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
     Object.keys(step.inputs).length > 0;
   const hasOutputs = step.outputs != null;
 
-  const getBadgeVariant = ():
-    'default' | 'secondary' | 'destructive' | 'outline' => {
-    if (isFailed) return 'destructive';
-    if (isCompleted) return 'default';
-    if (isRunning) return 'secondary';
-    return 'outline';
-  };
-
   const getRowClass = () => {
-    if (isFailed) return 'bg-destructive/5';
-    if (isRunning) return 'bg-info/5';
+    if (step.status === 'failed') return 'bg-destructive/5';
+    if (step.status === 'running') return 'bg-info/5';
+    if (step.status === 'suspended') return 'bg-warning/5';
     return '';
-  };
-
-  const getStatusLabel = () => {
-    if (isRunning) return 'Running';
-    if (isCompleted) return 'Completed';
-    if (isFailed) return 'Failed';
-    return step.status;
   };
 
   const handleCopy = (data: unknown, label: string) => {
@@ -411,9 +408,12 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
             : '-'}
         </td>
         <td className="px-3 py-1.5 text-right">
-          <Badge variant={getBadgeVariant()} className="px-1.5 py-0 text-3xs">
-            {isRunning && <Spinner className="mr-0.5 size-2.5" />}
-            {getStatusLabel()}
+          <Badge
+            variant={statusDisplay.badgeVariant}
+            className="px-1.5 py-0 text-3xs"
+          >
+            {statusDisplay.spin && <Spinner className="mr-0.5 size-2.5" />}
+            {statusDisplay.label}
           </Badge>
         </td>
       </tr>

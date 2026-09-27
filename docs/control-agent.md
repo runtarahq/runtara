@@ -1,6 +1,9 @@
 # Control agent for instance orchestration
 
-Status: proposed implementation brief.
+Status: implemented. [As built](#as-built) is the reference for authors and
+operators; the sections after it are the original brief, kept for its
+rationale. Owner decisions D1-D8 in
+[control-agent-decisions.md](control-agent-decisions.md) override the brief.
 
 ## Purpose
 
@@ -16,13 +19,272 @@ Either approval can arrive first.
 This is distinct from `EmbedWorkflow`: inline composition reuses workflow logic
 inside an execution; starting an instance creates an independent lifecycle.
 
+## As built
+
+This section is the author reference. The same text is served to MCP clients
+as `controlAgent` in `get_workflow_authoring_schema`
+(`crates/runtara-server/src/mcp/tools/workflows.rs`); its numbers come from
+`runtara-control-contract` and `runtara-agent-suspension`.
+
+### Capabilities
+
+The `control` agent is on every pricing tier, whatever the agent allowlist
+says. Its mutations and `wait` run only as steps of a workflow run
+(`runtime:requires-run`): `test_capability` answers
+`CONTROL_REQUIRES_INSTANCE` for them.
+
+| Capability | What it does |
+|---|---|
+| `start` | Durably admit a child run of another workflow; returns `{instanceId, workflowId, version, runLabel, replayed}` once accepted, without waiting for it. |
+| `get` | Read one run of the tenant: status, `suspensionReason`, `parentInstanceId`, output or error. |
+| `query` | Page runs of the tenant by `createdAtMs` or `finishedAtMs`; `parentInstanceId` or `callerChildren` lists children, including ones still `queued` in admission. |
+| `list-pending-signals` | List open WaitForSignal requests of one run, a workflow, or the calling run's children. |
+| `send-signal` | Answer the one open request of a WaitForSignal step, validated against its response schema. |
+| `cancel` | Cancel a direct child: cooperatively, forced after `graceMs`. A parked or queued child ends at once. |
+| `pause` | Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint. |
+| `resume` | Resume an explicitly paused direct child (`CONTROL_NOT_PAUSED` otherwise). It never answers a WaitForSignal request. |
+| `wait` | Park the calling run, without holding a runner, until direct children finish (`all`) or the first does (`any`), or the optional deadline passes. |
+
+### Authorization (D1)
+
+- Reads (`get`, `query`, `list-pending-signals`) see every run of the tenant.
+  The caller-relative filters (`query callerChildren`,
+  `list-pending-signals children`) need a calling run.
+- `wait`, `cancel`, `pause` and `resume` reach direct children only:
+  `CONTROL_NOT_CHILD` otherwise, `CONTROL_DENIED` for an ancestor.
+- `send-signal` answers a child, an ancestor, or any run whose WaitForSignal
+  request opted in with `action.key` when the step passes the same
+  `actionKey`; anything else is `CONTROL_DENIED`.
+- No mutation may target the calling run (`CONTROL_INVALID`). Tenant, caller
+  and operation come from the host, never from step inputs.
+
+### start (D6, D7)
+
+- **Inputs:** `workflowId` (an id, not a slug), optional `version` (default:
+  the current version, fixed at admission), `inputs` (`{data, variables}`,
+  validated against the child's input schema), optional `runLabel`, and a
+  required `parentClosePolicy` (`cancel`, which the editor preselects, or
+  `leave_running`).
+- **Run label:** at most 1024 bytes of printable ASCII. It names one child per
+  parent for the parent's whole lifetime: reusing it from another step or
+  iteration is `CONTROL_LABEL_CONFLICT`, and a retry of a failed child needs a
+  new label. Other parents, and runs without a parent, may reuse it.
+- **Depth:** lineage is capped at depth 16 (a top-level run is depth 1): a run
+  at depth 16 cannot start a child (`CONTROL_INVALID`).
+- **Fast failure:** a missing workflow or version is `CONTROL_NOT_FOUND` and a
+  permanently failed compilation `CONTROL_NOT_RUNNABLE`. A workflow not
+  compiled yet is admitted and launches once it compiles, until the admission
+  deadline (then the child fails with `launch_deadline_not_compiled`).
+- **Parent link:** the child records the calling run as `parentInstanceId`,
+  reported by `get`, `query`, the executions API and the invocation history.
+
+### Capacity (D5)
+
+- Children count against the tenant concurrency limit
+  (`MAX_CONCURRENT_EXECUTIONS`, or the `maxConcurrentExecutions` entitlement if
+  lower), which counts only starting and running runs: a parked run gives its
+  slot back.
+- Control-started children may hold at most `max(1, floor(0.8 x limit))`
+  slots (limit 10 gives 8, limit 5 gives 4), so outside triggers keep
+  headroom.
+- At the share, `start` fails with retryable `CONTROL_CAPACITY_RATE_LIMITED`
+  carrying a retry hint of 3-8 s; set `maxRetries` on the step to try again.
+- With a limit of at most 1 the calling run holds the only slot, so `start`
+  fails permanently with `CONTROL_CAPACITY_UNSATISFIABLE` (the server warns at
+  boot).
+
+### Statuses
+
+- Values: `queued`, `pending`, `running`, `suspended`, `completed`, `failed`,
+  `cancelled`, `not_started`.
+- `queued`: a child still in admission, accepted by `start` and not launched
+  yet. It can be cancelled but not paused or resumed.
+- `not_started`: a child that never launched; its one fenced outcome is
+  `not_started` or `cancelled`. `get` and `query` report it; the public
+  executions list does not.
+- `suspensionReason` of a suspended run: `paused` (explicitly paused, only a
+  resume relaunches it), `waiting_signal`, `waiting_instances` (a control
+  `wait`), `sleeping` or `shutdown`. The executions API reports the same as
+  `WorkflowInstanceDto.suspensionReason`.
+- Terminal: `completed`, `failed` and `cancelled` (including execution
+  timeout). A child's failure is outcome data, never a retryable control
+  error.
+
+### wait
+
+- **Inputs:** `instanceIds` (direct children, at most 1000), `mode` `all`
+  (default) or `any`, optional `deadline` in epoch milliseconds.
+- **Output:** `{mode, resolution: satisfied | deadline | empty, finished:
+  [{instanceId, status, output or error}], remaining: [ids]}`.
+- `all` settles when every target is terminal, `any` when at least one is;
+  repeat `any` with `remaining` to process results as they arrive.
+- An empty `instanceIds` returns resolution `empty` at once. Already finished
+  targets count at once.
+- Too many, missing, non-child or ancestor targets fail the step and register
+  nothing.
+- The deadline is a business timeout: the wait returns resolution `deadline`
+  with what finished; it never cancels children.
+- The step timeout is the hard cap: it fails the step with `AGENT_TIMEOUT`
+  even while parked, and follows onError.
+- The run parks without holding a runner or a concurrency slot and survives
+  restarts; the wake is recorded in the same commit as the child that
+  satisfies it.
+- The wait registers once per step operation: a replayed `any` keeps its
+  choice, and the first deadline stands.
+- The step must be durable (E028) and set `timeout` > 0 ms (E029); a timeout
+  of at most 1000 ms times out instead of parking (W078).
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| Control call input | 1 MiB |
+| `get` inlined output / error | 1 MiB / 64 KiB, else `outputOmitted`/`errorOmitted` with the size |
+| Page size (`query`, `list-pending-signals`) | 1-100, default 20 |
+| `wait` targets | 1000 |
+| `wait` inlined output / error per child, total | 256 KiB / 16 KiB, 3 MiB per wait; larger values are omitted and flagged |
+| Run label | 1024 bytes |
+| Lineage depth | 16 |
+| `cancel` grace | 0-3600000 ms, default 5000 |
+| Parent-close grace | 5000 ms |
+| Suspension state (`MAX_CONTINUATION_BYTES`) | 64 KiB per step operation and attempt |
+| One control call | 90000 ms, below the step's own timeout (`CONTROL_TIMEOUT`) |
+
+### Replay
+
+Each control step call has an operation identity: the step plus its loop
+position. A retried attempt, a crash recovery and a resumed run replay the
+same identity.
+
+| Capability | On replay |
+|---|---|
+| `get`, `query`, `list-pending-signals` | A durable step returns its checkpointed result; a non-durable one reads again. |
+| `start` | Returns the same child (`replayed: true`), also after a crash between admission and the checkpoint. Other arguments are `CONTROL_REPLAY_CONFLICT`. |
+| `send-signal`, `cancel`, `pause`, `resume` | Returns the receipt of the first call (`replayed: true`) without acting again. Other arguments are `CONTROL_REPLAY_CONFLICT`. |
+| `wait` | Reads the wait it registered: same targets, deadline and, for `any`, the same choice. Other targets or mode are `CONTROL_REPLAY_CONFLICT`. |
+
+A suspending step keeps at most 64 KiB of state per operation and attempt; a
+failed step discards it, so a retry starts afresh
+(`AGENT_CONTINUATION_REJECTED` when a capability refuses its saved state,
+`AGENT_INVALID_SUSPENSION` when the host refuses a suspension).
+
+### Validation
+
+| Code | Meaning |
+|---|---|
+| E028 | A suspending step (control `wait`) is not durable. |
+| E029 | A suspending step has no timeout, or timeout 0. |
+| E131 | A suspending step sits in an onError region, a WaitForSignal `onWait`, or an AiAgent tool or memory target. |
+| E132 | A control step sits in a WaitForSignal `onWait`, or an AiAgent tool or memory target. |
+| W073 | A Split's `parallelism` is ignored: its body holds an operation-scoped step (or another shape that forces sequential execution). |
+| W074 | A control `start` in a Split or While uses a literal `runLabel`; the second iteration fails with `CONTROL_LABEL_CONFLICT`. |
+| W075 | A control or suspending step in a parallel Split or an unconditioned branch group; that region runs serialized. |
+| W076 | A control or suspending step under a retrying Split or EmbedWorkflow; a region retry replays the operation's first outcome. |
+| W077 | A control `start` whose `workflowId` is not a literal; the target is only checked when the step runs. |
+| W078 | A suspending step's timeout is at most 1000 ms, so it times out instead of parking. |
+
+A workflow with control or suspending steps (or embedding one) cannot be
+published as a workflow-agent, and the composed runtime binding
+(`RUNTARA_DIRECT_RUNTIME_BINDING=composed`) cannot compile it. The full
+context matrix is `operationScopedSteps` in the authoring schema.
+
+### Lifecycle (D3, D4)
+
+- `parentClosePolicy: cancel` cancels a still-running child whenever its
+  parent ends (completed, failed, cancelled, or gone), with a 5 s grace, even
+  when the parent crashed or was stopped from outside; `leave_running` leaves
+  it alone. A suspended parent has not ended.
+- Pausing a waiting run (parked on a timer, a signal or its children) pauses
+  it at once, in control and in the public API; it loses its wake, and only
+  an explicit resume relaunches it. Signal answers and finished children are
+  kept and seen after the resume.
+- Pausing a parent does not pause its children, and neither an `any` result
+  nor a wait deadline cancels the remaining children; cancel them explicitly.
+- A finished child stays readable through `get` and `wait` until its parent
+  is terminal (one level deep), then follows normal retention.
+- Cancellation is not rollback of the child's business side effects.
+
+### Executor model
+
+The copy of the control agent composed into a workflow only forwards: its
+calls go to `runtara:control/executor`, which the host binds to its
+`ControlExecutor`. The executor instantiates the host-installed control bytes
+(never the composed copy, never tenant bytes) in a fresh restricted store per
+call (64 MiB memory, 90 s, at most 16 at once) where `runtara:control/api` is
+real; everywhere else that interface is `denied`. Tenant, caller and step
+operation come from the calling workflow's store, never from the agent's
+input.
+
+Decision D2 is enforced twice. When an artifact is prepared, the precompile
+worker audits every composed component that imports `runtara:control/*`; the
+artifact binds its one `runtara:builtin-artifacts/control-…` pin plus those
+digests. Every call re-checks that binding and the executor's own bytes
+against the approved history. The server approves its bundle's control bytes
+at boot (`approved_builtin_artifacts`, never deleted); an operator revokes a
+version by setting `revoked_at`, effective at the next boot. After that, calls
+through the revoked version are `CONTROL_DENIED`, new launches of workflows
+pinning it are not ready, and runs already parked on it still load and fail at
+their next control call. A run pinned to an older, still approved version
+keeps working after an upgrade. Composed artifacts whose other agents import
+`runtara:control` or `runtara:workflow-operation` are refused at preparation.
+
+Mutations and `wait` run inside a compiler-emitted operation scope
+(`runtara:workflow-operation`), which gives each call site its operation
+identity. Workflows without control or suspending steps compile to the same
+bytes as before.
+
+### Retention
+
+- **Children:** instance cleanup keeps a finished child until its parent is
+  terminal and both are past `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS` (one level
+  deep; a missing parent counts as terminal) and logs
+  `pinned_terminal_children` per pass. The fenced outcome of a child that never
+  launched follows the same rule. Cleanup does not delete admission rows
+  (`execution_requests`), so the per-parent label and replay constraints hold
+  for the parent's lifetime.
+- **Per-run state:** command receipts (`instance_control_receipts`), waits
+  (`instance_waits`, `instance_wait_targets`) and suspension state
+  (`instance_agent_continuations`) belong to the calling run and are deleted
+  with it.
+- **Artifacts:** image cleanup keeps the compiled package of a run that is
+  parked or still pinned, and never removes an image a launch still
+  references, so a parent parked for months resumes on the artifact it was
+  built from. Released host interfaces stay linked (see the
+  `runtara-workflow-wit` README's ABI rule).
+- **Audit:** every control mutation attempt writes an `audit_events` row
+  (`control.start`, `control.send_signal`, `control.cancel`, `control.pause`,
+  `control.resume`, `control.wait`) with its caller, operation and outcome,
+  never its payload.
+
+### Debugging
+
+- The execution detail shows **Started by** (the parent) and **Child runs**;
+  the invocation history has a Parent column and a `parentInstanceId` filter
+  (`GET /api/runtime/executions?parentInstanceId=`, MCP `list_executions
+  parent_instance_id`).
+- A parked run reads `suspended` with `suspensionReason` (`waiting_instances`
+  for a control `wait`). Its unfinished step reads `suspended` in
+  `GET /api/runtime/workflows/{id}/instances/{iid}/steps` (and MCP
+  `get_step_summaries`); `status=suspended` filters for it. A step reports one
+  row however often a resumed run replays it.
+- Step failures carry `CONTROL_*` codes (see `errorCodes` in the authoring
+  schema); `replayed: true` in a step output means the call was answered from
+  its receipt, not repeated.
+- `control:get` or the API show why a child ended; a child cancelled by the
+  parent-close cascade records the reason `parent <id> terminated (<status>)`.
+- Operator tables: `execution_requests` (server database: admission,
+  `parent_instance_id`, per-parent labels), `instance_waits` and
+  `instance_wait_targets` (open waits and their targets),
+  `instance_external_outcomes` (never-launched children),
+  `approved_builtin_artifacts` (the approved control history).
+
 ## Proposed capabilities
 
 Every capability returns without suspending except `wait`, which suspends its
 caller through the general agent suspension mechanism (see
 [Agent suspension](#agent-suspension)).
 
-Names are illustrative; finalize schemas during implementation.
+The shipped names and schemas are in [As built](#as-built).
 
 | Capability | Inputs and behavior |
 |---|---|

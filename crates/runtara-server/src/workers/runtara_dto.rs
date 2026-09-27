@@ -144,6 +144,7 @@ pub fn runtara_instance_to_dto_with_info(
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| inst.created_at.to_rfc3339()),
         status,
+        suspension_reason: inst.suspension_reason,
         termination_type: None, // Not available from Runtara summary
         error: None,            // Summary carries only `has_error`, not the message
         workflow_id,
@@ -195,6 +196,7 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
         created,
         updated,
         status,
+        suspension_reason: info.suspension_reason,
         termination_type: None,
         error: info.error.clone(),
         workflow_id,
@@ -246,6 +248,7 @@ pub fn runtara_info_to_execution_with_metadata(
         created,
         updated,
         status,
+        suspension_reason: info.suspension_reason,
         termination_type: None,
         error: info.error.clone(),
         workflow_id,

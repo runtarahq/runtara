@@ -1279,6 +1279,7 @@ mod classify_observed_status_tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: None,
+            suspension_reason: None,
             exit_code: None,
         }
     }

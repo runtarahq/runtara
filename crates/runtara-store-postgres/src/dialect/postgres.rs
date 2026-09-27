@@ -213,6 +213,12 @@ impl Dialect for PostgresDialect {
         // mapper can parse them with `serde_json::from_str`; the JSONB->TEXT
         // round-trip produces an equal `serde_json::Value`.
         //
+        // Each (correlation, scope) is one record: `se` keeps its first start
+        // and `first_end` the first end after that start. A resumed run
+        // replays completed steps and re-enters a parked one, emitting their
+        // start (and end) again; those later events are replays, not records.
+        // `sql_count_paired_records` applies the same rule.
+        //
         // Every name the caller supplies is read out of `vocab` and spliced;
         // the column *aliases* are fixed neutral names, so a vocabulary whose
         // keys collide with real `instance_events` columns (`id`, `created_at`,
@@ -232,19 +238,24 @@ impl Dialect for PostgresDialect {
         let settled_at_key = vocab.settled_at_key();
         format!(
             "WITH se AS MATERIALIZED ( \
-                SELECT \
-                    id, \
-                    created_at AS started_at, \
-                    sj->>'{correlation_key}' as correlation_id, \
-                    sj->>'{kind_key}' as kind, \
-                    sj->>'scope_id' as scope_id, \
-                    sj->>'parent_scope_id' as parent_scope_id \
+                SELECT DISTINCT ON (s1.correlation_id, COALESCE(s1.scope_id, '')) \
+                    s1.id, s1.started_at, s1.correlation_id, s1.kind, s1.scope_id, s1.parent_scope_id \
                 FROM ( \
-                    SELECT id, created_at, convert_from(payload, 'UTF8')::jsonb as sj \
-                    FROM instance_events \
-                    WHERE instance_id = $1 AND subtype = '{start_subtype}' \
-                    OFFSET 0 \
-                ) s0 \
+                    SELECT \
+                        id, \
+                        created_at AS started_at, \
+                        sj->>'{correlation_key}' as correlation_id, \
+                        sj->>'{kind_key}' as kind, \
+                        sj->>'scope_id' as scope_id, \
+                        sj->>'parent_scope_id' as parent_scope_id \
+                    FROM ( \
+                        SELECT id, created_at, convert_from(payload, 'UTF8')::jsonb as sj \
+                        FROM instance_events \
+                        WHERE instance_id = $1 AND subtype = '{start_subtype}' \
+                        OFFSET 0 \
+                    ) s0 \
+                ) s1 \
+                ORDER BY s1.correlation_id, COALESCE(s1.scope_id, ''), s1.id \
             ), \
             ee AS MATERIALIZED ( \
                 SELECT \
@@ -260,6 +271,14 @@ impl Dialect for PostgresDialect {
                     WHERE instance_id = $1 AND subtype = '{end_subtype}' \
                     OFFSET 0 \
                 ) e0 \
+            ), \
+            first_end AS ( \
+                SELECT DISTINCT ON (se.id) \
+                    se.id AS start_id, ee.end_id, ee.completed_at, ee.error, ee.output_error \
+                FROM se JOIN ee \
+                    ON se.correlation_id = ee.correlation_id AND COALESCE(se.scope_id, '') = COALESCE(ee.scope_id, '') \
+                    AND ee.end_id > se.id \
+                ORDER BY se.id, ee.end_id \
             ), \
             paired AS ( \
                 SELECT \
@@ -283,8 +302,7 @@ impl Dialect for PostgresDialect {
                         THEN {paired_duration_ms} \
                         ELSE NULL \
                     END as duration_ms \
-                FROM se LEFT JOIN ee \
-                    ON se.correlation_id = ee.correlation_id AND COALESCE(se.scope_id, '') = COALESCE(ee.scope_id, '') \
+                FROM se LEFT JOIN first_end ee ON ee.start_id = se.id \
             ), \
             page AS ( \
                 SELECT id, end_id, correlation_id, kind, scope_id, parent_scope_id, \
@@ -337,30 +355,45 @@ impl Dialect for PostgresDialect {
         let error_flag_key = vocab.error_flag_key();
         format!(
             "WITH start_events AS MATERIALIZED ( \
-            SELECT \
-                sj->>'{correlation_key}' as correlation_id, \
-                sj->>'{kind_key}' as kind, \
-                sj->>'scope_id' as scope_id, \
-                sj->>'parent_scope_id' as parent_scope_id \
+            SELECT DISTINCT ON (s1.correlation_id, COALESCE(s1.scope_id, '')) \
+                s1.id, s1.correlation_id, s1.kind, s1.scope_id, s1.parent_scope_id \
             FROM ( \
-                SELECT convert_from(payload, 'UTF8')::jsonb as sj \
-                FROM instance_events \
-                WHERE instance_id = $1 AND subtype = '{start_subtype}' \
-                OFFSET 0 \
-            ) s0 \
+                SELECT \
+                    id, \
+                    sj->>'{correlation_key}' as correlation_id, \
+                    sj->>'{kind_key}' as kind, \
+                    sj->>'scope_id' as scope_id, \
+                    sj->>'parent_scope_id' as parent_scope_id \
+                FROM ( \
+                    SELECT id, convert_from(payload, 'UTF8')::jsonb as sj \
+                    FROM instance_events \
+                    WHERE instance_id = $1 AND subtype = '{start_subtype}' \
+                    OFFSET 0 \
+                ) s0 \
+            ) s1 \
+            ORDER BY s1.correlation_id, COALESCE(s1.scope_id, ''), s1.id \
         ), \
         end_events AS MATERIALIZED ( \
             SELECT \
+                id, \
                 ej->>'{correlation_key}' as correlation_id, \
                 ej->>'scope_id' as scope_id, \
                 (ej->'{error_key}')::text as error, \
                 ej->'{outputs_key}'->>'{error_flag_key}' as output_error \
             FROM ( \
-                SELECT convert_from(payload, 'UTF8')::jsonb as ej \
+                SELECT id, convert_from(payload, 'UTF8')::jsonb as ej \
                 FROM instance_events \
                 WHERE instance_id = $1 AND subtype = '{end_subtype}' \
                 OFFSET 0 \
             ) e0 \
+        ), \
+        first_end AS ( \
+            SELECT DISTINCT ON (s.id) \
+                s.id AS start_id, e.id AS end_id, e.error, e.output_error \
+            FROM start_events s JOIN end_events e \
+                ON s.correlation_id = e.correlation_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+                AND e.id > s.id \
+            ORDER BY s.id, e.id \
         ), \
         paired AS ( \
             SELECT \
@@ -369,13 +402,13 @@ impl Dialect for PostgresDialect {
                 s.scope_id, \
                 s.parent_scope_id, \
                 CASE \
-                    WHEN e.correlation_id IS NULL THEN 'running' \
+                    WHEN e.end_id IS NULL THEN 'running' \
                     WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
                     WHEN e.output_error = 'true' THEN 'failed' \
                     ELSE 'completed' \
                 END as status \
             FROM start_events s \
-            LEFT JOIN end_events e ON s.correlation_id = e.correlation_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+            LEFT JOIN first_end e ON e.start_id = s.id \
         ) \
         SELECT COUNT(*) \
         FROM paired \

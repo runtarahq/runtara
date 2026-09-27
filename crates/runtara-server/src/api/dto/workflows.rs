@@ -929,6 +929,15 @@ pub struct WorkflowInstanceDto {
     pub updated: String,
     /// Current execution status
     pub status: ExecutionStatus,
+    /// Why a `suspended` execution is not running; absent otherwise. Only a
+    /// `paused` run needs a resume: the others wake on their own (a signal,
+    /// the runs they wait on, a timer, or recovery).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "suspensionReason"
+    )]
+    pub suspension_reason: Option<crate::types::SuspensionReason>,
     /// Reason for termination (set for all terminal states including successful completion)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "terminationType")]

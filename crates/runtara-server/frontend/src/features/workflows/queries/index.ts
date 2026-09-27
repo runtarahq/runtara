@@ -41,7 +41,7 @@ export interface StepSummariesFilters {
   limit?: number;
   offset?: number;
   sortOrder?: 'asc' | 'desc';
-  status?: 'running' | 'completed' | 'failed';
+  status?: 'running' | 'suspended' | 'completed' | 'failed';
   stepType?: string;
   scopeId?: string;
   parentScopeId?: string;

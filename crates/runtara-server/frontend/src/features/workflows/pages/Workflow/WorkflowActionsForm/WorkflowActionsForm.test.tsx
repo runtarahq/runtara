@@ -101,4 +101,46 @@ describe('WorkflowActionsForm', () => {
       expect(screen.queryByText('Completed')).not.toBeInTheDocument();
     });
   });
+
+  describe('breakpoint vs waiting', () => {
+    it('offers Continue only when stopped at a breakpoint', () => {
+      render(
+        <WorkflowActionsForm
+          {...defaultProps}
+          isExecuting={true}
+          isExecutionActive={true}
+          isSuspended={true}
+          onResume={vi.fn()}
+          executionStats={{ status: 'suspended' }}
+        />
+      );
+
+      expect(screen.getByText('Paused at breakpoint')).toBeInTheDocument();
+      expect(
+        screen.getByTitle('Continue execution to next breakpoint')
+      ).toBeInTheDocument();
+    });
+
+    it('shows a waiting run as Waiting with its reason and no Continue', () => {
+      render(
+        <WorkflowActionsForm
+          {...defaultProps}
+          isExecuting={true}
+          isExecutionActive={true}
+          isSuspended={false}
+          waitingReason="waiting_signal"
+          onResume={vi.fn()}
+          executionStats={{ status: 'suspended' }}
+        />
+      );
+
+      expect(screen.getByText('Waiting for signal')).toBeInTheDocument();
+      expect(
+        screen.queryByText('Paused at breakpoint')
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Continue execution to next breakpoint')
+      ).not.toBeInTheDocument();
+    });
+  });
 });

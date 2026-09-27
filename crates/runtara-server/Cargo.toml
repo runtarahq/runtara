@@ -146,6 +146,7 @@ runtara-core = { path = "../runtara-core" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }
 runtara-control-contract = { path = "../runtara-control-contract" }
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }

@@ -86,6 +86,47 @@ impl fmt::Display for ExecutionStatus {
     }
 }
 
+/// Why a `suspended` execution is not running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SuspensionReason {
+    /// Explicitly paused; only a resume relaunches it.
+    Paused,
+    /// Parked on a WaitForSignal request.
+    WaitingSignal,
+    /// Parked until other runs finish (control `wait`).
+    WaitingInstances,
+    /// Parked on a durable timer (Delay, retry backoff).
+    Sleeping,
+    /// Suspended by a server shutdown or restart; relaunched on recovery.
+    Shutdown,
+}
+
+impl SuspensionReason {
+    /// The reason a stored instance is suspended, from its stored
+    /// `termination_reason` and `wake_reason`. `None` unless it is suspended,
+    /// and while a pending wake is about to relaunch an unmarked run. An
+    /// explicit pause clears both (see
+    /// `runtara_environment::control_reads::is_explicitly_paused`).
+    pub fn from_stored(
+        suspended: bool,
+        termination_reason: Option<&str>,
+        wake_reason: Option<&str>,
+    ) -> Option<Self> {
+        if !suspended {
+            return None;
+        }
+        match termination_reason {
+            None if wake_reason.is_none() => Some(Self::Paused),
+            Some("waiting_signal") => Some(Self::WaitingSignal),
+            Some("waiting_instances") => Some(Self::WaitingInstances),
+            Some("sleeping") => Some(Self::Sleeping),
+            Some("shutdown_requested" | "environment_restart") => Some(Self::Shutdown),
+            _ => None,
+        }
+    }
+}
+
 /// Termination type providing context for why an execution terminated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, ToSchema)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
@@ -265,6 +306,46 @@ impl<'q> sqlx::Encode<'q, sqlx::Postgres> for MemoryTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspension_reason_maps_stored_markers() {
+        use SuspensionReason as R;
+        let reason = |suspended, termination, wake| R::from_stored(suspended, termination, wake);
+        // Only a suspended run has a suspension reason.
+        assert_eq!(reason(false, None, None), None);
+        assert_eq!(reason(false, Some("waiting_signal"), None), None);
+        // An explicit pause clears both markers.
+        assert_eq!(reason(true, None, None), Some(R::Paused));
+        // A pending wake on an unmarked run is about to relaunch, not paused.
+        assert_eq!(reason(true, None, Some("signal")), None);
+        assert_eq!(
+            reason(true, Some("waiting_signal"), None),
+            Some(R::WaitingSignal)
+        );
+        assert_eq!(
+            reason(true, Some("waiting_instances"), Some("instances")),
+            Some(R::WaitingInstances)
+        );
+        assert_eq!(reason(true, Some("sleeping"), None), Some(R::Sleeping));
+        assert_eq!(
+            reason(true, Some("shutdown_requested"), None),
+            Some(R::Shutdown)
+        );
+        assert_eq!(
+            reason(true, Some("environment_restart"), None),
+            Some(R::Shutdown)
+        );
+        assert_eq!(reason(true, Some("crashed"), None), None);
+        for (reason, label) in [
+            (R::Paused, "paused"),
+            (R::WaitingSignal, "waiting_signal"),
+            (R::WaitingInstances, "waiting_instances"),
+            (R::Sleeping, "sleeping"),
+            (R::Shutdown, "shutdown"),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), label);
+        }
+    }
 
     #[test]
     fn test_execution_status_helpers() {

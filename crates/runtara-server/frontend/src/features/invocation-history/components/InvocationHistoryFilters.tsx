@@ -27,6 +27,7 @@ export function countActiveInvocationFilters(
 ): number {
   return [
     filters.runLabel,
+    filters.parentInstanceId,
     filters.workflowId,
     filters.status,
     filters.createdFrom,
@@ -63,6 +64,7 @@ const STATUS_OPTIONS: {
   { value: ALL_VALUE, label: 'All statuses' },
   { value: 'queued', label: 'Queued' },
   { value: 'running', label: 'Running' },
+  { value: 'suspended', label: 'Suspended' },
   { value: 'completed', label: 'Completed' },
   { value: 'failed', label: 'Failed' },
   { value: 'cancelled', label: 'Cancelled' },
@@ -122,6 +124,26 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
             onFiltersChange({
               ...filters,
               runLabel: e.target.value || undefined,
+            })
+          }
+        />
+      </div>
+      <div className="space-y-1.5">
+        <Label
+          htmlFor="parent-instance-filter"
+          className="text-xs text-muted-foreground"
+        >
+          Started by run (parent ID)
+        </Label>
+        <Input
+          id="parent-instance-filter"
+          value={filters.parentInstanceId ?? ''}
+          placeholder="Any parent"
+          className="font-mono"
+          onChange={(e) =>
+            onFiltersChange({
+              ...filters,
+              parentInstanceId: e.target.value.trim() || undefined,
             })
           }
         />

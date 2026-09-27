@@ -269,6 +269,9 @@ pub struct InstanceInfo {
     // Termination tracking (available for terminal states)
     /// How the instance terminated.
     pub termination_reason: Option<TerminationReason>,
+    /// Why a suspended instance is not running.
+    #[serde(default)]
+    pub suspension_reason: Option<crate::types::SuspensionReason>,
     /// Process exit code (if available).
     pub exit_code: Option<i32>,
 }
@@ -309,6 +312,9 @@ pub struct InstanceSummary {
     pub finished_at: Option<DateTime<Utc>>,
     /// Whether the instance has an error.
     pub has_error: bool,
+    /// Why a suspended instance is not running.
+    #[serde(default)]
+    pub suspension_reason: Option<crate::types::SuspensionReason>,
 }
 
 /// Result of listing instances.
@@ -2039,6 +2045,7 @@ mod tests {
             memory_peak_bytes: Some(536_870_912), // 512 MB
             cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
             termination_reason: Some(TerminationReason::Completed),
+            suspension_reason: None,
             exit_code: Some(0),
         };
 
@@ -2071,6 +2078,7 @@ mod tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: None, // Running, no termination yet
+            suspension_reason: None,
             exit_code: None,
         };
 
@@ -2103,6 +2111,7 @@ mod tests {
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
             cpu_usage_usec: Some(5_000_000),        // 5 seconds
             termination_reason: Some(TerminationReason::Completed),
+            suspension_reason: None,
             exit_code: Some(0),
         };
 
@@ -2142,6 +2151,7 @@ mod tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: Some(TerminationReason::ApplicationError),
+            suspension_reason: None,
             exit_code: Some(1),
         };
 

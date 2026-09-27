@@ -26,6 +26,10 @@ import { parseTestAgentInputs } from '@/features/workflows/types/agent-metadata'
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled } from '@/shared/entitlements';
 import { findAgentById } from '@/shared/utils/agent-id';
+import {
+  capabilityRequiresRun,
+  REQUIRES_RUN_TEST_HINT,
+} from '@/features/workflows/utils/capability-flags';
 
 // Stable empty object to avoid creating new references on each render
 const EMPTY_NODE_DATA: Record<string, InputMappingEntry> = {};
@@ -36,6 +40,8 @@ interface TestHandler {
   isPending: boolean;
   isValid: boolean;
   isAvailable: boolean;
+  /** Why Run Test is disabled even though a capability is selected. */
+  unavailableReason?: string;
 }
 
 // Singleton to hold the current test handler
@@ -193,8 +199,16 @@ export function TestAgentInline() {
   // Otherwise the backend would reject the call with AGENT_NOT_ENABLED, and
   // disabling the Test button up-front is the better UX.
   const agentAllowed = !agentId || agentEnabled(entitlements, agentId);
+  // Control capabilities (start, send-signal, wait, ...) act on the run they
+  // are a step of; the playground has no run and answers
+  // CONTROL_REQUIRES_INSTANCE, so don't offer a Test that always fails.
+  const requiresRun = capabilityRequiresRun(capability);
   const isAvailable =
-    stepType === 'Agent' && !!agentId && !!capabilityId && agentAllowed;
+    stepType === 'Agent' &&
+    !!agentId &&
+    !!capabilityId &&
+    agentAllowed &&
+    !requiresRun;
 
   // Register the test handler for external access
   useEffect(() => {
@@ -203,12 +217,23 @@ export function TestAgentInline() {
       isPending: testMutation.isPending,
       isValid: validateInputs(),
       isAvailable,
+      unavailableReason: requiresRun ? REQUIRES_RUN_TEST_HINT : undefined,
     });
     return () => setTestHandler(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [testMutation.isPending, isAvailable, nodeData]);
+  }, [testMutation.isPending, isAvailable, requiresRun, nodeData]);
 
   if (!isAvailable) {
+    if (requiresRun) {
+      return (
+        <div
+          className="py-8 text-center text-muted-foreground"
+          data-testid="test-requires-run"
+        >
+          {REQUIRES_RUN_TEST_HINT}
+        </div>
+      );
+    }
     // Differentiate "agent disabled" from "nothing selected yet" so the user
     // understands why the panel is inert.
     if (stepType === 'Agent' && agentId && !agentAllowed) {

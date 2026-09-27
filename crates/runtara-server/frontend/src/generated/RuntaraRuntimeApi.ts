@@ -91,6 +91,14 @@ export type SwitchMatchType =
   | "BETWEEN"
   | "RANGE";
 
+/** Why a `suspended` execution is not running. */
+export type SuspensionReason =
+  | "paused"
+  | "waiting_signal"
+  | "waiting_instances"
+  | "sleeping"
+  | "shutdown";
+
 /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
 export type SortDirection = "ASC" | "DESC";
 
@@ -5493,7 +5501,11 @@ export interface StepSummaryResponse {
    * @format date-time
    */
   startedAt: string;
-  /** Step execution status */
+  /**
+   * Step execution status: "running", "suspended" (unfinished while its
+   * instance is suspended), "completed", "failed", or the terminal status
+   * of its instance for a step that never finished
+   */
   status: string;
   /** Unique step identifier */
   stepId: string;
@@ -6193,6 +6205,12 @@ export interface WorkflowInstanceDto {
   /** Current execution status */
   status: ExecutionStatus;
   steps?: WorkflowStepDto[];
+  /**
+   * Why a `suspended` execution is not running; absent otherwise. Only a
+   * `paused` run needs a resume: the others wake on their own (a signal,
+   * the runs they wait on, a timer, or recovery).
+   */
+  suspensionReason?: null | SuspensionReason;
   tags?: string[];
   /** Reason for termination (set for all terminal states including successful completion) */
   terminationType?: null | TerminationType;
@@ -9318,7 +9336,11 @@ export class Api<
         offset?: number | null;
         /** Sort order: "asc" (oldest first) or "desc" (newest first, default) */
         sortOrder?: string | null;
-        /** Filter by status: "running", "completed", or "failed" */
+        /**
+         * Filter by status: "running", "suspended", "completed", or "failed".
+         * An unfinished step reads "suspended" while its instance is suspended
+         * and takes the instance's status once the instance is terminal.
+         */
         status?: string | null;
         /** Filter by step type (e.g., "Http", "Transform", "Agent") */
         stepType?: string | null;

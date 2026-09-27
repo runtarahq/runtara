@@ -35,6 +35,10 @@ pub struct InstanceWithImage {
     pub image_id: Option<String>,
     /// Image name (from images table).
     pub image_name: Option<String>,
+    /// Why the instance stopped or parked, as stored.
+    pub termination_reason: Option<String>,
+    /// Pending wake of a suspended instance, as stored.
+    pub wake_reason: Option<String>,
 }
 
 /// Full instance record with image info and heartbeat.
@@ -80,6 +84,8 @@ pub struct InstanceFull {
     pub cpu_usage_usec: Option<i64>,
     /// How the instance terminated (completed, application_error, crashed, timeout, etc.).
     pub termination_reason: Option<String>,
+    /// Pending wake of a suspended instance, as stored.
+    pub wake_reason: Option<String>,
     /// Process exit code (if available).
     pub exit_code: Option<i32>,
 }
@@ -113,7 +119,8 @@ pub async fn get_instance_full(
                i.created_at, i.started_at, i.finished_at,
                i.attempt, i.max_attempts,
                i.memory_peak_bytes, i.cpu_usage_usec,
-               i.termination_reason::TEXT as termination_reason, i.exit_code
+               i.termination_reason::TEXT as termination_reason,
+               i.wake_reason::TEXT as wake_reason, i.exit_code
         FROM instances i
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
@@ -223,6 +230,7 @@ pub async fn list_instances(
     let mut query = sqlx::QueryBuilder::new(
         "SELECT i.instance_id, i.tenant_id, i.status::TEXT as status,
          i.created_at, i.started_at, i.finished_at, i.error, i.run_label, i.parent_instance_id,
+         i.termination_reason::TEXT as termination_reason, i.wake_reason::TEXT as wake_reason,
          ii.image_id, img.name as image_name
          FROM instances i
          LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
@@ -633,6 +641,8 @@ mod tests {
             error: None,
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow:v1".to_string()),
+            termination_reason: None,
+            wake_reason: None,
         };
 
         let debug_str = format!("{:?}", instance);
@@ -655,6 +665,8 @@ mod tests {
             error: None,
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow".to_string()),
+            termination_reason: None,
+            wake_reason: None,
         };
 
         let cloned = instance.clone();
@@ -677,6 +689,8 @@ mod tests {
             error: None,
             image_id: None,
             image_name: None,
+            termination_reason: None,
+            wake_reason: None,
         };
 
         assert!(instance.image_id.is_none());
@@ -710,6 +724,7 @@ mod tests {
             memory_peak_bytes: Some(536_870_912), // 512 MB
             cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
             termination_reason: None,
+            wake_reason: None,
             exit_code: None,
         };
 
@@ -743,6 +758,7 @@ mod tests {
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
             cpu_usage_usec: Some(5_000_000),        // 5 seconds
             termination_reason: None,
+            wake_reason: None,
             exit_code: None,
         };
 
@@ -777,6 +793,7 @@ mod tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: None,
+            wake_reason: None,
             exit_code: None,
         };
 
@@ -808,6 +825,7 @@ mod tests {
             memory_peak_bytes: Some(2_147_483_648), // 2 GB
             cpu_usage_usec: Some(120_000_000),      // 2 minutes
             termination_reason: Some("completed".to_string()),
+            wake_reason: None,
             exit_code: Some(0),
         };
 
@@ -840,6 +858,7 @@ mod tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: None,
+            wake_reason: None,
             exit_code: None,
         };
 

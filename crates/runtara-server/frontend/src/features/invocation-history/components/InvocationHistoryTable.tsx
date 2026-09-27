@@ -115,6 +115,7 @@ export function InvocationHistoryTable({
     onFiltersChange({
       ...filters,
       runLabel: undefined,
+      parentInstanceId: undefined,
       workflowId: undefined,
       status: undefined,
       createdFrom: undefined,

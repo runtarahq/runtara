@@ -5021,6 +5021,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmcp",
  "rsa",
+ "runtara-agent-suspension",
  "runtara-agent-trusted",
  "runtara-agents",
  "runtara-ai",

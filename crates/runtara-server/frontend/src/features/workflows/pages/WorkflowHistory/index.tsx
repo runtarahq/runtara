@@ -73,6 +73,15 @@ import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTime
 import { ReplayView } from '@/features/workflows/components/Replay';
 import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
+import {
+  canResume,
+  suspendedStatusLabel,
+} from '@/features/workflows/utils/suspension';
+import {
+  ChildRunsCard,
+  ParentRunLink,
+} from '@/features/invocation-history/components/RunLinks';
 import {
   hasElidedPayload,
   mapElidedForDisplay,
@@ -351,6 +360,15 @@ function WorkflowHistoryContent() {
                 </Button>
                 {isActiveStatus(data.status) ? (
                   <>
+                    {/* Only a paused run needs a resume; a waiting run wakes
+                        on its own. */}
+                    {canResume(data) && (
+                      <ResumeButton
+                        instanceId={data.id}
+                        variant="secondary"
+                        size="sm"
+                      />
+                    )}
                     {/* The pause handler only accepts instances in the
                         'running' state (suspended is a no-op, anything else
                         is a 400), so gate on the exact status. */}
@@ -368,22 +386,12 @@ function WorkflowHistoryContent() {
                     />
                   </>
                 ) : (
-                  <>
-                    {(data.status === 'failed' ||
-                      data.status === 'cancelled') && (
-                      <ResumeButton
-                        instanceId={data.id}
-                        variant="secondary"
-                        size="sm"
-                      />
-                    )}
-                    <ReplayButton
-                      instanceId={data.id}
-                      error={data.metadata?.errorMessage}
-                      variant="secondary"
-                      size="sm"
-                    />
-                  </>
+                  <ReplayButton
+                    instanceId={data.id}
+                    error={data.metadata?.errorMessage}
+                    variant="secondary"
+                    size="sm"
+                  />
                 )}
               </>
             )}
@@ -405,6 +413,14 @@ function WorkflowHistoryContent() {
                     <Badge variant={statusInfo.variant}>
                       {statusInfo.text}
                     </Badge>
+                    {suspendedStatusLabel(data) && (
+                      <Badge
+                        variant="warning"
+                        title="Why this run is suspended"
+                      >
+                        {suspendedStatusLabel(data)}
+                      </Badge>
+                    )}
                   </>
                 );
               })()}
@@ -440,6 +456,18 @@ function WorkflowHistoryContent() {
                 >
                   <Hash className="size-4" />
                   <span className="font-mono">{data.id}</span>
+                </div>
+              </>
+            )}
+            {data.parentInstanceId && (
+              <>
+                <Separator orientation="vertical" className="h-6" />
+                <div
+                  className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground"
+                  data-testid="started-by"
+                >
+                  <span>Started by</span>
+                  <ParentRunLink parentInstanceId={data.parentInstanceId} />
                 </div>
               </>
             )}
@@ -709,6 +737,9 @@ function WorkflowHistoryContent() {
           </CardContent>
         </Card>
 
+        {/* Runs this run started through control:start */}
+        {data.id && <ChildRunsCard instanceId={data.id} />}
+
         {/* Inputs & Outputs */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card className="overflow-hidden">
@@ -923,40 +954,14 @@ function WorkflowHistoryContent() {
                   const globalSequence = listPageIndex * LIST_PAGE_SIZE + index;
                   const isExpanded = expandedSteps.has(index);
 
-                  // Extract data from step summary
-                  const isRunning = step.status === 'running';
-                  const isCompleted = step.status === 'completed';
-                  const isFailed = step.status === 'failed';
-
-                  // Get badge variant based on status
-                  const getBadgeVariant = () => {
-                    if (isFailed) return 'destructive';
-                    if (isCompleted) return 'default';
-                    if (isRunning) return 'secondary';
-                    return 'outline';
-                  };
-
-                  // Get border color based on status
-                  const getBorderClass = () => {
-                    if (isFailed)
-                      return 'border-destructive/50 bg-destructive/5';
-                    if (isCompleted) return 'border-success/50 bg-success/5';
-                    if (isRunning) return 'border-info/50 bg-info/5';
-                    return 'border-border';
-                  };
-
-                  // Capitalize status for display
-                  const getStatusLabel = () => {
-                    if (isRunning) return 'Running';
-                    if (isCompleted) return 'Completed';
-                    if (isFailed) return 'Failed';
-                    return step.status;
-                  };
+                  // Badge, tint and label for the step summary status
+                  // (including `suspended` for a parked step).
+                  const statusDisplay = stepStatusDisplay(step.status);
 
                   return (
                     <div
                       key={step.stepId || index}
-                      className={`space-y-3 rounded-lg border p-4 transition-colors ${getBorderClass()}`}
+                      className={`space-y-3 rounded-lg border p-4 transition-colors ${statusDisplay.rowClass}`}
                     >
                       <div className="flex items-center justify-between">
                         <button
@@ -973,9 +978,11 @@ function WorkflowHistoryContent() {
                             {step.stepName || step.stepId}
                           </span>
                         </button>
-                        <Badge variant={getBadgeVariant()}>
-                          {isRunning && <Spinner className="mr-1 size-3" />}
-                          {getStatusLabel()}
+                        <Badge variant={statusDisplay.badgeVariant}>
+                          {statusDisplay.spin && (
+                            <Spinner className="mr-1 size-3" />
+                          )}
+                          {statusDisplay.label}
                         </Badge>
                       </div>
 

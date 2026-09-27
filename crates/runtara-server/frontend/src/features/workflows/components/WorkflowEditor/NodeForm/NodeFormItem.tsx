@@ -26,6 +26,7 @@ import { WaitForSignalStepField } from './WaitForSignalStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
 import { DelayStepField } from './DelayStepField';
+import { SuspendingStepHint } from './SuspendingStepHint';
 import {
   Collapsible,
   CollapsibleContent,
@@ -195,6 +196,7 @@ function StepAdvancedFields() {
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
+      <SuspendingStepHint />
       <CollapsibleTrigger
         type="button"
         className="flex w-full items-center gap-1.5 py-1 text-left text-sm font-medium"

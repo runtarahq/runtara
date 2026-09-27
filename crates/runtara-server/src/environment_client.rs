@@ -273,7 +273,13 @@ impl EnvironmentClient {
             return Err(EnvironmentError::InstanceNotFound(instance_id.to_string()));
         };
 
+        let suspension_reason = crate::types::SuspensionReason::from_stored(
+            inst.status == runtara_core::domain::InstanceStatus::Suspended,
+            inst.termination_reason.as_deref(),
+            inst.wake_reason.as_deref(),
+        );
         Ok(InstanceInfo {
+            suspension_reason,
             instance_id: inst.instance_id,
             run_label: inst.run_label,
             parent_instance_id: inst.parent_instance_id,
@@ -451,6 +457,11 @@ impl EnvironmentClient {
                     started_at: inst.started_at,
                     finished_at: inst.finished_at,
                     has_error: inst.has_error,
+                    suspension_reason: crate::types::SuspensionReason::from_stored(
+                        inst.status == runtara_core::domain::InstanceStatus::Suspended,
+                        inst.termination_reason.as_deref(),
+                        inst.wake_reason.as_deref(),
+                    ),
                 })
                 .collect(),
             total_count: result.total_count as u32,

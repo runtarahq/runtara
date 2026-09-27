@@ -266,6 +266,7 @@ export function FormActions({
           type="button"
           className="px-6"
           data-testid="node-form-run-test"
+          title={testHandler?.unavailableReason}
           onClick={() => testHandler?.runTest()}
           disabled={
             !testHandler?.isAvailable ||
