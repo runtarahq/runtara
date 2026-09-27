@@ -250,8 +250,8 @@ pub(super) fn emit_agent_plan(
         "operation-scoped sites never run in a parallel window"
     );
     debug_assert!(
-        !suspends || (max_retries == 0 && durable_checkpoint && memo_slot_ptr_local.is_none()),
-        "agent_suspend::check_sites admits only non-retrying durable sequential sites"
+        !suspends || (durable_checkpoint && memo_slot_ptr_local.is_none()),
+        "agent_suspend::check_sites admits only durable sequential suspending sites"
     );
     let invoke = if suspends {
         indices.agent_import(
@@ -346,13 +346,15 @@ pub(super) fn emit_agent_plan(
                 body.instruction(&Instruction::Else);
             }
             if scoped {
+                // Each attempt is its own continuation: a suspending site
+                // loads the one this attempt saved before its last park.
                 super::agent_suspend::emit_enter(
                     body,
                     indices,
                     static_data,
                     (route_ptr_local, route_len_local),
                     Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
-                    false,
+                    suspends,
                 );
             }
             emit_agent_invoke(
@@ -374,7 +376,13 @@ pub(super) fn emit_agent_plan(
             );
             if scoped {
                 super::agent_suspend::emit_entered_end(body);
-                super::agent_suspend::emit_exit(body, indices);
+                if suspends {
+                    // A suspension parks here without an `::attempt::`
+                    // checkpoint; only a failure reaches the one below.
+                    super::agent_suspend::emit_after_invoke(body, indices, static_data);
+                } else {
+                    super::agent_suspend::emit_exit(body, indices);
+                }
             }
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
@@ -769,7 +777,7 @@ pub(super) fn emit_agent_plan(
             if scoped {
                 super::agent_suspend::emit_entered_end(body);
                 if suspends {
-                    super::agent_suspend::emit_after_invoke(body, indices);
+                    super::agent_suspend::emit_after_invoke(body, indices, static_data);
                 } else {
                     super::agent_suspend::emit_exit(body, indices);
                 }

@@ -31,6 +31,7 @@ use serde_json::Value;
 #[path = "../../runtara-component-host/tests/common/outbound.rs"]
 mod outbound_fixture;
 
+mod control_wait;
 mod cooperative_measurement;
 mod cooperative_workflow_cancellation;
 #[path = "support/managed_inputs.rs"]

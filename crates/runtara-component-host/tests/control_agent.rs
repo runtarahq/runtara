@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 #[derive(Default)]
 struct FakeControl {
     calls: Mutex<Vec<(String, ControlAuthority)>>,
+    /// The deadline the last `wait` registered, echoed by `poll-wait` as the
+    /// persisted one.
+    wait_deadline: Mutex<Option<u64>>,
 }
 
 impl FakeControl {
@@ -170,9 +173,16 @@ impl ControlHost for FakeControl {
     async fn wait(
         &self,
         authority: &ControlAuthority,
-        _request: WaitRequest,
+        request: WaitRequest,
     ) -> Result<String, ControlError> {
         self.record("wait", authority);
+        // Like the native service: a wait needs a calling run, except that a
+        // test invocation of this fake may register one to show the dispatcher
+        // cannot keep the suspension.
+        if authority.operation.is_none() && request.instance_ids.iter().any(|id| id == "strict") {
+            requires_run(authority)?;
+        }
+        *self.wait_deadline.lock().unwrap() = request.deadline_ms;
         Ok("wait-1".into())
     }
 
@@ -186,7 +196,7 @@ impl ControlHost for FakeControl {
             mode: WaitMode::All,
             finished: vec![],
             remaining: vec!["a".into()],
-            deadline_ms: None,
+            deadline_ms: *self.wait_deadline.lock().unwrap(),
         }))
     }
 }
@@ -468,4 +478,104 @@ async fn plain_agent_instances_only_forward() {
         runtara_agent_suspension::SUSPENSION_UNSUPPORTED
     );
     assert!(harness.fake.calls.lock().unwrap().is_empty());
+}
+
+/// The host executor hands `wait` the operation's continuation: the first
+/// invocation registers and suspends on the wait (and its deadline), a
+/// re-invocation with the saved state only polls, and a continuation of
+/// another version is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_registers_once_and_is_redelivered_its_continuation() {
+    use runtara_component_host::operation_scope_host::{SuspendableOutcome, SuspensionWake};
+    let harness = harness().await;
+    let control = harness.dispatcher.control_executor().unwrap();
+    let authority = ControlAuthority {
+        tenant: "tenant-a".into(),
+        caller: Some("parent".into()),
+        operation: Some("op-1".into()),
+    };
+    let deadline = || tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let input = br#"{"instanceIds":["a"],"mode":"any","deadline":5000}"#.to_vec();
+    let SuspendableOutcome::Suspended(first) = control
+        .invoke(authority.clone(), "wait", input.clone(), None, deadline())
+        .await
+        .unwrap()
+    else {
+        panic!("a pending wait suspends");
+    };
+    assert_eq!(
+        first.wakes,
+        vec![
+            SuspensionWake::Instances("wait-1".into()),
+            SuspensionWake::At(5000)
+        ]
+    );
+    let SuspendableOutcome::Suspended(second) = control
+        .invoke(
+            authority.clone(),
+            "wait",
+            input.clone(),
+            Some(first.state.clone()),
+            deadline(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("still pending");
+    };
+    assert_eq!(second, first, "a replayed poll parks the same way");
+    let names: Vec<_> = harness
+        .fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, seen)| {
+            assert_eq!(seen, &authority, "the executor's authority");
+            name.clone()
+        })
+        .collect();
+    assert_eq!(names, ["wait", "poll-wait", "poll-wait"], "registered once");
+
+    let stale = control
+        .invoke(
+            authority,
+            "wait",
+            input,
+            Some(br#"{"v":99,"waitId":"wait-1"}"#.to_vec()),
+            deadline(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stale.code,
+        runtara_agent_suspension::AGENT_CONTINUATION_REJECTED
+    );
+}
+
+/// A test invocation has no calling run: the service refuses a wait with
+/// `requires-instance` before anything registers, and one it would register
+/// ends as `SUSPENSION_UNSUPPORTED` because a test cannot park.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_test_invocation_of_wait_needs_a_run_and_cannot_park() {
+    let harness = harness().await;
+    assert_eq!(
+        code(&test(&harness, "wait", json!({"instanceIds": ["strict"]})).await),
+        "CONTROL_REQUIRES_INSTANCE"
+    );
+    assert_eq!(
+        code(&test(&harness, "wait", json!({"instanceIds": ["a"]})).await),
+        runtara_agent_suspension::SUSPENSION_UNSUPPORTED
+    );
+    let too_many: Vec<String> = (0..1001).map(|i| format!("c{i}")).collect();
+    let before = harness.fake.calls.lock().unwrap().len();
+    assert_eq!(
+        code(&test(&harness, "wait", json!({"instanceIds": too_many})).await),
+        "CONTROL_TOO_LARGE"
+    );
+    assert_eq!(
+        harness.fake.calls.lock().unwrap().len(),
+        before,
+        "too many targets never reach the service"
+    );
 }

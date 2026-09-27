@@ -183,6 +183,9 @@ pub fn parse_agent_operation_key(key: &str, attempt: u32) -> Result<OperationIde
 pub(crate) struct EnteredOperation {
     pub(crate) identity: OperationIdentity,
     pub(crate) continuation: Option<Vec<u8>>,
+    /// Instance waits the control executor returned for this operation. Only
+    /// these may be named by its suspension's `instances` wakes.
+    pub(crate) waits: Vec<String>,
 }
 
 const SECOND_ENTER: &str =
@@ -192,9 +195,9 @@ const SECOND_ENTER: &str =
 #[derive(Debug, Default)]
 pub(crate) struct OperationScopeState {
     current: Option<EnteredOperation>,
-    /// Instance waits attached by suspensions in this run. The host that
-    /// parks the instance on them lands with durable instance waits.
-    registered_waits: Vec<String>,
+    /// Instance waits the run's last suspension attached; the park waits on
+    /// exactly these (`InvokeRunResult::instance_waits`).
+    parked_waits: Vec<String>,
 }
 
 impl OperationScopeState {
@@ -224,24 +227,77 @@ impl OperationScopeState {
         self.current = Some(EnteredOperation {
             identity,
             continuation,
+            waits: Vec::new(),
         });
         Ok(())
     }
 
-    /// Instance-wait ids the run's suspensions attached.
-    pub(crate) fn registered_waits(&self) -> &[String] {
-        &self.registered_waits
+    /// Leave the entered operation, if any.
+    pub(crate) fn leave(&mut self) -> Option<EnteredOperation> {
+        self.current.take()
     }
 
-    /// Record the instance waits of `wakes`, once each.
+    /// Instance-wait ids the run's last suspension attached.
+    pub(crate) fn registered_waits(&self) -> &[String] {
+        &self.parked_waits
+    }
+
+    /// Record the instance waits of `wakes` the control executor returned
+    /// for the entered operation, once each. Outside an operation there is
+    /// nothing to attach them to.
     pub(crate) fn record_waits(&mut self, wakes: &[SuspensionWake]) {
+        let Some(current) = self.current.as_mut() else {
+            return;
+        };
         for wake in wakes {
             if let SuspensionWake::Instances(id) = wake
-                && !self.registered_waits.contains(id)
+                && !current.waits.contains(id)
             {
-                self.registered_waits.push(id.clone());
+                current.waits.push(id.clone());
             }
         }
+    }
+
+    /// Check a suspension of the entered operation against the caps and the
+    /// waits it registered, and return its identity.
+    pub(crate) fn check_suspension(
+        &self,
+        state: &[u8],
+        wakes: &[SuspensionWake],
+    ) -> Result<OperationIdentity, String> {
+        let Some(current) = self.current.as_ref() else {
+            return Err("no operation is entered".into());
+        };
+        let invalid = |error: String| {
+            format!(
+                "{}: {error}",
+                runtara_agent_suspension::AGENT_INVALID_SUSPENSION
+            )
+        };
+        let contract: Vec<_> = wakes.iter().map(SuspensionWake::to_contract).collect();
+        runtara_agent_suspension::validate_suspension(&contract, state).map_err(invalid)?;
+        if let Some(foreign) = wakes.iter().find_map(|wake| match wake {
+            SuspensionWake::Instances(id) if !current.waits.contains(id) => Some(id),
+            _ => None,
+        }) {
+            return Err(invalid(format!(
+                "`{foreign}` is not an instance wait this operation registered"
+            )));
+        }
+        Ok(current.identity.clone())
+    }
+
+    /// Leave the entered operation as suspended: the park waits on the
+    /// instance waits of `wakes`.
+    pub(crate) fn suspended(&mut self, wakes: &[SuspensionWake]) {
+        self.current = None;
+        self.parked_waits = wakes
+            .iter()
+            .filter_map(|wake| match wake {
+                SuspensionWake::Instances(id) => Some(id.clone()),
+                SuspensionWake::At(_) => None,
+            })
+            .collect();
     }
 }
 
@@ -331,34 +387,23 @@ pub(crate) fn add_operation_scope_to_linker(
         |mut store: StoreContextMut<'_, WorkflowState>,
          (state, wakes): (Vec<u8>, Vec<SuspensionWake>)| {
             Box::new(async move {
-                let Some(operation) = store.data().operation.current.clone() else {
-                    return Ok((Err("no operation is entered".to_string()),));
-                };
-                let contract: Vec<_> = wakes.iter().map(SuspensionWake::to_contract).collect();
-                if let Err(error) = runtara_agent_suspension::validate_suspension(&contract, &state)
-                {
-                    return Ok((Err(format!(
-                        "{}: {error}",
-                        runtara_agent_suspension::AGENT_INVALID_SUSPENSION
-                    )),));
-                }
-                let host = match runtime(&store) {
-                    Ok(host) => host,
+                // A suspension that breaks the caps is the step error
+                // `AGENT_INVALID_SUSPENSION`; the operation stays entered so
+                // the failed exit discards whatever it kept.
+                let identity = match store.data().operation.check_suspension(&state, &wakes) {
+                    Ok(identity) => identity,
                     Err(error) => return Ok((Err(error),)),
                 };
-                if let Err(error) = host
-                    .operation_continuation_store(
-                        operation.identity.op_hash,
-                        operation.identity.attempt,
-                        state,
-                    )
+                // Losing the continuation would re-run the operation from
+                // scratch, so a store failure fails the run instead of the step.
+                runtime(&store)
+                    .map_err(wasmtime::Error::msg)?
+                    .operation_continuation_store(identity.op_hash, identity.attempt, state)
                     .await
-                {
-                    return Ok((Err(error),));
-                }
-                let data = store.data_mut();
-                data.operation.current = None;
-                data.operation.record_waits(&wakes);
+                    .map_err(|error| {
+                        wasmtime::format_err!("storing the operation continuation failed: {error}")
+                    })?;
+                store.data_mut().operation.suspended(&wakes);
                 Ok((Ok(()),))
             })
         },
@@ -367,13 +412,18 @@ pub(crate) fn add_operation_scope_to_linker(
         "exit",
         |mut store: StoreContextMut<'_, WorkflowState>, (failed,): (bool,)| {
             Box::new(async move {
-                let operation = store.data_mut().operation.current.take();
-                // A failure is not checkpointed, so a replay starts the
-                // operation afresh: its continuation must go with it.
+                let operation = store.data_mut().operation.leave();
+                // A failure is not checkpointed, so a replay or retry starts
+                // the operation afresh: its wait is closed (a retry registers
+                // a new one) and its continuation goes. Both must be confirmed
+                // before the step's error path runs.
                 if failed && let Some(operation) = operation {
-                    runtime(&store)
-                        .map_err(wasmtime::Error::msg)?
-                        .operation_release(operation.identity.op_hash)
+                    let host = runtime(&store).map_err(wasmtime::Error::msg)?;
+                    let op_hash = operation.identity.op_hash;
+                    host.operation_wait_close(op_hash.clone())
+                        .await
+                        .map_err(wasmtime::Error::msg)?;
+                    host.operation_release(op_hash)
                         .await
                         .map_err(wasmtime::Error::msg)?;
                 }
@@ -478,8 +528,57 @@ mod tests {
             SECOND_ENTER
         );
         assert_eq!(state.current().unwrap().identity, identity);
-        state.current = None;
+        state.leave();
         assert!(state.admit(&second, 1).is_ok());
+    }
+
+    #[test]
+    fn a_suspension_attaches_only_the_waits_its_operation_registered() {
+        let mut state = OperationScopeState::default();
+        // Outside an operation there is nothing to attach waits to.
+        state.record_waits(&[SuspensionWake::Instances("stray".into())]);
+        let site = key("wf", serde_json::json!([]), "wait");
+        let identity = state.admit(&site, 2).unwrap();
+        state.enter(identity.clone(), None).unwrap();
+        state.record_waits(&[
+            SuspensionWake::Instances("w1".into()),
+            SuspensionWake::At(5),
+            SuspensionWake::Instances("w1".into()),
+        ]);
+        assert_eq!(state.current().unwrap().waits, ["w1"]);
+
+        let invalid = runtara_agent_suspension::AGENT_INVALID_SUSPENSION;
+        for (wakes, bytes) in [
+            (vec![], 0),
+            (
+                vec![SuspensionWake::At(1); runtara_agent_suspension::MAX_WAKES + 1],
+                0,
+            ),
+            (vec![SuspensionWake::Instances("x".repeat(65))], 0),
+            (
+                vec![SuspensionWake::At(1)],
+                runtara_agent_suspension::MAX_CONTINUATION_BYTES + 1,
+            ),
+            // A wait another operation (or nobody) registered.
+            (vec![SuspensionWake::Instances("stray".into())], 0),
+        ] {
+            let error = state.check_suspension(&vec![0; bytes], &wakes).unwrap_err();
+            assert!(error.starts_with(invalid), "{error}");
+        }
+        let wakes = [
+            SuspensionWake::Instances("w1".into()),
+            SuspensionWake::At(9),
+        ];
+        assert_eq!(state.check_suspension(b"s", &wakes).unwrap(), identity);
+        state.suspended(&wakes);
+        assert!(state.current().is_none());
+        assert_eq!(state.registered_waits(), ["w1"]);
+
+        // A later operation's suspension replaces what the park waits on.
+        let next = key("wf", serde_json::json!([]), "delay");
+        state.enter(state.admit(&next, 1).unwrap(), None).unwrap();
+        state.suspended(&[SuspensionWake::At(3)]);
+        assert!(state.registered_waits().is_empty());
     }
 
     #[test]

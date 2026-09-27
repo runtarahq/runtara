@@ -62,6 +62,17 @@ struct Harness {
 
 impl Harness {
     async fn new() -> anyhow::Result<Self> {
+        Self::new_with(|native, _| native).await
+    }
+
+    /// Like [`Self::new`], with the control service `wrap` builds around the
+    /// native one (it also gets the executor, to revoke approvals mid-run).
+    async fn new_with(
+        wrap: impl FnOnce(
+            Arc<NativeControl>,
+            Arc<runtara_component_host::control_executor::ControlExecutor>,
+        ) -> Arc<dyn runtara_component_host::control_host::ControlHost>,
+    ) -> anyhow::Result<Self> {
         let url = std::env::var("TEST_RUNTARA_DATABASE_URL")
             .or_else(|_| std::env::var("TEST_ENVIRONMENT_DATABASE_URL"))
             .expect("isolated runtime database required");
@@ -84,19 +95,10 @@ impl Harness {
             RuntimeClientConfig::new(Default::default()),
         ));
         native.install(runtime.clone());
-        control.set_host(native.clone())?;
+        control.set_host(wrap(native.clone(), control.clone()))?;
         ApprovedBuiltins::install(&pool, &control, &[control.pin().to_owned()]).await?;
         let dir = tempfile::tempdir()?;
-        let runner = EmbeddedWasmRunner::new(
-            WorkflowRunnerConfig {
-                data_dir: dir.path().join("data"),
-                default_timeout: Duration::from_secs(30),
-                skip_cert_verification: false,
-            },
-            persistence.clone(),
-        )?
-        .with_in_process_precompiler_for_tests()
-        .with_control_executor(control.clone())?;
+        let runner = runner(dir.path(), &persistence, &control)?;
         Ok(Self {
             persistence,
             pool,
@@ -108,6 +110,11 @@ impl Harness {
             native,
             runtime,
         })
+    }
+
+    /// A fresh runner over the same store and executor, as after a restart.
+    fn restarted_runner(&self) -> anyhow::Result<EmbeddedWasmRunner> {
+        runner(self.dir.path(), &self.persistence, &self.control)
     }
 
     /// Compile `graph` against the same bundle.
@@ -155,8 +162,21 @@ impl Harness {
         input: Vec<u8>,
     ) -> Result<runtara_core::persistence::InstanceRecord, runtara_environment::runner::RunnerError>
     {
+        self.run_on(&self.runner, wasm_path, id, Some(input)).await
+    }
+
+    /// Run `wasm_path` as `id` on `runner` to its exit; `input` only on a
+    /// first start (a wake reads the stored input).
+    async fn run_on(
+        &self,
+        runner: &EmbeddedWasmRunner,
+        wasm_path: &std::path::Path,
+        id: &str,
+        input: Option<Vec<u8>>,
+    ) -> Result<runtara_core::persistence::InstanceRecord, runtara_environment::runner::RunnerError>
+    {
         let options = LaunchOptions {
-            launch_id: format!("launch-{id}"),
+            launch_id: format!("launch-{id}-{}", Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
             wasm_path: wasm_path.to_owned(),
@@ -168,19 +188,65 @@ impl Harness {
             timeout: Duration::from_secs(30),
             checkpoint_id: None,
             env: HashMap::new(),
-            prepersisted_input: Some(input),
+            prepersisted_input: input,
             start_gate: None,
         };
-        let handle = self.runner.try_launch_detached(&options).await?;
+        let handle = runner.try_launch_detached(&options).await?;
         tokio::time::timeout(
             Duration::from_secs(60),
-            self.runner
-                .wait_for_exit(&handle, Duration::from_millis(20)),
+            runner.wait_for_exit(&handle, Duration::from_millis(20)),
         )
         .await
         .expect("the run finishes");
         Ok(self.persistence.get_instance(id).await.unwrap().unwrap())
     }
+
+    /// Register `parent` with `data` and one running direct child per id.
+    async fn family(&self, parent: &str, children: &[String], data: Value) -> Vec<u8> {
+        use runtara_core::persistence::ParentLink;
+        let input = serde_json::to_vec(&json!({"data": data, "variables": {}})).unwrap();
+        assert!(
+            self.persistence
+                .try_register_instance(parent, &self.tenant, Some(&input))
+                .await
+                .unwrap()
+        );
+        for child in children {
+            let link = ParentLink {
+                parent_instance_id: parent.to_owned(),
+                parent_close_policy: "cancel".into(),
+                admitted_at: chrono::Utc::now(),
+            };
+            assert!(
+                self.persistence
+                    .try_register_child_instance(child, &self.tenant, None, None, &link)
+                    .await
+                    .unwrap()
+            );
+            self.persistence
+                .update_instance_status(child, InstanceStatus::Running, None)
+                .await
+                .unwrap();
+        }
+        input
+    }
+}
+
+fn runner(
+    dir: &std::path::Path,
+    persistence: &Arc<PostgresPersistence>,
+    control: &Arc<runtara_component_host::control_executor::ControlExecutor>,
+) -> anyhow::Result<EmbeddedWasmRunner> {
+    Ok(EmbeddedWasmRunner::new(
+        WorkflowRunnerConfig {
+            data_dir: dir.join("data"),
+            default_timeout: Duration::from_secs(30),
+            skip_cert_verification: false,
+        },
+        persistence.clone(),
+    )?
+    .with_in_process_precompiler_for_tests()
+    .with_control_executor(control.clone())?)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -397,7 +463,9 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
             std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
         }
     }
-    runtara_server::config::init(runtara_server::config::Config::from_env()?);
+    if runtara_server::config::try_get().is_none() {
+        runtara_server::config::init(runtara_server::config::Config::from_env()?);
+    }
 
     let harness = Harness::new().await?;
     let tenant = harness.tenant.clone();
@@ -590,5 +658,271 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
     let _ = tokio::time::timeout(Duration::from_secs(10), worker).await;
     let mut redis = manager;
     let _: () = redis::AsyncCommands::del(&mut redis, valkey.trigger_stream_key(&tenant)).await?;
+    Ok(())
+}
+
+fn wait_graph() -> Value {
+    json!({"durable": true, "entryPoint": "read", "steps": {
+        "read": {"id": "read", "stepType": "Agent", "agentId": "control",
+            "capabilityId": "get", "maxRetries": 0, "inputMapping": {
+                "instanceId": {"valueType": "reference", "value": "data.first"}}},
+        "wait": {"id": "wait", "stepType": "Agent", "agentId": "control",
+            "capabilityId": "wait", "maxRetries": 0, "timeout": 300_000, "inputMapping": {
+                "instanceIds": {"valueType": "reference", "value": "data.children"},
+                "mode": {"valueType": "immediate", "value": "all"}}},
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "result": {"valueType": "reference", "value": "steps.wait.outputs"}}}},
+        "executionPlan": [{"fromStep": "read", "toStep": "wait"},
+            {"fromStep": "wait", "toStep": "finish"}]})
+}
+
+/// `control:wait` against the real native service: the parent parks on its
+/// children without holding a runner slot, both answers wake it (in either
+/// order), and a runner that started after the park resumes it to the
+/// children's results. The finished wait and its continuation are released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_composed_control_wait_parks_without_a_slot_and_resumes_after_a_restart()
+-> anyhow::Result<()> {
+    let harness = Harness::new().await?;
+    let wasm = harness.compile(wait_graph())?;
+    for order in [[0usize, 1], [1, 0]] {
+        let parent = format!("{}-parent-{}{}", harness.tenant, order[0], order[1]);
+        let children = [format!("{parent}-finance"), format!("{parent}-legal")];
+        let input = harness
+            .family(
+                &parent,
+                &children,
+                json!({"first": children[0], "children": children}),
+            )
+            .await;
+        let parked = harness
+            .run_on(&harness.runner, &wasm, &parent, Some(input))
+            .await?;
+        assert_eq!(
+            parked.status,
+            InstanceStatus::Suspended,
+            "{:?}",
+            parked.error
+        );
+        assert_eq!(
+            parked.termination_reason.as_deref(),
+            Some("waiting_instances")
+        );
+        assert_eq!(
+            harness.runner.occupancy().expect("occupancy").held,
+            0,
+            "a parked parent holds no runner slot"
+        );
+        let (continuations, waits): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM instance_agent_continuations WHERE instance_id = $1), \
+                    (SELECT count(*) FROM instance_waits WHERE waiter_instance_id = $1)",
+        )
+        .bind(&parent)
+        .fetch_one(&harness.pool)
+        .await?;
+        assert_eq!((continuations, waits), (1, 1));
+
+        for (n, index) in order.into_iter().enumerate() {
+            harness
+                .persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&children[index], InstanceStatus::Completed)
+                        .with_output(format!(r#"{{"approved":{index}}}"#).as_bytes()),
+                )
+                .await?;
+            let row = harness.persistence.get_instance(&parent).await?.unwrap();
+            assert_eq!(
+                row.wake_reason == Some(runtara_core::domain::WakeReason::InstancesTerminal),
+                n == 1,
+                "only the second answer satisfies `all`"
+            );
+        }
+
+        let restarted = harness.restarted_runner()?;
+        let done = harness.run_on(&restarted, &wasm, &parent, None).await?;
+        assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
+        let output: Value = serde_json::from_slice(done.output.as_deref().unwrap())?;
+        let result = &output["result"];
+        assert_eq!(result["resolution"], "satisfied");
+        assert_eq!(result["remaining"], json!([]));
+        let finished = result["finished"].as_array().unwrap();
+        assert_eq!(
+            finished
+                .iter()
+                .map(|target| target["instanceId"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            order.map(|index| children[index].as_str()),
+            "finish order"
+        );
+        assert_eq!(finished[0]["output"], json!({"approved": order[0]}));
+        assert_eq!(finished[0]["outputOmitted"], false);
+        let (continuations, waits): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM instance_agent_continuations WHERE instance_id = $1), \
+                    (SELECT count(*) FROM instance_waits WHERE waiter_instance_id = $1)",
+        )
+        .bind(&parent)
+        .fetch_one(&harness.pool)
+        .await?;
+        assert_eq!((continuations, waits), (0, 0), "released after the result");
+    }
+    Ok(())
+}
+
+/// Revokes the control approvals right after the run's first control call.
+struct RevokeAfterFirstCall {
+    native: Arc<NativeControl>,
+    control: Arc<runtara_component_host::control_executor::ControlExecutor>,
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::control_host::ControlHost for RevokeAfterFirstCall {
+    async fn get(
+        &self,
+        authority: &runtara_component_host::control_host::ControlAuthority,
+        instance_id: String,
+    ) -> Result<
+        runtara_component_host::control_host::InstanceDetail,
+        runtara_component_host::control_host::ControlError,
+    > {
+        let result = self.native.get(authority, instance_id).await;
+        self.control.set_approved_pins(Vec::<String>::new());
+        result
+    }
+
+    async fn wait(
+        &self,
+        authority: &runtara_component_host::control_host::ControlAuthority,
+        request: runtara_component_host::control_host::WaitRequest,
+    ) -> Result<String, runtara_component_host::control_host::ControlError> {
+        self.native.wait(authority, request).await
+    }
+}
+
+/// Decision D2: approval is re-checked on every call, so a control version
+/// revoked while a run is live fails its next call with `denied`, and the wait
+/// registers nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_control_digest_is_denied_at_the_call() -> anyhow::Result<()> {
+    let harness =
+        Harness::new_with(|native, control| Arc::new(RevokeAfterFirstCall { native, control }))
+            .await?;
+    let wasm = harness.compile(wait_graph())?;
+    let parent = format!("{}-parent", harness.tenant);
+    let children = [format!("{parent}-child")];
+    let input = harness
+        .family(
+            &parent,
+            &children,
+            json!({"first": children[0], "children": children}),
+        )
+        .await;
+    let run = harness.run(&wasm, &parent, input).await?;
+    assert_eq!(run.status, InstanceStatus::Failed);
+    assert!(
+        run.error
+            .as_deref()
+            .is_some_and(|error| error.contains("CONTROL_DENIED")),
+        "{:?}",
+        run.error
+    );
+    let waits: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM instance_waits WHERE waiter_instance_id = $1")
+            .bind(&parent)
+            .fetch_one(&harness.pool)
+            .await?;
+    assert_eq!(waits, 0, "a denied wait registers nothing");
+    Ok(())
+}
+
+/// Decision D2 at readiness: an artifact whose control pin is not in the
+/// approved history is not ready, so it never launches; approving it makes
+/// the same compilation ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Result<()> {
+    use runtara_server::api::repositories::workflows::{
+        WorkflowRepository, set_installed_trusted_pins, workflow_definition_checksum,
+    };
+    if runtara_server::config::try_get().is_none() {
+        // SAFETY: set before the process configuration is read, once.
+        unsafe {
+            std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
+            if std::env::var("TENANT_ID").is_err() {
+                std::env::set_var("TENANT_ID", "control-component-tests");
+            }
+            if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
+                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
+            }
+        }
+        runtara_server::config::init(runtara_server::config::Config::from_env()?);
+    }
+    let harness = Harness::new().await?;
+    let server_url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
+        .expect("an isolated server database is required");
+    let server = sqlx::PgPool::connect(&server_url).await?;
+    sqlx::migrate!("./migrations").run(&server).await?;
+
+    let wasm = harness.compile(wait_graph())?;
+    let pins: Vec<String> =
+        runtara_workflows::direct_wasm::trusted_artifact_pins(&std::fs::read(&wasm)?)?
+            .into_iter()
+            .collect();
+    assert!(pins.contains(&harness.control.pin().to_owned()));
+    let workflow = format!("waiter-{}", Uuid::new_v4());
+    let definition = wait_graph();
+    let image = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version) VALUES ($1,$2,1,1)",
+    )
+    .bind(&harness.tenant)
+    .bind(&workflow)
+    .execute(&server)
+    .await?;
+    sqlx::query(
+        "INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, track_events) \
+         VALUES ($1,$2,1,$3,$4,false)",
+    )
+    .bind(&harness.tenant)
+    .bind(&workflow)
+    .bind(&definition)
+    .bind(serde_json::to_vec(&definition)?.len() as i32)
+    .execute(&server)
+    .await?;
+    sqlx::query(
+        "INSERT INTO workflow_compilations
+            (tenant_id, workflow_id, version, compilation_status, translated_path,
+             registered_image_id, source_checksum, track_events, template_major, lowering_mode,
+             trusted_pins)
+         VALUES ($1,$2,1,'success',$3,$4,$5,false,$6,$7,$8)",
+    )
+    .bind(&harness.tenant)
+    .bind(&workflow)
+    .bind(wasm.parent().unwrap().to_string_lossy().as_ref())
+    .bind(&image)
+    .bind(workflow_definition_checksum(&definition))
+    .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+    .bind(runtara_server::config::workflow_lowering_tag())
+    .bind(&pins)
+    .execute(&server)
+    .await?;
+    let repository = WorkflowRepository::new(server.clone());
+
+    set_installed_trusted_pins(Vec::<String>::new());
+    assert_eq!(
+        repository
+            .get_fresh_registered_image_id(&harness.tenant, &workflow, 1)
+            .await?,
+        None,
+        "an unapproved control pin leaves the image not ready"
+    );
+    set_installed_trusted_pins(pins.clone());
+    assert_eq!(
+        repository
+            .get_fresh_registered_image_id(&harness.tenant, &workflow, 1)
+            .await?
+            .as_deref(),
+        Some(image.as_str()),
+        "the approved pin makes the same compilation ready"
+    );
+    set_installed_trusted_pins(Vec::<String>::new());
     Ok(())
 }

@@ -240,7 +240,14 @@ pub trait RuntimeHost: Send + Sync {
     ) -> Result<(), String> {
         Err("runtime does not support typed agent suspension".into())
     }
-    /// Drop everything kept for an operation. Idempotent.
+    /// Close the operation's instance wait, if it registered one, so a retry
+    /// of the operation registers afresh. Idempotent: an operation without a
+    /// wait, or with a closed one, is fine.
+    async fn operation_wait_close(&self, _op_hash: String) -> Result<(), String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
+    /// Drop everything kept for an operation: its continuation and its
+    /// settled or closed instance wait. Idempotent.
     async fn operation_release(&self, _op_hash: String) -> Result<(), String> {
         Err("runtime does not support typed agent suspension".into())
     }

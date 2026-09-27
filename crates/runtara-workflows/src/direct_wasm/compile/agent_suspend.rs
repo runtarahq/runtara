@@ -12,19 +12,31 @@
 //!    or the control executor's argument). `suspendable.invoke` never carries
 //!    one, so this module passes none.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
-//!    continuation and attaches instance waits, then the workflow returns the
-//!    unchanged lifecycle `suspended(at(min(earliest at-wake, step deadline)))`.
-//!    A relaunch replays to this site, re-enters with the saved continuation and
-//!    invokes again.
+//!    continuation for the entered attempt and attaches the instance waits the
+//!    operation registered, then the workflow returns the unchanged lifecycle
+//!    `suspended(at(min(earliest at-wake, step deadline)))`, clamped by any
+//!    enclosing loop deadline. Nothing is checkpointed for the attempt (no
+//!    `::attempt::` key): a suspension is not a failure. A relaunch replays to
+//!    this site, re-enters the same attempt with the saved continuation and
+//!    invokes again. A suspension within one second of the step deadline would
+//!    only wake to time out, so it fails the step with `AGENT_TIMEOUT` instead;
+//!    one the host refuses (caps, a wait the operation did not register) fails
+//!    it with `AGENT_INVALID_SUSPENSION`. Either failure leaves the operation
+//!    through `scope.exit(true)`.
 //! 3. `completed(bytes)`: the payload is moved to where a `capabilities` result
-//!    keeps its list, so the ordinary output, checkpoint and error paths run
-//!    unchanged; `scope.exit(false)`. An error arm leaves via `scope.exit(true)`.
+//!    keeps its list, so the ordinary output, checkpoint, retry and error paths
+//!    run unchanged; `scope.exit(false)`. An error arm leaves via
+//!    `scope.exit(true)`, which closes the operation's wait and discards its
+//!    continuation, so a retry (the next attempt) or a replay starts afresh.
 //! 4. After the step's result checkpoint, `scope.release(checkpoint-key)`.
 //!
-//! Tracer scope (spike S0.2): one top-level, durable, timed, non-retrying
-//! Agent step under the invoke ABI. [`check_sites`] refuses every other shape
-//! instead of miscompiling it, together with the operation-scoped backstops
-//! every control or suspending site needs.
+//! Sites may sit wherever the slice-4 context matrix allows: the top level,
+//! branch arms (a branch group holding one runs sequentially), sequential Split
+//! and While bodies (a parallel Split runs its body sequentially), embedded
+//! workflows, and retrying steps, where each attempt is its own continuation.
+//! [`check_sites`] refuses every other shape instead of miscompiling it,
+//! together with the operation-scoped backstops every control or suspending
+//! site needs.
 
 use std::collections::BTreeSet;
 
@@ -33,15 +45,15 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 
 use super::abi::{
     emit_suspend_at_return, load_retptr_tag, push_retptr_arg, push_retptr_i32_load,
-    push_retptr_u8_load, return_if_retptr_error,
+    push_retptr_i64_load, push_retptr_u8_load, return_if_retptr_error,
 };
 use super::{
     DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
-    DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
-    DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET,
+    DIRECT_AGENT_RESULT_OK_LEN_OFFSET, DIRECT_AGENT_RESULT_OK_PTR_OFFSET, DIRECT_RET_U64_OK_OFFSET,
     DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL, DIRECT_RETRY_PARK_STATE_LEN_LOCAL,
-    DIRECT_RETRY_PARK_STATE_PTR_LOCAL, DIRECT_RUN_RETPTR_OFFSET, DirectCompileError,
-    DirectCoreFunctionIndices, DirectCoreStaticData, DirectWorkflowManifest,
+    DIRECT_RETRY_PARK_STATE_PTR_LOCAL, DIRECT_RUN_RETPTR_OFFSET, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCompileError, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectWorkflowManifest,
 };
 use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
 use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
@@ -71,17 +83,21 @@ pub(super) const SUSPENDED_STATE_LEN_OFFSET: u64 = SUSPENDED_STATE_PTR_OFFSET + 
 pub(super) const WAKE_SIZE: i32 = layout::WAKE_SIZE as i32;
 pub(super) const WAKE_AT_VALUE_OFFSET: u64 = layout::WAKE_PAYLOAD_OFFSET as u64;
 
-/// The first (and, in the tracer, only) attempt of an operation.
+/// The attempt of an operation at a site without retries.
 const FIRST_ATTEMPT: i32 = 1;
 
-// Scratch locals of the suspended path. It runs only at a non-retrying site,
-// where the per-attempt retry and retry-park locals are otherwise unused.
+// Scratch locals of the suspended path. It either returns from the entry
+// function (the park) or falls through to the step's error path, so it may
+// only borrow locals that path sets before reading: the per-attempt envelope
+// and retry-park locals are rewritten on every failure, and the Wait/Delay
+// signal-id locals belong to other step types. The per-attempt checkpoint key
+// of a retrying site stays intact for its failure checkpoint.
 const WAKES_PTR: u32 = DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL;
 const WAKES_LEN: u32 = DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL;
 const STATE_PTR: u32 = DIRECT_RETRY_PARK_STATE_PTR_LOCAL;
 const STATE_LEN: u32 = DIRECT_RETRY_PARK_STATE_LEN_LOCAL;
-const CURSOR: u32 = DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL;
-const END: u32 = DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL;
+const CURSOR: u32 = DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL;
+const END: u32 = DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL;
 const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 
 /// Compile-time backstop for operation-scoped (suspending or control) Agent
@@ -95,9 +111,9 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 ///   published workflow-agent), the composed runtime binding, an omitted
 ///   runtime, scoped isolation, and a control call compiled without the agent
 ///   catalog (it could not be classified);
-/// - a suspending site: non-durable, untimed, or an onError handler;
-/// - until the lowering widens past the S0.2 tracer: a suspending site nested
-///   in a loop or `onWait`, inside an embedded workflow, or retrying.
+/// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
+///   through an embedded workflow;
+/// - a suspending site: non-durable, untimed, or an onError handler.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
     abi: WorkflowAbi,
@@ -124,38 +140,39 @@ pub(super) fn check_sites(
             );
         }
     }
-    // Embed call sites reached as AiAgent tools, then every embed below them.
+    // Embed call sites reached as AiAgent tools, and embeds inside a
+    // `WaitForSignal.onWait` graph, then every embed below them.
     let mut tool_embeds = BTreeSet::new();
+    let mut on_wait_embeds = BTreeSet::new();
     for graph in std::iter::once(&manifest.graph)
         .chain(manifest.child_workflows.iter().map(|child| &child.graph))
     {
         collect_ai_targets(graph, &mut tool_embeds);
+        collect_on_wait_embeds(graph, false, &mut on_wait_embeds);
     }
-    loop {
-        let before = tool_embeds.len();
-        for child in &manifest.child_workflows {
-            if tool_embeds.contains(&child.step_id) {
-                collect_embed_steps(&child.graph, &mut tool_embeds);
+    for embeds in [&mut tool_embeds, &mut on_wait_embeds] {
+        loop {
+            let before = embeds.len();
+            for child in &manifest.child_workflows {
+                if embeds.contains(&child.step_id) {
+                    collect_embed_steps(&child.graph, embeds);
+                }
+            }
+            if embeds.len() == before {
+                break;
             }
         }
-        if tool_embeds.len() == before {
-            break;
-        }
     }
-    check_graph(&manifest.graph, SiteDepth::TopLevel, false, &target)?;
+    check_graph(&manifest.graph, false, false, &target)?;
     for child in &manifest.child_workflows {
-        let tool = tool_embeds.contains(&child.step_id);
-        check_graph(&child.graph, SiteDepth::Embedded, tool, &target)?;
+        check_graph(
+            &child.graph,
+            on_wait_embeds.contains(&child.step_id),
+            tool_embeds.contains(&child.step_id),
+            &target,
+        )?;
     }
     Ok(())
-}
-
-/// Where the graph holding a site sits.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SiteDepth {
-    TopLevel,
-    Nested,
-    Embedded,
 }
 
 /// The compile target every operation-scoped site must support.
@@ -228,9 +245,29 @@ fn collect_embed_steps(graph: &DirectGraphManifest, embeds: &mut BTreeSet<String
     }
 }
 
+/// Embed steps inside `WaitForSignal.onWait` graphs of `graph`.
+fn collect_on_wait_embeds(
+    graph: &DirectGraphManifest,
+    in_on_wait: bool,
+    embeds: &mut BTreeSet<String>,
+) {
+    for step in &graph.steps {
+        if in_on_wait && step.step_type == "EmbedWorkflow" {
+            embeds.insert(step.id.clone());
+        }
+        for nested in &step.nested_graphs {
+            let on_wait = in_on_wait || nested.role == ON_WAIT_ROLE;
+            collect_on_wait_embeds(&nested.graph, on_wait, embeds);
+        }
+    }
+}
+
+/// Role of a `WaitForSignal.onWait` nested graph.
+const ON_WAIT_ROLE: &str = "waitForSignal.onWait";
+
 fn check_graph(
     graph: &DirectGraphManifest,
-    depth: SiteDepth,
+    in_on_wait: bool,
     in_tool_workflow: bool,
     target: &SiteTarget<'_>,
 ) -> Result<(), DirectCompileError> {
@@ -254,6 +291,9 @@ fn check_graph(
                 kind,
                 "cannot run in a workflow embedded as an AiAgent tool",
             );
+        }
+        if in_on_wait {
+            return refuse(step, kind, "cannot run in a WaitForSignal onWait graph");
         }
         match target.abi {
             WorkflowAbi::InvokeHostImports => {}
@@ -296,31 +336,11 @@ fn check_graph(
         {
             return refuse(step, kind, "cannot run in an onError handler");
         }
-        // Limits of the S0.2 tracer lowering, lifted when it widens.
-        match depth {
-            SiteDepth::TopLevel => {}
-            SiteDepth::Nested => {
-                return refuse(
-                    step,
-                    kind,
-                    "is supported only at the top level of a workflow",
-                );
-            }
-            SiteDepth::Embedded => {
-                return refuse(step, kind, "cannot run inside an embedded workflow");
-            }
-        }
-        if agent.max_retries.unwrap_or(1) != 0 {
-            return refuse(step, kind, "must set maxRetries to 0");
-        }
     }
-    let nested_depth = match depth {
-        SiteDepth::Embedded => SiteDepth::Embedded,
-        SiteDepth::TopLevel | SiteDepth::Nested => SiteDepth::Nested,
-    };
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            check_graph(&nested.graph, nested_depth, in_tool_workflow, target)?;
+            let on_wait = in_on_wait || nested.role == ON_WAIT_ROLE;
+            check_graph(&nested.graph, on_wait, in_tool_workflow, target)?;
         }
     }
     Ok(())
@@ -382,19 +402,28 @@ pub(super) fn emit_exit(body: &mut WasmFunction, indices: &DirectCoreFunctionInd
 
 /// Consume a `suspendable.invoke` result left in the retptr area.
 ///
-/// A suspension parks the workflow and returns from the entry function. A
-/// completed outcome is rewritten in place to the `capabilities` result
+/// A suspension parks the workflow and returns from the entry function,
+/// unless it is refused or too close to the step deadline: then the retptr
+/// area holds the step error (`AGENT_INVALID_SUSPENSION`, `AGENT_TIMEOUT`).
+/// A completed outcome is rewritten in place to the `capabilities` result
 /// layout; an error arm already has it. Either way the operation is exited
 /// and the caller's ordinary error/output handling continues.
-pub(super) fn emit_after_invoke(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+pub(super) fn emit_after_invoke(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+) {
     let scope = indices.operation_scope();
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
     push_retptr_u8_load(body, OUTCOME_DISCRIMINANT_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    emit_suspend(body, indices);
-    body.instruction(&Instruction::End);
+    // Suspended: park, or leave the step error in the retptr area.
+    emit_suspend(body, indices, static_data);
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::Call(scope.exit));
+    body.instruction(&Instruction::Else);
     // completed(list<u8>) at +12/+16 → the `ok(list<u8>)` slots at +8/+12.
     // Each load happens before the store that could overlap it.
     for (from, to) in [
@@ -411,15 +440,26 @@ pub(super) fn emit_after_invoke(body: &mut WasmFunction, indices: &DirectCoreFun
     }
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::Call(scope.exit));
+    body.instruction(&Instruction::End);
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::Call(scope.exit));
     body.instruction(&Instruction::End);
 }
 
+/// A suspension this close to the step deadline fails with `AGENT_TIMEOUT`
+/// instead of parking: its wake could only time the step out.
+pub(super) const DEADLINE_MARGIN_MS: i64 = 1_000;
+
 /// Persist the suspension and park at the earliest `at` wake, bounded by the
 /// step deadline (`agent_deadline::DEADLINE`), which every suspending site has.
-fn emit_suspend(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+/// Falls through only with a step error in the retptr area.
+fn emit_suspend(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+) {
+    // Stash the suspension first: every host call below reuses the retptr.
     for (offset, local) in [
         (SUSPENDED_WAKES_PTR_OFFSET, WAKES_PTR),
         (SUSPENDED_WAKES_LEN_OFFSET, WAKES_LEN),
@@ -429,6 +469,19 @@ fn emit_suspend(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
         push_retptr_i32_load(body, offset);
         body.instruction(&Instruction::LocalSet(local));
     }
+    // now + margin >= DEADLINE: the step times out instead of parking.
+    push_retptr_arg(body);
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
+    return_if_retptr_error(body, indices);
+    push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::I64Const(DEADLINE_MARGIN_MS));
+    body.instruction(&Instruction::I64Add);
+    body.instruction(&Instruction::LocalGet(super::agent_deadline::DEADLINE));
+    body.instruction(&Instruction::I64GeU);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::agent_deadline::error(body, static_data);
+    body.instruction(&Instruction::Else);
+
     body.instruction(&Instruction::LocalGet(super::agent_deadline::DEADLINE));
     body.instruction(&Instruction::LocalSet(PARK_AT));
     // The lifted list lies in this memory, so `len * 16` cannot overflow it.
@@ -484,8 +537,22 @@ fn emit_suspend(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalGet(WAKES_LEN));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.operation_scope().suspend));
-    return_if_retptr_error(body, indices);
+    load_retptr_tag(body);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // The host refused the suspension: a step error, not a park.
+    let segment = static_data
+        .invalid_suspension_error
+        .as_ref()
+        .expect("a suspending site lays out its suspension error");
+    super::agent_deadline::error_info(
+        body,
+        segment.offset,
+        crate::direct_wasm::static_data::AGENT_INVALID_SUSPENSION_FIELDS,
+    );
+    body.instruction(&Instruction::Else);
     emit_suspend_at_return(body, indices, PARK_AT);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
 }
 
 /// `scope.release(checkpoint-key)` once the step result is checkpointed.

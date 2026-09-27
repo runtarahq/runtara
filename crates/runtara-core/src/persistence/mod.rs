@@ -25,6 +25,9 @@ pub mod control_receipts;
 /// Durable instance waits: a run parks until other runs finish.
 pub mod waits;
 
+/// Attempt-tagged per-operation continuations of suspending agent capabilities.
+pub mod continuations;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -670,6 +673,12 @@ pub trait Persistence: Send + Sync {
     /// Optional durable instance waits. Control's `wait` fails closed
     /// without them.
     fn instance_waits(&self) -> Option<&dyn waits::InstanceWaits> {
+        None
+    }
+
+    /// Optional per-operation continuations of suspending agent capabilities.
+    /// Typed agent suspension fails closed without them.
+    fn agent_continuations(&self) -> Option<&dyn continuations::AgentContinuations> {
         None
     }
 

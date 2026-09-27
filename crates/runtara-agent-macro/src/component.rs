@@ -61,15 +61,6 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         )
         .into_compile_error();
     }
-    if args.suspending.is_some() && !args.control_executor {
-        // Ordinary suspending agents read their continuation through
-        // `runtara:agent-suspension/context`; that glue is not generated yet.
-        return syn::Error::new_spanned(
-            &args.capabilities,
-            "`suspending` is supported only with `control_executor = true`",
-        )
-        .into_compile_error();
-    }
     let agent = &args.agent;
     let interface = format_ident!("agent_{}", agent.replace('-', "_"));
     let world = format!("runtara:agent-{agent}/agent");
@@ -83,11 +74,20 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
             "../../runtara-workflow-wit/wit/control",
             "wit",
         ] }
+    } else if args.suspending.is_some() {
+        quote! { [
+            "../../runtara-agent-wit/wit",
+            "../../runtara-agent-suspension/wit",
+            "wit",
+        ] }
     } else {
         quote! { ["../../runtara-agent-wit/wit", "wit"] }
     };
+    let suspendable_export = format!("export:runtara:agent-{agent}/suspendable@0.4.0#invoke");
     let async_exports = if args.trusted {
         quote! { [#export, "export:runtara:trusted/execution@0.1.0#invoke"] }
+    } else if args.suspending.is_some() && !args.control_executor {
+        quote! { [#export, #suspendable_export] }
     } else if args.control_executor {
         // Every function in the control world is async-typed; the forwarding
         // imports are awaited, never blocked on.
@@ -139,6 +139,10 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         return control_executor(&args, agent, &interface, &world, &wit_paths, &listed)
             .unwrap_or_else(syn::Error::into_compile_error);
     }
+    let suspension = match ordinary_suspension(&args, agent, &interface, &listed, &decode_input) {
+        Ok(tokens) => tokens,
+        Err(error) => return error.into_compile_error(),
+    };
     quote! {
         #[cfg(target_arch = "wasm32")]
         #[allow(warnings)]
@@ -232,23 +236,19 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
                 }
             }
         }
+        #suspension
+
         #[cfg(target_arch = "wasm32")]
         bindings::export!(Component with_types_in bindings);
     }
 }
 
-/// Glue for the control agent. The composed copy never runs a capability body:
-/// `capabilities.invoke` and `suspendable.invoke` forward to the host executor,
-/// which runs `execution.invoke` on approved bytes in a fresh store and supplies
-/// the caller operation's continuation.
-fn control_executor(
+/// The `suspending` list, checked against `capabilities`: each entry must be
+/// listed there, once. Keys are the capability paths as written.
+fn suspending_set(
     args: &AgentComponentArgs,
-    agent: &str,
-    interface: &syn::Ident,
-    world: &str,
-    wit_paths: &proc_macro2::TokenStream,
     listed: &[(String, syn::ExprPath)],
-) -> syn::Result<proc_macro2::TokenStream> {
+) -> syn::Result<std::collections::HashSet<String>> {
     let mut suspending = std::collections::HashSet::new();
     if let Some(list) = &args.suspending {
         for capability in &list.elems {
@@ -273,7 +273,146 @@ fn control_executor(
             }
         }
     }
-    let mut assertions = Vec::new();
+    Ok(suspending)
+}
+
+/// Compile-time checks that `suspending` matches `#[capability(suspends)]`.
+fn suspension_assertions(
+    listed: &[(String, syn::ExprPath)],
+    suspending: &std::collections::HashSet<String>,
+) -> Vec<proc_macro2::TokenStream> {
+    listed
+        .iter()
+        .map(|(key, path)| {
+            let segments = &path.path.segments;
+            let name = &segments.last().expect("validated capability path").ident;
+            let module: Vec<_> = segments.iter().take(segments.len() - 1).collect();
+            let suspends =
+                format_ident!("__CAPABILITY_SUSPENDS_{}", name.to_string().to_uppercase());
+            let is_suspending = suspending.contains(key);
+            let message = if is_suspending {
+                format!(
+                    "`{key}` is listed in `suspending` but is not #[capability(suspends = true)]"
+                )
+            } else {
+                format!(
+                    "`{key}` is #[capability(suspends = true)] but is not listed in `suspending`"
+                )
+            };
+            quote! {
+                const _: () = assert!(#(#module::)* #suspends == #is_suspending, #message);
+            }
+        })
+        .collect()
+}
+
+/// Glue for an ordinary agent that declares suspending capabilities: it
+/// exports `suspendable` beside `capabilities` and reads the continuation of
+/// the operation it runs in through `runtara:agent-suspension/context`, which
+/// the host answers from its own execution state. Plain `capabilities.invoke`
+/// refuses a suspending capability (`SUSPENSION_UNSUPPORTED`, from the
+/// per-capability adapter). Empty for an agent without `suspending`.
+fn ordinary_suspension(
+    args: &AgentComponentArgs,
+    agent: &str,
+    interface: &syn::Ident,
+    listed: &[(String, syn::ExprPath)],
+    decode_input: &proc_macro2::TokenStream,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if args.suspending.is_none() {
+        return Ok(proc_macro2::TokenStream::new());
+    }
+    let suspending = suspending_set(args, listed)?;
+    let assertions = suspension_assertions(listed, &suspending);
+    let mut arms = Vec::new();
+    for (key, path) in listed {
+        if !suspending.contains(key) {
+            continue;
+        }
+        let segments = &path.path.segments;
+        let name = &segments.last().expect("validated capability path").ident;
+        let module: Vec<_> = segments.iter().take(segments.len() - 1).collect();
+        let id = format_ident!("__CAPABILITY_ID_{}", name.to_string().to_uppercase());
+        let suspend = format_ident!("__suspend_{name}");
+        arms.push(quote! {
+            #(#module::)* #id => #(#module::)* #suspend(value, &context)
+                .await
+                .map(__suspendable_to_outcome),
+        });
+    }
+    Ok(quote! {
+        #(#assertions)*
+
+        // Aliased: the agent crate may import the Rust-side `Wake` / `Suspendable`.
+        #[cfg(target_arch = "wasm32")]
+        use bindings::runtara::agent_suspension::types::{
+            Outcome as __Outcome, Suspension as __Suspension, Wake as __Wake,
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        impl bindings::exports::runtara::#interface::suspendable::Guest for Component {
+            async fn invoke(capability_id: String, input: Vec<u8>) -> Result<__Outcome, ErrorInfo> {
+                let value: serde_json::Value = #decode_input.map_err(bad_json)?;
+                // The host derives the operation from its own state, never
+                // from this call's arguments.
+                let context = runtara_agent_suspension::SuspendContext::new(
+                    bindings::runtara::agent_suspension::context::continuation(),
+                );
+                let result = match capability_id.as_str() {
+                    #(#arms)*
+                    other => return Err(ErrorInfo {
+                        code: "UNKNOWN_CAPABILITY".into(),
+                        message: format!("{} agent has no suspending capability `{other}`", #agent),
+                        category: "permanent".into(), severity: "error".into(),
+                        retryable: false, retry_after_ms: None, attributes: None,
+                    }),
+                };
+                result.map_err(error_string_to_error_info)
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn __suspendable_to_outcome(
+            result: runtara_agent_suspension::Suspendable<serde_json::Value>,
+        ) -> __Outcome {
+            match result {
+                runtara_agent_suspension::Suspendable::Completed(value) => {
+                    // A `serde_json::Value` always serializes.
+                    __Outcome::Completed(serde_json::to_vec(&value).unwrap_or_default())
+                }
+                runtara_agent_suspension::Suspendable::Suspended { wakes, state } => {
+                    __Outcome::Suspended(__Suspension {
+                        wakes: wakes
+                            .into_iter()
+                            .map(|wake| match wake {
+                                runtara_agent_suspension::Wake::At(at) => __Wake::At(at),
+                                runtara_agent_suspension::Wake::Instances(id) => {
+                                    __Wake::Instances(id)
+                                }
+                            })
+                            .collect(),
+                        state,
+                    })
+                }
+            }
+        }
+    })
+}
+
+/// Glue for the control agent. The composed copy never runs a capability body:
+/// `capabilities.invoke` and `suspendable.invoke` forward to the host executor,
+/// which runs `execution.invoke` on approved bytes in a fresh store and supplies
+/// the caller operation's continuation.
+fn control_executor(
+    args: &AgentComponentArgs,
+    agent: &str,
+    interface: &syn::Ident,
+    world: &str,
+    wit_paths: &proc_macro2::TokenStream,
+    listed: &[(String, syn::ExprPath)],
+) -> syn::Result<proc_macro2::TokenStream> {
+    let suspending = suspending_set(args, listed)?;
+    let assertions = suspension_assertions(listed, &suspending);
     let mut execution_arms = Vec::new();
     let mut suspending_ids = Vec::new();
     for (key, path) in listed {
@@ -281,17 +420,7 @@ fn control_executor(
         let name = &segments.last().expect("validated capability path").ident;
         let module: Vec<_> = segments.iter().take(segments.len() - 1).collect();
         let id = format_ident!("__CAPABILITY_ID_{}", name.to_string().to_uppercase());
-        let suspends = format_ident!("__CAPABILITY_SUSPENDS_{}", name.to_string().to_uppercase());
-        let is_suspending = suspending.contains(key);
-        let message = if is_suspending {
-            format!("`{key}` is listed in `suspending` but is not #[capability(suspends = true)]")
-        } else {
-            format!("`{key}` is #[capability(suspends = true)] but is not listed in `suspending`")
-        };
-        assertions.push(quote! {
-            const _: () = assert!(#(#module::)* #suspends == #is_suspending, #message);
-        });
-        if is_suspending {
+        if suspending.contains(key) {
             let suspend = format_ident!("__suspend_{name}");
             suspending_ids.push(quote! { #(#module::)* #id });
             execution_arms.push(quote! {
@@ -368,7 +497,7 @@ fn control_executor(
                 match bindings::runtara::control::executor::invoke(capability_id, input).await? {
                     __Outcome::Completed(output) => Ok(output),
                     __Outcome::Suspended(_) => Err(__control_error(
-                        "AGENT_UNEXPECTED_SUSPEND",
+                        runtara_agent_suspension::AGENT_UNEXPECTED_SUSPEND,
                         "a non-suspending capability returned a suspension".into(),
                     )),
                 }
@@ -518,11 +647,50 @@ mod tests {
     }
 
     #[test]
+    fn an_ordinary_suspending_agent_exports_suspendable_and_reads_its_context() {
+        let glue = expand(quote! {
+            agent = "suspend-probe",
+            capabilities = [plain, waits::pause],
+            suspending = [waits::pause],
+        });
+        // Both exports are async; the suspension WIT is on the path.
+        assert!(glue.contains(
+            r#"async:["export:runtara:agent-suspend-probe/capabilities@0.4.0#invoke","export:runtara:agent-suspend-probe/suspendable@0.4.0#invoke"]"#
+        ), "{glue}");
+        assert!(glue.contains(r#""../../runtara-agent-suspension/wit""#));
+        assert!(glue.contains(
+            "implbindings::exports::runtara::agent_suspend_probe::suspendable::GuestforComponent"
+        ));
+        // The continuation comes from the host context, never from arguments.
+        assert!(glue.contains(
+            "runtara_agent_suspension::SuspendContext::new(bindings::runtara::agent_suspension::context::continuation(),)"
+        ), "{glue}");
+        assert!(glue.contains("waits::__suspend_pause(value,&context)"));
+        // Plain `capabilities.invoke` keeps every capability's adapter, whose
+        // suspending one refuses with SUSPENSION_UNSUPPORTED.
+        assert!(glue.contains("waits::__invoke_pause(value)"));
+        assert!(glue.contains("__invoke_plain(value)"));
+        assert!(!glue.contains("__suspend_plain"));
+        assert!(glue.contains("const_:()=assert!(waits::__CAPABILITY_SUSPENDS_PAUSE==true"));
+        assert!(glue.contains("const_:()=assert!(__CAPABILITY_SUSPENDS_PLAIN==false"));
+        // No control forwarding outside the control agent.
+        assert!(!glue.contains("control::executor"));
+    }
+
+    #[test]
+    fn an_agent_without_suspending_capabilities_is_unchanged() {
+        let glue = expand(quote! { agent = "plain", capabilities = [get] });
+        assert!(!glue.contains("suspendable"));
+        assert!(!glue.contains("agent_suspension"));
+        assert!(glue.contains(r#"path:["../../runtara-agent-wit/wit","wit"]"#));
+    }
+
+    #[test]
     fn misdeclared_suspension_lists_are_rejected() {
         for (input, message) in [
             (
-                quote! { agent = "control", capabilities = [wait], suspending = [wait] },
-                "`suspending` is supported only with `control_executor = true`",
+                quote! { agent = "probe", capabilities = [get], suspending = [wait] },
+                "a suspending capability must also be listed in `capabilities`",
             ),
             (
                 quote! {

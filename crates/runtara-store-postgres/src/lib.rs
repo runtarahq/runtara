@@ -27,6 +27,7 @@ pub mod encoding;
 pub mod fence;
 
 mod backend;
+mod continuations;
 mod control_receipts;
 mod dialect;
 mod inputs;

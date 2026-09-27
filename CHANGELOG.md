@@ -120,6 +120,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   named wake-reason CHECK replacing the unnamed one from `024`; `041`
   validates it).
 
+- **Parallel approvals: the `control` agent's `wait` capability.** A step
+  waits for direct children to finish (`instanceIds`, at most 1000; `mode`
+  `all` or `any`; an optional `deadline` in epoch milliseconds) and returns
+  `{mode, resolution: satisfied|deadline|empty, finished[], remaining[]}`,
+  each finished child with its status and its output or error (values over
+  their cap are omitted and flagged). The run parks without holding a runner
+  slot until the wait settles and resumes where it left off; it registers its
+  wait once, so a replayed `any` keeps its choice, and too many, missing,
+  non-child or ancestor targets register nothing. The step must be durable
+  and have a timeout (`E028`, `E029`), and cannot sit in onError, onWait or
+  AiAgent tools (`E131`).
+- **Typed agent suspension.** A capability declared `suspends` may return
+  `suspended {wakes, state}`: the host keeps `state` (at most 64 KiB) per
+  step operation and attempt, attaches the step's instance waits, parks the
+  run at the earliest wake bounded by the step timeout, and re-invokes the
+  capability with its state on wake. Such steps now compile in branch arms,
+  Split and While bodies (a parallel Split runs them sequentially), embedded
+  workflows and retrying steps (each attempt keeps its own state). A
+  suspension within one second of the step timeout fails with
+  `AGENT_TIMEOUT`; one the host refuses fails with `AGENT_INVALID_SUSPENSION`;
+  a failed step closes its wait and discards its state, so a retry starts
+  afresh (`AGENT_CONTINUATION_REJECTED` when a capability refuses its saved
+  state). **Upgrade note:** the first boot migrates the runtime database
+  (`042_agent_continuations`: `instance_agent_continuations`, deleted with
+  its run).
+
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a
   self-signed or private-CA certificate with full verification;

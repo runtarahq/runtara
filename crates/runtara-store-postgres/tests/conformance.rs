@@ -1747,6 +1747,13 @@ fn lose_wake_hook(
 }
 
 #[tokio::test]
+async fn agent_continuations_conformance() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool);
+    runtara_core::persistence::conformance::continuations::run_all(&backend).await;
+}
+
+#[tokio::test]
 async fn instance_wait_conformance() {
     use runtara_core::persistence::conformance::waits;
     let (pool, _container) = postgres_test_pool().await;

@@ -48,8 +48,19 @@ pub const MAX_WAKE_ID_BYTES: usize = 64;
 /// as the plain `capabilities.invoke` or a test invocation.
 pub const SUSPENSION_UNSUPPORTED: &str = "SUSPENSION_UNSUPPORTED";
 
-/// The suspension violated the contract (no wakes, too many, oversized).
+/// The suspension violated the contract (no wakes, too many, oversized, or
+/// an instance wake its operation did not register). The host refuses it and
+/// the step fails with this code instead of parking.
 pub const AGENT_INVALID_SUSPENSION: &str = "AGENT_INVALID_SUSPENSION";
+
+/// A suspending capability refused the continuation it was handed (for
+/// example a version it does not read). The step fails; its failed exit
+/// discards the continuation, so a retry starts the operation afresh.
+pub const AGENT_CONTINUATION_REJECTED: &str = "AGENT_CONTINUATION_REJECTED";
+
+/// A capability returned a suspension through a path that cannot park: a
+/// non-suspending capability, or the plain `capabilities.invoke` export.
+pub const AGENT_UNEXPECTED_SUSPEND: &str = "AGENT_UNEXPECTED_SUSPEND";
 
 /// Canonical-ABI layout (wasm32) of the `types` interface: what the direct
 /// emitter reads from a `suspendable.invoke` result and what the host's
@@ -226,6 +237,44 @@ mod tests {
             interface.functions["invoke"].kind,
             wit_parser::FunctionKind::AsyncFreestanding
         ));
+    }
+
+    #[test]
+    fn the_suspending_agent_template_declares_the_documented_interface() {
+        let template = include_str!("../../runtara-agent-wit/templates/suspendable-agent.wit.in");
+        assert!(template.contains(SUSPENDABLE_INTERFACE_WIT), "{template}");
+        let mut resolve = Resolve::default();
+        resolve
+            .push_str(
+                "agent.wit",
+                "package runtara:agent@0.4.0;\ninterface types {\n record error-info { code: string, message: string, category: string, severity: string, retryable: bool, retry-after-ms: option<u64>, attributes: option<string> }\n}\n",
+            )
+            .unwrap();
+        resolve.push_str("agent-suspension.wit", WIT).unwrap();
+        let id = resolve
+            .push_str("probe.wit", &template.replace("{AGENT_ID}", "probe"))
+            .unwrap();
+        let world = &resolve.worlds[resolve.packages[id].worlds["agent"]];
+        let imports: Vec<_> = world
+            .imports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect();
+        assert!(
+            imports.contains(&CONTEXT_INTERFACE.to_string()),
+            "{imports:?}"
+        );
+        let exports: Vec<_> = world
+            .exports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect();
+        assert!(
+            exports.contains(&format!(
+                "runtara:agent-probe/{SUSPENDABLE_INTERFACE}@0.4.0"
+            )),
+            "{exports:?}"
+        );
     }
 
     #[test]

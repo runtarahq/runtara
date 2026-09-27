@@ -88,6 +88,8 @@ pub struct PersistenceRuntimeHost {
     /// the guest's next branch point rather than up to a tick later. `None`
     /// outside a real run.
     interrupt_guest: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The instance's tenant, read once for instance-wait calls.
+    tenant: tokio::sync::OnceCell<String>,
 }
 
 impl PersistenceRuntimeHost {
@@ -106,6 +108,7 @@ impl PersistenceRuntimeHost {
             sleep_interrupted: AtomicBool::new(false),
             cancel_token: None,
             interrupt_guest: None,
+            tenant: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -156,6 +159,40 @@ impl PersistenceRuntimeHost {
 
     fn err(error: impl std::fmt::Display) -> String {
         error.to_string()
+    }
+
+    /// The store's continuations of suspending agent operations. Typed
+    /// suspension fails closed on a backend without them.
+    fn continuations(
+        &self,
+    ) -> Result<&dyn runtara_core::persistence::continuations::AgentContinuations, String> {
+        self.state
+            .persistence
+            .agent_continuations()
+            .ok_or_else(|| "this store does not keep agent continuations".to_string())
+    }
+
+    /// The store's instance waits with this instance's tenant, or `None` for
+    /// a backend without instance waits (no operation can have registered one).
+    async fn instance_waits(
+        &self,
+    ) -> Result<Option<(&dyn runtara_core::persistence::waits::InstanceWaits, &str)>, String> {
+        let Some(waits) = self.state.persistence.instance_waits() else {
+            return Ok(None);
+        };
+        let tenant = self
+            .tenant
+            .get_or_try_init(|| async {
+                self.state
+                    .persistence
+                    .get_instance(&self.instance_id)
+                    .await
+                    .map_err(Self::err)?
+                    .map(|instance| instance.tenant_id)
+                    .ok_or_else(|| format!("instance {} not found", self.instance_id))
+            })
+            .await?;
+        Ok(Some((waits, tenant.as_str())))
     }
 
     /// Rate-limited lifecycle-signal poll, mirroring `RuntaraSdk::poll_signal`:
@@ -590,6 +627,54 @@ impl RuntimeHost for PersistenceRuntimeHost {
         .await
         .map(|_| ())
         .map_err(Self::err)
+    }
+
+    async fn operation_continuation_load(
+        &self,
+        op_hash: String,
+        attempt: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.continuations()?
+            .get(&self.instance_id, &op_hash, attempt)
+            .await
+            .map_err(Self::err)
+    }
+
+    async fn operation_continuation_store(
+        &self,
+        op_hash: String,
+        attempt: u32,
+        state: Vec<u8>,
+    ) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
+        self.continuations()?
+            .put(&self.instance_id, &op_hash, attempt, &state)
+            .await
+            .map_err(Self::err)
+    }
+
+    async fn operation_wait_close(&self, op_hash: String) -> Result<(), String> {
+        if let Some((waits, tenant)) = self.instance_waits().await? {
+            waits
+                .close_wait(tenant, &self.instance_id, &op_hash)
+                .await
+                .map_err(Self::err)?;
+        }
+        Ok(())
+    }
+
+    async fn operation_release(&self, op_hash: String) -> Result<(), String> {
+        self.continuations()?
+            .delete(&self.instance_id, &op_hash)
+            .await
+            .map_err(Self::err)?;
+        if let Some((waits, tenant)) = self.instance_waits().await? {
+            waits
+                .delete_resolved_wait(tenant, &self.instance_id, &op_hash)
+                .await
+                .map_err(Self::err)?;
+        }
+        Ok(())
     }
 
     async fn durable_sleep_checkpoint(

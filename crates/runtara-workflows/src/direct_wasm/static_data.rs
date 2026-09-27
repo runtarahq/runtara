@@ -47,6 +47,15 @@ pub(super) const AGENT_OPERATION_SCOPE_FIELDS: [&str; 4] = [
     "permanent",
     "error",
 ];
+/// The step error of a suspension the host refused: it broke the caps (no
+/// wakes, more than 16, a wait id over 64 bytes, a state over 64 KiB) or named
+/// an instance wait its operation did not register.
+pub(super) const AGENT_INVALID_SUSPENSION_FIELDS: [&str; 4] = [
+    runtara_agent_suspension::AGENT_INVALID_SUSPENSION,
+    "The agent returned a suspension the host refused",
+    "permanent",
+    "error",
+];
 /// Structured failure payload emitted when a `While` step exceeds its configured
 /// timeout. Generated Rust parses `WhileConfig.timeout` but does not enforce it;
 /// direct mode is the first to honor the documented "if exceeded, step fails"
@@ -204,6 +213,9 @@ pub(super) struct DirectCoreStaticData {
     /// `AGENT_OPERATION_SCOPE_FIELDS`, laid out only when an operation-scoped
     /// site exists, so every other artifact keeps its exact bytes.
     pub(super) operation_scope_error: Option<DirectDataSegment>,
+    /// `AGENT_INVALID_SUSPENSION_FIELDS`, laid out only when a suspending site
+    /// exists.
+    pub(super) invalid_suspension_error: Option<DirectDataSegment>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -418,6 +430,14 @@ impl DirectCoreStaticData {
             offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
             Some(segment)
         };
+        let invalid_suspension_error = if agent_suspending.is_empty() {
+            None
+        } else {
+            let fields = AGENT_INVALID_SUSPENSION_FIELDS.concat();
+            let segment = DirectDataSegment::new(offset, fields.as_bytes());
+            offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
+            Some(segment)
+        };
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
@@ -458,6 +478,7 @@ impl DirectCoreStaticData {
             agent_suspending,
             agent_operation_scoped,
             operation_scope_error,
+            invalid_suspension_error,
             heap_base: offset,
             memory_min_pages,
         })
@@ -550,6 +571,7 @@ impl DirectCoreStaticData {
         segments.extend(self.step_ids.values());
         segments.extend(self.agent_capability_ids.values());
         segments.extend(self.operation_scope_error.as_ref());
+        segments.extend(self.invalid_suspension_error.as_ref());
         segments
     }
 }

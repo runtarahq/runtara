@@ -43,10 +43,22 @@
 #              child reads `not-started` while it runs, and no id has both
 #              a run and a never-launched outcome.
 #
-# Later stages (waits) are added by their slices. Stage 1 ends by revoking
-# the control approval, so it runs after every other stage.
+#   5  WAITS   parallel approvals: a parent starts Finance and Legal approval
+#              children (each a WaitForSignal) and control:wait-s on both
+#              (`all`); it parks without a runner slot (an outside trigger
+#              still runs), one answer does not wake it, the second does, in
+#              either order, and it finishes with both results in answer
+#              order. Pausing a parked parent holds it while its children
+#              finish (D4); `any` with leave_running returns on the first
+#              answer and the sibling survives (D3); a business deadline
+#              settles with what finished; a SIGKILL restart while parked
+#              resumes; non-durable, untimed and onError waits are E028,
+#              E029 and E131.
 #
-# Usage:  STAGES=1,2,3,4 ./e2e/test_control_agent.sh
+# Stage 1 ends by revoking the control approval, so it runs after every
+# other stage.
+#
+# Usage:  STAGES=1,2,3,4,5 ./e2e/test_control_agent.sh
 #
 # Prereqs: Postgres + docker (isolated Valkey), a built runtara-server, and
 # prebuilt components (scripts/build-agent-components.sh).
@@ -61,8 +73,8 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-STAGES="${STAGES:-1,2,3,4}"
-IMPLEMENTED_STAGES="1,2,3,4"
+STAGES="${STAGES:-1,2,3,4,5}"
+IMPLEMENTED_STAGES="1,2,3,4,5"
 for stage in ${STAGES//,/ }; do
     case ",${IMPLEMENTED_STAGES}," in
         *",${stage},"*) ;;
@@ -922,6 +934,241 @@ if stage_enabled 4; then
         "SELECT count(*) FROM instance_external_outcomes AS o JOIN instances AS i ON i.instance_id = o.instance_id")
     [ "${BOTH}" = "0" ] || { print_error "${BOTH} ids have both a run and a never-launched outcome"; exit 1; }
     print_success "The held child was cancelled in admission, never ran, and reads cancelled ✓"
+fi
+
+if stage_enabled 5; then
+    # -----------------------------------------------------------------------
+    # Stage 5: parallel approvals through control:wait.
+    # -----------------------------------------------------------------------
+    labelled() {
+        psql_quiet -d "${TEST_DB_SERVER}" -c \
+            "SELECT instance_id FROM execution_requests WHERE tenant_id = '${TENANT}' AND parent_instance_id = '$1' AND run_label = '$2'"
+    }
+    open_request() {
+        psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+            "SELECT request_id FROM instance_input_requests WHERE instance_id = '$1' AND state = 'open'"
+    }
+    parked_reason() {
+        psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+            "SELECT COALESCE(termination_reason::text, '') FROM instances WHERE instance_id = '$1'"
+    }
+    busy_runs() {
+        psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+            "SELECT count(*) FROM instances WHERE tenant_id = '${TENANT}' AND status IN ('pending', 'running')"
+    }
+    # Answer a child's open WaitForSignal request through the public API.
+    answer() {
+        local child="$1" approved="$2" request resp
+        request=""
+        for _ in {1..60}; do
+            request=$(open_request "${child}")
+            [ -n "${request}" ] && break
+            sleep 1
+        done
+        [ -n "${request}" ] || { print_error "Child ${child} has no open request: $(instance_row "${child}")"; exit 1; }
+        resp=$(api_post "/signals/${child}" "$(jq -nc --arg r "${request}" --arg o "e2e-answer-${child}" --argjson a "${approved}" \
+            '{requestId: $r, operationId: $o, payload: {approved: $a}}')")
+        [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Answering ${child} failed: ${resp}"; exit 1; }
+    }
+    approvals_step() {
+        # id, label, policy
+        jq -n --arg id "$1" --arg label "$2" --arg policy "$3" '{
+            id: $id, stepType: "Agent", agentId: "control", capabilityId: "start",
+            maxRetries: 0, durable: true, inputMapping: {
+                workflowId: { valueType: "reference", value: "data.approver" },
+                runLabel: { valueType: "immediate", value: $label },
+                parentClosePolicy: { valueType: "immediate", value: $policy },
+                inputs: { valueType: "immediate", value: { data: {}, variables: {} } } } }'
+    }
+    # A parent that starts the Finance and Legal approvals, then waits.
+    approvals_graph() {
+        # name, policy, mode, with-deadline
+        jq -n --arg name "$1" --argjson finance "$(approvals_step finance finance "$2")" \
+            --argjson legal "$(approvals_step legal legal "$2")" --arg mode "$3" --argjson timed "$4" '
+            ({ instanceIds: { valueType: "composite", value: [
+                   { valueType: "reference", value: "steps.finance.outputs.instanceId" },
+                   { valueType: "reference", value: "steps.legal.outputs.instanceId" } ] },
+               mode: { valueType: "immediate", value: $mode } }
+             + (if $timed then { deadline: { valueType: "reference", value: "data.deadline" } } else {} end)) as $mapping
+            | {
+            name: $name, durable: true, entryPoint: "finance",
+            steps: { finance: $finance, legal: $legal,
+                     wait: { id: "wait", stepType: "Agent", agentId: "control", capabilityId: "wait",
+                             maxRetries: 0, durable: true, timeout: 600000, inputMapping: $mapping },
+                     finish: { id: "finish", stepType: "Finish", inputMapping: {
+                         result: { valueType: "reference", value: "steps.wait.outputs" },
+                         finance: { valueType: "reference", value: "steps.finance.outputs.instanceId" },
+                         legal: { valueType: "reference", value: "steps.legal.outputs.instanceId" } } } },
+            executionPlan: [ { fromStep: "finance", toStep: "legal" }, { fromStep: "legal", toStep: "wait" },
+                             { fromStep: "wait", toStep: "finish" } ],
+            variables: {}, outputSchema: {},
+            inputSchema: ({ approver: { type: "string", required: true } }
+                          + (if $timed then { deadline: { type: "integer", required: true } } else {} end))
+        }'
+    }
+    # Launch a parent; wait until it parks on both approvals; echo "parent finance legal".
+    parked_parent() {
+        local wf="$1" data="$2" parent finance legal
+        parent=$(launch "${wf}" "${data}")
+        for _ in {1..60}; do [ -n "$(labelled "${parent}" legal)" ] && break; sleep 0.5; done
+        finance=$(labelled "${parent}" finance); legal=$(labelled "${parent}" legal)
+        [ -n "${finance}" ] && [ -n "${legal}" ] || { print_error "Parent ${parent} did not start both approvals"; exit 1; }
+        for child in "${finance}" "${legal}"; do
+            [ "$(wait_status "${child}" suspended 90)" = "suspended" ] || { print_error "Approval ${child} did not park: $(instance_row "${child}")"; exit 1; }
+        done
+        [ "$(wait_status "${parent}" suspended 90)" = "suspended" ] || { print_error "Parent ${parent} did not park: $(instance_row "${parent}")"; exit 1; }
+        for _ in {1..30}; do [ "$(parked_reason "${parent}")" = "waiting_instances" ] && break; sleep 0.5; done
+        [ "$(parked_reason "${parent}")" = "waiting_instances" ] || { print_error "Parent ${parent} is not waiting on its children: '$(parked_reason "${parent}")'"; exit 1; }
+        echo "${parent} ${finance} ${legal}"
+    }
+    # `parked_parent` runs in a command substitution, where its `exit` only
+    # leaves the subshell: stop here when it did not name all three runs.
+    parked_or_exit() { [ -n "${3:-}" ] || { print_error "No parked parent"; exit 1; }; }
+
+    # Earlier stages leave children holding control's share for a while.
+    for _ in {1..120}; do [ "$(busy_runs)" = "0" ] && break; sleep 1; done
+
+    APPROVER_GRAPH=$(jq -n '{
+        name: "control-approver", durable: true, entryPoint: "approve",
+        steps: { approve: { id: "approve", stepType: "WaitForSignal", name: "Approve",
+                            pollIntervalMs: 500,
+                            responseSchema: { approved: { type: "boolean", required: true } } },
+                 finish: { id: "finish", stepType: "Finish", inputMapping: {
+                     decision: { valueType: "reference", value: "steps.approve.outputs" } } } },
+        executionPlan: [ { fromStep: "approve", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: {}
+    }')
+    read -r APPROVER_WF _ <<< "$(make_workflow control-approver "${APPROVER_GRAPH}")"
+    read -r ALL_WF _ <<< "$(make_workflow control-approvals-all "$(approvals_graph control-approvals-all cancel all false)")"
+    read -r ANY_WF _ <<< "$(make_workflow control-approvals-any "$(approvals_graph control-approvals-any leave_running any false)")"
+    read -r TIMED_WF _ <<< "$(make_workflow control-approvals-timed "$(approvals_graph control-approvals-timed cancel all true)")"
+    APPROVER_DATA=$(jq -nc --arg a "${APPROVER_WF}" '{approver: $a}')
+
+    for order in finance-first legal-first; do
+        print_step "Stage 5: parallel approvals, answered ${order}..."
+        read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${ALL_WF}" "${APPROVER_DATA}")"
+        parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
+        # Parked with both approvals parked: nothing holds a runner slot, so an
+        # outside trigger still runs under MAX_CONCURRENT_EXECUTIONS=5.
+        [ "$(busy_runs)" = "0" ] || { print_error "A parked parent or approval holds a slot: $(busy_runs) busy"; exit 1; }
+        REASON=$(test_control get "{\"instanceId\": \"${PARENT}\"}" | jq -r '.output.instance.suspensionReason // .result.instance.suspensionReason // empty')
+        [ "${REASON}" = "waiting_instances" ] || { print_error "Expected suspensionReason waiting_instances, got '${REASON}'"; exit 1; }
+        if [ "${order}" = "finance-first" ]; then FIRST="${FINANCE}"; SECOND="${LEGAL}"; else FIRST="${LEGAL}"; SECOND="${FINANCE}"; fi
+        answer "${FIRST}" true
+        [ "$(wait_status "${FIRST}" completed 90)" = "completed" ] || { print_error "The first approval did not finish: $(instance_row "${FIRST}")"; exit 1; }
+        sleep 3
+        [ "$(instance_status "${PARENT}")" = "suspended" ] || { print_error "One answer woke an \`all\` wait: $(instance_row "${PARENT}")"; exit 1; }
+        answer "${SECOND}" false
+        [ "$(wait_status "${PARENT}" completed 120)" = "completed" ] || { print_error "The parent did not finish: $(instance_row "${PARENT}")"; exit 1; }
+        OUT=$(instance_output "${PARENT}")
+        [ "$(echo "${OUT}" | jq -r '.result.resolution')" = "satisfied" ] || { print_error "Unexpected resolution: ${OUT}"; exit 1; }
+        [ "$(echo "${OUT}" | jq -r '.result.finished | map(.instanceId) | join(",")')" = "${FIRST},${SECOND}" ] \
+            || { print_error "Finished should list the approvals in answer order: ${OUT}"; exit 1; }
+        [ "$(echo "${OUT}" | jq -r --arg f "${FINANCE}" '.result.finished[] | select(.instanceId == $f) | .output.decision.approved')" \
+            = "$([ "${order}" = "finance-first" ] && echo true || echo false)" ] || { print_error "Finance's decision is missing: ${OUT}"; exit 1; }
+        [ "$(echo "${OUT}" | jq -r '.result.remaining | length')" = "0" ] || { print_error "Nothing should remain: ${OUT}"; exit 1; }
+        [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM instance_waits WHERE waiter_instance_id = '${PARENT}'")" = "0" ] \
+            || { print_error "The settled wait was not released"; exit 1; }
+        [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM instance_agent_continuations WHERE instance_id = '${PARENT}'")" = "0" ] \
+            || { print_error "The continuation was not released"; exit 1; }
+        print_success "Both approvals answered (${order}): the parent parked slot-free and resumed with both results ✓"
+    done
+
+    print_step "Stage 5: pausing a parked parent holds it (D4)..."
+    read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${ALL_WF}" "${APPROVER_DATA}")"
+    parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
+    RESP=$(api_post "/workflows/instances/${PARENT}/pause" '{}')
+    [ "$(echo "${RESP}" | jq -r '.data.outcome')" = "applied" ] || { print_error "Pausing the parked parent should apply at once: ${RESP}"; exit 1; }
+    answer "${FINANCE}" true
+    answer "${LEGAL}" true
+    [ "$(wait_status "${LEGAL}" completed 90)" = "completed" ] || { print_error "Legal did not finish: $(instance_row "${LEGAL}")"; exit 1; }
+    [ "$(wait_status "${FINANCE}" completed 90)" = "completed" ] || { print_error "Finance did not finish: $(instance_row "${FINANCE}")"; exit 1; }
+    sleep 5
+    [ "$(instance_status "${PARENT}")" = "suspended" ] || { print_error "A paused parent was woken by its children: $(instance_row "${PARENT}")"; exit 1; }
+    REASON=$(test_control get "{\"instanceId\": \"${PARENT}\"}" | jq -r '.output.instance.suspensionReason // .result.instance.suspensionReason // empty')
+    [ "${REASON}" = "paused" ] || { print_error "Expected suspensionReason paused, got '${REASON}'"; exit 1; }
+    RESP=$(api_post "/workflows/instances/${PARENT}/resume" '{}')
+    [ "$(echo "${RESP}" | jq -r '.data.outcome')" = "applied" ] || { print_error "Resume failed: ${RESP}"; exit 1; }
+    [ "$(wait_status "${PARENT}" completed 120)" = "completed" ] || { print_error "The resumed parent did not finish: $(instance_row "${PARENT}")"; exit 1; }
+    [ "$(instance_output "${PARENT}" | jq -r '.result.resolution')" = "satisfied" ] || { print_error "Unexpected: $(instance_output "${PARENT}")"; exit 1; }
+    print_success "A paused parent stayed paused while its children finished, and resumed to their results ✓"
+
+    print_step "Stage 5: \`any\` with leave_running returns on the first answer (D3)..."
+    read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${ANY_WF}" "${APPROVER_DATA}")"
+    parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
+    answer "${LEGAL}" true
+    [ "$(wait_status "${PARENT}" completed 120)" = "completed" ] || { print_error "The any-parent did not finish: $(instance_row "${PARENT}")"; exit 1; }
+    OUT=$(instance_output "${PARENT}")
+    [ "$(echo "${OUT}" | jq -r '.result.mode + "|" + .result.resolution')" = "any|satisfied" ] || { print_error "Unexpected: ${OUT}"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.result.finished | map(.instanceId) | join(",")')" = "${LEGAL}" ] || { print_error "Only legal finished: ${OUT}"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.result.remaining | join(",")')" = "${FINANCE}" ] || { print_error "Finance remains: ${OUT}"; exit 1; }
+    sleep 8
+    [ "$(instance_status "${FINANCE}")" = "suspended" ] || { print_error "The leave_running approval did not survive its parent: $(instance_row "${FINANCE}")"; exit 1; }
+    answer "${FINANCE}" true
+    [ "$(wait_status "${FINANCE}" completed 90)" = "completed" ] || { print_error "The surviving approval did not finish: $(instance_row "${FINANCE}")"; exit 1; }
+    print_success "\`any\` returned on the first answer; the leave_running sibling kept running ✓"
+
+    print_step "Stage 5: a business deadline returns what finished so far..."
+    DEADLINE=$(( $(date +%s) * 1000 + 25000 ))
+    read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${TIMED_WF}" "$(jq -nc --arg a "${APPROVER_WF}" --argjson d "${DEADLINE}" '{approver: $a, deadline: $d}')")"
+    parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
+    answer "${FINANCE}" true
+    [ "$(wait_status "${FINANCE}" completed 90)" = "completed" ] || { print_error "Finance did not finish: $(instance_row "${FINANCE}")"; exit 1; }
+    [ "$(wait_status "${PARENT}" completed 120)" = "completed" ] || { print_error "The timed parent did not finish at its deadline: $(instance_row "${PARENT}")"; exit 1; }
+    [ "$(( $(date +%s) * 1000 ))" -ge "${DEADLINE}" ] || { print_error "The timed parent finished before its deadline"; exit 1; }
+    OUT=$(instance_output "${PARENT}")
+    [ "$(echo "${OUT}" | jq -r '.result.resolution')" = "deadline" ] || { print_error "Expected resolution deadline: ${OUT}"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.result.finished | map(.instanceId) | join(",")')" = "${FINANCE}" ] || { print_error "Only finance finished: ${OUT}"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.result.remaining | join(",")')" = "${LEGAL}" ] || { print_error "Legal remains: ${OUT}"; exit 1; }
+    print_success "The deadline settled the wait with finance finished and legal remaining ✓"
+
+    print_step "Stage 5: a restart while parked resumes the parent..."
+    read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${ALL_WF}" "${APPROVER_DATA}")"
+    parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
+    crash_server
+    start_server
+    answer "${FINANCE}" true
+    answer "${LEGAL}" true
+    [ "$(wait_status "${PARENT}" completed 180)" = "completed" ] || { print_error "The parent did not resume after the restart: $(instance_row "${PARENT}")"; exit 1; }
+    [ "$(instance_output "${PARENT}" | jq -r '.result.finished | length')" = "2" ] || { print_error "Unexpected: $(instance_output "${PARENT}")"; exit 1; }
+    print_success "A parent parked across a SIGKILL restart resumed to both results ✓"
+
+    print_step "Stage 5: bad placements are validation errors (E028, E029, E131)..."
+    bad_wait() {
+        # extra step fields
+        jq -n --argjson extra "$1" '{
+            id: "wait", stepType: "Agent", agentId: "control", capabilityId: "wait", maxRetries: 0,
+            durable: true, timeout: 600000,
+            inputMapping: { instanceIds: { valueType: "immediate", value: ["x"] } } } + $extra'
+    }
+    expect_code() {
+        local code="$1" graph="$2" resp wf_id
+        resp=$(api_post /workflows/create "{\"name\": \"control-bad-${code}\", \"description\": \"control e2e\"}")
+        wf_id=$(echo "${resp}" | jq -r '.data.id // empty')
+        resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${graph}}")
+        if ! echo "${resp}" | grep -q "${code}"; then
+            resp=$(api_post "/workflows/${wf_id}/versions/1/compile" '{}' 300)
+        fi
+        echo "${resp}" | grep -q "${code}" || { print_error "Expected ${code}: $(echo "${resp}" | head -c 600)"; exit 1; }
+    }
+    single_graph() {
+        jq -n --argjson step "$1" '{ name: "control-bad", durable: true, entryPoint: "wait",
+            steps: { wait: $step, finish: { id: "finish", stepType: "Finish" } },
+            executionPlan: [ { fromStep: "wait", toStep: "finish" } ],
+            variables: {}, inputSchema: {}, outputSchema: {} }'
+    }
+    expect_code E028 "$(single_graph "$(bad_wait '{"durable": false}')")"
+    expect_code E029 "$(single_graph "$(bad_wait '{"timeout": null}' | jq 'del(.timeout)')")"
+    ON_ERROR=$(jq -n --argjson wait "$(bad_wait '{}')" '{ name: "control-bad", durable: true, entryPoint: "boom",
+        steps: { boom: { id: "boom", stepType: "Agent", agentId: "control", capabilityId: "get", maxRetries: 0,
+                         inputMapping: { instanceId: { valueType: "immediate", value: "no-such-run" } } },
+                 wait: $wait, finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [ { fromStep: "boom", toStep: "finish" },
+                         { fromStep: "boom", toStep: "wait", label: "onError" },
+                         { fromStep: "wait", toStep: "finish" } ],
+        variables: {}, inputSchema: {}, outputSchema: {} }')
+    expect_code E131 "${ON_ERROR}"
+    print_success "Non-durable (E028), untimed (E029) and onError (E131) waits are refused ✓"
 fi
 
 if stage_enabled 1; then

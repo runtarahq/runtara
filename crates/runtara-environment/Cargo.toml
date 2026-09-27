@@ -146,3 +146,7 @@ required-features = ["scoped-workflow-integration-tests"]
 [[test]]
 name = "managed_inputs"
 required-features = ["scoped-workflow-integration-tests"]
+
+[[test]]
+name = "control_wait_runner_test"
+required-features = ["scoped-workflow-integration-tests"]

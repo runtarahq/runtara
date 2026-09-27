@@ -94,6 +94,8 @@ struct Host {
     continuations: Mutex<HashMap<(String, u32), Vec<u8>>>,
     /// Every `operation_release`, in order.
     released_operations: Mutex<Vec<String>>,
+    /// Every `operation_wait_close`, in order.
+    closed_waits: Mutex<Vec<String>>,
 }
 impl Host {
     fn new() -> Self {
@@ -132,6 +134,7 @@ impl Host {
             input_keys: Mutex::new(Vec::new()),
             continuations: Mutex::new(HashMap::new()),
             released_operations: Mutex::new(Vec::new()),
+            closed_waits: Mutex::new(Vec::new()),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -392,10 +395,15 @@ impl RuntimeHost for Host {
         attempt: u32,
         state: Vec<u8>,
     ) -> Result<(), String> {
-        self.continuations
-            .lock()
-            .unwrap()
-            .insert((op_hash, attempt), state);
+        // One continuation per operation, like the durable store: a later
+        // attempt's replaces an earlier one's.
+        let mut continuations = self.continuations.lock().unwrap();
+        continuations.retain(|(stored, _), _| *stored != op_hash);
+        continuations.insert((op_hash, attempt), state);
+        Ok(())
+    }
+    async fn operation_wait_close(&self, op_hash: String) -> Result<(), String> {
+        self.closed_waits.lock().unwrap().push(op_hash);
         Ok(())
     }
     async fn operation_release(&self, op_hash: String) -> Result<(), String> {

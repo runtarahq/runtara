@@ -5,7 +5,8 @@
 //!     the dependency and dispatcher registries still see one agent;
 //! (b) each call site binds the right `(agent, interface)` import although the
 //!     two are type-identical, which only behaviour can show;
-//! (c) the result offsets the emitter reads are the WIT's `SizeAlign` layout;
+//! (c) the result offsets the emitter reads are the WIT's `SizeAlign` layout
+//!     (pinned hermetically in `operation_scoped_tests`);
 //! (d) a relaunch delivers the saved continuation (host `context` import);
 //! (e) the composed control copy forwards to the host executor with the saved
 //!     continuation, while a direct control API call from a root store, or from
@@ -19,8 +20,6 @@ use runtara_component_host::control_host::{
     WaitRequest, WaitResolution, WaitSettled,
 };
 use runtara_component_host::lifecycle::WorkflowWake;
-// This test module is itself named `agent_suspend`; name the emitter module.
-use crate::direct_wasm::compile::agent_suspend as lowering;
 
 /// The probe's `at` wake, well before any step deadline in these tests.
 const PROBE_WAKE_AT: u64 = 5_000;
@@ -54,6 +53,92 @@ const MEMORY: &str = r#"(core module $memory
 /// `PROBE_WAKE_AT` with `PROBE_STATE`. The two exports are type-identical in
 /// their flat signature, so only these answers tell which one a site bound.
 fn suspend_probe() -> Vec<u8> {
+    probe_component("suspend-probe", Behaviour::Once)
+}
+
+/// How a probe's `suspendable.invoke` answers.
+#[derive(Clone, Copy)]
+enum Behaviour {
+    /// Complete with the continuation; without one, suspend until
+    /// `PROBE_WAKE_AT` with `PROBE_STATE`.
+    Once,
+    /// Always suspend with `PROBE_STATE`, until `u64::MAX` (so the step
+    /// deadline bounds the park).
+    Forever,
+    /// Suspend without any wake.
+    NoWakes,
+    /// Suspend on an instance wait nobody registered.
+    ForeignWait,
+    /// Refuse a continuation (`AGENT_CONTINUATION_REJECTED`, retryable so a
+    /// retrying site starts its next attempt); without one, suspend like
+    /// `Once`.
+    Reject,
+}
+
+/// The WAT of `suspendable.invoke` for `behaviour`. The result lives at 2048:
+/// ok tag, the outcome discriminant at +8, its payload at +12; the one wake at
+/// 1536 (discriminant, payload at +8). An error-info sits at +8.
+fn suspendable_body(behaviour: Behaviour) -> String {
+    let suspend = |wake: &str| {
+        format!(
+            r#"(i32.store8 (i32.const 2056) (i32.const 1))
+          (i32.store (i32.const 2060) (i32.const 1536))
+          (i32.store (i32.const 2064) (i32.const 1))
+          (i32.store (i32.const 2068) (i32.const 1056))
+          (i32.store (i32.const 2072) (i32.const {state_len}))
+          {wake}"#,
+            state_len = PROBE_STATE.len(),
+        )
+    };
+    let at = |value: &str| {
+        format!(
+            "(i32.store8 (i32.const 1536) (i32.const 0)) (i64.store (i32.const 1544) (i64.const {value}))"
+        )
+    };
+    let completed = r#"(i32.store8 (i32.const 2056) (i32.const 0))
+          (i32.store (i32.const 2060) (i32.load (i32.const 3076)))
+          (i32.store (i32.const 2064) (i32.load (i32.const 3080)))"#;
+    let rejected = r#"(i32.store8 (i32.const 2048) (i32.const 1))
+          (i32.store (i32.const 2056) (i32.const 1200)) (i32.store (i32.const 2060) (i32.const 27))
+          (i32.store (i32.const 2064) (i32.const 1240)) (i32.store (i32.const 2068) (i32.const 5))
+          (i32.store (i32.const 2072) (i32.const 1250)) (i32.store (i32.const 2076) (i32.const 9))
+          (i32.store (i32.const 2080) (i32.const 1260)) (i32.store (i32.const 2084) (i32.const 5))
+          (i32.store8 (i32.const 2088) (i32.const 1))
+          (i32.store8 (i32.const 2096) (i32.const 0))
+          (i32.store8 (i32.const 2112) (i32.const 0))"#;
+    let once = suspend(&at(&PROBE_WAKE_AT.to_string()));
+    let (with, without) = match behaviour {
+        Behaviour::Once => (completed.to_string(), once),
+        Behaviour::Reject => (rejected.to_string(), once),
+        Behaviour::Forever => {
+            let forever = suspend(&at("-1"));
+            (forever.clone(), forever)
+        }
+        Behaviour::NoWakes => {
+            let none = suspend("(i32.store (i32.const 2064) (i32.const 0))");
+            (none.clone(), none)
+        }
+        Behaviour::ForeignWait => {
+            let foreign = suspend(
+                "(i32.store8 (i32.const 1536) (i32.const 1))                  (i32.store (i32.const 1544) (i32.const 1100))                  (i32.store (i32.const 1548) (i32.const 7))",
+            );
+            (foreign.clone(), foreign)
+        }
+    };
+    format!(
+        r#"(func (export "suspendable") (param i32 i32 i32 i32) (result i32)
+      (call $continuation (i32.const 3072))
+      (i32.store8 (i32.const 2048) (i32.const 0))
+      (if (i32.load8_u (i32.const 3072))
+        (then {with})
+        (else {without}))
+      (i32.const 2048))"#
+    )
+}
+
+/// A suspending probe agent `agent` whose `suspendable.invoke` behaves as
+/// `behaviour` (see [`suspend_probe`] for the shape).
+fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
   (import "runtara:agent-suspension/context@0.1.0" (instance $context
@@ -66,28 +151,17 @@ fn suspend_probe() -> Vec<u8> {
     (import "h" "continuation" (func $continuation (param i32)))
     (data (i32.const 1024) "\22capabilities\22")
     (data (i32.const 1056) "\22paused\22")
+    (data (i32.const 1100) "foreign")
+    (data (i32.const 1200) "AGENT_CONTINUATION_REJECTED")
+    (data (i32.const 1240) "stale")
+    (data (i32.const 1250) "transient")
+    (data (i32.const 1260) "error")
     (func (export "plain") (param i32 i32 i32 i32) (result i32)
       (i32.store8 (i32.const 2048) (i32.const 0))
       (i32.store (i32.const 2056) (i32.const 1024))
       (i32.store (i32.const 2060) (i32.const 14))
       (i32.const 2048))
-    (func (export "suspendable") (param i32 i32 i32 i32) (result i32)
-      (call $continuation (i32.const 3072))
-      (i32.store8 (i32.const 2048) (i32.const 0))
-      (if (i32.load8_u (i32.const 3072))
-        (then
-          (i32.store8 (i32.const 2056) (i32.const 0))
-          (i32.store (i32.const 2060) (i32.load (i32.const 3076)))
-          (i32.store (i32.const 2064) (i32.load (i32.const 3080))))
-        (else
-          (i32.store8 (i32.const 2056) (i32.const 1))
-          (i32.store (i32.const 2060) (i32.const 1536))
-          (i32.store (i32.const 2064) (i32.const 1))
-          (i32.store (i32.const 2068) (i32.const 1056))
-          (i32.store (i32.const 2072) (i32.const {state_len}))
-          (i32.store8 (i32.const 1536) (i32.const 0))
-          (i64.store (i32.const 1544) (i64.const {PROBE_WAKE_AT}))))
-      (i32.const 2048)))
+    {body})
   (core instance $code (instantiate $code
     (with "m" (instance $memory))
     (with "h" (instance (export "continuation" (func $continuation))))))
@@ -105,9 +179,9 @@ fn suspend_probe() -> Vec<u8> {
   (instance $suspendable (export "error-info" (type $error)) (export "wake" (type $wake))
     (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
     (export "invoke" (func $suspendable)))
-  (export "runtara:agent-suspend-probe/capabilities@0.4.0" (instance $capabilities))
-  (export "runtara:agent-suspend-probe/suspendable@0.4.0" (instance $suspendable)))"#,
-        state_len = PROBE_STATE.len(),
+  (export "runtara:agent-{agent}/capabilities@0.4.0" (instance $capabilities))
+  (export "runtara:agent-{agent}/suspendable@0.4.0" (instance $suspendable)))"#,
+        body = suspendable_body(behaviour),
     ))
     .expect("suspend probe parses")
 }
@@ -184,17 +258,40 @@ fn control_api_probe() -> Vec<u8> {
 }
 
 fn probe_info() -> runtara_dsl::agent_meta::AgentInfo {
+    probe_info_for("suspend-probe")
+}
+
+fn probe_info_for(agent: &str) -> runtara_dsl::agent_meta::AgentInfo {
     let capability = |id: &str, suspends: bool| {
         json!({"id": id, "name": id, "inputType": "ProbeInput", "inputs": [],
             "output": {"type": "string"}, "hasSideEffects": false, "isIdempotent": true,
             "rateLimited": false, "suspends": suspends})
     };
     serde_json::from_value(json!({
-        "id": "suspend-probe", "name": "Suspend probe", "description": "fixture",
+        "id": agent, "name": "Suspend probe", "description": "fixture",
         "hasSideEffects": false, "supportsConnections": false, "integrationIds": [],
         "capabilities": [capability("plain", false), capability("pause", true)]
     }))
     .expect("probe AgentInfo")
+}
+
+/// Stage one probe agent per behaviour, the way an operator agent in an extra
+/// components dir is.
+fn stage_probes(dir: &Path, probes: &[(&str, Behaviour)]) -> anyhow::Result<PathBuf> {
+    let staging = dir.join("probe-components");
+    fs::create_dir_all(&staging)?;
+    for (agent, behaviour) in probes {
+        let file = agent.replace('-', "_");
+        fs::write(
+            staging.join(format!("runtara_agent_{file}.wasm")),
+            probe_component(agent, *behaviour),
+        )?;
+        fs::write(
+            staging.join(format!("runtara_agent_{file}.meta.json")),
+            serde_json::to_vec(&probe_info_for(agent))?,
+        )?;
+    }
+    Ok(staging)
 }
 
 /// Stage the probe the way an operator agent in an extra components dir is.
@@ -483,6 +580,8 @@ struct FakeControl {
     registrations: Mutex<Vec<(ControlAuthority, WaitRequest)>>,
     polls: Mutex<Vec<(ControlAuthority, String)>>,
     cancels: Mutex<Vec<(Option<String>, String)>>,
+    /// Raise this host's root cancel on the first poll.
+    cancel_on_poll: Mutex<Option<Arc<Host>>>,
 }
 
 impl FakeControl {
@@ -541,6 +640,9 @@ impl ControlHost for FakeControl {
         authority: &ControlAuthority,
         wait_id: String,
     ) -> Result<WaitPoll, ControlError> {
+        if let Some(host) = self.cancel_on_poll.lock().unwrap().take() {
+            host.cancel.store(true, Ordering::SeqCst);
+        }
         let mut polls = self.polls.lock().unwrap();
         polls.push((authority.clone(), wait_id));
         Ok(if polls.len() == 1 {
@@ -637,7 +739,10 @@ async fn the_composed_control_copy_forwards_to_the_host_executor() -> anyhow::Re
     assert_eq!(
         completed(&second),
         json!({"result": {"mode": "all", "resolution": "satisfied",
-            "finished": ["child-1"], "remaining": []}})
+            "finished": [{"instanceId": "child-1", "status": "completed", "finishedAtMs": 1,
+                "output": {}, "outputBytes": 2, "outputOmitted": false,
+                "error": null, "errorOmitted": false}],
+            "remaining": []}})
     );
     assert_eq!(
         fake.registrations.lock().unwrap().len(),
@@ -855,135 +960,257 @@ async fn a_direct_control_api_call_is_denied_outside_the_executor() -> anyhow::R
     Ok(())
 }
 
-/// (c) The offsets the emitter reads from a `suspendable.invoke` result are
-/// the canonical layout of the WIT, and the two agent interfaces are
-/// type-identical in their flat signature (which is why (b) is behavioural).
-#[test]
-fn the_emitted_result_offsets_match_the_wit_layout() {
-    use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
-    let mut resolve = Resolve::default();
-    resolve
-        .push_str("agent.wit", runtara_agent_wit::RUNTARA_AGENT_WIT)
-        .unwrap();
-    resolve
-        .push_str("agent-suspension.wit", runtara_agent_suspension::WIT)
-        .unwrap();
-    let package = resolve
-        .push_str(
-            "probe.wit",
-            &agent_wit_package_with_interfaces("suspend-probe", false, true),
-        )
-        .unwrap();
-    let mut sizes = SizeAlign::default();
-    sizes.fill(&resolve);
-    let at = |offset: wit_parser::ArchitectureSize| offset.size_wasm32() as u64;
-    let interfaces = &resolve.packages[package].interfaces;
-    let invoke = |interface: &str| &resolve.interfaces[interfaces[interface]].functions["invoke"];
+/// One `pause` step on `agent`, then Finish with its output.
+fn pause_graph(agent: &str, retries: u32) -> Value {
+    let mut step = agent_step("pause", agent, "pause", json!({}));
+    step["maxRetries"] = json!(retries);
+    step["retryDelay"] = json!(0);
+    json!({"durable": true, "entryPoint": "pause", "steps": {
+        "pause": step,
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "pause": {"valueType": "reference", "value": "steps.pause.outputs"}}}},
+        "executionPlan": [{"fromStep": "pause", "toStep": "finish"}]})
+}
 
-    let variant = |ty: &Type| match ty {
-        Type::Id(id) => match &resolve.types[*id].kind {
-            TypeDefKind::Variant(variant) => variant.clone(),
-            TypeDefKind::Type(Type::Id(inner)) => match &resolve.types[*inner].kind {
-                TypeDefKind::Variant(variant) => variant.clone(),
-                other => panic!("not a variant: {other:?}"),
-            },
-            other => panic!("not a variant: {other:?}"),
+/// Compile `graph` against staged probes and return it with a fresh host.
+fn compile_probes(
+    dir: &Path,
+    graph: Value,
+    probes: &[(&str, Behaviour)],
+) -> anyhow::Result<(DirectCompilationResult, Arc<Host>)> {
+    let staging = stage_probes(dir, probes)?;
+    let agents = probes
+        .iter()
+        .map(|(agent, _)| probe_info_for(agent))
+        .collect();
+    let compiled = compile_graph(dir, graph, agents, &[staging])?;
+    Ok((compiled, Arc::new(Host::new())))
+}
+
+fn failed_code(result: &InvokeRunResult) -> String {
+    match &result.exit {
+        InvokeExit::Failed(error) => error.code.clone(),
+        other => panic!("expected a failed run, got {other:?}"),
+    }
+}
+
+fn parked_at(result: &InvokeRunResult) -> u64 {
+    match &result.exit {
+        InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [WorkflowWake::At(at)] => *at,
+            other => panic!("one timed wake: {other:?}"),
         },
-        other => panic!("not a variant: {other:?}"),
+        other => panic!("expected a park, got {other:?}"),
+    }
+}
+
+/// Continuations the host keeps, as `(attempt, state)`.
+fn saved(host: &Host) -> Vec<(u32, Vec<u8>)> {
+    host.continuations
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|((_, attempt), state)| (*attempt, state.clone()))
+        .collect()
+}
+
+/// A retrying suspending site: each attempt parks under its own continuation
+/// without an `::attempt::` checkpoint, a refused continuation fails the
+/// attempt (closing its wait and discarding its state), and the next attempt
+/// starts afresh until the retries run out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retrying_site_parks_each_attempt_under_its_own_continuation() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (compiled, host) = compile_probes(
+        dir.path(),
+        pause_graph("reject-probe", 1),
+        &[("reject-probe", Behaviour::Reject)],
+    )?;
+    let attempt_keys = |host: &Host| {
+        host.checkpoints
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.contains("::attempt::"))
+            .cloned()
+            .collect::<Vec<_>>()
     };
-    let Some(Type::Id(result)) = invoke("suspendable").result else {
-        panic!("suspendable.invoke returns a result");
-    };
-    let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-        panic!("suspendable.invoke returns a result");
-    };
-    let result_payload =
-        at(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()]));
-    let outcome_ty = result.ok.expect("an outcome ok arm");
-    let outcome = variant(&outcome_ty);
-    let outcome_payload = at(sizes.payload_offset(
-        outcome.tag(),
-        outcome.cases.iter().map(|case| case.ty.as_ref()),
-    ));
-    assert_eq!(result_payload, DIRECT_AGENT_RESULT_OK_PTR_OFFSET);
-    assert_eq!(
-        result_payload,
-        lowering::OUTCOME_DISCRIMINANT_OFFSET,
-        "outcome's discriminant sits at the result payload"
+
+    let first = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(parked_at(&first), PROBE_WAKE_AT);
+    assert_eq!(saved(&host), vec![(1, PROBE_STATE.to_vec())]);
+    assert!(attempt_keys(&host).is_empty(), "a park is not a failure");
+
+    // Attempt 1 is handed its continuation, refuses it, and fails: the retry
+    // parks for its (zero) backoff, then attempt 2 starts without one.
+    let mut attempts = Vec::new();
+    let mut last = launch(&compiled, host.clone(), None).await?;
+    for _ in 0..4 {
+        if !matches!(last.exit, InvokeExit::Suspended(_)) {
+            break;
+        }
+        attempts.extend(saved(&host).into_iter().map(|(attempt, _)| attempt));
+        last = launch(&compiled, host.clone(), None).await?;
+    }
+    assert!(
+        attempts.contains(&2),
+        "attempt 2 parked on its own: {attempts:?}"
+    );
+    assert!(
+        !attempts.contains(&1),
+        "attempt 1's state is gone: {attempts:?}"
     );
     assert_eq!(
-        result_payload + outcome_payload,
-        lowering::COMPLETED_PTR_OFFSET
+        failed_code(&last),
+        runtara_agent_suspension::AGENT_CONTINUATION_REJECTED
     );
     assert_eq!(
-        lowering::COMPLETED_LEN_OFFSET,
-        lowering::COMPLETED_PTR_OFFSET + 4
+        attempt_keys(&host).len(),
+        2,
+        "one checkpoint per failed attempt"
+    );
+    let closed = host.closed_waits.lock().unwrap().clone();
+    assert_eq!(
+        closed.len(),
+        2,
+        "each failed attempt closed its wait: {closed:?}"
+    );
+    assert_eq!(closed[0], closed[1], "attempts share the operation");
+    assert!(host.continuations.lock().unwrap().is_empty());
+    Ok(())
+}
+
+/// A suspension the host refuses fails the step with
+/// `AGENT_INVALID_SUSPENSION` instead of parking, and keeps nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_suspension_fails_the_step_instead_of_parking() -> anyhow::Result<()> {
+    for (agent, behaviour) in [
+        ("no-wakes-probe", Behaviour::NoWakes),
+        ("foreign-probe", Behaviour::ForeignWait),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let (compiled, host) =
+            compile_probes(dir.path(), pause_graph(agent, 0), &[(agent, behaviour)])?;
+        let run = launch(&compiled, host.clone(), None).await?;
+        assert_eq!(
+            failed_code(&run),
+            runtara_agent_suspension::AGENT_INVALID_SUSPENSION,
+            "{agent}"
+        );
+        assert!(run.instance_waits.is_empty(), "{agent}");
+        assert!(host.continuations.lock().unwrap().is_empty(), "{agent}");
+        assert_eq!(host.closed_waits.lock().unwrap().len(), 1, "{agent}");
+    }
+    Ok(())
+}
+
+/// The park is clamped to the step deadline; a suspension within a second of
+/// it fails with `AGENT_TIMEOUT`, and a relaunch at the deadline times out
+/// before invoking.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_park_ties_to_the_step_deadline_and_a_late_suspension_times_out() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (compiled, host) = compile_probes(
+        dir.path(),
+        pause_graph("forever-probe", 0),
+        &[("forever-probe", Behaviour::Forever)],
+    )?;
+    let first = launch(&compiled, host.clone(), None).await?;
+    let deadline = parked_at(&first);
+    assert!(
+        (STEP_TIMEOUT_MS..=STEP_TIMEOUT_MS + 31_000).contains(&deadline),
+        "a wake past the deadline parks at the deadline: {deadline}"
     );
 
-    let Some(Type::Id(suspension)) = outcome.cases[1].ty else {
-        panic!("suspended carries the suspension record");
-    };
-    let suspension = match &resolve.types[suspension].kind {
-        TypeDefKind::Record(record) => record.clone(),
-        TypeDefKind::Type(Type::Id(inner)) => match &resolve.types[*inner].kind {
-            TypeDefKind::Record(record) => record.clone(),
-            other => panic!("not a record: {other:?}"),
-        },
-        other => panic!("not a record: {other:?}"),
-    };
-    let fields = sizes.field_offsets(suspension.fields.iter().map(|field| &field.ty));
-    let base = result_payload + outcome_payload;
-    assert_eq!(
-        (suspension.fields[0].name.as_str(), base + at(fields[0].0)),
-        ("wakes", lowering::SUSPENDED_WAKES_PTR_OFFSET)
-    );
-    assert_eq!(
-        (suspension.fields[1].name.as_str(), base + at(fields[1].0)),
-        ("state", lowering::SUSPENDED_STATE_PTR_OFFSET)
-    );
-    assert_eq!(
-        lowering::SUSPENDED_WAKES_LEN_OFFSET,
-        lowering::SUSPENDED_WAKES_PTR_OFFSET + 4
-    );
-    assert_eq!(
-        lowering::SUSPENDED_STATE_LEN_OFFSET,
-        lowering::SUSPENDED_STATE_PTR_OFFSET + 4
-    );
+    // Well before the deadline: parks at the same deadline again.
+    host.clock_override
+        .store(deadline - 1_001, Ordering::SeqCst);
+    let again = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(parked_at(&again), deadline);
+    assert_eq!(saved(&host).len(), 1);
 
-    let Type::Id(wakes) = suspension.fields[0].ty else {
-        panic!("wakes is a list");
-    };
-    let TypeDefKind::List(wake_ty) = &resolve.types[wakes].kind else {
-        panic!("wakes is a list");
-    };
-    let wake = variant(wake_ty);
-    assert_eq!(wake.cases[0].name, "at");
-    assert_eq!(
-        at(sizes.size(wake_ty)),
-        lowering::WAKE_SIZE as u64,
-        "wake stride"
-    );
-    assert_eq!(
-        at(sizes.payload_offset(wake.tag(), wake.cases.iter().map(|case| case.ty.as_ref()))),
-        lowering::WAKE_AT_VALUE_OFFSET
-    );
+    // Within the margin: the step times out instead of parking.
+    host.clock_override.store(deadline - 500, Ordering::SeqCst);
+    let late = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(failed_code(&late), "AGENT_TIMEOUT");
+    assert!(host.continuations.lock().unwrap().is_empty());
+    assert_eq!(host.closed_waits.lock().unwrap().len(), 1);
 
-    // The error arm is where the ordinary Agent error path reads it.
-    assert_eq!(
-        at(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),
-        DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET
-    );
+    // A relaunch at the deadline itself times out before the agent runs.
+    let dir = tempfile::tempdir()?;
+    let (compiled, host) = compile_probes(
+        dir.path(),
+        pause_graph("forever-probe", 0),
+        &[("forever-probe", Behaviour::Forever)],
+    )?;
+    let deadline = parked_at(&launch(&compiled, host.clone(), None).await?);
+    host.clock_override.store(deadline, Ordering::SeqCst);
+    let at_deadline = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(failed_code(&at_deadline), "AGENT_TIMEOUT");
+    Ok(())
+}
 
-    // Type-identical flat signatures: only the result's shape differs.
-    let mangling = wit_parser::ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback);
-    let signature =
-        |interface: &str| resolve.wasm_signature(mangling.import_variant(), invoke(interface));
-    assert_eq!(
-        signature("capabilities").params,
-        signature("suspendable").params
+/// A relaunch whose result checkpoint is lost keeps the continuation (the
+/// release follows the checkpoint), so the next replay re-enters the same
+/// attempt with it and completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_result_checkpoint_replays_with_the_continuation() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (compiled, host) = compile_probes(
+        dir.path(),
+        pause_graph("once-probe", 0),
+        &[("once-probe", Behaviour::Once)],
+    )?;
+    let first = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(parked_at(&first), PROBE_WAKE_AT);
+    // Fail only the save of the step's result (its lookup is a read).
+    *host.checkpoint_fault.lock().unwrap() = Some(CheckpointFault {
+        pattern: r#"["once-probe","pause","pause"]]"#.into(),
+        write: true,
+        skip: 0,
+        remaining: 1,
+    });
+    let lost = launch(&compiled, host.clone(), None).await?;
+    assert!(
+        !matches!(lost.exit, InvokeExit::Completed(_)),
+        "{:?}",
+        lost.exit
     );
-    assert_eq!(
-        signature("capabilities").results,
-        signature("suspendable").results
-    );
+    assert_eq!(saved(&host), vec![(1, PROBE_STATE.to_vec())]);
+    let replay = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(completed(&replay), json!({"pause": "paused"}));
+    assert!(host.continuations.lock().unwrap().is_empty());
+    Ok(())
+}
+
+/// A cancel that lands while the control executor polls the wait never
+/// completes the step or loses its state: the run either parks with the
+/// continuation kept or stops.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_racing_the_wait_never_completes_the_step() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
+    let fake = Arc::new(FakeControl::default());
+    let host = Arc::new(Host::new());
+    *fake.cancel_on_poll.lock().unwrap() = Some(host.clone());
+    let run = launch(
+        &compiled,
+        host.clone(),
+        Some(control_executor(fake.clone())?),
+    )
+    .await?;
+    match &run.exit {
+        InvokeExit::Suspended(_) => {
+            assert_eq!(run.instance_waits, vec!["wait-1".to_string()]);
+            assert_eq!(
+                saved(&host).len(),
+                1,
+                "the parked operation keeps its state"
+            );
+        }
+        InvokeExit::Cancelled | InvokeExit::Failed(_) => {}
+        other => panic!("a cancelled wait never completes: {other:?}"),
+    }
+    assert_eq!(fake.registrations.lock().unwrap().len(), 1);
+    Ok(())
 }

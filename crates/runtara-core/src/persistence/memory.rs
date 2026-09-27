@@ -12,6 +12,7 @@
 //! A single mutex covers the whole store, which is what makes the claim and
 //! guard operations atomic.
 
+mod continuations;
 mod control_receipts;
 mod inputs;
 mod invocations;
@@ -56,6 +57,8 @@ struct Store {
     external_outcomes: HashMap<String, crate::persistence::ExternalOutcomeRecord>,
     /// Instance waits by `(waiter, wait_id)`.
     instance_waits: HashMap<(String, String), waits::MemWait>,
+    /// Agent continuations by `(instance_id, op_hash)`: `(attempt, state)`.
+    agent_continuations: HashMap<(String, String), (u32, Vec<u8>)>,
     /// Stands in for a sequence: the only monotonic id source a store without
     /// one has to invent.
     next_id: i64,
@@ -298,6 +301,12 @@ impl Persistence for InMemoryPersistence {
     fn control_receipts(
         &self,
     ) -> Option<&dyn crate::persistence::control_receipts::ControlReceipts> {
+        Some(self)
+    }
+
+    fn agent_continuations(
+        &self,
+    ) -> Option<&dyn crate::persistence::continuations::AgentContinuations> {
         Some(self)
     }
 
@@ -1173,6 +1182,9 @@ impl Persistence for InMemoryPersistence {
             store.input_requests.retain(|(inst, _), _| inst != id);
             store.control_receipts.retain(|(caller, _), _| caller != id);
             store.instance_waits.retain(|(waiter, _), _| waiter != id);
+            store
+                .agent_continuations
+                .retain(|(instance, _), _| instance != id);
             store.invocation_leases.remove(id);
             store
                 .invocation_parents
@@ -1507,6 +1519,13 @@ mod tests {
         crate::persistence::conformance::run_retention_pin_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    }
+
+    /// Agent continuations, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_agent_continuations_contract() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::continuations::run_all(&backend).await;
     }
 
     /// Durable instance waits, on the in-memory backend.

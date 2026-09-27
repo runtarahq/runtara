@@ -2748,6 +2748,10 @@ pub mod inputs;
 /// lifecycle, park and reconciler rotation.
 pub mod waits;
 
+/// Agent continuation conformance: attempt matching, size cap, running
+/// fence, idempotent delete, cascade and isolation.
+pub mod continuations;
+
 /// External outcomes are fenced against launches: the first publication
 /// wins, a published outcome refuses the child's launch, and an existing
 /// instance row refuses the publication.

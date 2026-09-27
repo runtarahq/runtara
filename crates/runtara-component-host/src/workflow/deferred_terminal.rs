@@ -203,6 +203,9 @@ impl RuntimeHost for DeferredTerminal {
             .operation_continuation_store(op_hash, attempt, state)
             .await
     }
+    async fn operation_wait_close(&self, op_hash: String) -> Result<(), String> {
+        self.inner.operation_wait_close(op_hash).await
+    }
     async fn operation_release(&self, op_hash: String) -> Result<(), String> {
         self.inner.operation_release(op_hash).await
     }
