@@ -46,12 +46,7 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_BATCH: usize = 100;
 
 /// The cancel reason of a child whose parent ended.
-pub fn parent_close_reason(parent_instance_id: &str, parent_status: Option<&str>) -> String {
-    format!(
-        "parent {parent_instance_id} terminated ({})",
-        parent_status.unwrap_or("missing")
-    )
-}
+pub use runtara_control_contract::parent_close_reason;
 
 /// What one round of the three passes did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +336,16 @@ async fn wait_for_shutdown(shutdown: &ShutdownSignal) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_environment_cascade_records_the_contract_reason() {
+        for status in [Some("completed"), Some("failed"), None] {
+            assert_eq!(
+                runtara_environment::wake_scheduler::parent_close_reason("p-1", status),
+                parent_close_reason("p-1", status)
+            );
+        }
+    }
 
     #[test]
     fn the_parent_close_reason_names_the_parent_and_its_end() {

@@ -128,7 +128,9 @@ pub struct ParentCloseStats {
     pub stopped: usize,
 }
 
-/// The stop reason a cascaded child records.
+/// The stop reason a cascaded child records. Mirrors
+/// `runtara_control_contract::parent_close_reason`; the server's publisher uses
+/// that one and a server test asserts the two agree.
 pub fn parent_close_reason(parent_instance_id: &str, parent_status: Option<&str>) -> String {
     format!(
         "parent {parent_instance_id} terminated ({})",

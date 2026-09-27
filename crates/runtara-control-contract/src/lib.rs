@@ -97,9 +97,13 @@ pub const PARENT_CLOSE_GRACE_MS: u64 = 5_000;
 /// The principal the parent-close cascade stops children as.
 pub const PARENT_CLOSE_PRINCIPAL: &str = "platform:parent-close";
 
-/// The cancellation reason the cascade records on a child.
-pub fn parent_close_reason(parent_instance_id: &str) -> String {
-    format!("parent instance {parent_instance_id} ended and its parent-close policy is cancel")
+/// The cancellation reason the cascade records on a child. `parent_status` is
+/// the parent's terminal status, or `None` when its row is gone.
+pub fn parent_close_reason(parent_instance_id: &str, parent_status: Option<&str>) -> String {
+    format!(
+        "parent {parent_instance_id} terminated ({})",
+        parent_status.unwrap_or("missing")
+    )
 }
 
 /// Capability tag: the capability only works inside a run (it needs a
@@ -428,8 +432,14 @@ mod tests {
         assert_eq!(cancel_grace_ms(Some(3_600_000)), Some(3_600_000));
         assert_eq!(cancel_grace_ms(Some(3_600_001)), None);
         assert_eq!(PARENT_CLOSE_GRACE_MS, DEFAULT_CANCEL_GRACE_MS);
-        let reason = parent_close_reason("parent-1");
-        assert!(reason.contains("parent-1") && reason.contains("cancel"));
+        assert_eq!(
+            parent_close_reason("parent-1", Some("failed")),
+            "parent parent-1 terminated (failed)"
+        );
+        assert_eq!(
+            parent_close_reason("parent-1", None),
+            "parent parent-1 terminated (missing)"
+        );
     }
 
     #[test]
