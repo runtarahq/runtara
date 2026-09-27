@@ -66,13 +66,44 @@ fn signals(scope: SignalScope, page_size: u32) -> PendingSignalsRequest {
     }
 }
 
+/// A database beside the runtime test database, created on first use and
+/// migrated with the combined core and Environment migrations. The runtime
+/// test database itself belongs to the core-only suite (`core_instance_api`),
+/// whose migrator refuses a `_sqlx_migrations` table holding Environment rows.
+async fn migrated_pool() -> sqlx::PgPool {
+    use sqlx::{ConnectOptions, Executor};
+    let url = std::env::var("TEST_RUNTARA_DATABASE_URL")
+        .or_else(|_| std::env::var("TEST_ENVIRONMENT_DATABASE_URL"))
+        .expect("isolated runtime database required");
+    let base: sqlx::postgres::PgConnectOptions = url
+        .parse()
+        .expect("the runtime test database URL must parse");
+    let name = format!(
+        "{}_control_service",
+        base.get_database().unwrap_or("runtara_test")
+    );
+    // A duplicate-database error means an earlier run created it already.
+    let mut admin = base
+        .clone()
+        .database("postgres")
+        .connect()
+        .await
+        .expect("the test database server must accept connections");
+    let _ = admin
+        .execute(format!("CREATE DATABASE \"{name}\"").as_str())
+        .await;
+    let pool = sqlx::PgPool::connect_with(base.database(&name))
+        .await
+        .expect("the derived test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("core and Environment migrations must succeed");
+    pool
+}
+
 impl Fixture {
     async fn new() -> Self {
-        let url = std::env::var("TEST_RUNTARA_DATABASE_URL")
-            .or_else(|_| std::env::var("TEST_ENVIRONMENT_DATABASE_URL"))
-            .expect("isolated runtime database required");
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        runtara_environment::migrations::run(&pool).await.unwrap();
+        let pool = migrated_pool().await;
         let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
         let runtime = Arc::new(RuntimeClient::new(
             Arc::new(EnvironmentHandlerState::new(
