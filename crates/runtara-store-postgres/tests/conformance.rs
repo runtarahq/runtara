@@ -573,6 +573,139 @@ async fn legacy_resume_is_retired_and_not_delivered_by_old_writers() {
     backend.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// Upgrades a seeded schema from migration 031 through the 1024-byte label
+/// migrations in a private schema, each migration in its own transaction as
+/// sqlx applies them.
+#[tokio::test]
+async fn run_label_widening_upgrades_a_seeded_schema() {
+    use runtara_core::persistence::Persistence;
+    let (pool, _container) = postgres_test_pool().await;
+    let schema = format!("label_upgrade_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let options = (*pool.connect_options())
+        .clone()
+        .options([("search_path", format!("{schema},public"))]);
+    let scoped = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let apply = |upgrade: bool| {
+        let scoped = scoped.clone();
+        async move {
+            for migration in runtara_store_postgres::migrations::POSTGRES
+                .iter()
+                .filter(|m| (m.version > 31) == upgrade)
+            {
+                let mut tx = scoped.begin().await.unwrap();
+                sqlx::raw_sql(&migration.sql)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap_or_else(|e| panic!("migration {} failed: {e}", migration.version));
+                tx.commit().await.unwrap();
+            }
+        }
+    };
+    let catalog_flag = |sql: &'static str| {
+        let (pool, schema) = (pool.clone(), schema.clone());
+        async move {
+            sqlx::query_scalar::<_, bool>(sql)
+                .bind(&schema)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    const TRIGRAM_EXISTS: &str = "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = $1 \
+         AND indexname = 'idx_instances_run_label_search')";
+
+    apply(false).await;
+    assert!(catalog_flag(TRIGRAM_EXISTS).await);
+    let backend = PostgresPersistence::new(scoped.clone());
+    let tenant = "label-upgrade";
+    let seeded = [Some("x".repeat(250)), Some(" Order_123:/?% ".into()), None];
+    let mut ids = Vec::new();
+    for label in &seeded {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, None, label.as_deref())
+                .await
+                .unwrap()
+        );
+        ids.push(id);
+    }
+
+    apply(true).await;
+    assert!(!catalog_flag(TRIGRAM_EXISTS).await);
+    assert!(
+        catalog_flag(
+            "SELECT i.indisvalid AND i.indisready FROM pg_index i \
+             JOIN pg_class c ON c.oid = i.indexrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = 'idx_instances_tenant_label_created'"
+        )
+        .await
+    );
+    assert!(
+        catalog_flag(
+            "SELECT co.convalidated FROM pg_constraint co \
+             JOIN pg_class c ON c.oid = co.conrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = 'instances' AND co.conname = 'valid_run_label'"
+        )
+        .await
+    );
+    assert!(
+        catalog_flag(
+            "SELECT character_maximum_length = 1024 FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = 'instances' AND column_name = 'run_label'"
+        )
+        .await
+    );
+    assert!(
+        catalog_flag(
+            "SELECT EXISTS (SELECT 1 FROM pg_stats WHERE schemaname = $1 \
+             AND tablename = 'instances' AND attname = 'run_label')"
+        )
+        .await
+    );
+    for (id, label) in ids.iter().zip(&seeded) {
+        assert_eq!(
+            &backend.get_instance(id).await.unwrap().unwrap().run_label,
+            label
+        );
+    }
+    let set_label = |label: String| {
+        let (scoped, id) = (scoped.clone(), ids[2].clone());
+        async move {
+            sqlx::query("UPDATE instances SET run_label = $2 WHERE instance_id = $1")
+                .bind(id)
+                .bind(label)
+                .execute(&scoped)
+                .await
+        }
+    };
+    set_label("~".repeat(1024)).await.unwrap();
+    for invalid in [
+        "x".repeat(1025),
+        "bad\nlabel".into(),
+        " ".into(),
+        String::new(),
+    ] {
+        assert!(set_label(invalid).await.is_err());
+    }
+
+    scoped.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn invocation_fences_lease_ownership() {
     let (pool, _container) = postgres_test_pool().await;

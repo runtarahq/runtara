@@ -943,7 +943,17 @@ mod run_label_query_tests {
 
     #[test]
     fn exact_report_lookup_rejects_invalid_and_oversized_identifiers() {
-        for value in ["".into(), "bad\nlabel".into(), "x".repeat(251)] {
+        let longest = "x".repeat(1024);
+        let condition: Condition =
+            serde_json::from_value(json!({"op":"EQ","arguments":["runLabel",longest]})).unwrap();
+        let mut filters = ExecutionFilters::default();
+        assert!(
+            instance_query_filters(Some(&condition), &mut filters)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(filters.run_label, Some(longest));
+        for value in ["".into(), "bad\nlabel".into(), "x".repeat(1025)] {
             let condition: Condition =
                 serde_json::from_value(json!({"op":"EQ","arguments":["runLabel",value]})).unwrap();
             assert!(

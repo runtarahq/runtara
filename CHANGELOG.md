@@ -85,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Run labels accept up to 1024 bytes** (was 250), still printable ASCII with
+  at least one non-space character, on start, the `runLabel` filter, reports
+  and MCP. The first boot after upgrading runs core migrations 032 and 033:
+  they drop the unused trigram index `idx_instances_run_label_search`, widen
+  `instances.run_label`, which rebuilds the exact-match btree
+  `idx_instances_tenant_label_created` while `instances` is locked, then
+  validate the label constraint and refresh its statistics. The substring
+  `search` filter keeps its 250-character limit.
 - **Every workflow recompiles once after upgrading.** The direct-WASM lowering
   tag now ends in `on-signal-remap=v1`, so cached artifacts built by an older
   server no longer match and each workflow is rebuilt on its next compile or

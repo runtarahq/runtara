@@ -7253,7 +7253,7 @@ export class Api<
       workflowId: string,
       data: string,
       query?: {
-        /** Exact immutable reference: 1–250 printable ASCII bytes, not all spaces. */
+        /** Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces. */
         runLabel?: string;
       },
       params: RequestParams = {},
@@ -7280,7 +7280,7 @@ export class Api<
       action: string,
       data: string,
       query?: {
-        /** Exact immutable reference: 1–250 printable ASCII bytes, not all spaces. */
+        /** Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces. */
         runLabel?: string;
       },
       params: RequestParams = {},

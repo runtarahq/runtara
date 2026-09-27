@@ -1156,7 +1156,7 @@ pub struct CompileWorkflowResponse {
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct RunLabelQuery {
-    /// Exact immutable reference: 1–250 printable ASCII bytes, not all spaces.
+    /// Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces.
     #[serde(default, rename = "runLabel")]
     pub run_label: Option<String>,
 }

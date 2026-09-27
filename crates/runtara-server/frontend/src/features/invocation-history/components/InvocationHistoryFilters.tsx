@@ -116,7 +116,7 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
         <Input
           id="run-label-filter"
           value={filters.runLabel ?? ''}
-          maxLength={250}
+          maxLength={1024}
           placeholder="All labels"
           onChange={(e) =>
             onFiltersChange({

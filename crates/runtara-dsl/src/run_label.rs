@@ -3,7 +3,7 @@
 //! Exact execution-reference validation shared by start and query boundaries.
 
 /// Maximum label length in bytes (the accepted alphabet is ASCII).
-pub const MAX_RUN_LABEL_LENGTH: usize = 250;
+pub const MAX_RUN_LABEL_LENGTH: usize = 1024;
 
 /// Validate without trimming, truncating, or otherwise changing an identifier.
 /// Only omission means no label; an explicitly empty label is invalid.
@@ -44,8 +44,8 @@ mod tests {
             );
         }
         assert_eq!(
-            normalize_run_label(Some(&"x".repeat(250))).unwrap(),
-            Some("x".repeat(250))
+            normalize_run_label(Some(&"x".repeat(1024))).unwrap(),
+            Some("x".repeat(1024))
         );
     }
 
@@ -54,6 +54,6 @@ mod tests {
         for label in ["", "   ", "\tx", "x\ny", "x\0y", "é", "🙂", "\u{7f}"] {
             assert!(normalize_run_label(Some(label)).is_err(), "{label:?}");
         }
-        assert!(normalize_run_label(Some(&"x".repeat(251))).is_err());
+        assert!(normalize_run_label(Some(&"x".repeat(1025))).is_err());
     }
 }

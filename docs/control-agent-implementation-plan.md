@@ -116,7 +116,7 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 - `runtara-server`: delete both `send_custom_signal` wrappers; add missing labels incl. `StartGateFailed` to `TerminationReason` (`runtime_types.rs`).
 - `runtara-component-host`, environment `runner/`, `embedded_runtara.rs`: drop `core_http_url`, `DispatcherEnv`, `core_client_addr`. No composed fail-closed until ops confirms.
 - Fix stale docs (workflow-agent suspend, Composed binding, Agent-step `timeout`).
-**Migrations.** `crates/runtara-environment/migrations/20260926000000_start_gate_failed_termination.sql`: add enum value `start_gate_failed` only.
+**Migrations.** `crates/runtara-environment/migrations/20260926000200_start_gate_failed_termination.sql`: add enum value `start_gate_failed` only (000000 and 000100 are taken by runtara-server migrations, and server and environment versions must not overlap).
 **Tests.**
 - Unit: stdlib remap; `direct_lowering_tag`/`required_stdlib_markers` assertions; server `runtime_types` label round-trip.
 - `runtara-workflows` lib tests (WAT components): forbidden imports rejected, allowed pass, incl. staged agents.

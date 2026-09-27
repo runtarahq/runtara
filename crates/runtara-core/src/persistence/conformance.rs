@@ -2327,7 +2327,7 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
             Some(label)
         );
     }
-    for label in ["", " ", "bad\nlabel", &"x".repeat(251)] {
+    for label in ["", " ", "bad\nlabel", &"x".repeat(1025)] {
         let id = Uuid::new_v4().to_string();
         assert!(
             backend
@@ -2337,6 +2337,32 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
         );
         assert!(backend.get_instance(&id).await.unwrap().is_none());
     }
+    // The maximum length spans the whole printable alphabet and round-trips exactly.
+    let longest: String = (0..1024u32)
+        .map(|i| char::from(b' ' + (i % 95) as u8))
+        .collect();
+    let id = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&id, tenant, None, Some(&longest))
+            .await
+            .unwrap()
+    );
+    backend
+        .update_instance_status(&id, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
+    backend
+        .complete_instance(CompleteInstanceParams::new(
+            &id,
+            CoreInstanceStatus::Completed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().run_label,
+        Some(longest)
+    );
 }
 
 /// Authoritative managed-input lifecycle and acceptance conformance.

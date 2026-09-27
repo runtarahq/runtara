@@ -329,7 +329,7 @@ pub struct CompileWorkflowParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowParams {
-    /// Optional exact execution reference (1–250 printable ASCII bytes).
+    /// Optional exact execution reference (1–1024 printable ASCII bytes).
     pub run_label: Option<String>,
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -345,7 +345,7 @@ pub struct ExecuteWorkflowParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowSyncParams {
-    /// Optional exact immutable execution reference (1–250 printable ASCII bytes).
+    /// Optional exact immutable execution reference (1–1024 printable ASCII bytes).
     pub run_label: Option<String>,
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,

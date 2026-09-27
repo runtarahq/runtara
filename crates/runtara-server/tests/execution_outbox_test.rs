@@ -683,7 +683,7 @@ async fn start_label_is_durable_non_unique_and_conflicting_replays_are_rejected(
     let stored: TriggerEvent = serde_json::from_value(payload).unwrap();
     assert_eq!(stored.run_label.as_deref(), Some(" Order_123 "));
     assert_eq!(reserved_count(&pool, &tenant).await, 2);
-    for invalid in ["".into(), "bad\nlabel".into(), "x".repeat(251)] {
+    for invalid in ["".into(), "bad\nlabel".into(), "x".repeat(1025)] {
         request.run_label = Some(invalid);
         assert!(matches!(
             outbox.enqueue(&tenant, &request, "invalid", 10).await,
@@ -691,5 +691,21 @@ async fn start_label_is_durable_non_unique_and_conflicting_replays_are_rejected(
         ));
     }
     assert_eq!(reserved_count(&pool, &tenant).await, 2);
+    let longest = "x".repeat(1024);
+    request.instance_id = Uuid::new_v4().to_string();
+    request.run_label = Some(longest.clone());
+    let accepted = outbox
+        .enqueue(&tenant, &request, "longest", 10)
+        .await
+        .unwrap();
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT trigger_event FROM execution_requests WHERE request_id = $1")
+            .bind(accepted.request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stored: TriggerEvent = serde_json::from_value(payload).unwrap();
+    assert_eq!(stored.run_label, Some(longest));
+    assert_eq!(reserved_count(&pool, &tenant).await, 3);
     cleanup(&pool, &tenant).await;
 }
