@@ -22,10 +22,22 @@
 #              public signal path refuses control's reserved `control:`
 #              operation ids.
 #
-# Later stages (start, ownership, waits) are added by their slices. Stage 1
-# ends by revoking the control approval, so it runs after every other stage.
+#   3  START   a parent's control:start steps admit two children (labels
+#              `a` and `b`); the server is SIGKILLed while the parent sits
+#              in a durable Delay, and the replayed non-durable start returns
+#              the same child (replayed: true, one admission row). The parent
+#              then queries its children (query with callerChildren, get),
+#              pauses, resumes and cancels one and answers the other's
+#              WaitForSignal; the executions API filters by
+#              parentInstanceId. A reused label is CONTROL_LABEL_CONFLICT,
+#              and with MAX_CONCURRENT_EXECUTIONS=5 a fifth running child is
+#              CONTROL_CAPACITY_RATE_LIMITED (control's share is 4) while an
+#              outside trigger is still admitted.
 #
-# Usage:  STAGES=1,2 ./e2e/test_control_agent.sh
+# Later stages (ownership, waits) are added by their slices. Stage 1 ends by
+# revoking the control approval, so it runs after every other stage.
+#
+# Usage:  STAGES=1,2,3 ./e2e/test_control_agent.sh
 #
 # Prereqs: Postgres + docker (isolated Valkey), a built runtara-server, and
 # prebuilt components (scripts/build-agent-components.sh).
@@ -40,8 +52,8 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-STAGES="${STAGES:-1,2}"
-IMPLEMENTED_STAGES="1,2"
+STAGES="${STAGES:-1,2,3}"
+IMPLEMENTED_STAGES="1,2,3"
 for stage in ${STAGES//,/ }; do
     case ",${IMPLEMENTED_STAGES}," in
         *",${stage},"*) ;;
@@ -126,6 +138,7 @@ start_server() {
         OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
         RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
         TENANT_ID="${TENANT}" \
+        MAX_CONCURRENT_EXECUTIONS=5 \
         SERVER_HOST=127.0.0.1 \
         SERVER_PORT="${TEST_PORT_PUBLIC}" \
         RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
@@ -360,18 +373,17 @@ if stage_enabled 1; then
                            callerChildren: { type: "boolean", required: true } }
         }')
     read -r QUERY_WF _ <<< "$(make_workflow control-query-probe "${QUERY_GRAPH}")"
-    for probe in '{"pageSize": 101, "callerChildren": false}|CONTROL_INVALID' \
-                 '{"pageSize": 10, "callerChildren": true}|CONTROL_UNSUPPORTED'; do
-        data="${probe%%|*}"; want="${probe##*|}"
-        RUN=$(launch "${QUERY_WF}" "${data}")
-        [ "$(wait_status "${RUN}" failed 120)" = "failed" ] || { print_error "${data} should fail: $(instance_row "${RUN}")"; exit 1; }
-        instance_row "${RUN}" | grep -q "${want}" || { print_error "Expected ${want}: $(instance_row "${RUN}")"; exit 1; }
-    done
+    RUN=$(launch "${QUERY_WF}" '{"pageSize": 101, "callerChildren": false}')
+    [ "$(wait_status "${RUN}" failed 120)" = "failed" ] || { print_error "pageSize 101 should fail: $(instance_row "${RUN}")"; exit 1; }
+    instance_row "${RUN}" | grep -q "CONTROL_INVALID" || { print_error "Expected CONTROL_INVALID: $(instance_row "${RUN}")"; exit 1; }
+    # A run without children reads an empty page of them.
+    RUN=$(launch "${QUERY_WF}" '{"pageSize": 10, "callerChildren": true}')
+    [ "$(wait_status "${RUN}" completed 120)" = "completed" ] || { print_error "callerChildren should read an empty page: $(instance_row "${RUN}")"; exit 1; }
     CODE=$(test_control query '{"callerChildren": true}' | error_code)
     [ "${CODE}" = "CONTROL_REQUIRES_INSTANCE" ] || { print_error "Test invocation without a run: expected CONTROL_REQUIRES_INSTANCE, got '${CODE}'"; exit 1; }
     RESP=$(test_control get "{\"instanceId\": \"${DONE}\"}")
     echo "${RESP}" | grep -q '"total":42' || { print_error "Tenant-scoped test read failed: ${RESP}"; exit 1; }
-    print_success "NOT_FOUND, INVALID and UNSUPPORTED from runs; REQUIRES_INSTANCE from a test invocation ✓"
+    print_success "NOT_FOUND and INVALID from runs; callerChildren reads; REQUIRES_INSTANCE from a test invocation ✓"
 fi
 
 if stage_enabled 2; then
@@ -495,6 +507,194 @@ if stage_enabled 2; then
     [ "${RESP}" = "400" ] || { print_error "A public control: operation id should be refused, got ${RESP}"; exit 1; }
     case "$(input_request "${OPEN}")" in open*) ;; *) print_error "The forged answer was accepted"; exit 1 ;; esac
     print_success "cancel/pause of a non-child: CONTROL_NOT_CHILD; failed run NotResumable; control: prefix refused ✓"
+fi
+
+if stage_enabled 3; then
+    # -----------------------------------------------------------------------
+    # Stage 3: start.
+    # -----------------------------------------------------------------------
+    children_of() {
+        psql_quiet -d "${TEST_DB_SERVER}" -c \
+            "SELECT count(*) FROM execution_requests WHERE tenant_id = '${TENANT}' AND parent_instance_id = '$1'"
+    }
+    child_labelled() {
+        psql_quiet -d "${TEST_DB_SERVER}" -c \
+            "SELECT instance_id FROM execution_requests WHERE tenant_id = '${TENANT}' AND parent_instance_id = '$1' AND run_label = '$2'"
+    }
+    start_step() {
+        # id, workflow reference, label, policy, durable
+        jq -n --arg id "$1" --arg label "$3" --arg policy "$4" --argjson durable "$5" --arg wf "$2" '{
+            id: $id, stepType: "Agent", agentId: "control", capabilityId: "start",
+            maxRetries: 0, durable: $durable, inputMapping: {
+                workflowId: { valueType: "reference", value: $wf },
+                runLabel: { valueType: "immediate", value: $label },
+                parentClosePolicy: { valueType: "immediate", value: $policy },
+                inputs: { valueType: "immediate", value: { data: { n: 1 }, variables: {} } } } }'
+    }
+    CHILD_GRAPH=$(jq -n '{
+        name: "control-child", durable: true, entryPoint: "approve",
+        steps: { approve: { id: "approve", stepType: "WaitForSignal", name: "Approve",
+                            pollIntervalMs: 500,
+                            responseSchema: { approved: { type: "boolean", required: true } } },
+                 finish: { id: "finish", stepType: "Finish", inputMapping: {
+                     decision: { valueType: "reference", value: "steps.approve.outputs" } } } },
+        executionPlan: [ { fromStep: "approve", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: { n: { type: "integer" } }
+    }')
+    read -r CHILD_WF _ <<< "$(make_workflow control-child "${CHILD_GRAPH}")"
+
+    print_step "Stage 3: a parent starts two children, then the server is SIGKILLed..."
+    # startA is not durable, so the replay after the crash re-invokes it and
+    # only the admission's idempotency keeps it from starting a second child.
+    # `settle` runs after the restart, so the children have launched and
+    # parked on their WaitForSignal before the parent commands them.
+    STEPS=$(jq -n \
+        --argjson a "$(start_step startA data.child a cancel false)" \
+        --argjson b "$(start_step startB data.child b leave_running true)" \
+        '{
+            startA: $a, startB: $b,
+            hold: { id: "hold", stepType: "Delay", durationMs: { valueType: "immediate", value: 8000 } },
+            settle: { id: "settle", stepType: "Delay", durationMs: { valueType: "immediate", value: 8000 } },
+            query: { id: "query", stepType: "Agent", agentId: "control", capabilityId: "query", maxRetries: 0,
+                     inputMapping: { callerChildren: { valueType: "immediate", value: true },
+                                     pageSize: { valueType: "immediate", value: 10 } } },
+            getA: { id: "getA", stepType: "Agent", agentId: "control", capabilityId: "get", maxRetries: 0,
+                    inputMapping: { instanceId: { valueType: "reference", value: "steps.startA.outputs.instanceId" } } },
+            pauseA: { id: "pauseA", stepType: "Agent", agentId: "control", capabilityId: "pause", maxRetries: 0,
+                      inputMapping: { instanceId: { valueType: "reference", value: "steps.startA.outputs.instanceId" } } },
+            resumeA: { id: "resumeA", stepType: "Agent", agentId: "control", capabilityId: "resume", maxRetries: 0,
+                       inputMapping: { instanceId: { valueType: "reference", value: "steps.startA.outputs.instanceId" } } },
+            signalB: { id: "signalB", stepType: "Agent", agentId: "control", capabilityId: "send-signal", maxRetries: 0,
+                       inputMapping: { instanceId: { valueType: "reference", value: "steps.startB.outputs.instanceId" },
+                                       signalId: { valueType: "immediate", value: "approve" },
+                                       payload: { valueType: "immediate", value: { approved: true } } } },
+            cancelA: { id: "cancelA", stepType: "Agent", agentId: "control", capabilityId: "cancel", maxRetries: 0,
+                       inputMapping: { instanceId: { valueType: "reference", value: "steps.startA.outputs.instanceId" },
+                                       graceMs: { valueType: "immediate", value: 0 } } },
+            finish: { id: "finish", stepType: "Finish", inputMapping: {
+                startA: { valueType: "reference", value: "steps.startA.outputs" },
+                startB: { valueType: "reference", value: "steps.startB.outputs" },
+                query: { valueType: "reference", value: "steps.query.outputs" },
+                getA: { valueType: "reference", value: "steps.getA.outputs" },
+                pauseA: { valueType: "reference", value: "steps.pauseA.outputs" },
+                resumeA: { valueType: "reference", value: "steps.resumeA.outputs" },
+                signalB: { valueType: "reference", value: "steps.signalB.outputs" },
+                cancelA: { valueType: "reference", value: "steps.cancelA.outputs" } } }
+        }')
+    PARENT_GRAPH=$(jq -n --argjson steps "${STEPS}" '{
+        name: "control-parent", durable: true, entryPoint: "startA", steps: $steps,
+        executionPlan: [ { fromStep: "startA", toStep: "startB" }, { fromStep: "startB", toStep: "hold" },
+                         { fromStep: "hold", toStep: "settle" }, { fromStep: "settle", toStep: "query" }, { fromStep: "query", toStep: "getA" },
+                         { fromStep: "getA", toStep: "pauseA" }, { fromStep: "pauseA", toStep: "resumeA" },
+                         { fromStep: "resumeA", toStep: "signalB" }, { fromStep: "signalB", toStep: "cancelA" },
+                         { fromStep: "cancelA", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: { child: { type: "string", required: true } }
+    }')
+    read -r PARENT_WF _ <<< "$(make_workflow control-parent "${PARENT_GRAPH}")"
+    PARENT=$(launch "${PARENT_WF}" "$(jq -nc --arg c "${CHILD_WF}" '{child: $c}')")
+    for _ in {1..60}; do
+        [ "$(children_of "${PARENT}")" = "2" ] && break
+        sleep 0.5
+    done
+    [ "$(children_of "${PARENT}")" = "2" ] || { print_error "The parent did not admit two children: $(instance_row "${PARENT}")"; exit 1; }
+    CHILD_A=$(child_labelled "${PARENT}" a)
+    CHILD_B=$(child_labelled "${PARENT}" b)
+    echo "  parent=${PARENT} a=${CHILD_A} b=${CHILD_B}"
+    # Crash once both children have launched and parked, while the parent is
+    # still in its durable Delay.
+    for child in "${CHILD_A}" "${CHILD_B}"; do
+        [ "$(wait_status "${child}" suspended 60)" = "suspended" ] || { print_error "Child ${child} did not launch and park: $(instance_row "${child}")"; exit 1; }
+    done
+    [ "$(instance_status "${PARENT}")" != "completed" ] || { print_error "The parent finished before the crash"; exit 1; }
+    crash_server
+    start_server
+    [ "$(wait_status "${PARENT}" completed 240)" = "completed" ] || { print_error "The parent did not finish after the crash: $(instance_row "${PARENT}")"; exit 1; }
+    OUT=$(instance_output "${PARENT}")
+    echo "  parent output: $(echo "${OUT}" | head -c 800)"
+    [ "$(echo "${OUT}" | jq -r '.startA.instanceId')" = "${CHILD_A}" ] || { print_error "The replayed start returned another child"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.startA.replayed')" = "true" ] || { print_error "The replayed start should report replayed: ${OUT}"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.startB.instanceId')" = "${CHILD_B}" ] || { print_error "startB returned another child"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.startA.workflowId')" = "${CHILD_WF}" ] || { print_error "startA workflowId wrong"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.startA.runLabel')" = "a" ] || { print_error "startA runLabel wrong"; exit 1; }
+    [ "$(children_of "${PARENT}")" = "2" ] || { print_error "The replay admitted another child: $(children_of "${PARENT}")"; exit 1; }
+    print_success "start admitted two children; the SIGKILL replay returned the same child (replayed: true) ✓"
+
+    print_step "Stage 3: the parent read, commanded and answered its children..."
+    [ "$(echo "${OUT}" | jq -r '.query.total')" = "2" ] || { print_error "query(callerChildren) should see two children"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r --arg p "${PARENT}" '[.query.items[] | select(.parentInstanceId == $p)] | length')" = "2" ] \
+        || { print_error "query items should name the parent"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.getA.instance.parentInstanceId')" = "${PARENT}" ] || { print_error "get should report parentInstanceId"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.pauseA.outcome')" = "applied" ] || { print_error "Pausing the waiting child should apply at once"; exit 1; }
+    [ "$(echo "${OUT}" | jq -r '.resumeA.outcome')" = "applied" ] || { print_error "Resuming the paused child failed"; exit 1; }
+    case "$(echo "${OUT}" | jq -r '.cancelA.outcome')" in applied|requested) ;; *) print_error "Cancelling the child failed"; exit 1 ;; esac
+    [ -n "$(echo "${OUT}" | jq -r '.signalB.requestId // empty')" ] || { print_error "send-signal to the child failed"; exit 1; }
+    [ "$(wait_status "${CHILD_B}" completed 120)" = "completed" ] || { print_error "Child b did not finish: $(instance_row "${CHILD_B}")"; exit 1; }
+    instance_output "${CHILD_B}" | grep -q '"approved":true' || { print_error "Child b saw another answer"; exit 1; }
+    [ "$(wait_status "${CHILD_A}" cancelled 120)" = "cancelled" ] || { print_error "Child a was not cancelled: $(instance_row "${CHILD_A}")"; exit 1; }
+    LISTED=$(curl -sS "${API}/executions?parentInstanceId=${PARENT}&size=10")
+    [ "$(echo "${LISTED}" | jq -r --arg p "${PARENT}" '[.data.content[] | select(.parentInstanceId == $p)] | length')" = "2" ] \
+        || { print_error "The executions API should list two children: $(echo "${LISTED}" | head -c 400)"; exit 1; }
+    [ "$(curl -sS "${API}/workflows/instances/${CHILD_B}" | jq -r '.data.parentInstanceId')" = "${PARENT}" ] \
+        || { print_error "The instance API should report parentInstanceId"; exit 1; }
+    print_success "query/get see the children; pause, resume, cancel and send-signal reached them; the API filters by parent ✓"
+
+    print_step "Stage 3: a reused label conflicts..."
+    DUP_GRAPH=$(jq -n \
+        --argjson one "$(start_step one data.child dup cancel true)" \
+        --argjson two "$(start_step two data.child dup cancel true)" '{
+        name: "control-duplicate-label", durable: true, entryPoint: "one",
+        steps: { one: $one, two: $two, finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [ { fromStep: "one", toStep: "two" }, { fromStep: "two", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: { child: { type: "string", required: true } }
+    }')
+    read -r DUP_WF _ <<< "$(make_workflow control-duplicate-label "${DUP_GRAPH}")"
+    DUP=$(launch "${DUP_WF}" "$(jq -nc --arg c "${CHILD_WF}" '{child: $c}')")
+    [ "$(wait_status "${DUP}" failed 120)" = "failed" ] || { print_error "A reused label should fail the run: $(instance_row "${DUP}")"; exit 1; }
+    instance_row "${DUP}" | grep -q "CONTROL_LABEL_CONFLICT" || { print_error "Expected CONTROL_LABEL_CONFLICT: $(instance_row "${DUP}")"; exit 1; }
+    [ "$(children_of "${DUP}")" = "1" ] || { print_error "The conflicting start admitted a child"; exit 1; }
+    print_success "A reused run label is CONTROL_LABEL_CONFLICT and admits nothing ✓"
+
+    print_step "Stage 3: control's children hold at most their share (4 of 5)..."
+    # A child that keeps running (an in-process agent sleep, not a parked
+    # Delay), so it holds its slot while the parent starts the next one.
+    BUSY_GRAPH=$(jq -n '{
+        name: "control-busy", durable: true, entryPoint: "busy",
+        steps: { busy: { id: "busy", stepType: "Agent", agentId: "utils", capabilityId: "delay-in-ms",
+                         maxRetries: 0, inputMapping: { delay_value: { valueType: "immediate", value: 20000 } } },
+                 finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [ { fromStep: "busy", toStep: "finish" } ],
+        variables: {}, outputSchema: {}, inputSchema: { n: { type: "integer" } }
+    }')
+    read -r BUSY_WF _ <<< "$(make_workflow control-busy "${BUSY_GRAPH}")"
+    FAN_STEPS='{}'
+    FAN_PLAN='[]'
+    for i in 1 2 3 4 5; do
+        FAN_STEPS=$(echo "${FAN_STEPS}" | jq --argjson step "$(start_step "s${i}" data.child "busy-${i}" leave_running true)" --arg id "s${i}" '. + {($id): $step}')
+        next="s$((i + 1))"; [ "${i}" = "5" ] && next="finish"
+        FAN_PLAN=$(echo "${FAN_PLAN}" | jq --arg from "s${i}" --arg to "${next}" '. + [{fromStep: $from, toStep: $to}]')
+    done
+    FAN_GRAPH=$(jq -n --argjson steps "${FAN_STEPS}" --argjson plan "${FAN_PLAN}" '{
+        name: "control-fan-out", durable: true, entryPoint: "s1",
+        steps: ($steps + { finish: { id: "finish", stepType: "Finish" } }),
+        executionPlan: $plan, variables: {}, outputSchema: {},
+        inputSchema: { child: { type: "string", required: true } }
+    }')
+    read -r FAN_WF _ <<< "$(make_workflow control-fan-out "${FAN_GRAPH}")"
+    OUTSIDE_GRAPH=$(jq -n '{
+        name: "control-outside", durable: true, entryPoint: "finish",
+        steps: { finish: { id: "finish", stepType: "Finish" } },
+        executionPlan: [], variables: {}, inputSchema: {}, outputSchema: {}
+    }')
+    read -r OUTSIDE_WF _ <<< "$(make_workflow control-outside "${OUTSIDE_GRAPH}")"
+    FAN=$(launch "${FAN_WF}" "$(jq -nc --arg c "${BUSY_WF}" '{child: $c}')")
+    [ "$(wait_status "${FAN}" failed 120)" = "failed" ] || { print_error "The fifth child should not fit: $(instance_row "${FAN}")"; exit 1; }
+    instance_row "${FAN}" | grep -q "CONTROL_CAPACITY_RATE_LIMITED" || { print_error "Expected CONTROL_CAPACITY_RATE_LIMITED: $(instance_row "${FAN}")"; exit 1; }
+    [ "$(children_of "${FAN}")" = "4" ] || { print_error "Expected four admitted children, got $(children_of "${FAN}")"; exit 1; }
+    RESP=$(api_post "/workflows/${OUTSIDE_WF}/execute" '{"inputs": {"data": {}, "variables": {}}}')
+    OUTSIDE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+    [ -n "${OUTSIDE}" ] || { print_error "An outside trigger should be admitted while control holds its share: ${RESP}"; exit 1; }
+    [ "$(wait_status "${OUTSIDE}" completed 120)" = "completed" ] || { print_error "The outside run did not finish: $(instance_row "${OUTSIDE}")"; exit 1; }
+    print_success "The fifth running child is CONTROL_CAPACITY_RATE_LIMITED; an outside trigger still runs ✓"
 fi
 
 if stage_enabled 1; then

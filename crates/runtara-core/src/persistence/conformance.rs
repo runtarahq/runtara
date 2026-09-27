@@ -2480,6 +2480,134 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
         .expect("delete_instances_batch failed (batch lease cleanup)");
 }
 
+/// Parent links: a child of a same-tenant parent persists its link through
+/// every read and the lifecycle; a foreign, missing or self parent writes
+/// nothing; a lost claim leaves the existing row untouched.
+pub async fn run_parent_link_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::ParentLink;
+    let tenant = format!("parent-conformance-{}", Uuid::new_v4());
+    let parent = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&parent, &tenant, None, None)
+            .await
+            .unwrap()
+    );
+    // Whole milliseconds survive every backend's timestamp precision.
+    let admitted_at = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("a current timestamp");
+    let link = |parent: &str, policy: &str| ParentLink {
+        parent_instance_id: parent.into(),
+        parent_close_policy: policy.into(),
+        admitted_at,
+    };
+
+    let child = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_child_instance(
+                &child,
+                &tenant,
+                Some(b"input"),
+                Some("child-1"),
+                &link(&parent, "cancel"),
+            )
+            .await
+            .unwrap()
+    );
+    let expected = Some(link(&parent, "cancel"));
+    let row = backend.get_instance(&child).await.unwrap().unwrap();
+    assert_eq!(row.parent, expected);
+    assert_eq!(row.run_label.as_deref(), Some("child-1"));
+    assert_eq!(row.input.as_deref(), Some(b"input".as_slice()));
+    assert_eq!(row.status, CoreInstanceStatus::Pending);
+    assert_eq!(
+        backend
+            .get_instance_meta(&child)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent,
+        expected
+    );
+    // A top-level run has no link.
+    assert_eq!(
+        backend.get_instance(&parent).await.unwrap().unwrap().parent,
+        None
+    );
+
+    // A replay loses the claim and changes nothing.
+    assert!(
+        !backend
+            .try_register_child_instance(
+                &child,
+                &tenant,
+                None,
+                None,
+                &link(&parent, "leave_running"),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.get_instance(&child).await.unwrap().unwrap().parent,
+        expected
+    );
+
+    // The link survives the lifecycle.
+    backend
+        .update_instance_status(&child, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
+    backend
+        .complete_instance(CompleteInstanceParams::new(
+            &child,
+            CoreInstanceStatus::Completed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.get_instance(&child).await.unwrap().unwrap().parent,
+        expected
+    );
+
+    // A parent of another tenant, a missing parent, the child itself and an
+    // unknown policy are refused, and nothing is written.
+    let foreign = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&foreign, "another-tenant", None, None)
+            .await
+            .unwrap()
+    );
+    for (id, link) in [
+        (Uuid::new_v4().to_string(), link(&foreign, "cancel")),
+        (Uuid::new_v4().to_string(), link("no-such-parent", "cancel")),
+        (Uuid::new_v4().to_string(), link(&parent, "abandon")),
+        (Uuid::new_v4().to_string(), link("", "cancel")),
+    ] {
+        let refused = backend
+            .try_register_child_instance(&id, &tenant, None, None, &link)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::error::CoreError::ValidationError { .. })
+            ),
+            "{link:?} must be refused, got {refused:?}"
+        );
+        assert!(backend.get_instance(&id).await.unwrap().is_none());
+    }
+    let own = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_child_instance(&own, &tenant, None, None, &link(&own, "cancel"))
+            .await
+            .is_err()
+    );
+    assert!(backend.get_instance(&own).await.unwrap().is_none());
+}
+
 /// Start references are exact, non-unique, and immutable throughout the lifecycle.
 async fn run_start_label_sequence<P: Persistence>(backend: &P) {
     let label = " Order_123:/?% ";

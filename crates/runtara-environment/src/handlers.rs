@@ -236,6 +236,9 @@ impl EnvironmentHandlerState {
 pub struct StartInstanceRequest {
     /// Immutable optional execution reference, validated at start.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`; it must be a
+    /// run of the same tenant.
+    pub parent: Option<runtara_core::persistence::ParentLink>,
 
     /// Image ID to create instance from.
     pub image_id: String,
@@ -664,6 +667,7 @@ pub async fn handle_start_instance(
     };
     let initial = InitialLaunchRequest {
         run_label: run_label.clone(),
+        parent: request.parent,
         launch,
         input: input_bytes,
         env: Some(launch_env),
@@ -720,6 +724,12 @@ pub async fn handle_start_instance(
             Ok(StartInstanceResponse::rejected(StartRejection::Internal(
                 format!("instance '{instance_id}' exists without an active launch generation"),
             )))
+        }
+        Err(crate::launch_queue::LaunchQueueError::InvalidParent(detail)) => {
+            warn!(instance_id = %instance_id, detail, "Refusing a child start with an invalid parent");
+            Ok(StartInstanceResponse::rejected(
+                StartRejection::InvalidRequest(format!("invalid parent: {detail}")),
+            ))
         }
         Err(error) => {
             error!(error = %error, "Failed to atomically queue instance start");

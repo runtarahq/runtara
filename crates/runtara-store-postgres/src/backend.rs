@@ -538,6 +538,69 @@ impl Persistence for PostgresPersistence {
         Self::op_try_register_instance(&self.pool, instance_id, tenant_id, input, run_label).await
     }
 
+    async fn try_register_child_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+        parent: &runtara_core::persistence::ParentLink,
+    ) -> Result<bool, CoreError> {
+        parent.validate(instance_id)?;
+        let run_label =
+            runtara_dsl::run_label::normalize_run_label(run_label).map_err(|message| {
+                CoreError::ValidationError {
+                    field: "runLabel".into(),
+                    message,
+                }
+            })?;
+        let persistence = |e: sqlx::Error| CoreError::PersistenceError {
+            operation: "try_register_child_instance".into(),
+            details: e.to_string(),
+        };
+        // The parent check and the insert are one statement: a child is
+        // written only while a run of its own tenant holds the parent id.
+        let inserted: Option<String> = sqlx::query_scalar(
+            r#"
+            INSERT INTO instances
+                (instance_id, tenant_id, definition_version, status, created_at, input,
+                 run_label, parent_instance_id, parent_close_policy, admitted_at)
+            SELECT $1, $2, 1, 'pending', NOW(), $3, $4, $5, $6, $7
+            WHERE EXISTS (
+                SELECT 1 FROM instances AS p WHERE p.instance_id = $5 AND p.tenant_id = $2
+            )
+            ON CONFLICT (instance_id) DO NOTHING
+            RETURNING instance_id
+            "#,
+        )
+        .bind(instance_id)
+        .bind(tenant_id)
+        .bind(input)
+        .bind(run_label.as_deref())
+        .bind(&parent.parent_instance_id)
+        .bind(&parent.parent_close_policy)
+        .bind(parent.admitted_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(persistence)?;
+        if inserted.is_some() {
+            return Ok(true);
+        }
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instances WHERE instance_id = $1)")
+                .bind(instance_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(persistence)?;
+        if taken {
+            return Ok(false);
+        }
+        Err(CoreError::ValidationError {
+            field: "parentInstanceId".into(),
+            message: "the parent is not a run of this tenant".into(),
+        })
+    }
+
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
         Self::op_get_instance(&self.pool, instance_id).await
     }

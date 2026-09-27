@@ -34,6 +34,9 @@ pub struct ListExecutionsParams {
     /// all matches contribute to the filtered total before pagination. Use the
     /// normalized, possibly truncated label returned by list_executions/get_execution.
     pub run_label: Option<String>,
+    /// Only the children of this execution: the runs its control:start steps
+    /// started (each child reports its parent as parentInstanceId).
+    pub parent_instance_id: Option<String>,
     #[schemars(description = "Filter by workflow ID")]
     pub workflow_id: Option<String>,
     #[schemars(
@@ -154,6 +157,9 @@ fn list_executions_query_string(params: &ListExecutionsParams) -> String {
     }
     if let Some(label) = &params.run_label {
         push_query_param(&mut query, "runLabel", label);
+    }
+    if let Some(parent) = &params.parent_instance_id {
+        push_query_param(&mut query, "parentInstanceId", parent);
     }
     if let Some(sid) = &params.workflow_id {
         push_query_param(&mut query, "workflowId", sid);
@@ -2221,6 +2227,7 @@ mod tests {
         let query = list_executions_query_string(&ListExecutionsParams {
             search: None,
             run_label: None,
+            parent_instance_id: Some("parent 1".to_string()),
             workflow_id: Some("workflow/needs encoding".to_string()),
             status: Some("running,queued".to_string()),
             page: Some(2),
@@ -2230,6 +2237,8 @@ mod tests {
         });
 
         assert!(query.contains("workflowId=workflow%2Fneeds%20encoding"));
+        assert!(query.contains("parentInstanceId=parent%201"));
+        assert!(!query.contains("parent_instance_id="));
         assert!(query.contains("status=running%2Cqueued"));
         assert!(query.contains("page=2"));
         assert!(query.contains("size=50"));

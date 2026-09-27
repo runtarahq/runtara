@@ -1529,6 +1529,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let launch_id = Uuid::new_v4().to_string();
     let request = InitialLaunchRequest {
         run_label: Some(" Order_123:/?% ".into()),
+        parent: None,
         launch: EnqueueRequest::immediate(
             &launch_id,
             &instance_id,
@@ -1620,6 +1621,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let invalid_instance = Uuid::new_v4().to_string();
     let invalid = InitialLaunchRequest {
         run_label: None,
+        parent: None,
         launch: EnqueueRequest::immediate(
             Uuid::new_v4().to_string(),
             &invalid_instance,

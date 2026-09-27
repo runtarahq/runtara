@@ -46,6 +46,12 @@ use crate::workers::runtara_dto::{
 use runtara_environment::execution_timeout::ExecutionTimeoutSeconds;
 use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
+mod control_start;
+pub use control_start::{
+    ChildStart, START_FINGERPRINT_PREFIX, StartChildError, StartedChild, control_start_key,
+    lineage_depth, normalize_start,
+};
+
 /// Recover workflow identity from an artifact-qualified runtime image name.
 ///
 /// The server database retains only the currently selected image ID for a
@@ -1456,6 +1462,7 @@ impl ExecutionEngine {
                 &event.workflow_id,
                 Some(event.instance_id.clone()),
                 event.run_label.clone(),
+                event.parent_link(),
                 Some(workflow_input),
                 Some(execution_timeout),
                 event.debug,
@@ -2059,6 +2066,7 @@ impl ExecutionEngine {
             .with_offset((page * size) as u32);
 
         options.search = filters.search.clone();
+        options.parent_instance_id = filters.parent_instance_id.clone();
         options.run_label =
             runtara_dsl::run_label::normalize_run_label(filters.run_label.as_deref())
                 .map_err(ExecutionError::ValidationError)?;
@@ -2670,7 +2678,18 @@ fn map_outbox_error(error: ExecutionOutboxError) -> ExecutionError {
                 maximum: limit,
             },
         ),
-        ExecutionOutboxError::RunLabelConflict => ExecutionError::RunLabelConflict,
+        ExecutionOutboxError::RunLabelConflict | ExecutionOutboxError::ParentRunLabelConflict => {
+            ExecutionError::RunLabelConflict
+        }
+        ExecutionOutboxError::StartReplayConflict => {
+            ExecutionError::ValidationError(error.to_string())
+        }
+        ExecutionOutboxError::ControlShareFull { share } => ExecutionError::EntitlementDenied(
+            crate::entitlement_error::EntitlementDenial::LimitExceeded {
+                limit: "maxConcurrentExecutions",
+                maximum: share,
+            },
+        ),
         ExecutionOutboxError::InvalidRunLabel(_)
         | ExecutionOutboxError::InvalidIdempotencyKey
         | ExecutionOutboxError::TenantMismatch => {

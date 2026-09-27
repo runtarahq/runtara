@@ -74,6 +74,49 @@ pub struct InstanceRecord {
     /// Checkpoint count observed at the last auto-recovery, as text. Compared
     /// against the current count to distinguish "made progress" from "stuck".
     pub recovery_marker: Option<String>,
+    /// The run that started this one through `control:start`, with the
+    /// author's parent-close policy and the admission time. `None` for a
+    /// top-level run.
+    pub parent: Option<ParentLink>,
+}
+
+/// Parent-close policies a child may carry, in the order the editor offers
+/// them (`cancel` is preselected).
+pub const PARENT_CLOSE_POLICIES: [&str; 2] = ["cancel", "leave_running"];
+
+/// How a child run relates to the run that started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentLink {
+    /// The parent run, always of the child's tenant.
+    pub parent_instance_id: String,
+    /// `cancel` or `leave_running` ([`PARENT_CLOSE_POLICIES`]).
+    pub parent_close_policy: String,
+    /// When `control:start` admitted the child; orders a parent's children.
+    pub admitted_at: DateTime<Utc>,
+}
+
+impl ParentLink {
+    /// Reject a link no backend may store: an empty or self parent, or an
+    /// unknown policy.
+    pub fn validate(&self, instance_id: &str) -> Result<(), CoreError> {
+        let invalid = |message: &str| CoreError::ValidationError {
+            field: "parentInstanceId".into(),
+            message: message.into(),
+        };
+        if self.parent_instance_id.trim().is_empty() {
+            return Err(invalid("the parent instance id must not be empty"));
+        }
+        if self.parent_instance_id == instance_id {
+            return Err(invalid("a run cannot be its own parent"));
+        }
+        if !PARENT_CLOSE_POLICIES.contains(&self.parent_close_policy.as_str()) {
+            return Err(CoreError::ValidationError {
+                field: "parentClosePolicy".into(),
+                message: "the parent-close policy must be cancel or leave_running".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Checkpoint record from the persistence layer.
@@ -535,6 +578,30 @@ pub trait Persistence: Send + Sync {
             self.store_instance_input(instance_id, input).await?;
         }
         Ok(true)
+    }
+
+    /// Atomically register a child of `parent.parent_instance_id`, like
+    /// [`Self::try_register_instance_with_label`] plus the parent link.
+    ///
+    /// The parent must be a run of the same tenant; anything else is a
+    /// `ValidationError` on `parentInstanceId` and writes nothing, so a
+    /// child can never hang off another tenant's run. `Ok(false)` when the
+    /// id is already taken (the existing row is not touched).
+    ///
+    /// Backends without parent links refuse every child.
+    async fn try_register_child_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+        parent: &ParentLink,
+    ) -> Result<bool, CoreError> {
+        let _ = (instance_id, tenant_id, input, run_label, parent);
+        Err(CoreError::ValidationError {
+            field: "parentInstanceId".into(),
+            message: "This persistence backend does not support parent links".into(),
+        })
     }
 
     /// Read an instance's full row, launch input included.

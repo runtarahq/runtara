@@ -155,6 +155,7 @@ pub fn make_instance(
         exit_code: None,
         recovery_attempts: 0,
         recovery_marker: None,
+        parent: None,
     }
 }
 

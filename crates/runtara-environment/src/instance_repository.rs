@@ -44,6 +44,8 @@ use crate::error::{Error, Result};
 pub struct InstanceDetail {
     /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    pub parent_instance_id: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Lifecycle status.
@@ -89,6 +91,8 @@ pub struct InstanceDetail {
 pub struct InstanceListItem {
     /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    pub parent_instance_id: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Owning tenant.
@@ -133,6 +137,8 @@ pub struct ListInstancesOptions {
     pub search: Option<String>,
     /// Exact normalized execution label filter.
     pub run_label: Option<String>,
+    /// Only the children of this run (`control:start`).
+    pub parent_instance_id: Option<String>,
     /// Workflow IDs whose names match search, resolved in the server database.
     pub search_workflow_ids: Vec<String>,
     /// Filter by tenant ID.
@@ -226,6 +232,24 @@ impl InstanceRepository {
             .fetch_all(&self.pool).await?)
     }
 
+    /// Live children of `parent` in `tenant` that hold an open managed input,
+    /// for `list-pending-signals` over the caller's children. Like
+    /// [`Self::input_candidate_ids_for_image_name_prefix`], managed input
+    /// discovery still applies the authoritative filter after this.
+    pub async fn input_candidate_ids_for_parent(
+        &self,
+        tenant: &str,
+        parent: &str,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT i.instance_id FROM instances i WHERE i.tenant_id=$1 AND i.parent_instance_id=$2 AND i.status NOT IN ('completed','failed','cancelled') AND EXISTS (SELECT 1 FROM instance_input_requests r WHERE r.instance_id=i.instance_id AND r.state='open') ORDER BY i.instance_id COLLATE \"C\"",
+        )
+        .bind(tenant)
+        .bind(parent)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Everything the server reports about one instance. `None` if there is no
     /// such row.
     pub async fn detail(&self, instance_id: &str) -> Result<Option<InstanceDetail>> {
@@ -237,6 +261,7 @@ impl InstanceRepository {
             status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
             instance_id: inst.instance_id,
             run_label: inst.run_label,
+            parent_instance_id: inst.parent_instance_id,
             tenant_id: inst.tenant_id,
             image_id: inst.image_id,
             image_name: inst.image_name,
@@ -272,6 +297,7 @@ impl InstanceRepository {
                         status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
                         instance_id: inst.instance_id,
                         run_label: inst.run_label,
+                        parent_instance_id: inst.parent_instance_id,
                         tenant_id: inst.tenant_id,
                         image_id: inst.image_id,
                         image_name: inst.image_name,

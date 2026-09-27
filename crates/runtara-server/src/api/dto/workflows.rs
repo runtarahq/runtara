@@ -908,6 +908,14 @@ pub struct WorkflowInstanceDto {
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The execution whose `control:start` step started this one; absent for
+    /// executions started any other way.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
     /// Runtime finish timestamp used by completion-date filters. May also be
     /// present for a suspended attempt; absent until the runtime records it.
     #[serde(

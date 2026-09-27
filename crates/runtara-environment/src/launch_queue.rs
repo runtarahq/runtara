@@ -288,6 +288,9 @@ pub struct EnqueueRequest {
 pub struct InitialLaunchRequest {
     /// Immutable optional execution reference, validated at start.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`. The parent
+    /// must be a run of the same tenant, or the claim is refused.
+    pub parent: Option<runtara_core::persistence::ParentLink>,
 
     /// The first physical launch generation. Its kind must be [`LaunchKind::Start`].
     pub launch: EnqueueRequest,
@@ -392,6 +395,9 @@ pub enum LaunchQueueError {
     /// The start reference failed exact-label validation.
     #[error("invalid run label: {0}")]
     InvalidRunLabel(String),
+    /// A child's parent link is malformed or names no run of its tenant.
+    #[error("invalid parent: {0}")]
+    InvalidParent(String),
     /// PostgreSQL rejected or could not complete a queue operation.
     #[error("launch queue database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -611,12 +617,24 @@ impl LaunchRepository {
             "#
         );
 
+        if let Some(parent) = &request.parent {
+            parent
+                .validate(&request.launch.instance_id)
+                .map_err(|error| LaunchQueueError::InvalidParent(error.to_string()))?;
+        }
         let mut tx = self.pool.begin().await?;
+        // A child is written only while a run of its own tenant holds the
+        // parent id; the check and the claim are one statement.
         let claimed: Option<String> = sqlx::query_scalar(
             r#"
             INSERT INTO instances
-                (instance_id, tenant_id, definition_version, status, created_at, input, run_label)
-            VALUES ($1, $2, 1, 'pending', NOW(), $3, $4)
+                (instance_id, tenant_id, definition_version, status, created_at, input, run_label,
+                 parent_instance_id, parent_close_policy, admitted_at)
+            SELECT $1, $2, 1, 'pending', NOW(), $3, $4, $5, $6, $7
+            WHERE $5::TEXT IS NULL OR EXISTS (
+                SELECT 1 FROM instances AS parent
+                WHERE parent.instance_id = $5 AND parent.tenant_id = $2
+            )
             ON CONFLICT (instance_id) DO NOTHING
             RETURNING instance_id
             "#,
@@ -625,6 +643,9 @@ impl LaunchRepository {
         .bind(&request.launch.tenant_id)
         .bind(request.input.as_deref())
         .bind(run_label.as_deref())
+        .bind(request.parent.as_ref().map(|p| &p.parent_instance_id))
+        .bind(request.parent.as_ref().map(|p| &p.parent_close_policy))
+        .bind(request.parent.as_ref().map(|p| p.admitted_at))
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -633,6 +654,19 @@ impl LaunchRepository {
                 .bind(&request.launch.instance_id)
                 .fetch_optional(&mut *tx)
                 .await?;
+            if existing.is_none() && request.parent.is_some() {
+                let taken: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM instances WHERE instance_id = $1)",
+                )
+                .bind(&request.launch.instance_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !taken {
+                    return Err(LaunchQueueError::InvalidParent(
+                        "the parent is not a run of this tenant".into(),
+                    ));
+                }
+            }
             tx.commit().await?;
             return match existing {
                 Some(launch) => Ok(InitialLaunchOutcome::ExistingLaunch(launch.try_into()?)),
@@ -2278,6 +2312,7 @@ mod tests {
             .bind(&id).execute(&pool).await.unwrap();
         let request = InitialLaunchRequest {
             run_label: None,
+            parent: None,
             launch: EnqueueRequest::immediate(
                 &id,
                 &id,
@@ -2359,6 +2394,7 @@ mod tests {
             let next = format!("{id}-{suffix}");
             repo.claim_initial(InitialLaunchRequest {
                 run_label: None,
+                parent: None,
                 launch: EnqueueRequest::immediate(
                     &next,
                     &next,

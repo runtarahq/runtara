@@ -750,6 +750,7 @@ mod tests {
                     exit_code: None,
                     recovery_attempts: 0,
                     recovery_marker: None,
+                    parent: None,
                 }))
         }
 

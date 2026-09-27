@@ -291,8 +291,47 @@ impl Persistence for InMemoryPersistence {
                 exit_code: None,
                 recovery_attempts: 0,
                 recovery_marker: None,
+                parent: None,
             },
         );
+        Ok(true)
+    }
+
+    async fn try_register_child_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+        parent: &crate::persistence::ParentLink,
+    ) -> Result<bool, CoreError> {
+        parent.validate(instance_id)?;
+        {
+            let store = self.store.lock().unwrap();
+            if store.instances.contains_key(instance_id) {
+                return Ok(false);
+            }
+            if !store
+                .instances
+                .get(&parent.parent_instance_id)
+                .is_some_and(|row| row.tenant_id == tenant_id)
+            {
+                return Err(CoreError::ValidationError {
+                    field: "parentInstanceId".into(),
+                    message: "the parent is not a run of this tenant".into(),
+                });
+            }
+        }
+        if !self
+            .try_register_instance_with_label(instance_id, tenant_id, input, run_label)
+            .await?
+        {
+            return Ok(false);
+        }
+        let mut store = self.store.lock().unwrap();
+        if let Some(row) = store.instances.get_mut(instance_id) {
+            row.parent = Some(parent.clone());
+        }
         Ok(true)
     }
 
@@ -1246,6 +1285,7 @@ mod tests {
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
         crate::persistence::conformance::run_parked_pause_sequence(&backend).await;
         crate::persistence::conformance::run_control_receipt_sequence(&backend).await;
+        crate::persistence::conformance::run_parent_link_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
     }

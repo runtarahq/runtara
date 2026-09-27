@@ -163,7 +163,32 @@ beside the old one, stops the service, swaps the directories, and restarts —
 so an interrupted download leaves the running install untouched. Your config
 and data directories are not modified.
 
-Pin a version with `--version`, including downgrades.
+Pin a version with `--version`, including downgrades — except across a
+release whose migrations the older binary does not know (below).
+
+### Upgrading to the `control:start` release
+
+The first boot of this release migrates both databases before it serves:
+
+- **Runtime database** (`RUNTARA_DATABASE_URL`): `instances` gains the parent
+  link of child runs (`035`), its checks are validated (`036`), and
+  `idx_instances_parent_admitted` is built (`037`). The column add holds an
+  `ACCESS EXCLUSIVE` lock on `instances` for a moment and the index build a
+  `SHARE` lock (writes wait) for as long as it takes over the child rows,
+  which do not exist yet on an upgrade — expect well under a second.
+- **Server database** (`RUNTARA_SERVER_DATABASE_URL`): `execution_requests`
+  gains the parent, run-label, fingerprint and outcome columns of admitted
+  children (`20260927000100`), then its checks and child indexes, including
+  the unique per-parent run-label index (`20260927000101`).
+
+**Do not downgrade past this release.** An older binary refuses to start on a
+database whose `_sqlx_migrations` holds versions it does not know, and the
+migrations are forward-only. Restore a pre-upgrade backup instead if you must
+go back.
+
+A deployment whose concurrency limit (`MAX_CONCURRENT_EXECUTIONS`, or the
+tier's `maxConcurrentExecutions`) is 1 or less logs a boot warning: the
+parent holds the only slot, so `control:start` can never admit a child.
 
 ## Uninstall
 

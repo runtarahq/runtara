@@ -6179,6 +6179,11 @@ export interface WorkflowInstanceDto {
   /** @format double */
   maxMemoryMb?: number | null;
   outputs?: any;
+  /**
+   * The execution whose `control:start` step started this one; absent for
+   * executions started any other way.
+   */
+  parentInstanceId?: string | null;
   /** @format double */
   processingOverheadSeconds?: number | null;
   /** @format double */
@@ -7316,6 +7321,11 @@ export class Api<
         search?: string;
         /** Exact execution label (duplicates are returned). */
         runLabel?: string;
+        /**
+         * Only the children of this run: the executions its `control:start`
+         * steps started.
+         */
+        parentInstanceId?: string;
         /**
          * Page number (0-based, default: 0)
          * @format int32

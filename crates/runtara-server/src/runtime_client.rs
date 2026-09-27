@@ -298,6 +298,43 @@ impl RuntimeClient {
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
+    /// A run's lineage in `tenant`, itself first, then its ancestors.
+    pub async fn control_lineage(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Vec<(String, Option<String>)>, RuntimeError> {
+        self.client
+            .control_lineage(tenant, instance_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// One page of a parent's launched and admitted children, plus the total.
+    pub async fn control_children(
+        &self,
+        tenant: &str,
+        parent: &str,
+        options: &runtara_environment::instance_repository::ListInstancesOptions,
+        include_launched: bool,
+        admitted: &[runtara_environment::control_reads::AdmittedChild],
+        order: runtara_environment::control_reads::ChildOrder,
+    ) -> Result<(Vec<runtara_environment::control_reads::ControlChild>, i64), RuntimeError> {
+        self.client
+            .control_children(tenant, parent, options, include_launched, admitted, order)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Live children of `parent` with open managed inputs.
+    pub async fn parent_input_instances(
+        &self,
+        tenant: &str,
+        parent: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
+        self.client.parent_input_instances(tenant, parent).await
+    }
+
     /// Retained request lookup for submission and receipt replay.
     pub async fn get_input_request(
         &self,
@@ -449,6 +486,7 @@ impl RuntimeClient {
         workflow_id: &str,
         instance_id: Option<String>,
         run_label: Option<String>,
+        parent: Option<runtara_core::persistence::ParentLink>,
         input: Option<Value>,
         timeout: Option<ExecutionTimeoutSeconds>,
         debug: bool,
@@ -458,6 +496,7 @@ impl RuntimeClient {
 
         let mut options = StartInstanceOptions::new(image_id, tenant_id);
         options.run_label = run_label;
+        options.parent = parent;
 
         // Store instance_id for later use in env vars
         let actual_instance_id = if let Some(ref id) = instance_id {
@@ -1113,6 +1152,7 @@ mod classify_observed_status_tests {
         let created = Utc::now();
         InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             image_id: "img-1".to_string(),
             image_name: "wf:1".to_string(),

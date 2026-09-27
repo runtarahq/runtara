@@ -212,6 +212,7 @@ async fn test_start_instance_success() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -272,6 +273,7 @@ async fn test_start_instance_with_custom_id() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(custom_instance_id.clone()),
@@ -321,6 +323,7 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     let instance_id = format!("idempotent-{}", Uuid::new_v4());
     let request = || StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -399,6 +402,7 @@ async fn test_start_instance_hands_runner_the_stored_input() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
             instance_id: Some(instance_id.clone()),
@@ -573,6 +577,7 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
     let instance_id = format!("vanishing-{}", Uuid::new_v4());
     let request = || StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -636,6 +641,7 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
             instance_id: Some(instance_id.clone()),
@@ -735,6 +741,7 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
 
     let request = || StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -822,6 +829,7 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
     let instance_id = format!("image-conflict-{}", Uuid::new_v4());
     let start = |image_id: String| StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id,
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -859,6 +867,7 @@ async fn test_start_instance_empty_image_id() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: "".to_string(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -886,6 +895,7 @@ async fn test_start_instance_image_not_found() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: "nonexistent-image-id".to_string(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -927,6 +937,7 @@ async fn a_database_failure_is_not_reported_as_a_missing_image() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: "some-image-id".to_string(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -1136,6 +1147,7 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image.clone(),
             tenant_id: "test-tenant".into(),
             instance_id: None,
@@ -1873,6 +1885,7 @@ async fn test_start_instance_tenant_isolation() {
     // Attempt to start an instance as tenant-B using tenant-A's image
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "tenant-B".to_string(), // Different tenant!
         instance_id: None,
@@ -1928,6 +1941,7 @@ async fn test_start_instance_same_tenant_allowed() {
     // Start an instance as tenant-A using tenant-A's image
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "tenant-A".to_string(), // Same tenant
         instance_id: None,
@@ -1985,6 +1999,7 @@ async fn test_start_instance_stores_env() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -2042,6 +2057,7 @@ async fn test_start_instance_empty_env() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -2693,6 +2709,7 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
             instance_id: None,

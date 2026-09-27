@@ -37,8 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ancestor, or any run whose request opted in with `action.key` when the step
   passes the same `actionKey`; `cancel` (reason, grace 0-3600 s, default 5 s),
   `pause` and `resume` reach direct children only, and nothing targets the
-  calling run. The parent link arrives with `start`, so until then only the
-  `action.key` opt-in reaches another run. Each mutation step runs in a
+  calling run. Each mutation step runs in a
   compiler-emitted operation scope (`runtara:workflow-operation`), durable or
   not, so a retried or replayed step never applies twice: its receipt is kept
   per calling run and step operation (runtime migration
@@ -49,6 +48,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channels). Every attempt is recorded in `audit_events`
   (`control.send_signal`, `control.cancel`, …) without payloads. Workflows
   without control or suspending steps compile to the same bytes as before.
+
+- **The `control` agent starts child runs.** `start` durably admits a run
+  of another workflow as a child of the calling run and returns
+  `{instanceId, workflowId, version, runLabel, replayed}` once it is
+  accepted, without waiting for it. The author must choose a
+  `parentClosePolicy` (`cancel`, which the step editor preselects, or
+  `leave_running`); the editor now pre-fills every required enum input
+  without a default with its first value. Admission is replay-safe per step
+  operation: the same step replays the same child (`replayed: true`) and
+  other arguments are `CONTROL_REPLAY_CONFLICT`. A run label names one child
+  per parent for the parent's lifetime (`CONTROL_LABEL_CONFLICT`); lineage
+  stops at depth 16 (`CONTROL_INVALID`); a missing workflow or version is
+  `CONTROL_NOT_FOUND` and a permanently failed compilation
+  `CONTROL_NOT_RUNNABLE`, while a workflow not compiled yet is admitted and
+  retried until the request deadline (then `launch_deadline_not_compiled`).
+  Children count against the concurrency limit, and control's children may
+  hold at most `max(1, floor(0.8 x limit))` slots: beyond that `start` fails
+  with retryable `CONTROL_CAPACITY_RATE_LIMITED` (3-8 s hint); a limit of at
+  most 1 is `CONTROL_CAPACITY_UNSATISFIABLE`, with a boot warning. The parent
+  link now decides which runs are children and ancestors for `send-signal`,
+  `cancel`, `pause` and `resume`; a child still in admission reads as
+  `queued` and cannot pause or resume yet. `get` reports `parentInstanceId`,
+  `query` filters by `parentInstanceId` or the caller's children (merging
+  children still in admission, paged by admission time), and
+  `list-pending-signals` covers the caller's children. The executions API
+  (`WorkflowInstanceDto.parentInstanceId`, `GET /api/runtime/executions
+  ?parentInstanceId=`) and MCP `list_executions` (`parent_instance_id`) expose
+  the link. **Upgrade note:** the first boot migrates the runtime database
+  (`035`-`037`: parent columns on `instances`, briefly locked, and
+  `idx_instances_parent_admitted`) and the server database
+  (`20260927000100`/`000101`: child columns, checks and the unique per-parent
+  label index on `execution_requests`). Migrations are forward-only; do not
+  downgrade past this release.
 
 - TLS support for the Valkey connection: `VALKEY_TLS=1` switches every server
   connection to `rediss://`; `VALKEY_TLS_CA_CERT=/path/cert.pem` trusts a

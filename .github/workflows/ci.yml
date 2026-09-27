@@ -627,6 +627,17 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # control_component admits children through the execution outbox and
+      # launches them through the trigger stream, which lives in Valkey.
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -691,12 +702,17 @@ jobs:
       - name: Run a composed control agent against the native control service
         env:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres@localhost:5432/control_component_test
+          TEST_RUNTARA_SERVER_DATABASE_URL: postgres://postgres@localhost:5432/control_component_server_test
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/agent-components
+          VALKEY_HOST: localhost
+          VALKEY_PORT: "6379"
         # Compiles a workflow calling control:get, checks the composed control
         # copy is the installed bytes verbatim, and runs it through the
-        # environment runner and the host control executor.
+        # environment runner and the host control executor. The start test
+        # admits a child through NativeControl and launches it for real.
         run: |
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_test;'
+          psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_server_test;'
           cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test control_component
 
       - name: Qualify emitted Agent deadlines before relaxing E128

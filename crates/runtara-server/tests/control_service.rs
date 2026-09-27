@@ -331,24 +331,33 @@ async fn query_pages_filters_and_sorts_before_paging() {
         ),
         (
             QueryRequest {
-                parent: Some(ParentFilter::Instance(ids[0].clone())),
+                parent: Some(ParentFilter::Instance(" ".into())),
                 ..query(10)
             },
-            ControlErrorCode::Unsupported,
+            ControlErrorCode::Invalid,
         ),
     ] {
         assert_eq!(fx.control.query(&me, request).await.unwrap_err().code, code);
     }
-    // With a calling run the caller-relative filter waits for its slice.
+    // A run without children has an empty page, by id or as the caller.
     let caller = authority(&fx.tenant, Some(&ids[0]));
-    let request = QueryRequest {
-        parent: Some(ParentFilter::Caller),
-        ..query(10)
-    };
-    assert_eq!(
-        fx.control.query(&caller, request).await.unwrap_err().code,
-        ControlErrorCode::Unsupported
-    );
+    for (me, parent) in [
+        (&me, ParentFilter::Instance(ids[0].clone())),
+        (&caller, ParentFilter::Caller),
+    ] {
+        let page = fx
+            .control
+            .query(
+                me,
+                QueryRequest {
+                    parent: Some(parent),
+                    ..query(10)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!((page.items.len(), page.total), (0, 0));
+    }
 }
 
 #[tokio::test]
@@ -514,7 +523,7 @@ async fn identity_calls_need_a_run_and_the_service_binds_late() {
             .await
             .unwrap_err()
             .code,
-        ControlErrorCode::Unsupported
+        ControlErrorCode::RequiresOperation
     );
 
     // A call before the runtime exists waits for it.
@@ -1244,4 +1253,590 @@ async fn mutations_are_audited_without_payloads() {
     for (_, _, payload) in &rows {
         assert!(!payload.to_string().contains("s3cr3t"), "{payload}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// start: parent link, idempotent admission, capacity, parent-aware reads
+// ---------------------------------------------------------------------------
+
+use runtara_component_host::control_host::ParentClosePolicy;
+use runtara_core::persistence::ParentLink;
+use runtara_server::api::repositories::workflows::WorkflowRepository;
+use runtara_server::workers::execution_engine::ExecutionEngine;
+
+/// The concurrency limit every test of this binary runs under: control's
+/// share of it is `max(1, floor(0.8 x 3))` = 2.
+const LIMIT: &str = "3";
+
+static CONFIG: std::sync::Once = std::sync::Once::new();
+
+fn init_config() {
+    CONFIG.call_once(|| {
+        // SAFETY: set once, before any test reads the environment.
+        unsafe {
+            std::env::set_var("MAX_CONCURRENT_EXECUTIONS", LIMIT);
+            if std::env::var("TENANT_ID").is_err() {
+                std::env::set_var("TENANT_ID", "control-service-tests");
+            }
+            if std::env::var("RUNTARA_MCP_SESSION_STORE").is_err() {
+                std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
+            }
+            if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
+                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
+            }
+        }
+        runtara_server::config::init(
+            runtara_server::config::Config::from_env().expect("test configuration"),
+        );
+    });
+}
+
+struct Children {
+    fx: Fixture,
+    server: sqlx::PgPool,
+    engine: Arc<ExecutionEngine>,
+    control: NativeControl,
+}
+
+static SERVER_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+impl Children {
+    async fn new() -> Self {
+        init_config();
+        let fx = Fixture::new().await;
+        let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
+            .expect("start tests need TEST_RUNTARA_SERVER_DATABASE_URL");
+        let server = sqlx::PgPool::connect(&url).await.unwrap();
+        SERVER_MIGRATOR.run(&server).await.unwrap();
+        let runtime = Arc::new(RuntimeClient::new(
+            Arc::new(EnvironmentHandlerState::new(
+                fx.pool.clone(),
+                fx.persistence.clone(),
+                Arc::new(MockRunner::new()),
+                std::env::temp_dir(),
+            )),
+            RuntimeClientConfig::new(Default::default()),
+        ));
+        let (events, _) = tokio::sync::mpsc::channel(64);
+        let engine = Arc::new(ExecutionEngine::new(
+            server.clone(),
+            Arc::new(WorkflowRepository::new(server.clone())),
+            Some(runtime.clone()),
+            None,
+            runtara_server::product_events::ProductEventSink::new(events),
+        ));
+        let control = NativeControl::new(Some(fx.tenant.clone()));
+        control.install(runtime);
+        control.install_engine(engine.clone());
+        Self {
+            fx,
+            server,
+            engine,
+            control,
+        }
+    }
+
+    /// A workflow of the tenant whose single version takes `{order: integer}`.
+    async fn workflow(&self, definition: Value) -> String {
+        let workflow = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version) VALUES ($1, $2, 1, 1)",
+        )
+        .bind(&self.fx.tenant)
+        .bind(&workflow)
+        .execute(&self.server)
+        .await
+        .unwrap();
+        let size = serde_json::to_vec(&definition).unwrap().len() as i32;
+        sqlx::query(
+            "INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, track_events) \
+             VALUES ($1, $2, 1, $3, $4, false)",
+        )
+        .bind(&self.fx.tenant)
+        .bind(&workflow)
+        .bind(&definition)
+        .bind(size)
+        .execute(&self.server)
+        .await
+        .unwrap();
+        workflow
+    }
+
+    async fn child_workflow(&self) -> String {
+        self.workflow(json!({
+            "name": "child", "steps": {}, "executionPlan": [], "entryPoint": null,
+            "variables": {}, "outputSchema": {},
+            "inputSchema": {"order": {"type": "integer", "required": true}}
+        }))
+        .await
+    }
+
+    /// Launch an admitted child the way Environment does: an instance row
+    /// carrying the parent link and the admission time.
+    async fn launch(&self, child: &str) {
+        let request = self
+            .engine
+            .control_child(&self.fx.tenant, child)
+            .await
+            .unwrap()
+            .expect("an admitted child");
+        assert!(
+            self.fx
+                .persistence
+                .try_register_child_instance(
+                    child,
+                    &self.fx.tenant,
+                    None,
+                    request.run_label.as_deref(),
+                    &ParentLink {
+                        parent_instance_id: request.parent_instance_id.unwrap(),
+                        parent_close_policy: request.parent_close_policy.unwrap(),
+                        admitted_at: request.created_at,
+                    },
+                )
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "INSERT INTO instance_images (instance_id, image_id, tenant_id) VALUES ($1,$2,$3)",
+        )
+        .bind(child)
+        .bind(&self.fx.image)
+        .bind(&self.fx.tenant)
+        .execute(&self.fx.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn cleanup(&self) {
+        for sql in [
+            "DELETE FROM execution_outbox WHERE request_id IN (SELECT request_id FROM execution_requests WHERE tenant_id = $1)",
+            "DELETE FROM execution_admission_reservations WHERE tenant_id = $1",
+            "DELETE FROM execution_requests WHERE tenant_id = $1",
+            "DELETE FROM execution_admission_tenants WHERE tenant_id = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(&self.fx.tenant)
+                .execute(&self.server)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+fn start_request(workflow: &str, order: i64, label: Option<&str>) -> StartRequest {
+    StartRequest {
+        workflow_id: workflow.into(),
+        version: None,
+        input: serde_json::to_vec(&json!({"data": {"order": order}, "variables": {}})).unwrap(),
+        run_label: label.map(str::to_owned),
+        parent_close_policy: ParentClosePolicy::Cancel,
+    }
+}
+
+/// `start` admits children durably and idempotently; `get`, `query(parent)`
+/// and the relations see them in admission and after launch; the lifecycle
+/// commands reach real children and nothing else.
+#[tokio::test]
+async fn start_admits_children_that_get_query_and_lifecycle_follow() {
+    let cx = Children::new().await;
+    let tenant = cx.fx.tenant.clone();
+    let workflow = cx.child_workflow().await;
+    let parent = cx.fx.run("parent", &tenant).await;
+    let op = |n: &str| scoped(&tenant, &parent, n);
+
+    let first = cx
+        .control
+        .start(&op("1"), start_request(&workflow, 1, Some("order-1")))
+        .await
+        .unwrap();
+    assert!(!first.replayed);
+    assert_eq!(
+        (
+            first.workflow_id.as_str(),
+            first.version,
+            first.run_label.as_deref()
+        ),
+        (workflow.as_str(), 1, Some("order-1"))
+    );
+    // The same operation replays the same child; other arguments conflict.
+    let replay = cx
+        .control
+        .start(&op("1"), start_request(&workflow, 1, Some("order-1")))
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.instance_id, first.instance_id);
+    let codes = [
+        cx.control
+            .start(&op("1"), start_request(&workflow, 2, Some("order-1")))
+            .await
+            .unwrap_err()
+            .code,
+        cx.control
+            .start(&op("2"), start_request(&workflow, 2, Some("order-1")))
+            .await
+            .unwrap_err()
+            .code,
+    ];
+    assert_eq!(
+        codes,
+        [
+            ControlErrorCode::ReplayConflict,
+            ControlErrorCode::LabelConflict
+        ]
+    );
+
+    // In admission, the child is `queued` and names its parent.
+    let queued = cx
+        .control
+        .get(&authority(&tenant, None), first.instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(queued.instance.status, InstanceStatus::Queued);
+    assert_eq!(
+        queued.instance.parent_instance_id.as_deref(),
+        Some(parent.as_str())
+    );
+    assert_eq!(queued.instance.version, Some(1));
+    // It cannot pause or resume before it starts.
+    for (result, code) in [
+        (
+            cx.control.pause(&op("p0"), first.instance_id.clone()).await,
+            ControlErrorCode::NotPausable,
+        ),
+        (
+            cx.control
+                .resume(&op("r0"), first.instance_id.clone())
+                .await,
+            ControlErrorCode::NotPaused,
+        ),
+    ] {
+        assert_eq!(result.unwrap_err().code, code);
+    }
+
+    // A second child launches.
+    let second = cx
+        .control
+        .start(&op("3"), start_request(&workflow, 3, None))
+        .await
+        .unwrap();
+    cx.launch(&second.instance_id).await;
+    let launched = cx
+        .control
+        .get(&authority(&tenant, None), second.instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(launched.instance.status, InstanceStatus::Pending);
+    assert_eq!(
+        launched.instance.parent_instance_id.as_deref(),
+        Some(parent.as_str())
+    );
+
+    // query(parent) merges both, pages by admission, and filters by state.
+    let mut request = QueryRequest {
+        parent: Some(ParentFilter::Caller),
+        ..query(1)
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = cx.control.query(&op("q"), request.clone()).await.unwrap();
+        assert_eq!(page.total, 2);
+        seen.extend(page.items);
+        match page.next_page_token {
+            Some(token) => request.page_token = Some(token),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen.iter()
+            .map(|item| (item.instance_id.as_str(), item.status))
+            .collect::<Vec<_>>(),
+        [
+            (first.instance_id.as_str(), InstanceStatus::Queued),
+            (second.instance_id.as_str(), InstanceStatus::Pending)
+        ]
+    );
+    for (statuses, expected) in [
+        (vec![InstanceStatus::Queued], &first.instance_id),
+        (vec![InstanceStatus::Pending], &second.instance_id),
+    ] {
+        let page = cx
+            .control
+            .query(
+                &authority(&tenant, None),
+                QueryRequest {
+                    parent: Some(ParentFilter::Instance(parent.clone())),
+                    statuses,
+                    ..query(10)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(&page.items[0].instance_id, expected);
+    }
+    let mut labelled = QueryRequest {
+        parent: Some(ParentFilter::Instance(parent.clone())),
+        ..query(10)
+    };
+    labelled.run_label = Some("order-1".into());
+    assert_eq!(
+        cx.control
+            .query(&authority(&tenant, None), labelled)
+            .await
+            .unwrap()
+            .total,
+        1
+    );
+
+    // Relations come from the parent links: the lifecycle commands reach the
+    // launched child, the child cannot command its parent, and a stranger
+    // cannot command either.
+    cx.fx.park(&second.instance_id).await;
+    let paused = cx
+        .control
+        .pause(&op("p1"), second.instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(paused.outcome, CommandOutcome::Applied);
+    let resumed = cx
+        .control
+        .resume(&op("r1"), second.instance_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(resumed.outcome, CommandOutcome::Applied);
+    let child_calls = scoped(&tenant, &second.instance_id, "c1");
+    assert_eq!(
+        cx.control
+            .pause(&child_calls, parent.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::Denied,
+        "a parent is an ancestor of its child"
+    );
+    // send-signal may reach an ancestor: it gets past authorization.
+    assert_eq!(
+        cx.control
+            .send_signal(
+                &scoped(&tenant, &second.instance_id, "s1"),
+                signal(&parent, "approve", None, json!({}))
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::NotWaiting
+    );
+    let stranger = cx.fx.run("stranger", &tenant).await;
+    assert_eq!(
+        cx.control
+            .pause(&scoped(&tenant, &stranger, "x"), second.instance_id.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ControlErrorCode::NotChild
+    );
+    let cancelled = cx
+        .control
+        .cancel(
+            &op("c2"),
+            CancelRequest {
+                instance_id: second.instance_id.clone(),
+                reason: None,
+                grace_ms: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        cancelled.outcome,
+        CommandOutcome::Applied | CommandOutcome::Requested
+    ));
+
+    // The public list filters by parent too.
+    let page = cx
+        .engine
+        .list_all_executions(
+            &tenant,
+            None,
+            None,
+            runtara_server::api::dto::executions::ExecutionFilters {
+                parent_instance_id: Some(parent.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.content.len(), 1);
+    assert_eq!(
+        page.content[0].parent_instance_id.as_deref(),
+        Some(parent.as_str())
+    );
+
+    // Refused starts and replays leaked no reservation: one per child.
+    let held: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM execution_admission_reservations WHERE tenant_id = $1 AND released_at IS NULL",
+    )
+    .bind(&tenant)
+    .fetch_one(&cx.server)
+    .await
+    .unwrap();
+    assert_eq!(held, 2);
+    cx.cleanup().await;
+}
+
+/// Decisions D5-D7: the control share is retryable capacity with a hint; a
+/// missing workflow or version is `not-found`; a permanently failed compile
+/// is `not-runnable` and admits nothing, while a workflow not compiled yet
+/// is admitted; inputs are checked; lineage stops at depth 16.
+#[tokio::test]
+async fn start_refuses_what_can_never_run_and_what_does_not_fit() {
+    let cx = Children::new().await;
+    let tenant = cx.fx.tenant.clone();
+    let workflow = cx.child_workflow().await;
+    let parent = cx.fx.run("parent", &tenant).await;
+    // Park the parent so the concurrency gate counts only children.
+    cx.fx.park(&parent).await;
+    let op = |n: &str| scoped(&tenant, &parent, n);
+    let code = |result: Result<_, runtara_component_host::control_host::ControlError>| {
+        result
+            .map(|_: runtara_component_host::control_host::StartResult| ())
+            .unwrap_err()
+    };
+
+    let missing = code(
+        cx.control
+            .start(&op("m1"), start_request("no-such-workflow", 1, None))
+            .await,
+    );
+    assert_eq!(missing.code, ControlErrorCode::NotFound);
+    let mut versioned = start_request(&workflow, 1, None);
+    versioned.version = Some(9);
+    assert_eq!(
+        code(cx.control.start(&op("m2"), versioned).await).code,
+        ControlErrorCode::NotFound
+    );
+    let mut bad_inputs = start_request(&workflow, 1, None);
+    bad_inputs.input = br#"{"data": {"order": "seven"}}"#.to_vec();
+    assert_eq!(
+        code(cx.control.start(&op("m3"), bad_inputs).await).code,
+        ControlErrorCode::Invalid
+    );
+    let mut malformed = start_request(&workflow, 1, None);
+    malformed.input = b"[1]".to_vec();
+    assert_eq!(
+        code(cx.control.start(&op("m4"), malformed).await).code,
+        ControlErrorCode::Invalid
+    );
+
+    // A definition whose compile failed for good is not runnable; nothing
+    // is admitted for it.
+    let broken_definition = json!({
+        "name": "broken", "steps": {}, "executionPlan": [], "entryPoint": null
+    });
+    let broken = cx.workflow(broken_definition.clone()).await;
+    sqlx::query(
+        "INSERT INTO workflow_compilations
+            (tenant_id, workflow_id, version, compilation_status, translated_path,
+             error_message, source_checksum, track_events, template_major, lowering_mode,
+             compiler_build)
+         VALUES ($1, $2, 1, 'failed', '', '[E004] Workflow has no steps defined', $3, false, $4, $5, $6)",
+    )
+    .bind(&tenant)
+    .bind(&broken)
+    .bind(runtara_server::api::repositories::workflows::workflow_definition_checksum(
+        &broken_definition,
+    ))
+    .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+    .bind(runtara_server::config::workflow_lowering_tag())
+    .bind(runtara_server::api::repositories::workflows::compiler_build_id())
+    .execute(&cx.server)
+    .await
+    .unwrap();
+    let not_runnable = code(
+        cx.control
+            .start(&op("b1"), start_request(&broken, 1, None))
+            .await,
+    );
+    assert_eq!(not_runnable.code, ControlErrorCode::NotRunnable);
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM execution_requests WHERE tenant_id = $1 AND workflow_id = $2",
+    )
+    .bind(&tenant)
+    .bind(&broken)
+    .fetch_one(&cx.server)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0, "a not-runnable start writes nothing");
+
+    // Not compiled yet: admitted, up to control's share of the limit.
+    for n in ["c1", "c2"] {
+        cx.control
+            .start(&op(n), start_request(&workflow, 1, None))
+            .await
+            .unwrap_or_else(|error| panic!("{n}: {error:?}"));
+    }
+    let full = code(
+        cx.control
+            .start(&op("c3"), start_request(&workflow, 1, None))
+            .await,
+    );
+    assert_eq!(full.code, ControlErrorCode::Capacity);
+    let hint = full.retry_after_ms.expect("a full share is retryable");
+    assert!((3_000..=8_000).contains(&hint), "{hint}");
+    // A replay of an admitted operation is not capacity.
+    assert!(
+        cx.control
+            .start(&op("c1"), start_request(&workflow, 1, None))
+            .await
+            .unwrap()
+            .replayed
+    );
+
+    // Lineage: a run at depth 16 cannot start a child; depth 15 can.
+    let mut chain = vec![cx.fx.run("depth-1", &tenant).await];
+    for depth in 2..=16 {
+        let id = format!("{tenant}-depth-{depth}");
+        cx.fx
+            .persistence
+            .try_register_child_instance(
+                &id,
+                &tenant,
+                None,
+                None,
+                &ParentLink {
+                    parent_instance_id: chain.last().unwrap().clone(),
+                    parent_close_policy: "cancel".into(),
+                    admitted_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        chain.push(id);
+    }
+    for id in &chain {
+        cx.fx.park(id).await;
+    }
+    let too_deep = code(
+        cx.control
+            .start(
+                &scoped(&tenant, &chain[15], "d16"),
+                start_request(&workflow, 1, None),
+            )
+            .await,
+    );
+    assert_eq!(too_deep.code, ControlErrorCode::Invalid);
+    assert!(too_deep.message.contains("16"), "{}", too_deep.message);
+    // Depth 15 passes the depth check and meets the full share instead.
+    let at_15 = code(
+        cx.control
+            .start(
+                &scoped(&tenant, &chain[14], "d15"),
+                start_request(&workflow, 1, None),
+            )
+            .await,
+    );
+    assert_eq!(at_15.code, ControlErrorCode::Capacity);
+    cx.cleanup().await;
 }

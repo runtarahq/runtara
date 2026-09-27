@@ -206,6 +206,13 @@ pub struct InstanceInfo {
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
     // Identity
     /// Instance ID.
     pub instance_id: String,
@@ -268,6 +275,13 @@ pub struct InstanceSummary {
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
     /// Instance ID.
     pub instance_id: String,
     /// Tenant ID.
@@ -308,6 +322,10 @@ pub struct StartInstanceOptions {
     /// Immutable optional execution reference, validated at start.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`, with its
+    /// parent-close policy and admission time.
+    #[serde(skip)]
+    pub parent: Option<runtara_core::persistence::ParentLink>,
 
     /// Image ID to launch.
     pub image_id: String,
@@ -454,6 +472,9 @@ pub struct ListInstancesOptions {
     pub search: Option<String>,
     /// Exact execution label filter (no normalization).
     pub run_label: Option<String>,
+    /// Only the children of this run (`control:start`).
+    #[serde(default)]
+    pub parent_instance_id: Option<String>,
     /// Workflow IDs whose names match search, resolved in the server database.
     #[serde(default)]
     pub search_workflow_ids: Vec<String>,
@@ -1993,6 +2014,7 @@ mod tests {
     fn test_instance_info_with_metrics() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -2024,6 +2046,7 @@ mod tests {
     fn test_instance_info_without_metrics() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -2055,6 +2078,7 @@ mod tests {
     fn test_instance_info_serde_with_metrics() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "workflow".to_string(),
@@ -2093,6 +2117,7 @@ mod tests {
     fn test_instance_info_with_stderr() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),

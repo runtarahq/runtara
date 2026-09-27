@@ -276,6 +276,7 @@ impl EnvironmentClient {
         Ok(InstanceInfo {
             instance_id: inst.instance_id,
             run_label: inst.run_label,
+            parent_instance_id: inst.parent_instance_id,
             image_id: inst.image_id.unwrap_or_default(),
             image_name: inst.image_name.unwrap_or_default(),
             tenant_id: inst.tenant_id,
@@ -325,6 +326,50 @@ impl EnvironmentClient {
         Ok(self.instances().control_instances(options).await?)
     }
 
+    /// A run's lineage in `tenant`, itself first ([`control_lineage`]).
+    ///
+    /// [`control_lineage`]: runtara_environment::instance_repository::InstanceRepository::control_lineage
+    pub async fn control_lineage(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        Ok(self
+            .instances()
+            .control_lineage(tenant, instance_id)
+            .await?)
+    }
+
+    /// One page of a parent's launched and admitted children.
+    pub async fn control_children(
+        &self,
+        tenant: &str,
+        parent: &str,
+        options: &instance_repository::ListInstancesOptions,
+        include_launched: bool,
+        admitted: &[runtara_environment::control_reads::AdmittedChild],
+        order: runtara_environment::control_reads::ChildOrder,
+    ) -> Result<(Vec<runtara_environment::control_reads::ControlChild>, i64)> {
+        Ok(self
+            .instances()
+            .control_children(tenant, parent, options, include_launched, admitted, order)
+            .await?)
+    }
+
+    /// Live children of `parent` with open managed inputs.
+    pub async fn parent_input_instances(
+        &self,
+        tenant: &str,
+        parent: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
+        self.instances()
+            .input_candidate_ids_for_parent(tenant, parent)
+            .await
+            .map_err(|error| {
+                runtara_core::persistence::inputs::InputError::Storage(error.to_string())
+            })
+    }
+
     /// Count a tenant's instances in the given statuses.
     #[instrument(skip(self), level = "debug")]
     pub async fn count_instances_by_status(
@@ -359,6 +404,7 @@ impl EnvironmentClient {
                 .map(|inst| InstanceSummary {
                     instance_id: inst.instance_id,
                     run_label: inst.run_label,
+                    parent_instance_id: inst.parent_instance_id,
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
@@ -385,6 +431,7 @@ impl EnvironmentClient {
             &self.state,
             StartInstanceRequest {
                 run_label: options.run_label,
+                parent: options.parent,
                 image_id: options.image_id,
                 tenant_id: options.tenant_id,
                 instance_id: options.instance_id,
@@ -1006,6 +1053,7 @@ fn list_instances_options(
     instance_repository::ListInstancesOptions {
         search: options.search.clone(),
         run_label: options.run_label.clone(),
+        parent_instance_id: options.parent_instance_id.clone(),
         search_workflow_ids: options.search_workflow_ids.clone(),
         tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {

@@ -12,6 +12,10 @@ pub struct ListAllExecutionsQuery {
     /// Exact execution label (duplicates are returned).
     #[serde(rename = "runLabel")]
     pub run_label: Option<String>,
+    /// Only the children of this run: the executions its `control:start`
+    /// steps started.
+    #[serde(default, rename = "parentInstanceId")]
+    pub parent_instance_id: Option<String>,
     /// Page number (0-based, default: 0)
     #[serde(default)]
     pub page: Option<i32>,
@@ -66,6 +70,8 @@ pub struct ListAllExecutionsResponse {
 pub struct ExecutionFilters {
     pub search: Option<String>,
     pub run_label: Option<String>,
+    /// Only the children of this run (`control:start`).
+    pub parent_instance_id: Option<String>,
     pub workflow_id: Option<String>,
     pub statuses: Option<Vec<String>>,
     pub created_from: Option<DateTime<Utc>>,
@@ -81,6 +87,7 @@ impl Default for ExecutionFilters {
         Self {
             search: None,
             run_label: None,
+            parent_instance_id: None,
             workflow_id: None,
             statuses: None,
             created_from: None,

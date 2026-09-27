@@ -11,10 +11,12 @@
 //!
 //! Reads: `get`, `query` and `list-pending-signals` cover the caller's
 //! tenant; identity and caller-relative filters need a calling instance.
-//! Mutations: `send-signal` answers an open `WaitForSignal` request of a
-//! child, an ancestor, or a request that opted in with `action.key`;
-//! `cancel`, `pause` and `resume` reach direct children only; none may target
-//! the calling run. Each is replay-safe under the step's operation identity,
+//! Mutations: `start` durably admits a child of the calling run and returns
+//! once it is accepted, without waiting for it to run; `send-signal`
+//! answers an open `WaitForSignal` request of a child, an ancestor, or a
+//! request that opted in with `action.key`; `cancel`, `pause` and `resume`
+//! reach direct children only; none may target the calling run. Each is
+//! replay-safe under the step's operation identity,
 //! which the compiler emits and the host keeps, so a retried or replayed step
 //! never applies twice.
 //! `wait` registers a host-owned wait once, keeps the wait id as its
@@ -25,6 +27,7 @@ use runtara_agent_suspension::{SuspendContext, Suspendable, Wake};
 use runtara_control_contract::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Version tag of the `wait` continuation.
 const CONTINUATION_VERSION: u32 = runtara_control_contract::CONTROL_CONTINUATION_V1;
@@ -763,6 +766,116 @@ fn require_id(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The `parentClosePolicy` values, in [`runtara_control_contract::ParentClosePolicy::ALL`]
+/// order; the editor preselects the first.
+const PARENT_CLOSE_POLICIES: [&str; 2] = ["cancel", "leave_running"];
+
+/// Allowed values of `parentClosePolicy` for the input metadata.
+pub struct ParentClosePolicyNames;
+
+impl runtara_dsl::agent_meta::EnumVariants for ParentClosePolicyNames {
+    fn variant_names() -> &'static [&'static str] {
+        &PARENT_CLOSE_POLICIES
+    }
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Start Child Run Input")]
+pub struct StartInput {
+    #[field(
+        display_name = "Workflow ID",
+        description = "Id of the workflow to start (not its slug)"
+    )]
+    pub workflow_id: String,
+    #[field(
+        display_name = "Version",
+        description = "Workflow version (at least 1); defaults to the current version, fixed at admission"
+    )]
+    #[serde(default)]
+    pub version: Option<u32>,
+    #[field(
+        display_name = "Inputs",
+        description = "The child's {data, variables} input envelope"
+    )]
+    #[serde(default)]
+    pub inputs: Option<BTreeMap<String, Value>>,
+    #[field(
+        display_name = "Run Label",
+        description = "Business identity of the child, unique per parent for the parent's lifetime (1-1024 bytes)"
+    )]
+    #[serde(default)]
+    pub run_label: Option<String>,
+    // Required and without a default: the author must choose (E022 while
+    // unmapped); the editor preselects the first value, `cancel`.
+    #[field(
+        display_name = "Parent Close Policy",
+        description = "What happens to the child if this run ends first: cancel it (after a 5 s grace) or leave it running",
+        enum_type = "ParentClosePolicyNames"
+    )]
+    pub parent_close_policy: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Start Child Run Output")]
+pub struct StartOutput {
+    #[field(display_name = "Instance ID", description = "The child run")]
+    pub instance_id: String,
+    #[field(
+        display_name = "Workflow ID",
+        description = "The workflow the child executes"
+    )]
+    pub workflow_id: String,
+    #[field(
+        display_name = "Version",
+        description = "The workflow version fixed at admission"
+    )]
+    pub version: u32,
+    #[field(display_name = "Run Label", description = "The child's label, if any")]
+    pub run_label: Option<String>,
+    #[field(
+        display_name = "Replayed",
+        description = "This step had already started the child; nothing new ran"
+    )]
+    pub replayed: bool,
+}
+
+/// Validated `start` arguments, before they become the WIT request.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+struct StartArgs {
+    input: Vec<u8>,
+    policy: runtara_control_contract::ParentClosePolicy,
+}
+
+fn start_args(input: &StartInput) -> Result<StartArgs, String> {
+    require_id("workflowId", &input.workflow_id)?;
+    if input.version == Some(0) {
+        return Err(invalid("version must be at least 1".into()));
+    }
+    if let Some(label) = &input.run_label {
+        let max = runtara_control_contract::MAX_RUN_LABEL_BYTES;
+        if label.is_empty() || label.len() > max {
+            return Err(invalid(format!("runLabel must be 1-{max} bytes")));
+        }
+    }
+    let policy = runtara_control_contract::ParentClosePolicy::ALL
+        .into_iter()
+        .find(|policy| policy.input_name() == input.parent_close_policy)
+        .ok_or_else(|| {
+            invalid(format!(
+                "parentClosePolicy must be `cancel` or `leave_running`, not `{}`",
+                input.parent_close_policy
+            ))
+        })?;
+    let input = match &input.inputs {
+        Some(inputs) => serde_json::to_vec(inputs),
+        None => serde_json::to_vec(&serde_json::json!({"data": {}, "variables": {}})),
+    }
+    .map_err(|_| invalid("inputs must be JSON".into()))?;
+    Ok(StartArgs { input, policy })
+}
+
 #[capability(
     module = "control",
     id = "send-signal",
@@ -904,6 +1017,54 @@ pub async fn pause(input: RunInput) -> Result<CommandOutput, String> {
 pub async fn resume(input: RunInput) -> Result<CommandOutput, String> {
     require_id("instanceId", &input.instance_id)?;
     host::resume(input.instance_id).await
+}
+
+#[capability(
+    module = "control",
+    id = "start",
+    display_name = "Start Child Run",
+    description = "Durably admit a child run of this run and return once it is accepted, without waiting for it to run. Replay-safe: a retried step returns the same child (replayed: true). The run label is unique per parent. Children count against the tenant concurrency limit and may hold at most max(1, floor(0.8 x limit)) slots.",
+    side_effects = true,
+    tags = "runtime:requires-run",
+    errors(
+        permanent(
+            "CONTROL_INVALID",
+            "Malformed arguments, lineage deeper than 16, or inputs that do not match the child's input schema"
+        ),
+        permanent("CONTROL_NOT_FOUND", "No such workflow or version in this tenant"),
+        permanent(
+            "CONTROL_NOT_RUNNABLE",
+            "The workflow's compilation failed permanently; a workflow not compiled yet is accepted"
+        ),
+        permanent(
+            "CONTROL_LABEL_CONFLICT",
+            "This run already gave the label to another child"
+        ),
+        permanent(
+            "CONTROL_REPLAY_CONFLICT",
+            "This step already ran with different arguments"
+        ),
+        transient(
+            "CONTROL_CAPACITY_RATE_LIMITED",
+            "The concurrency limit or the control share of it is full; retry after the hint"
+        ),
+        permanent(
+            "CONTROL_CAPACITY_UNSATISFIABLE",
+            "A concurrency limit of at most 1 can never admit a child"
+        ),
+        permanent("CONTROL_DENIED", "Control is not available to this call"),
+        permanent("CONTROL_REQUIRES_INSTANCE", "Only works inside a run"),
+        permanent("CONTROL_REQUIRES_OPERATION", "Only works in a compiled workflow step"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn start(input: StartInput) -> Result<StartOutput, String> {
+    let args = start_args(&input)?;
+    host::start(input, args).await
 }
 
 /// Host control calls. Real only in the host executor's store.
@@ -1140,6 +1301,32 @@ mod host {
             .map_err(control_error)
     }
 
+    pub(super) async fn start(
+        input: super::StartInput,
+        args: super::StartArgs,
+    ) -> Result<super::StartOutput, String> {
+        use runtara_control_contract::ParentClosePolicy;
+        let result = api::start(types::StartRequest {
+            workflow_id: input.workflow_id,
+            version: input.version,
+            input: args.input,
+            run_label: input.run_label,
+            parent_close_policy: match args.policy {
+                ParentClosePolicy::Cancel => types::ParentClosePolicy::Cancel,
+                ParentClosePolicy::LeaveRunning => types::ParentClosePolicy::LeaveRunning,
+            },
+        })
+        .await
+        .map_err(control_error)?;
+        Ok(super::StartOutput {
+            instance_id: result.instance_id,
+            workflow_id: result.workflow_id,
+            version: result.version,
+            run_label: result.run_label,
+            replayed: result.replayed,
+        })
+    }
+
     pub(super) async fn register_wait(ids: Vec<String>, all: bool) -> Result<String, String> {
         let mode = if all {
             types::WaitMode::All
@@ -1231,6 +1418,13 @@ mod host {
         Err(unavailable())
     }
 
+    pub(super) async fn start(
+        _input: super::StartInput,
+        _args: super::StartArgs,
+    ) -> Result<super::StartOutput, String> {
+        Err(unavailable())
+    }
+
     pub(super) async fn register_wait(_ids: Vec<String>, _all: bool) -> Result<String, String> {
         Err(unavailable())
     }
@@ -1256,6 +1450,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             "ListPendingSignalsOutput",
             &__OUTPUT_META_ListPendingSignalsOutput,
         ),
+        ("StartOutput", &__OUTPUT_META_StartOutput),
         ("SendSignalOutput", &__OUTPUT_META_SendSignalOutput),
         ("CommandOutput", &__OUTPUT_META_CommandOutput),
     ]);
@@ -1283,6 +1478,12 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 &__CAPABILITY_META_LIST_PENDING_SIGNALS,
                 Some(&__INPUT_META_ListPendingSignalsInput),
                 Some(&__OUTPUT_META_ListPendingSignalsOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_START,
+                Some(&__INPUT_META_StartInput),
+                Some(&__OUTPUT_META_StartOutput),
                 &output_types,
             ),
             capability_to_api_with_types(
@@ -1326,6 +1527,7 @@ runtara_agent_macro::agent_component!(
         get,
         query,
         list_pending_signals,
+        start,
         send_signal,
         cancel,
         pause,
@@ -1350,6 +1552,7 @@ mod tests {
                 "get",
                 "query",
                 "list-pending-signals",
+                "start",
                 "send-signal",
                 "cancel",
                 "pause",
@@ -1357,7 +1560,7 @@ mod tests {
                 "wait"
             ]
         );
-        let wait = &info.capabilities[7];
+        let wait = &info.capabilities[8];
         assert!(wait.suspends);
         assert!(!wait.trusted);
     }
@@ -1365,7 +1568,7 @@ mod tests {
     #[test]
     fn mutations_have_side_effects_and_need_a_run() {
         let info = agent_info();
-        for mutation in &info.capabilities[3..7] {
+        for mutation in &info.capabilities[3..8] {
             assert!(mutation.has_side_effects, "{}", mutation.id);
             assert!(!mutation.suspends, "{}", mutation.id);
             assert!(
@@ -1411,6 +1614,142 @@ mod tests {
             .find(|field| field["name"] == "payload")
             .unwrap();
         assert_eq!(payload["type"], "any", "{payload}");
+    }
+
+    #[test]
+    fn start_requires_a_parent_close_policy_without_a_default() {
+        let info = agent_info();
+        let start = info
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "start")
+            .unwrap();
+        assert!(start.has_side_effects && !start.suspends);
+        assert!(
+            start
+                .tags
+                .iter()
+                .any(|tag| tag == runtara_control_contract::REQUIRES_RUN_TAG)
+        );
+        let codes: Vec<_> = start.known_errors.iter().map(|e| e.code.as_str()).collect();
+        for code in [
+            runtara_control_contract::CONTROL_CAPACITY_RATE_LIMITED,
+            runtara_control_contract::CONTROL_CAPACITY_UNSATISFIABLE,
+            "CONTROL_LABEL_CONFLICT",
+            "CONTROL_NOT_RUNNABLE",
+        ] {
+            assert!(codes.contains(&code), "{codes:?}");
+        }
+
+        let info = serde_json::to_value(agent_info()).unwrap();
+        let start = info["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|capability| capability["id"] == "start")
+            .unwrap();
+        let field = |name: &str| {
+            start["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["name"] == name)
+                .unwrap_or_else(|| panic!("no {name} in {start}"))
+                .clone()
+        };
+        let schema = runtara_control_contract::start_input_schema();
+        let policy = field(runtara_control_contract::PARENT_CLOSE_POLICY_FIELD);
+        assert_eq!(policy["required"], true, "{policy}");
+        assert_eq!(policy["type"], "string", "{policy}");
+        assert_eq!(
+            policy["enum"],
+            serde_json::json!(["cancel", "leave_running"]),
+            "{policy}"
+        );
+        assert_eq!(
+            policy["enum"],
+            schema["properties"][runtara_control_contract::PARENT_CLOSE_POLICY_FIELD]["enum"]
+        );
+        assert!(policy.get("default").is_none(), "{policy}");
+        let required: Vec<_> = start["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|field| field["required"] == true)
+            .map(|field| field["name"].clone())
+            .collect();
+        assert_eq!(serde_json::Value::from(required), schema["required"]);
+        for (name, kind) in [
+            ("workflowId", "string"),
+            ("version", "integer"),
+            ("inputs", "object"),
+            ("runLabel", "string"),
+        ] {
+            let field = field(name);
+            assert_eq!(field["type"], kind, "{field}");
+            assert_eq!(field["type"], schema["properties"][name]["type"], "{field}");
+        }
+    }
+
+    #[test]
+    fn start_arguments_are_validated_before_the_host() {
+        let start_with = |input: serde_json::Value| {
+            let input: StartInput = serde_json::from_value(input).unwrap();
+            futures_lite_block_on(start(input)).unwrap_err()
+        };
+        let long = "x".repeat(runtara_control_contract::MAX_RUN_LABEL_BYTES + 1);
+        for bad in [
+            serde_json::json!({"workflowId": " ", "parentClosePolicy": "cancel"}),
+            serde_json::json!({"workflowId": "wf", "version": 0, "parentClosePolicy": "cancel"}),
+            serde_json::json!({"workflowId": "wf", "parentClosePolicy": "leave-running"}),
+            serde_json::json!({"workflowId": "wf", "parentClosePolicy": ""}),
+            serde_json::json!({"workflowId": "wf", "runLabel": "", "parentClosePolicy": "cancel"}),
+            serde_json::json!({"workflowId": "wf", "runLabel": long, "parentClosePolicy": "cancel"}),
+        ] {
+            assert!(start_with(bad.clone()).contains("CONTROL_INVALID"), "{bad}");
+        }
+        // Valid arguments reach the (native, absent) host.
+        let label = "x".repeat(runtara_control_contract::MAX_RUN_LABEL_BYTES);
+        assert!(
+            start_with(serde_json::json!({
+                "workflowId": "wf", "version": 1, "runLabel": label,
+                "parentClosePolicy": "leave_running"
+            }))
+            .contains("CONTROL_UNAVAILABLE")
+        );
+        // Absent inputs become the empty envelope; given inputs pass through.
+        let input: StartInput = serde_json::from_value(serde_json::json!({
+            "workflowId": "wf", "parentClosePolicy": "cancel"
+        }))
+        .unwrap();
+        let args = start_args(&input).unwrap();
+        assert_eq!(
+            args.policy,
+            runtara_control_contract::ParentClosePolicy::Cancel
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&args.input).unwrap(),
+            serde_json::json!({"data": {}, "variables": {}})
+        );
+        let input: StartInput = serde_json::from_value(serde_json::json!({
+            "workflowId": "wf", "parentClosePolicy": "leave_running",
+            "inputs": {"data": {"n": 1}, "variables": {}}
+        }))
+        .unwrap();
+        let args = start_args(&input).unwrap();
+        assert_eq!(
+            args.policy,
+            runtara_control_contract::ParentClosePolicy::LeaveRunning
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&args.input).unwrap(),
+            serde_json::json!({"data": {"n": 1}, "variables": {}})
+        );
+        assert_eq!(
+            PARENT_CLOSE_POLICIES,
+            runtara_control_contract::ParentClosePolicy::ALL
+                .map(runtara_control_contract::ParentClosePolicy::input_name)
+        );
     }
 
     #[test]

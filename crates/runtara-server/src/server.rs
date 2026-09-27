@@ -1736,6 +1736,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
+    native_control.install_engine(execution_engine.clone());
+    {
+        let limit = crate::middleware::entitlement::effective_limit(
+            config::raw_max_concurrent_executions(),
+            config::entitlements().limits.max_concurrent_executions,
+        );
+        if !runtara_control_contract::capacity_satisfiable(u32::try_from(limit).unwrap_or(u32::MAX))
+        {
+            tracing::warn!(
+                max_concurrent_executions = limit,
+                "the concurrency limit is at most 1, so control:start can never admit a child \
+                 (the calling run holds the only slot); starts fail with \
+                 CONTROL_CAPACITY_UNSATISFIABLE"
+            );
+        }
+    }
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
         let shutdown = shutdown_signal.clone();
         shutdown_coordinator.spawn_intake(async move {

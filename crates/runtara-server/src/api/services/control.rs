@@ -13,15 +13,23 @@
 //!   only; nothing targets the caller itself. They are replay-safe through
 //!   intent-first, success-only receipts keyed by `(caller, op_hash)`, and
 //!   every attempt is audited without payloads.
-//! - The parent link lands with `start`; until then [`NoLineage`] relates
-//!   every other run as `other`, so the lifecycle commands answer
-//!   `not-child` and `send-signal` needs the `action.key` opt-in.
-//! - `start`, `wait` and `poll-wait` answer `requires-instance` without a
-//!   calling instance and `unsupported` otherwise until their slices land.
+//! - `start` durably admits a child of the caller through the execution
+//!   engine ([`ExecutionEngine::start_child`]): idempotent per operation,
+//!   run labels unique per parent, lineage depth 16, capacity per decision
+//!   D5. The parent link, in the runtime's instance rows and in the server's
+//!   admission records for children not launched yet, is what relates a
+//!   target to the caller: `child` when the caller started it, `ancestor`
+//!   when it is in the caller's lineage.
+//! - `get` and `query(parent)` include children still in admission as
+//!   `queued`; `query(parent)` merges them with the launched ones in one
+//!   runtime read paged by admission time.
+//! - `wait` and `poll-wait` answer `requires-instance` without a calling
+//!   instance and `unsupported` otherwise until their slice lands.
 //!
 //! The service is late-bound: the executor exists before the embedded
-//! runtime does, so a call waits up to [`INSTALL_WAIT`] for
-//! [`NativeControl::install`] and is `unavailable` after that.
+//! runtime and the execution engine do, so a call waits up to
+//! [`INSTALL_WAIT`] for [`NativeControl::install`] (and `start` for
+//! [`NativeControl::install_engine`]) and is `unavailable` after that.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,13 +49,16 @@ use serde_json::{Value, json};
 
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
-    self, CommandEffect, ExecutionError, PauseOutcome, ResumeOutcome, StopOutcome,
+    self, CommandEffect, ExecutionEngine, ExecutionError, PauseOutcome, ResumeOutcome,
+    StartChildError, StopOutcome,
 };
+use crate::workers::execution_outbox::ControlChildRequest;
 use runtara_component_host::control_host::CommandOutcome;
 use runtara_core::persistence::control_receipts::{
     BeginReceipt, ControlIntent, ControlReceipt, ControlReceiptState, ControlReceipts,
 };
 use runtara_core::persistence::inputs::{InputError, InputRequest, InputState};
+use runtara_environment::control_reads::{AdmittedChild, ChildOrder, ControlChild};
 use sha2::{Digest, Sha256};
 
 /// How long a call waits for the embedded runtime to install the service.
@@ -80,12 +91,16 @@ pub enum Mutation {
     Pause,
     Resume,
     Wait,
+    /// Admission of a child; authorized by the caller being a run, not by
+    /// [`decide`].
+    Start,
 }
 
 impl Mutation {
     /// Receipt and audit spelling.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Start => "start",
             Self::SendSignal => "send_signal",
             Self::Cancel => "cancel",
             Self::Pause => "pause",
@@ -107,6 +122,7 @@ pub fn decide(
 ) -> Result<(), ControlErrorCode> {
     match (mutation, relation) {
         (_, Relation::SelfCall) => Err(ControlErrorCode::Invalid),
+        (Mutation::Start, _) => Ok(()),
         (Mutation::SendSignal, Relation::Child | Relation::Ancestor) => Ok(()),
         (Mutation::SendSignal, Relation::Other) if opted_in => Ok(()),
         (Mutation::SendSignal, Relation::Other) => Err(ControlErrorCode::Denied),
@@ -127,23 +143,25 @@ pub trait RelationResolver: Send + Sync {
     ) -> Result<Relation, ControlError>;
 }
 
-/// The resolver until the parent link lands with `start`: the caller is
-/// itself, every other run is `other`.
-pub struct NoLineage;
-
-#[async_trait::async_trait]
-impl RelationResolver for NoLineage {
-    async fn relation(
-        &self,
-        _tenant: &str,
-        caller: &str,
-        target: &str,
-    ) -> Result<Relation, ControlError> {
-        Ok(if caller == target {
-            Relation::SelfCall
-        } else {
-            Relation::Other
-        })
+/// How `target` relates to a caller whose lineage (itself first) is
+/// `lineage`, given the parent `target` records, if any. Pure.
+pub fn relate(
+    caller: &str,
+    target: &str,
+    target_parent: Option<&str>,
+    lineage: &[(String, Option<String>)],
+) -> Relation {
+    if caller == target {
+        Relation::SelfCall
+    } else if target_parent == Some(caller) {
+        Relation::Child
+    } else if lineage
+        .iter()
+        .any(|(_, parent)| parent.as_deref() == Some(target))
+    {
+        Relation::Ancestor
+    } else {
+        Relation::Other
     }
 }
 
@@ -180,7 +198,11 @@ pub struct NativeControl {
     /// tenant (tests).
     tenant: Option<String>,
     install_wait: Duration,
-    relations: Arc<dyn RelationResolver>,
+    /// The execution engine `start` admits children through, and whose
+    /// admission records hold children not launched yet.
+    engine: tokio::sync::watch::Sender<Option<Arc<ExecutionEngine>>>,
+    /// Overrides the native lineage resolution (tests).
+    relations: Option<Arc<dyn RelationResolver>>,
     /// The server database `audit_events` lives in, when auditing.
     audit: Option<sqlx::PgPool>,
 }
@@ -197,7 +219,8 @@ impl NativeControl {
             runtime: tokio::sync::watch::channel(None).0,
             tenant,
             install_wait,
-            relations: Arc::new(NoLineage),
+            engine: tokio::sync::watch::channel(None).0,
+            relations: None,
             audit: None,
         }
     }
@@ -208,15 +231,92 @@ impl NativeControl {
         self
     }
 
-    /// Resolve relations with `relations` instead of [`NoLineage`].
+    /// Resolve relations with `relations` instead of the parent links.
     pub fn with_relations(mut self, relations: Arc<dyn RelationResolver>) -> Self {
-        self.relations = relations;
+        self.relations = Some(relations);
         self
     }
 
     /// Bind the embedded runtime; calls waiting for it proceed.
     pub fn install(&self, runtime: Arc<RuntimeClient>) {
         self.runtime.send_replace(Some(runtime));
+    }
+
+    /// Bind the execution engine; `start` calls waiting for it proceed.
+    pub fn install_engine(&self, engine: Arc<ExecutionEngine>) {
+        self.engine.send_replace(Some(engine));
+    }
+
+    /// The engine, waiting for it like [`Self::runtime`].
+    async fn engine(&self) -> Result<Arc<ExecutionEngine>, ControlError> {
+        let mut receiver = self.engine.subscribe();
+        let installed = tokio::time::timeout(
+            self.install_wait,
+            receiver.wait_for(|engine| engine.is_some()),
+        )
+        .await;
+        match installed {
+            Ok(Ok(engine)) => Ok(engine.clone().expect("waited for an installed engine")),
+            _ => Err(unavailable("the control service is not ready yet")),
+        }
+    }
+
+    /// The engine if installed. Reads that merely add children still in
+    /// admission do without it rather than wait.
+    fn installed_engine(&self) -> Option<Arc<ExecutionEngine>> {
+        self.engine.borrow().clone()
+    }
+
+    /// The server's admission record of `instance_id`, a child `start`
+    /// admitted, if any.
+    async fn admitted_child(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Option<ControlChildRequest>, ControlError> {
+        match self.installed_engine() {
+            None => Ok(None),
+            Some(engine) => engine
+                .control_child(tenant, instance_id)
+                .await
+                .map_err(|_| unavailable("the run could not be read")),
+        }
+    }
+
+    /// How `target` relates to `caller`, from the parent links.
+    async fn relation(
+        &self,
+        tenant: &str,
+        caller: &str,
+        target: &str,
+    ) -> Result<Relation, ControlError> {
+        if let Some(relations) = &self.relations {
+            return relations.relation(tenant, caller, target).await;
+        }
+        if caller == target {
+            return Ok(Relation::SelfCall);
+        }
+        let runtime = self.runtime().await?;
+        let lineage_error = |_| unavailable("the run's lineage could not be read");
+        let target_parent = match runtime
+            .control_instance(tenant, target, 0, 0)
+            .await
+            .map_err(lineage_error)?
+        {
+            Some(row) => row.parent_instance_id,
+            None => self
+                .admitted_child(tenant, target)
+                .await?
+                .and_then(|request| request.parent_instance_id),
+        };
+        if target_parent.as_deref() == Some(caller) {
+            return Ok(Relation::Child);
+        }
+        let lineage = runtime
+            .control_lineage(tenant, caller)
+            .await
+            .map_err(lineage_error)?;
+        Ok(relate(caller, target, target_parent.as_deref(), &lineage))
     }
 
     async fn runtime(&self) -> Result<Arc<RuntimeClient>, ControlError> {
@@ -516,7 +616,7 @@ impl NativeControl {
         cancel: Option<(u32, String)>,
     ) -> Result<CommandResult, ControlError> {
         let runtime = self.runtime().await?;
-        let relation = self.relations.relation(tenant, caller, instance_id).await?;
+        let relation = self.relation(tenant, caller, instance_id).await?;
         decide(mutation, relation, false).map_err(|code| refused(code, mutation))?;
         let receipts = receipts(&runtime)?;
         let intent = ControlIntent {
@@ -553,6 +653,27 @@ impl NativeControl {
         };
         let applied =
             apply_lifecycle(&runtime, tenant, mutation, instance_id, cancel, reapplying).await;
+        // A child still in admission has no run to pause or resume yet.
+        let applied = match applied {
+            Err(error)
+                if error.code == ControlErrorCode::NotFound
+                    && matches!(mutation, Mutation::Pause | Mutation::Resume)
+                    && self
+                        .admitted_child(tenant, instance_id)
+                        .await?
+                        .is_some_and(|request| request.in_admission()) =>
+            {
+                Err(if mutation == Mutation::Pause {
+                    ControlError::new(
+                        ControlErrorCode::NotPausable,
+                        "the child has not started yet",
+                    )
+                } else {
+                    ControlError::new(ControlErrorCode::NotPaused, "the child has not started yet")
+                })
+            }
+            other => other,
+        };
         match applied {
             Ok(outcome) => {
                 receipts
@@ -601,10 +722,7 @@ impl NativeControl {
             fingerprint: fingerprint(Mutation::SendSignal, &arguments),
             detail: json!({}),
         };
-        let relation = self
-            .relations
-            .relation(tenant, caller, &request.instance_id)
-            .await?;
+        let relation = self.relation(tenant, caller, &request.instance_id).await?;
         if relation == Relation::SelfCall {
             return Err(refused(ControlErrorCode::Invalid, Mutation::SendSignal));
         }
@@ -799,6 +917,104 @@ impl NativeControl {
     }
 }
 
+impl NativeControl {
+    /// `query` restricted to the children of `parent`: the server's children
+    /// still in admission (filtered here) merged with the launched ones in
+    /// one runtime read, paged by admission time.
+    async fn query_children(
+        &self,
+        tenant: &str,
+        parent: &str,
+        request: &QueryRequest,
+        statuses: Vec<String>,
+        limit: i64,
+        offset: u64,
+    ) -> Result<InstancePage, ControlError> {
+        let created_after = time("createdAfterMs", request.created_after_ms)?;
+        let created_before = time("createdBeforeMs", request.created_before_ms)?;
+        let finished_after = time("finishedAfterMs", request.finished_after_ms)?;
+        let finished_before = time("finishedBeforeMs", request.finished_before_ms)?;
+        let include_launched = request.statuses.is_empty() || !statuses.is_empty();
+        let include_admitted = (request.statuses.is_empty()
+            || request.statuses.contains(&InstanceStatus::Queued))
+            && finished_after.is_none()
+            && finished_before.is_none();
+        let requests: Vec<ControlChildRequest> = match (include_admitted, self.installed_engine()) {
+            (true, Some(engine)) => engine
+                .admitted_children(tenant, parent)
+                .await
+                .map_err(|_| unavailable("the children could not be listed"))?
+                .into_iter()
+                .filter(|child| {
+                    request
+                        .workflow_id
+                        .as_ref()
+                        .is_none_or(|workflow| &child.workflow_id == workflow)
+                        && request
+                            .run_label
+                            .as_ref()
+                            .is_none_or(|label| child.run_label.as_ref() == Some(label))
+                        && created_after.is_none_or(|after| child.created_at >= after)
+                        && created_before.is_none_or(|before| child.created_at < before)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let admitted: Vec<AdmittedChild> = requests
+            .iter()
+            .map(|child| AdmittedChild {
+                instance_id: child.instance_id.clone(),
+                run_label: child.run_label.clone(),
+                admitted_at: child.created_at,
+            })
+            .collect();
+        let order = match (request.sort_by, request.order) {
+            (SortField::CreatedAt, SortOrder::Ascending) => ChildOrder::AdmittedAsc,
+            (SortField::CreatedAt, SortOrder::Descending) => ChildOrder::AdmittedDesc,
+            (SortField::FinishedAt, SortOrder::Ascending) => ChildOrder::FinishedAsc,
+            (SortField::FinishedAt, SortOrder::Descending) => ChildOrder::FinishedDesc,
+        };
+        let options = ListInstancesOptions {
+            run_label: request.run_label.clone(),
+            statuses: (!statuses.is_empty()).then_some(statuses),
+            image_name_prefix: request
+                .workflow_id
+                .as_ref()
+                .map(|workflow| format!("{workflow}:")),
+            created_after,
+            created_before,
+            finished_after,
+            finished_before,
+            limit,
+            offset: offset as i64,
+            ..Default::default()
+        };
+        let runtime = self.runtime().await?;
+        let (children, total) = runtime
+            .control_children(tenant, parent, &options, include_launched, &admitted, order)
+            .await
+            .map_err(|_| unavailable("the children could not be listed"))?;
+        let total = total.max(0) as u64;
+        let next = offset + children.len() as u64;
+        let items = children
+            .iter()
+            .map(|child| match child {
+                ControlChild::Launched(row) => summary(row),
+                ControlChild::Admitted(admitted) => requests
+                    .iter()
+                    .find(|request| request.instance_id == admitted.instance_id)
+                    .map(queued_summary)
+                    .expect("admitted children come from these requests"),
+            })
+            .collect();
+        Ok(InstancePage {
+            items,
+            total,
+            next_page_token: (next < total && !children.is_empty()).then(|| next.to_string()),
+        })
+    }
+}
+
 /// The runtime's control receipts; mutations fail closed without them.
 fn receipts(runtime: &RuntimeClient) -> Result<&dyn ControlReceipts, ControlError> {
     runtime
@@ -859,7 +1075,7 @@ async fn apply_lifecycle(
                 | ResumeOutcome::NotResumable { .. } => Err(not_paused()),
             }
         }
-        Mutation::SendSignal | Mutation::Wait => {
+        Mutation::SendSignal | Mutation::Wait | Mutation::Start => {
             unreachable!("not a lifecycle command")
         }
     }
@@ -993,8 +1209,7 @@ fn summary(row: &ControlInstance) -> InstanceSummary {
         workflow_id,
         version: u32::try_from(version).ok().filter(|version| *version > 0),
         run_label: row.run_label.clone(),
-        // The parent link lands with `start`.
-        parent_instance_id: None,
+        parent_instance_id: row.parent_instance_id.clone(),
         status: status(row.status),
         suspension_reason: suspension_reason(row),
         termination_reason: row
@@ -1005,6 +1220,79 @@ fn summary(row: &ControlInstance) -> InstanceSummary {
         created_at_ms: millis(row.created_at),
         started_at_ms: row.started_at.map(millis),
         finished_at_ms: row.finished_at.map(millis),
+    }
+}
+
+/// A child `start` admitted that has not launched: `queued`.
+fn queued_summary(request: &ControlChildRequest) -> InstanceSummary {
+    InstanceSummary {
+        instance_id: request.instance_id.clone(),
+        workflow_id: request.workflow_id.clone(),
+        version: request
+            .workflow_version
+            .and_then(|version| u32::try_from(version).ok())
+            .filter(|version| *version > 0),
+        run_label: request.run_label.clone(),
+        parent_instance_id: request.parent_instance_id.clone(),
+        status: InstanceStatus::Queued,
+        suspension_reason: None,
+        termination_reason: None,
+        created_at_ms: millis(request.created_at),
+        started_at_ms: None,
+        finished_at_ms: None,
+    }
+}
+
+fn no_terminal() -> TerminalResult {
+    TerminalResult {
+        output: None,
+        output_bytes: None,
+        output_omitted: false,
+        error: None,
+        error_omitted: false,
+    }
+}
+
+/// Map an admission refusal to its control error. A full share gets a
+/// jittered 3-8 s retry hint; a limit that can never admit a child none.
+fn start_error(error: StartChildError) -> ControlError {
+    use ControlErrorCode as C;
+    match error {
+        StartChildError::Invalid(message) => invalid(message),
+        StartChildError::NotFound(message) => ControlError::new(C::NotFound, message),
+        StartChildError::NotRunnable(message) => ControlError::new(C::NotRunnable, message),
+        StartChildError::LabelConflict => ControlError::new(
+            C::LabelConflict,
+            "this run already gave that runLabel to another child",
+        ),
+        StartChildError::ReplayConflict => ControlError::new(
+            C::ReplayConflict,
+            "this operation already started a child with different arguments",
+        ),
+        StartChildError::Capacity { retryable: true } => ControlError {
+            code: C::Capacity,
+            message: "the concurrency limit or control's share of it is full; retry later".into(),
+            retry_after_ms: Some(contract::capacity_retry_after_ms(rand::random())),
+        },
+        StartChildError::Capacity { retryable: false } => ControlError::new(
+            C::Capacity,
+            "a concurrency limit of at most 1 can never admit a child: the calling run holds the only slot",
+        ),
+        StartChildError::Denied(message) => ControlError::new(C::Denied, message),
+        StartChildError::Unavailable(_) => unavailable("the child could not be admitted"),
+    }
+}
+
+fn wit_policy(
+    policy: runtara_component_host::control_host::ParentClosePolicy,
+) -> contract::ParentClosePolicy {
+    match policy {
+        runtara_component_host::control_host::ParentClosePolicy::Cancel => {
+            contract::ParentClosePolicy::Cancel
+        }
+        runtara_component_host::control_host::ParentClosePolicy::LeaveRunning => {
+            contract::ParentClosePolicy::LeaveRunning
+        }
     }
 }
 
@@ -1102,9 +1390,49 @@ impl ControlHost for NativeControl {
     async fn start(
         &self,
         authority: &ControlAuthority,
-        _request: StartRequest,
+        request: StartRequest,
     ) -> Result<StartResult, ControlError> {
-        Err(identity_call(authority, "start"))
+        let tenant = self.tenant(authority)?;
+        let (caller, operation) = mutation_identity(authority, "start")?;
+        let start = execution_engine::normalize_start(
+            &request.workflow_id,
+            request.version,
+            &request.input,
+            request.run_label.as_deref(),
+            wit_policy(request.parent_close_policy),
+        )
+        .map_err(start_error)?;
+        let result = match self.engine().await {
+            Ok(engine) => engine
+                .start_child(tenant, caller, operation, &start)
+                .await
+                .map_err(start_error),
+            Err(error) => Err(error),
+        };
+        let target = result
+            .as_ref()
+            .map(|child| child.instance_id.clone())
+            .unwrap_or_else(|_| start.workflow_id.clone());
+        self.audit(
+            tenant,
+            caller,
+            operation,
+            Mutation::Start,
+            &target,
+            &result
+                .as_ref()
+                .map(|child| ("admitted".to_owned(), child.replayed))
+                .map_err(Clone::clone),
+        )
+        .await;
+        let child = result?;
+        Ok(StartResult {
+            instance_id: child.instance_id,
+            workflow_id: child.workflow_id,
+            version: u32::try_from(child.version).unwrap_or_default(),
+            run_label: child.run_label,
+            replayed: child.replayed,
+        })
     }
 
     async fn get(
@@ -1123,12 +1451,21 @@ impl ControlHost for NativeControl {
                 contract::GET_ERROR_INLINE_BYTES,
             )
             .await
-            .map_err(|_| unavailable("the run could not be read"))?
-            .ok_or_else(not_found)?;
-        Ok(InstanceDetail {
-            instance: summary(&row),
-            terminal: terminal(&row),
-        })
+            .map_err(|_| unavailable("the run could not be read"))?;
+        match row {
+            Some(row) => Ok(InstanceDetail {
+                instance: summary(&row),
+                terminal: terminal(&row),
+            }),
+            // Admitted by `start` and not launched yet.
+            None => match self.admitted_child(tenant, &instance_id).await? {
+                Some(request) if request.in_admission() => Ok(InstanceDetail {
+                    instance: queued_summary(&request),
+                    terminal: no_terminal(),
+                }),
+                _ => Err(not_found()),
+            },
+        }
     }
 
     async fn query(
@@ -1139,16 +1476,19 @@ impl ControlHost for NativeControl {
         let tenant = self.tenant(authority)?;
         let limit = check_page_size(request.page_size)?;
         let offset = page_offset(request.page_token.as_deref())?;
-        match &request.parent {
-            None => {}
-            Some(ParentFilter::Caller) => return Err(identity_call(authority, "a caller filter")),
-            Some(ParentFilter::Instance(_)) => {
-                return Err(ControlError::new(
-                    ControlErrorCode::Unsupported,
-                    "the parent filter is not available in this build",
-                ));
+        let parent = match &request.parent {
+            None => None,
+            Some(ParentFilter::Caller) => Some(
+                authority
+                    .caller
+                    .clone()
+                    .ok_or_else(|| identity_call(authority, "a caller filter"))?,
+            ),
+            Some(ParentFilter::Instance(id)) => {
+                check_id("parent", id)?;
+                Some(id.clone())
             }
-        }
+        };
         if let Some(workflow) = &request.workflow_id {
             check_id("workflowId", workflow)?;
         }
@@ -1163,6 +1503,11 @@ impl ControlHost for NativeControl {
             .filter_map(|status| stored_status(*status))
             .map(str::to_owned)
             .collect();
+        if let Some(parent) = parent {
+            return self
+                .query_children(tenant, &parent, &request, statuses, limit, offset)
+                .await;
+        }
         if !request.statuses.is_empty() && statuses.is_empty() {
             // Only admission states, which no run is in yet.
             return Ok(InstancePage {
@@ -1226,7 +1571,19 @@ impl ControlHost for NativeControl {
         }
         let runtime = self.runtime().await?;
         let (instances, workflow_id) = match &request.scope {
-            SignalScope::Children => return Err(identity_call(authority, "a children scope")),
+            SignalScope::Children => {
+                let caller = authority
+                    .caller
+                    .as_deref()
+                    .ok_or_else(|| identity_call(authority, "a children scope"))?;
+                let instances = runtime
+                    .parent_input_instances(tenant, caller)
+                    .await
+                    .map_err(input_error)?;
+                // Children may run different workflows; each signal names
+                // its own run's.
+                (instances, String::new())
+            }
             SignalScope::Instance(id) => {
                 check_id("instanceId", id)?;
                 let row = runtime
@@ -1263,10 +1620,31 @@ impl ControlHost for NativeControl {
             .await
             .map_err(input_error)?;
         let total = page.total_count;
+        let mut workflows = std::collections::HashMap::new();
+        if matches!(request.scope, SignalScope::Children) {
+            for instance in page.requests.iter().map(|request| &request.instance_id) {
+                if workflows.contains_key(instance) {
+                    continue;
+                }
+                let workflow = runtime
+                    .control_instance(tenant, instance, 0, 0)
+                    .await
+                    .map_err(|_| unavailable("the run could not be read"))?
+                    .map(|row| summary(&row).workflow_id)
+                    .unwrap_or_default();
+                workflows.insert(instance.clone(), workflow);
+            }
+        }
         let mut signals: Vec<PendingSignal> = page
             .requests
             .into_iter()
-            .map(|request| pending_signal(request, &workflow_id))
+            .map(|request| {
+                let workflow = workflows
+                    .get(&request.instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| workflow_id.clone());
+                pending_signal(request, &workflow)
+            })
             .collect();
         let (items, next) = if filtered {
             signals.retain(|signal| {
@@ -1485,15 +1863,74 @@ mod tests {
         assert_eq!(decide(M::Cancel, R::Other, true), Err(E::NotChild));
     }
 
-    #[tokio::test]
-    async fn until_the_parent_link_every_other_run_is_other() {
+    #[test]
+    fn relations_follow_the_parent_links() {
+        let lineage = |ids: &[(&str, Option<&str>)]| {
+            ids.iter()
+                .map(|(id, parent)| (id.to_string(), parent.map(str::to_owned)))
+                .collect::<Vec<_>>()
+        };
+        // me -> parent -> root
+        let mine = lineage(&[
+            ("me", Some("parent")),
+            ("parent", Some("root")),
+            ("root", None),
+        ]);
+        assert_eq!(relate("me", "me", None, &mine), Relation::SelfCall);
+        assert_eq!(relate("me", "kid", Some("me"), &mine), Relation::Child);
         assert_eq!(
-            NoLineage.relation("t", "me", "me").await.unwrap(),
-            Relation::SelfCall
+            relate("me", "parent", Some("root"), &mine),
+            Relation::Ancestor
+        );
+        assert_eq!(relate("me", "root", None, &mine), Relation::Ancestor);
+        // A sibling, a grandchild and an unrelated run are `other`.
+        assert_eq!(
+            relate("me", "sibling", Some("parent"), &mine),
+            Relation::Other
         );
         assert_eq!(
-            NoLineage.relation("t", "me", "child").await.unwrap(),
+            relate("me", "grandkid", Some("kid"), &mine),
             Relation::Other
+        );
+        assert_eq!(relate("me", "stranger", None, &mine), Relation::Other);
+        // An ancestor whose row is gone is still an ancestor by its id.
+        let orphan = lineage(&[("me", Some("gone"))]);
+        assert_eq!(relate("me", "gone", None, &orphan), Relation::Ancestor);
+    }
+
+    #[test]
+    fn start_errors_map_to_control_codes() {
+        use ControlErrorCode as C;
+        let capacity = start_error(StartChildError::Capacity { retryable: true });
+        assert_eq!(capacity.code, C::Capacity);
+        let hint = capacity
+            .retry_after_ms
+            .expect("a retryable capacity error hints");
+        assert!(
+            (contract::CAPACITY_RETRY_MIN_MS..=contract::CAPACITY_RETRY_MAX_MS).contains(&hint)
+        );
+        let never = start_error(StartChildError::Capacity { retryable: false });
+        assert_eq!((never.code, never.retry_after_ms), (C::Capacity, None));
+        assert_eq!(
+            contract::ErrorCode::Capacity.agent_code(never.retry_after_ms),
+            contract::CONTROL_CAPACITY_UNSATISFIABLE
+        );
+        for (error, code) in [
+            (StartChildError::Invalid("x".into()), C::Invalid),
+            (StartChildError::NotFound("x".into()), C::NotFound),
+            (StartChildError::NotRunnable("x".into()), C::NotRunnable),
+            (StartChildError::LabelConflict, C::LabelConflict),
+            (StartChildError::ReplayConflict, C::ReplayConflict),
+            (StartChildError::Denied("x".into()), C::Denied),
+            (StartChildError::Unavailable("db".into()), C::Unavailable),
+        ] {
+            assert_eq!(start_error(error).code, code);
+        }
+        // Platform detail never reaches the caller.
+        assert!(
+            !start_error(StartChildError::Unavailable("secret dsn".into()))
+                .message
+                .contains("secret")
         );
     }
 
@@ -1590,11 +2027,11 @@ mod tests {
     #[test]
     fn identity_calls_need_a_caller_then_wait_for_their_slice() {
         assert_eq!(
-            identity_call(&authority(None), "start").code,
+            identity_call(&authority(None), "wait").code,
             ControlErrorCode::RequiresInstance
         );
         assert_eq!(
-            identity_call(&authority(Some("parent")), "start").code,
+            identity_call(&authority(Some("parent")), "wait").code,
             ControlErrorCode::Unsupported
         );
     }

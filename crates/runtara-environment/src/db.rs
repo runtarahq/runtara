@@ -15,6 +15,8 @@ use crate::instance_repository::ListInstancesOptions;
 pub struct InstanceWithImage {
     /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    pub parent_instance_id: Option<String>,
     /// Unique identifier for the instance.
     pub instance_id: String,
     /// Tenant identifier for multi-tenancy isolation.
@@ -40,6 +42,8 @@ pub struct InstanceWithImage {
 pub struct InstanceFull {
     /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    pub parent_instance_id: Option<String>,
     /// Unique identifier for the instance.
     pub instance_id: String,
     /// Tenant identifier for multi-tenancy isolation.
@@ -105,7 +109,7 @@ pub async fn get_instance_full(
     sqlx::query_as::<_, InstanceFull>(
         r#"
         SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
-               i.status::TEXT as status, i.run_label, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
+               i.status::TEXT as status, i.run_label, i.parent_instance_id, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
                i.attempt, i.max_attempts,
                i.memory_peak_bytes, i.cpu_usage_usec,
@@ -182,6 +186,11 @@ pub(crate) fn push_instance_filters(
     if let Some(label) = &options.run_label {
         query.push(" AND i.run_label = ").push_bind(label.clone());
     }
+    if let Some(parent) = &options.parent_instance_id {
+        query
+            .push(" AND i.parent_instance_id = ")
+            .push_bind(parent.clone());
+    }
     if let Some(search) = options
         .search
         .as_deref()
@@ -213,7 +222,7 @@ pub async fn list_instances(
 ) -> Result<Vec<InstanceWithImage>, sqlx::Error> {
     let mut query = sqlx::QueryBuilder::new(
         "SELECT i.instance_id, i.tenant_id, i.status::TEXT as status,
-         i.created_at, i.started_at, i.finished_at, i.error, i.run_label,
+         i.created_at, i.started_at, i.finished_at, i.error, i.run_label, i.parent_instance_id,
          ii.image_id, img.name as image_name
          FROM instances i
          LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
@@ -614,6 +623,7 @@ mod tests {
     fn test_instance_with_image_debug() {
         let instance = InstanceWithImage {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "running".to_string(),
@@ -635,6 +645,7 @@ mod tests {
     fn test_instance_with_image_clone() {
         let instance = InstanceWithImage {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "running".to_string(),
@@ -656,6 +667,7 @@ mod tests {
     fn test_instance_with_image_no_image() {
         let instance = InstanceWithImage {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "pending".to_string(),
@@ -679,6 +691,7 @@ mod tests {
     fn test_instance_full_debug() {
         let instance = InstanceFull {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),
@@ -711,6 +724,7 @@ mod tests {
         let now = Utc::now();
         let instance = InstanceFull {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),
@@ -744,6 +758,7 @@ mod tests {
     fn test_instance_full_no_heartbeat() {
         let instance = InstanceFull {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: None,
@@ -774,6 +789,7 @@ mod tests {
     fn test_instance_full_with_metrics() {
         let instance = InstanceFull {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-metrics".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),
@@ -805,6 +821,7 @@ mod tests {
         // (e.g., container exited too quickly or cgroup read failed)
         let instance = InstanceFull {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-no-metrics".to_string(),
             tenant_id: "tenant-1".to_string(),
             image_id: Some("img-123".to_string()),

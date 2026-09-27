@@ -205,6 +205,18 @@ pub enum ExecutionOutboxError {
     InvalidRunLabel(String),
     #[error("trigger event tenant does not match the enqueue tenant")]
     TenantMismatch,
+    /// `control:start`: the parent already gave this run label to another
+    /// child.
+    #[error("the parent already started a child with this runLabel")]
+    ParentRunLabelConflict,
+    /// `control:start`: the operation already admitted a child with other
+    /// arguments.
+    #[error("the operation already started a child with different arguments")]
+    StartReplayConflict,
+    /// `control:start`: children of control already hold the control share
+    /// of the concurrency limit.
+    #[error("control-started children hold their whole share ({share}) of the concurrency limit")]
+    ControlShareFull { share: u64 },
     #[error("failed to serialize trigger event: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("execution outbox database error: {0}")]
@@ -216,6 +228,65 @@ struct ExistingRequest {
     request_id: Uuid,
     instance_id: String,
     run_label: Option<String>,
+    start_fingerprint: Option<String>,
+}
+
+/// The parent-aware part of a `control:start` admission.
+#[derive(Debug, Clone, Copy)]
+pub struct ChildAdmission<'a> {
+    /// The calling run, the child's parent.
+    pub parent_instance_id: &'a str,
+    /// `cancel` or `leave_running`.
+    pub parent_close_policy: &'a str,
+    /// The calling step's operation (`op_hash`).
+    pub operation: &'a str,
+    /// `v1:` fingerprint of the normalized start arguments.
+    pub fingerprint: &'a str,
+    /// Most reservations control-started children may hold at once
+    /// (`max(1, floor(0.8 x limit))`, decision D5).
+    pub control_share: u64,
+}
+
+/// A child `control:start` admitted, as its source request records it.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ControlChildRequest {
+    pub request_id: Uuid,
+    pub instance_id: String,
+    pub workflow_id: String,
+    pub workflow_version: Option<i32>,
+    pub run_label: Option<String>,
+    pub parent_instance_id: Option<String>,
+    pub parent_close_policy: Option<String>,
+    pub start_fingerprint: Option<String>,
+    /// `queued`, `delivered`, `launching`, `accepted`, `expired`,
+    /// `cancelled` or `terminal`.
+    pub state: String,
+    pub terminal_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ControlChildRequest {
+    /// Admitted and still on its way to a launch (or just launched).
+    pub fn in_admission(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "queued" | "delivered" | "launching" | "accepted"
+        )
+    }
+}
+
+const CONTROL_CHILD_COLUMNS: &str = "request_id, instance_id, workflow_id, workflow_version, \
+     run_label, parent_instance_id, parent_close_policy, start_fingerprint, state, \
+     terminal_reason, created_at";
+
+/// The unique index that keeps a run label to one child per parent.
+const PARENT_RUN_LABEL_KEY: &str = "execution_requests_parent_run_label_key";
+
+fn is_parent_label_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.constraint())
+        .is_some_and(|constraint| constraint == PARENT_RUN_LABEL_KEY)
 }
 
 /// Server-owned database boundary for accepted asynchronous executions.
@@ -249,7 +320,8 @@ impl ExecutionOutbox {
     ) -> Result<Option<EnqueuedExecution>, ExecutionOutboxError> {
         let request = sqlx::query_as::<_, ExistingRequest>(
             r#"
-            SELECT request_id, instance_id, trigger_event->>'runLabel' AS run_label
+            SELECT request_id, instance_id, trigger_event->>'runLabel' AS run_label,
+                   start_fingerprint
             FROM execution_requests
             WHERE tenant_id = $1 AND idempotency_key = $2
             "#,
@@ -285,6 +357,44 @@ impl ExecutionOutbox {
         idempotency_key: &str,
         admission_limit: u64,
     ) -> Result<EnqueuedExecution, ExecutionOutboxError> {
+        self.enqueue_inner(tenant_id, event, idempotency_key, admission_limit, None)
+            .await
+    }
+
+    /// [`Self::enqueue`] for a child admitted by `control:start`. On top of
+    /// the ordinary admission it records the parent link, keeps the run
+    /// label to one child per parent ([`ExecutionOutboxError::ParentRunLabelConflict`]),
+    /// answers a replay of the operation with other arguments with
+    /// [`ExecutionOutboxError::StartReplayConflict`], and holds control's
+    /// children to their share of the limit
+    /// ([`ExecutionOutboxError::ControlShareFull`]) under a per-tenant
+    /// advisory lock, so concurrent starts cannot overshoot it.
+    pub async fn enqueue_child(
+        &self,
+        tenant_id: &str,
+        event: &TriggerEvent,
+        idempotency_key: &str,
+        admission_limit: u64,
+        child: ChildAdmission<'_>,
+    ) -> Result<EnqueuedExecution, ExecutionOutboxError> {
+        self.enqueue_inner(
+            tenant_id,
+            event,
+            idempotency_key,
+            admission_limit,
+            Some(child),
+        )
+        .await
+    }
+
+    async fn enqueue_inner(
+        &self,
+        tenant_id: &str,
+        event: &TriggerEvent,
+        idempotency_key: &str,
+        admission_limit: u64,
+        child: Option<ChildAdmission<'_>>,
+    ) -> Result<EnqueuedExecution, ExecutionOutboxError> {
         runtara_dsl::run_label::normalize_run_label(event.run_label.as_deref())
             .map_err(ExecutionOutboxError::InvalidRunLabel)?;
         if tenant_id != event.tenant_id {
@@ -310,8 +420,15 @@ impl ExecutionOutbox {
         if let Some(existing) =
             find_by_idempotency_in_tx(&mut tx, tenant_id, idempotency_key).await?
         {
-            if existing.run_label != event.run_label {
-                return Err(ExecutionOutboxError::RunLabelConflict);
+            match child {
+                Some(child) if existing.start_fingerprint.as_deref() != Some(child.fingerprint) => {
+                    return Err(ExecutionOutboxError::StartReplayConflict);
+                }
+                Some(_) => {}
+                None if existing.run_label != event.run_label => {
+                    return Err(ExecutionOutboxError::RunLabelConflict);
+                }
+                None => {}
             }
             tx.commit().await?;
             return Ok(EnqueuedExecution {
@@ -319,6 +436,51 @@ impl ExecutionOutbox {
                 instance_id: existing.instance_id,
                 duplicate: true,
             });
+        }
+
+        if let Some(child) = child {
+            if let Some(label) = event.run_label.as_deref() {
+                let holder = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT instance_id FROM execution_requests
+                    WHERE tenant_id = $1 AND parent_instance_id = $2 AND run_label = $3
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(child.parent_instance_id)
+                .bind(label)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if holder.is_some() {
+                    return Err(ExecutionOutboxError::ParentRunLabelConflict);
+                }
+            }
+            // Every control start of the tenant takes this lock after its
+            // idempotency lock, so the count below and the reservation this
+            // transaction inserts are one decision across processes.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!("control-share\u{1f}{tenant_id}"))
+                .execute(&mut *tx)
+                .await?;
+            let held = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT count(*)
+                FROM execution_admission_reservations AS reservation
+                INNER JOIN execution_requests AS request
+                    ON request.request_id = reservation.request_id
+                WHERE reservation.tenant_id = $1
+                  AND reservation.released_at IS NULL
+                  AND request.parent_instance_id IS NOT NULL
+                "#,
+            )
+            .bind(tenant_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if u64::try_from(held).unwrap_or(0) >= child.control_share {
+                return Err(ExecutionOutboxError::ControlShareFull {
+                    share: child.control_share,
+                });
+            }
         }
 
         let max_reservations =
@@ -401,27 +563,41 @@ impl ExecutionOutbox {
 
         let request_id = Uuid::new_v4();
         let deadline_at = deadline_from(Utc::now(), self.policy.request_deadline);
-        give_back!(
-            sqlx::query(
-                r#"
+        let inserted = sqlx::query(
+            r#"
             INSERT INTO execution_requests (
                 request_id, tenant_id, idempotency_key, instance_id, workflow_id,
-                workflow_version, trigger_event, deadline_at
+                workflow_version, trigger_event, deadline_at,
+                parent_instance_id, run_label, start_fingerprint, parent_close_policy,
+                control_operation
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
-            )
-            .bind(request_id)
-            .bind(tenant_id)
-            .bind(idempotency_key)
-            .bind(&event.instance_id)
-            .bind(&event.workflow_id)
-            .bind(event.version)
-            .bind(sqlx::types::Json(payload))
-            .bind(deadline_at)
-            .execute(&mut *tx)
-            .await
-        );
+        )
+        .bind(request_id)
+        .bind(tenant_id)
+        .bind(idempotency_key)
+        .bind(&event.instance_id)
+        .bind(&event.workflow_id)
+        .bind(event.version)
+        .bind(sqlx::types::Json(payload))
+        .bind(deadline_at)
+        .bind(child.map(|child| child.parent_instance_id))
+        .bind(child.and(event.run_label.as_deref()))
+        .bind(child.map(|child| child.fingerprint))
+        .bind(child.map(|child| child.parent_close_policy))
+        .bind(child.map(|child| child.operation))
+        .execute(&mut *tx)
+        .await;
+        // Another operation of the same parent can take the label between
+        // the check above and this insert; the unique index decides.
+        let inserted = match inserted {
+            Err(error) if is_parent_label_violation(&error) => {
+                Err(ExecutionOutboxError::ParentRunLabelConflict)
+            }
+            other => other.map_err(ExecutionOutboxError::from),
+        };
+        give_back!(inserted);
 
         give_back!(
             sqlx::query(
@@ -450,6 +626,97 @@ impl ExecutionOutbox {
             instance_id: event.instance_id.clone(),
             duplicate: false,
         })
+    }
+
+    /// The child a `control:start` operation admitted, by its idempotency
+    /// key.
+    pub async fn control_start(
+        &self,
+        tenant_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<ControlChildRequest>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, ControlChildRequest>(&format!(
+            "SELECT {CONTROL_CHILD_COLUMNS} FROM execution_requests \
+             WHERE tenant_id = $1 AND idempotency_key = $2"
+        ))
+        .bind(tenant_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// The child `parent` gave `run_label` to, if any.
+    pub async fn parent_label_holder(
+        &self,
+        tenant_id: &str,
+        parent_instance_id: &str,
+        run_label: &str,
+    ) -> Result<Option<String>, ExecutionOutboxError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT instance_id FROM execution_requests
+            WHERE tenant_id = $1 AND parent_instance_id = $2 AND run_label = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(parent_instance_id)
+        .bind(run_label)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// The source request of a `control:start` child, by instance id.
+    pub async fn control_child(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<ControlChildRequest>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, ControlChildRequest>(&format!(
+            "SELECT {CONTROL_CHILD_COLUMNS} FROM execution_requests \
+             WHERE tenant_id = $1 AND instance_id = $2 AND parent_instance_id IS NOT NULL"
+        ))
+        .bind(tenant_id)
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// The children of `parent` still in admission (the server's in-flight
+    /// half of `query(parent)`), in admission order. Children already
+    /// launched may be among them; the runtime read dedups those.
+    pub async fn admitted_children(
+        &self,
+        tenant_id: &str,
+        parent_instance_id: &str,
+    ) -> Result<Vec<ControlChildRequest>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, ControlChildRequest>(&format!(
+            "SELECT {CONTROL_CHILD_COLUMNS} FROM execution_requests \
+             WHERE tenant_id = $1 AND parent_instance_id = $2 \
+               AND state IN ('queued', 'delivered', 'launching', 'accepted') \
+             ORDER BY created_at, instance_id"
+        ))
+        .bind(tenant_id)
+        .bind(parent_instance_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Unreleased reservations held by `control:start` children of a tenant.
+    pub async fn control_reservations(&self, tenant_id: &str) -> Result<i64, ExecutionOutboxError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM execution_admission_reservations AS reservation
+            INNER JOIN execution_requests AS request
+                ON request.request_id = reservation.request_id
+            WHERE reservation.tenant_id = $1
+              AND reservation.released_at IS NULL
+              AND request.parent_instance_id IS NOT NULL
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Release a reservation exactly once. P0.1's durable launch handoff and
@@ -1037,13 +1304,15 @@ impl ExecutionOutbox {
     /// taken durable ownership, so its own bounded launch deadline applies.
     pub async fn expire_due(&self) -> Result<usize, ExecutionOutboxError> {
         let mut tx = self.pool.begin().await?;
-        let request_ids = sqlx::query_scalar::<_, Uuid>(
+        let request_ids = sqlx::query_as::<_, (Uuid, Option<String>)>(
             r#"
             UPDATE execution_outbox AS o
             SET state = 'expired',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                last_error = 'execution_outbox_deadline_exceeded',
+                last_error = CASE WHEN o.last_error = 'workflow_not_compiled'
+                                  THEN 'launch_deadline_not_compiled'
+                                  ELSE 'execution_outbox_deadline_exceeded' END,
                 updated_at = NOW()
             FROM execution_requests AS r
             WHERE o.request_id = r.request_id
@@ -1057,31 +1326,32 @@ impl ExecutionOutbox {
                     AND o.lease_expires_at <= NOW()
                  )
               )
-            RETURNING o.request_id
+            RETURNING o.request_id, o.last_error
             "#,
         )
         .fetch_all(&mut *tx)
         .await?;
 
         let mut released_tenants: Vec<String> = Vec::new();
-        for request_id in &request_ids {
+        for (request_id, reason) in &request_ids {
+            let reason = reason
+                .as_deref()
+                .unwrap_or("execution_outbox_deadline_exceeded");
             sqlx::query(
                 r#"
                 UPDATE execution_requests
                 SET state = 'expired',
-                    terminal_reason = 'execution_outbox_deadline_exceeded',
+                    terminal_reason = $2,
                     updated_at = NOW()
                 WHERE request_id = $1
                   AND state IN ('queued', 'delivered', 'launching')
                 "#,
             )
             .bind(request_id)
+            .bind(reason)
             .execute(&mut *tx)
             .await?;
-            released_tenants.extend(
-                release_admission_in_tx(&mut tx, *request_id, "execution_outbox_deadline_exceeded")
-                    .await?,
-            );
+            released_tenants.extend(release_admission_in_tx(&mut tx, *request_id, reason).await?);
         }
 
         tx.commit().await?;
@@ -1140,7 +1410,8 @@ async fn find_by_idempotency_in_tx(
 ) -> Result<Option<ExistingRequest>, sqlx::Error> {
     sqlx::query_as::<_, ExistingRequest>(
         r#"
-        SELECT request_id, instance_id, trigger_event->>'runLabel' AS run_label
+        SELECT request_id, instance_id, trigger_event->>'runLabel' AS run_label,
+               start_fingerprint
         FROM execution_requests
         WHERE tenant_id = $1 AND idempotency_key = $2
         "#,
@@ -1258,35 +1529,42 @@ async fn expire_request_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
 ) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query(
+    // A request still waiting for its first compile when the deadline hits
+    // says so, rather than looking like a lost delivery.
+    let reason = sqlx::query_scalar::<_, String>(
         r#"
         UPDATE execution_outbox
         SET state = 'expired',
             lease_owner = NULL,
             lease_expires_at = NULL,
-            last_error = 'execution_outbox_deadline_exceeded',
+            last_error = CASE WHEN last_error = 'workflow_not_compiled'
+                              THEN 'launch_deadline_not_compiled'
+                              ELSE 'execution_outbox_deadline_exceeded' END,
             updated_at = NOW()
         WHERE request_id = $1
           AND state IN ('pending', 'leased', 'delivered')
+        RETURNING last_error
         "#,
     )
     .bind(request_id)
-    .execute(&mut **tx)
-    .await?;
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or_else(|| "execution_outbox_deadline_exceeded".to_owned());
     sqlx::query(
         r#"
         UPDATE execution_requests
         SET state = 'expired',
-            terminal_reason = 'execution_outbox_deadline_exceeded',
+            terminal_reason = $2,
             updated_at = NOW()
         WHERE request_id = $1
           AND state IN ('queued', 'delivered', 'launching')
         "#,
     )
     .bind(request_id)
+    .bind(&reason)
     .execute(&mut **tx)
     .await?;
-    release_admission_in_tx(tx, request_id, "execution_outbox_deadline_exceeded").await
+    release_admission_in_tx(tx, request_id, &reason).await
 }
 
 async fn reset_launch_handoff_in_tx(

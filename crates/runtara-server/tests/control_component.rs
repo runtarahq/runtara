@@ -56,6 +56,8 @@ struct Harness {
     control: Arc<runtara_component_host::control_executor::ControlExecutor>,
     dir: tempfile::TempDir,
     runner: EmbeddedWasmRunner,
+    native: Arc<NativeControl>,
+    runtime: Arc<RuntimeClient>,
 }
 
 impl Harness {
@@ -72,7 +74,7 @@ impl Harness {
             .control_executor()
             .expect("the bundle ships the control agent");
         let native = Arc::new(NativeControl::new(Some(tenant.clone())));
-        native.install(Arc::new(RuntimeClient::new(
+        let runtime = Arc::new(RuntimeClient::new(
             Arc::new(EnvironmentHandlerState::new(
                 pool.clone(),
                 persistence.clone(),
@@ -80,8 +82,9 @@ impl Harness {
                 std::env::temp_dir(),
             )),
             RuntimeClientConfig::new(Default::default()),
-        )));
-        control.set_host(native)?;
+        ));
+        native.install(runtime.clone());
+        control.set_host(native.clone())?;
         ApprovedBuiltins::install(&pool, &control, &[control.pin().to_owned()]).await?;
         let dir = tempfile::tempdir()?;
         let runner = EmbeddedWasmRunner::new(
@@ -102,6 +105,8 @@ impl Harness {
             control,
             dir,
             runner,
+            native,
+            runtime,
         })
     }
 
@@ -139,6 +144,17 @@ impl Harness {
                 .await
                 .unwrap()
         );
+        self.run(wasm_path, id, input).await
+    }
+
+    /// Run `wasm_path` as the already registered instance `id` to its exit.
+    async fn run(
+        &self,
+        wasm_path: &std::path::Path,
+        id: &str,
+        input: Vec<u8>,
+    ) -> Result<runtara_core::persistence::InstanceRecord, runtara_environment::runner::RunnerError>
+    {
         let options = LaunchOptions {
             launch_id: format!("launch-{id}"),
             instance_id: id.to_owned(),
@@ -334,5 +350,245 @@ async fn a_composed_control_send_signal_answers_a_waiting_run() -> anyhow::Resul
         "{:?}",
         second.error
     );
+    Ok(())
+}
+
+fn start_graph(child_workflow: &str) -> Value {
+    json!({"durable": true, "entryPoint": "start", "steps": {
+        "start": {"id": "start", "stepType": "Agent", "agentId": "control",
+            "capabilityId": "start", "maxRetries": 0, "inputMapping": {
+                "workflowId": {"valueType": "immediate", "value": child_workflow},
+                "runLabel": {"valueType": "immediate", "value": "child-1"},
+                "inputs": {"valueType": "immediate", "value": {"data": {"n": 7}, "variables": {}}},
+                "parentClosePolicy": {"valueType": "immediate", "value": "cancel"}}},
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "child": {"valueType": "reference", "value": "steps.start.outputs"}}}},
+        "executionPlan": [{"fromStep": "start", "toStep": "finish"}]})
+}
+
+fn child_definition() -> Value {
+    json!({"name": "control-child", "durable": true, "entryPoint": "finish", "steps": {
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "n": {"valueType": "reference", "value": "data.n"}}}},
+        "executionPlan": [], "variables": {}, "outputSchema": {}, "inputSchema": {}})
+}
+
+/// A compiled `control:start` step admits a child through the native
+/// service and the execution engine; the durable request travels through
+/// the outbox relay, the Valkey trigger stream and the trigger worker into
+/// an Environment launch that carries the parent link, and the child runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> {
+    use runtara_server::api::repositories::trigger_stream::TriggerStreamPublisher;
+    use runtara_server::api::repositories::workflows::{
+        WorkflowRepository, workflow_definition_checksum,
+    };
+    use runtara_server::workers::execution_engine::ExecutionEngine;
+    use runtara_server::workers::execution_outbox::{ExecutionOutbox, ExecutionOutboxRelay};
+
+    // SAFETY: set before the process configuration is read, once.
+    unsafe {
+        std::env::set_var("MAX_CONCURRENT_EXECUTIONS", "8");
+        std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
+        if std::env::var("TENANT_ID").is_err() {
+            std::env::set_var("TENANT_ID", "control-component-tests");
+        }
+        if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
+            std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
+        }
+    }
+    runtara_server::config::init(runtara_server::config::Config::from_env()?);
+
+    let harness = Harness::new().await?;
+    let tenant = harness.tenant.clone();
+    let server_url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
+        .expect("an isolated server database is required");
+    let server = sqlx::PgPool::connect(&server_url).await?;
+    sqlx::migrate!("./migrations").run(&server).await?;
+    let mut valkey = runtara_server::valkey::ValkeyConfig::from_env()
+        .expect("an isolated Valkey is required (VALKEY_HOST)");
+    valkey.trigger_stream_prefix = format!("runtara:test:control-start:{}", Uuid::new_v4());
+
+    let (events, _events) = tokio::sync::mpsc::channel(64);
+    let sink = runtara_server::product_events::ProductEventSink::new(events);
+    let engine = Arc::new(ExecutionEngine::new(
+        server.clone(),
+        Arc::new(WorkflowRepository::new(server.clone())),
+        Some(harness.runtime.clone()),
+        None,
+        sink.clone(),
+    ));
+    harness.native.install_engine(engine);
+
+    // The child: compiled, registered with Environment, ready on the server.
+    let child_workflow = format!("child-{}", Uuid::new_v4());
+    let child_wasm = harness.compile(child_definition())?;
+    let image = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1,$2,$3,$4)")
+        .bind(&image)
+        .bind(&tenant)
+        .bind(format!("{child_workflow}:1@fixture"))
+        .bind(child_wasm.to_string_lossy().as_ref())
+        .execute(&harness.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version) VALUES ($1,$2,1,1)",
+    )
+    .bind(&tenant)
+    .bind(&child_workflow)
+    .execute(&server)
+    .await?;
+    let definition = child_definition();
+    sqlx::query(
+        "INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, track_events) \
+         VALUES ($1,$2,1,$3,$4,false)",
+    )
+    .bind(&tenant)
+    .bind(&child_workflow)
+    .bind(&definition)
+    .bind(serde_json::to_vec(&definition)?.len() as i32)
+    .execute(&server)
+    .await?;
+    sqlx::query(
+        "INSERT INTO workflow_compilations
+            (tenant_id, workflow_id, version, compilation_status, translated_path,
+             registered_image_id, source_checksum, track_events, template_major, lowering_mode,
+             trusted_pins)
+         VALUES ($1,$2,1,'success',$3,$4,$5,false,$6,$7,'{}'::text[])",
+    )
+    .bind(&tenant)
+    .bind(&child_workflow)
+    .bind(child_wasm.parent().unwrap().to_string_lossy().as_ref())
+    .bind(&image)
+    .bind(workflow_definition_checksum(&definition))
+    .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+    .bind(runtara_server::config::workflow_lowering_tag())
+    .execute(&server)
+    .await?;
+
+    // The parent starts it.
+    let parent_wasm = harness.compile(start_graph(&child_workflow))?;
+    let parent = format!("{tenant}-parent");
+    let run = harness.launch(&parent_wasm, &parent, json!({})).await?;
+    assert_eq!(run.status, InstanceStatus::Completed, "{:?}", run.error);
+    let output: Value = serde_json::from_slice(run.output.as_deref().unwrap())?;
+    let started = &output["child"];
+    assert_eq!(started["workflowId"], child_workflow.as_str());
+    assert_eq!(started["version"], 1);
+    assert_eq!(started["runLabel"], "child-1");
+    assert_eq!(started["replayed"], false);
+    let child = started["instanceId"].as_str().unwrap().to_owned();
+
+    // Relay -> Valkey stream -> trigger worker -> Environment.
+    let manager =
+        redis::aio::ConnectionManager::new(redis::Client::open(valkey.connection_url())?).await?;
+    let relay = ExecutionOutboxRelay::new(
+        ExecutionOutbox::new(server.clone()),
+        Arc::new(TriggerStreamPublisher::new(manager.clone(), valkey.clone())),
+    );
+    let shutdown = runtara_server::shutdown::ShutdownSignal::new();
+    let worker = tokio::spawn(runtara_server::workers::trigger_worker::run(
+        server.clone(),
+        Some(harness.runtime.clone()),
+        valkey.clone(),
+        runtara_server::workers::trigger_worker::TriggerWorkerConfig {
+            tenant_id: tenant.clone(),
+            block_timeout_ms: 200,
+            ..Default::default()
+        },
+        shutdown.clone(),
+        sink,
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    ));
+    let mut launched = None;
+    for _ in 0..100 {
+        relay.run_once().await?;
+        if let Some(row) = harness.persistence.get_instance(&child).await? {
+            launched = Some(row);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let launched = launched.expect("the trigger worker launched the child");
+    let link = launched
+        .parent
+        .clone()
+        .expect("the child row carries its parent");
+    assert_eq!(link.parent_instance_id, parent);
+    assert_eq!(link.parent_close_policy, "cancel");
+    assert_eq!(launched.run_label.as_deref(), Some("child-1"));
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM execution_requests WHERE tenant_id = $1 AND instance_id = $2",
+    )
+    .bind(&tenant)
+    .bind(&child)
+    .fetch_one(&server)
+    .await?;
+    assert!(
+        matches!(state.as_str(), "launching" | "accepted"),
+        "{state}"
+    );
+
+    // The accepted launch runs.
+    let finished = harness
+        .run(
+            &child_wasm,
+            &child,
+            launched.input.clone().unwrap_or_default(),
+        )
+        .await?;
+    assert_eq!(
+        finished.status,
+        InstanceStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(finished.output.as_deref().unwrap())?,
+        json!({"n": 7})
+    );
+    use runtara_component_host::control_host::{
+        ControlAuthority, ControlHost, InstanceStatus as Control, ParentFilter, QueryRequest,
+        SortField, SortOrder,
+    };
+    let me = ControlAuthority {
+        tenant: tenant.clone(),
+        caller: None,
+        operation: None,
+    };
+    let read = harness.native.get(&me, child.clone()).await.unwrap();
+    assert_eq!(read.instance.status, Control::Completed);
+    assert_eq!(
+        read.instance.parent_instance_id.as_deref(),
+        Some(parent.as_str())
+    );
+    let page = harness
+        .native
+        .query(
+            &me,
+            QueryRequest {
+                workflow_id: None,
+                run_label: None,
+                statuses: vec![],
+                parent: Some(ParentFilter::Instance(parent.clone())),
+                created_after_ms: None,
+                created_before_ms: None,
+                finished_after_ms: None,
+                finished_before_ms: None,
+                sort_by: SortField::CreatedAt,
+                order: SortOrder::Ascending,
+                page_size: 10,
+                page_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].instance_id, child);
+
+    shutdown.trigger();
+    let _ = tokio::time::timeout(Duration::from_secs(10), worker).await;
+    let mut redis = manager;
+    let _: () = redis::AsyncCommands::del(&mut redis, valkey.trigger_stream_key(&tenant)).await?;
     Ok(())
 }
