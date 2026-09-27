@@ -572,6 +572,11 @@ pub struct DirectCompilationResult {
     /// re-raise the reserved park and suspend codes. Composition refuses any
     /// of them that does not resolve as a staged workflow-agent.
     pub workflow_agents: std::collections::BTreeSet<String>,
+    /// Every capability each agent is called with, and whether the compile
+    /// treated it as suspending. Composition refuses an agent whose
+    /// `.meta.json` disagrees.
+    pub agent_capability_sites:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
     /// Path to the primary emitted Wasm artifact.
     ///
     /// Before static composition this is the directly emitted
@@ -715,6 +720,7 @@ fn compose_direct_workflow_selected(
         extra_component_dirs,
         &result.component_artifacts.agent_components,
         &result.workflow_agents,
+        &result.agent_capability_sites,
     )?;
     if let Some(report) = &result.artifact_metadata.isolation_selection {
         for (package, digest) in &report.shared_components {
@@ -1067,6 +1073,18 @@ pub fn compile_direct_workflow_composed_configured(
         _ => None,
     };
     let mut result = compile_direct_workflow_with_abi(input, abi, omit_runtime)?;
+    // The inner compile checked its sites against the environment's binding;
+    // this entry re-emits under `binding`, so check them again.
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path)?)?;
+    agent_suspend::check_sites(
+        &manifest,
+        abi,
+        result.omit_runtime,
+        binding,
+        &result.scoped_agents,
+        true,
+    )?;
     let agent_ids: Vec<String> = result
         .component_artifacts
         .agent_components
@@ -1318,8 +1336,11 @@ fn compile_direct_workflow_inner(
             report: Box::new(support_report),
         });
     }
-    let workflow_agent_safety =
-        analyze_workflow_agent_safety(&input.execution_graph, &input.child_workflows);
+    let workflow_agent_safety = analyze_workflow_agent_safety(
+        &input.execution_graph,
+        &input.child_workflows,
+        agent_catalog,
+    );
     let child_workflow_metadata =
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
@@ -1388,6 +1409,7 @@ fn compile_direct_workflow_inner(
         omit_runtime,
         runtime_binding,
         &scoped_agents,
+        agent_catalog.is_some(),
     )?;
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
@@ -1474,6 +1496,7 @@ fn compile_direct_workflow_inner(
         },
         scoped_agents,
         workflow_agents: manifest.workflow_agent_ids(),
+        agent_capability_sites: manifest.agent_capability_sites(),
         wasm_path,
         workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
         manifest_path,
@@ -2039,6 +2062,9 @@ mod tests;
 
 #[cfg(test)]
 mod retry_bounds_tests;
+
+#[cfg(test)]
+mod operation_scoped_tests;
 
 #[cfg(test)]
 mod wait_failure_tests;

@@ -99,6 +99,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong offset), so cached artifacts built by an older server no longer match and each workflow is rebuilt on its next compile or
   launch. Expect a one-off burst of compilation work after the upgrade; nothing
   needs to be done by hand.
+- **Validation checks where suspending and control-agent steps may appear.**
+  A step whose capability suspends must be durable (E028) and set a timeout
+  above zero (E029), and may not run in an onError handler, a WaitForSignal
+  `onWait` or as an AiAgent tool or memory provider (E131); a control-agent
+  step is refused in `onWait` and AiAgent tools and memory (E132). Embed call
+  sites are judged against what their workflows call. New warnings: a literal
+  `runLabel` on a control `start` in a loop (W074), such steps in a parallel
+  Split or branch group, which now run serialized (W075), under a retrying
+  Split or EmbedWorkflow (W076), a non-literal `start` target (W077) and a
+  suspending step timeout within the 1 s deadline margin (W078). The rules
+  are listed in the workflow authoring schema. Workflows containing such steps
+  cannot be published as workflow-agents, and **the `composed` runtime binding
+  (`RUNTARA_DIRECT_RUNTIME_BINDING=composed`) cannot compile them**; compile
+  them with the default host-imported runtime.
 - **Agent components are now held to an import allowlist at composition.** A
   bundled or third-party agent component may import only `wasi:*`,
   `runtara:agent/types@*` and the host interfaces the component host links

@@ -478,6 +478,8 @@ pub struct AgentStep {
     /// this step without its own deadline. Enclosing deadlines still apply.
     /// Cleanup can extend beyond the budget; uncooperative code may require
     /// emergency whole-workflow abort. External effects are not rolled back.
+    /// A step whose capability suspends must set it above zero (E029): it is
+    /// the step's hard deadline, parked time included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -488,6 +490,7 @@ pub struct AgentStep {
     /// Disable durability for this step when `Some(false)`. Skips checkpoint
     /// read/write around the capability call. Ignored when the enclosing
     /// workflow is already non-durable. Defaults to the workflow setting.
+    /// A step whose capability suspends must stay durable (E028).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }
@@ -2108,7 +2111,8 @@ pub struct SplitConfig {
     ///
     /// When > 1 and the Split body is an eligible single-Agent subgraph (no
     /// breakpoints, no split-level retries, not a workflow-agent
-    /// child), iterations run as CONCURRENT windows: agent calls are launched
+    /// child, no operation-scoped (suspending or control) step), iterations
+    /// run as CONCURRENT windows: agent calls are launched
     /// as component-model-async subtasks and their I/O overlaps. Ineligible
     /// shapes keep the strictly sequential execution (advisory W073).
     /// Results, error routing, and `dontStopOnFailed` semantics are identical

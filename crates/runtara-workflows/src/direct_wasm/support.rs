@@ -98,23 +98,28 @@ pub struct WorkflowAgentSafetyViolation {
 /// preloaded `EmbedWorkflow` child, including error and callback paths. It is
 /// conservative: when a child closure cannot be proven complete, publishing is
 /// refused rather than assuming a missing dependency cannot suspend.
+///
+/// An operation-scoped call refuses publication: a suspending capability
+/// (`suspending-capability`, from the `catalog`) or any call to the control
+/// agent (`control-agent`, recognized by id even without a catalog). Neither
+/// is a parking site: the capability ABI cannot carry a typed suspension or
+/// the caller's operation identity.
 pub fn analyze_workflow_agent_safety(
     graph: &ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
+    catalog: Option<&runtara_dsl::agent_meta::AgentCatalog>,
 ) -> WorkflowAgentSafetyReport {
     let children = DirectSupportChildWorkflows::from_child_workflows(child_workflows);
     let mut violations = Vec::new();
     let mut child_stack = Vec::new();
     let cooperative_waits_supported =
         !workflow_agent_requires_runtime(graph, child_workflows, false);
-    collect_workflow_agent_safety(
-        graph,
-        "root",
-        &children,
-        &mut child_stack,
-        &mut violations,
+    let context = SafetyContext {
+        child_workflows: &children,
         cooperative_waits_supported,
-    );
+        catalog,
+    };
+    collect_workflow_agent_safety(graph, "root", &context, &mut child_stack, &mut violations);
     violations.sort_by(|left, right| {
         (
             left.path.as_str(),
@@ -210,13 +215,19 @@ fn has_runtime_timeout(graph: &ExecutionGraph) -> bool {
     })
 }
 
+/// What every step of a workflow-agent safety walk needs.
+struct SafetyContext<'a> {
+    child_workflows: &'a DirectSupportChildWorkflows<'a>,
+    cooperative_waits_supported: bool,
+    catalog: Option<&'a runtara_dsl::agent_meta::AgentCatalog>,
+}
+
 fn collect_workflow_agent_safety(
     graph: &ExecutionGraph,
     graph_path: &str,
-    child_workflows: &DirectSupportChildWorkflows<'_>,
+    context: &SafetyContext<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
-    cooperative_waits_supported: bool,
 ) {
     // ExecutionGraph.steps is a HashMap. Sorting on its authored key makes
     // diagnostics stable across process hash seeds and therefore suitable for
@@ -226,25 +237,42 @@ fn collect_workflow_agent_safety(
 
     for (step_key, step) in steps {
         let step_path = format!("{graph_path}/steps/{step_key}");
-        collect_workflow_agent_step_safety(
-            step,
-            &step_path,
-            child_workflows,
-            child_stack,
-            violations,
-            cooperative_waits_supported,
-        );
+        collect_workflow_agent_step_safety(step, &step_path, context, child_stack, violations);
     }
 }
 
 fn collect_workflow_agent_step_safety(
     step: &Step,
     path: &str,
-    child_workflows: &DirectSupportChildWorkflows<'_>,
+    context: &SafetyContext<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
-    cooperative_waits_supported: bool,
 ) {
+    let child_workflows = context.child_workflows;
+    let cooperative_waits_supported = context.cooperative_waits_supported;
+    if let Step::Agent(agent) = step {
+        let suspends = context.catalog.is_some_and(|catalog| {
+            catalog.capability_suspends(&agent.agent_id, &agent.capability_id)
+        });
+        let control = runtara_dsl::agent_meta::canonical_agent_id(&agent.agent_id)
+            == runtara_dsl::agent_meta::CONTROL_AGENT_ID;
+        let refusal = if suspends {
+            Some((
+                "suspending-capability",
+                "the capability suspends; a published agent cannot park its caller on a typed suspension",
+            ))
+        } else if control {
+            Some((
+                "control-agent",
+                "control calls need the caller's own operation identity, which a published agent does not have",
+            ))
+        } else {
+            None
+        };
+        if let Some((feature, reason)) = refusal {
+            push_workflow_agent_safety_violation(violations, path, step, feature, reason);
+        }
+    }
     // A breakpoint is not a publication hazard: the capability lowering strips
     // it, so a published agent carries no breakpoint import and cannot pause.
     // Refusing here would reject a workflow over a debugging aid that does not
@@ -270,10 +298,9 @@ fn collect_workflow_agent_step_safety(
                 collect_workflow_agent_safety(
                     on_wait,
                     &format!("{path}/on-wait"),
-                    child_workflows,
+                    context,
                     child_stack,
                     violations,
-                    cooperative_waits_supported,
                 );
             }
         }
@@ -316,19 +343,17 @@ fn collect_workflow_agent_step_safety(
             collect_workflow_agent_safety(
                 &split.subgraph,
                 &format!("{path}/split"),
-                child_workflows,
+                context,
                 child_stack,
                 violations,
-                cooperative_waits_supported,
             );
         }
         Step::While(while_step) => collect_workflow_agent_safety(
             &while_step.subgraph,
             &format!("{path}/while"),
-            child_workflows,
+            context,
             child_stack,
             violations,
-            cooperative_waits_supported,
         ),
         Step::EmbedWorkflow(embed) => {
             if embed.max_retries.unwrap_or(3) > 0 && !cooperative_waits_supported {
@@ -377,10 +402,9 @@ fn collect_workflow_agent_step_safety(
             collect_workflow_agent_safety(
                 child,
                 &format!("{path}/embedded"),
-                child_workflows,
+                context,
                 child_stack,
                 violations,
-                cooperative_waits_supported,
             );
             child_stack.pop();
         }
@@ -2145,7 +2169,7 @@ mod tests {
 
     #[test]
     fn workflow_agent_safety_certifies_pure_control_flow() {
-        let report = analyze_workflow_agent_safety(&fixture("simple"), &[]);
+        let report = analyze_workflow_agent_safety(&fixture("simple"), &[], None);
 
         assert!(!report.may_suspend_or_sleep, "{report:?}");
         assert!(report.violations.is_empty());
@@ -2163,7 +2187,7 @@ mod tests {
                 }, "executionPlan": [{"fromStep": "call", "toStep": "finish"}]
             }))
             .unwrap();
-            let report = analyze_workflow_agent_safety(&graph, &[]);
+            let report = analyze_workflow_agent_safety(&graph, &[], None);
             assert!(!report.may_suspend_or_sleep, "{report:?}");
             let features = analyze_workflow_features(&graph);
             assert!(
@@ -2177,7 +2201,7 @@ mod tests {
             );
 
             graph.durable = Some(true);
-            assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            assert!(analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep);
             graph.durable = Some(false);
             // An error path requiring root runtime ownership must be considered
             // even when the HTTP call itself is non-durable.
@@ -2188,7 +2212,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            assert!(analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep);
         }
     }
 
@@ -2211,7 +2235,7 @@ mod tests {
             let mut value = base.clone();
             value["steps"]["scope"]["config"]["sequential"] = sequential.into();
             let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
-            assert!(!analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            assert!(!analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep);
             assert!(!workflow_agent_requires_runtime(&graph, &[], false));
         }
         // The full declared closure matters, including otherwise unreachable
@@ -2268,7 +2292,7 @@ mod tests {
                 workflow_agent_requires_runtime(&graph, &[], false),
                 "{case}: {features:?}"
             );
-            let report = analyze_workflow_agent_safety(&graph, &[]);
+            let report = analyze_workflow_agent_safety(&graph, &[], None);
             // Split backoff in a runtime-owning workflow parks now, so it is a
             // parking site rather than a refusal — found at the same path.
             assert!(report.violations.is_empty(), "{case}: {report:?}");
@@ -2324,7 +2348,7 @@ mod tests {
             let graph = serde_json::from_value(root).unwrap();
             let children = make_children(middle.clone(), leaf.clone());
             assert!(!workflow_agent_requires_runtime(&graph, &children, false));
-            assert!(!analyze_workflow_agent_safety(&graph, &children).may_suspend_or_sleep);
+            assert!(!analyze_workflow_agent_safety(&graph, &children, None).may_suspend_or_sleep);
             assert!(workflow_agent_requires_runtime(&graph, &children, true));
         }
         for location in 0..3 {
@@ -2371,7 +2395,7 @@ mod tests {
                     workflow_agent_requires_runtime(&parent, &children, false),
                     "{location}/{case}"
                 );
-                let safety = analyze_workflow_agent_safety(&parent, &children);
+                let safety = analyze_workflow_agent_safety(&parent, &children, None);
                 // Embed backoff across a runtime-owning closure parks now: the
                 // site is still found at the same path, as a parking site.
                 assert!(
@@ -2404,7 +2428,7 @@ mod tests {
         };
         finish.breakpoint = Some(true);
 
-        let report = analyze_workflow_agent_safety(&graph, &[]);
+        let report = analyze_workflow_agent_safety(&graph, &[], None);
 
         assert!(
             !report
@@ -2434,6 +2458,7 @@ mod tests {
                 version_resolved: 3,
                 execution_graph: fixture("wait_simple"),
             }],
+            None,
         );
 
         assert!(report.may_suspend_or_sleep);
@@ -2443,6 +2468,83 @@ mod tests {
                 violation.path == "root/steps/call_child/embedded/steps/wait"
                     && violation.feature == "wait-for-signal"
             }),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_safety_refuses_suspending_and_control_calls_anywhere_in_the_closure() {
+        let catalog = runtara_dsl::agent_meta::AgentCatalog::from_json(
+            &serde_json::json!([{
+                "id": "waiter", "name": "waiter", "description": "fixture",
+                "hasSideEffects": false, "supportsConnections": false, "integrationIds": [],
+                "capabilities": [{"id": "pause", "name": "pause", "inputType": "Input",
+                    "inputs": [], "output": {"type": "object"}, "hasSideEffects": false,
+                    "isIdempotent": true, "rateLimited": false, "suspends": true}]
+            }])
+            .to_string(),
+        )
+        .expect("catalog");
+        let single = |agent: &str, capability: &str| -> ExecutionGraph {
+            serde_json::from_value(serde_json::json!({
+                "entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": agent,
+                        "capabilityId": capability, "maxRetries": 0, "timeout": 60000},
+                    "finish": {"id": "finish", "stepType": "Finish"}},
+                "executionPlan": [{"fromStep": "call", "toStep": "finish"}]}))
+            .expect("graph parses")
+        };
+        let features = |report: &WorkflowAgentSafetyReport| {
+            report
+                .violations
+                .iter()
+                .map(|violation| (violation.path.clone(), violation.feature.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let report = analyze_workflow_agent_safety(&single("waiter", "pause"), &[], Some(&catalog));
+        assert_eq!(
+            features(&report),
+            vec![("root/steps/call".into(), "suspending-capability".into())]
+        );
+        assert!(
+            report
+                .parking_sites
+                .iter()
+                .all(|site| site.feature != "suspending-capability"),
+            "not a parking site: {report:?}"
+        );
+
+        // Control is recognized by its id, with or without a catalog.
+        for catalog in [None, Some(&catalog)] {
+            let report = analyze_workflow_agent_safety(&single("control", "get"), &[], catalog);
+            assert_eq!(
+                features(&report),
+                vec![("root/steps/call".into(), "control-agent".into())]
+            );
+        }
+
+        // An embedded child's call refuses the parent too.
+        let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "embed", "steps": {
+                "embed": {"id": "embed", "stepType": "EmbedWorkflow", "childWorkflowId": "child",
+                    "childVersion": 1, "maxRetries": 0},
+                "finish": {"id": "finish", "stepType": "Finish"}},
+            "executionPlan": [{"fromStep": "embed", "toStep": "finish"}]}))
+        .expect("graph parses");
+        let children = [ChildWorkflowInput {
+            step_id: "embed".into(),
+            workflow_id: "child".into(),
+            version_requested: "1".into(),
+            version_resolved: 1,
+            execution_graph: single("waiter", "pause"),
+        }];
+        let report = analyze_workflow_agent_safety(&parent, &children, Some(&catalog));
+        assert!(
+            features(&report).contains(&(
+                "root/steps/embed/embedded/steps/call".into(),
+                "suspending-capability".into()
+            )),
             "{report:?}"
         );
     }
@@ -2502,7 +2604,7 @@ mod tests {
         }))
         .expect("graph parses");
 
-        let report = analyze_workflow_agent_safety(&graph, &[]);
+        let report = analyze_workflow_agent_safety(&graph, &[], None);
 
         assert!(
             report.violations.is_empty(),

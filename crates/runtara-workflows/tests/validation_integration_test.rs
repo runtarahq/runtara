@@ -472,3 +472,164 @@ fn test_error_undefined_data_reference() {
         "Should suggest available fields"
     );
 }
+
+// ============================================================================
+// Operation-scoped steps across the embed closure
+// ============================================================================
+
+mod operation_scoped_closure {
+    use runtara_dsl::ExecutionGraph;
+    use runtara_dsl::agent_meta::AgentCatalog;
+    use runtara_workflows::validation::{
+        ClosureChildGraph, ClosureValidationReport, ValidationError, ValidationWarning,
+        validate_workflow_closure,
+    };
+    use serde_json::{Value, json};
+
+    /// `control` (get; wait suspends) and `waiter` (pause suspends).
+    fn catalog() -> AgentCatalog {
+        let capability = |id: &str, suspends: bool| {
+            json!({"id": id, "name": id, "inputType": "Input", "inputs": [],
+                "output": {"type": "object"}, "hasSideEffects": false, "isIdempotent": true,
+                "rateLimited": false, "suspends": suspends})
+        };
+        let agent = |id: &str, capabilities: Vec<Value>| {
+            json!({"id": id, "name": id, "description": "fixture", "hasSideEffects": false,
+                "supportsConnections": false, "integrationIds": [], "capabilities": capabilities})
+        };
+        AgentCatalog::from_json(
+            &json!([
+                agent(
+                    "control",
+                    vec![capability("get", false), capability("wait", true)]
+                ),
+                agent("waiter", vec![capability("pause", true)]),
+            ])
+            .to_string(),
+        )
+        .expect("fixture catalog")
+    }
+
+    fn graph(value: Value) -> ExecutionGraph {
+        serde_json::from_value(value).expect("graph")
+    }
+
+    /// A child whose only step calls `agent:capability`, durable and timed.
+    fn child(agent: &str, capability: &str) -> ClosureChildGraph {
+        ClosureChildGraph {
+            workflow_id: "child".into(),
+            version: 1,
+            execution_graph: graph(json!({"entryPoint": "call", "steps": {
+                "call": {"id": "call", "stepType": "Agent", "agentId": agent,
+                    "capabilityId": capability, "maxRetries": 0, "timeout": 60000},
+                "finish": {"id": "finish", "stepType": "Finish"}},
+                "executionPlan": [{"fromStep": "call", "toStep": "finish"}]})),
+        }
+    }
+
+    fn embed(extra: Value) -> Value {
+        let mut step = json!({"id": "embed", "stepType": "EmbedWorkflow",
+            "childWorkflowId": "child", "childVersion": 1});
+        for (key, value) in extra.as_object().unwrap() {
+            step[key] = value.clone();
+        }
+        step
+    }
+
+    fn parent(embed: Value) -> ExecutionGraph {
+        graph(json!({"entryPoint": "embed", "steps": {
+            "embed": embed, "finish": {"id": "finish", "stepType": "Finish"}},
+            "executionPlan": [{"fromStep": "embed", "toStep": "finish"}]}))
+    }
+
+    fn validate(root: &ExecutionGraph, child: ClosureChildGraph) -> ClosureValidationReport {
+        validate_workflow_closure("parent", root, &catalog(), &[child])
+    }
+
+    #[test]
+    fn a_non_durable_embed_of_a_suspending_child_is_rejected_at_the_call_site() {
+        let report = validate(
+            &parent(embed(json!({"maxRetries": 0, "durable": false}))),
+            child("waiter", "pause"),
+        );
+        assert!(
+            report.root.errors.iter().any(|error| matches!(error,
+                ValidationError::SuspendingCapabilityNotDurable { step_id, child_workflow_id, .. }
+                    if step_id == "embed" && child_workflow_id.as_deref() == Some("child"))),
+            "{:?}",
+            report.root.errors
+        );
+        assert!(report.children.iter().all(|child| child.result.is_ok()));
+
+        // A durable call site is fine, and a control-only child needs none.
+        let report = validate(
+            &parent(embed(json!({"maxRetries": 0}))),
+            child("waiter", "pause"),
+        );
+        assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
+        let report = validate(
+            &parent(embed(json!({"maxRetries": 0, "durable": false}))),
+            child("control", "get"),
+        );
+        assert!(report.is_ok(), "{:?}", report.errors().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_embed_used_as_an_ai_agent_tool_rejects_what_its_child_calls() {
+        let root = graph(json!({"entryPoint": "ai", "steps": {
+            "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "llm",
+                "config": {"systemPrompt": {"valueType": "immediate", "value": "s"},
+                    "userPrompt": {"valueType": "immediate", "value": "u"}}},
+            "embed": embed(json!({"maxRetries": 0})),
+            "finish": {"id": "finish", "stepType": "Finish"}},
+            "executionPlan": [{"fromStep": "ai", "toStep": "embed", "label": "delegate"},
+                {"fromStep": "ai", "toStep": "finish"}]}));
+        let report = validate(&root, child("control", "get"));
+        assert!(
+            report.root.errors.iter().any(|error| matches!(error,
+                ValidationError::ControlCapabilityUnsupportedContext { step_id, context, .. }
+                    if step_id == "embed" && context == "ai-agent-tool")),
+            "{:?}",
+            report.root.errors
+        );
+        let report = validate(&root, child("waiter", "pause"));
+        assert!(
+            report
+                .root
+                .errors
+                .iter()
+                .any(|error| error.code() == "E131"),
+            "{:?}",
+            report.root.errors
+        );
+    }
+
+    #[test]
+    fn an_embed_retrying_an_operation_scoped_child_warns_at_the_call_site() {
+        // EmbedWorkflow retries default to 3.
+        let report = validate(&parent(embed(json!({}))), child("control", "get"));
+        assert!(report.is_ok());
+        assert!(
+            report.root.warnings.iter().any(|warning| matches!(warning,
+                ValidationWarning::OperationScopedStepUnderEnclosingRetry {
+                    step_id, retry_step_id, child_workflow_id }
+                    if step_id == "embed" && retry_step_id == "embed"
+                        && child_workflow_id.as_deref() == Some("child"))),
+            "{:?}",
+            report.root.warnings
+        );
+        let report = validate(
+            &parent(embed(json!({"maxRetries": 0}))),
+            child("control", "get"),
+        );
+        assert!(
+            report
+                .root
+                .warnings
+                .iter()
+                .all(|warning| warning.code() != "W076"),
+            "{:?}",
+            report.root.warnings
+        );
+    }
+}

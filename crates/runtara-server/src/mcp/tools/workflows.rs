@@ -599,6 +599,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 }
             }
         ],
+        "operationScopedSteps": runtara_dsl::step_context_rules::step_context_rules_json(),
         "completeExamples": {
             "conditionalBranching": {
                 "name": "Route empty input",
@@ -1749,6 +1750,28 @@ mod tests {
 
         serde_json::from_value::<runtara_dsl::Step>(error["example"].clone())
             .expect("advertised Error example must parse as a real Error step");
+    }
+
+    #[test]
+    fn authoring_schema_renders_every_operation_scoped_rule() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let section = &schema["operationScopedSteps"];
+        let rules = section["rules"].as_array().expect("rules");
+        let rendered: Vec<&str> = rules
+            .iter()
+            .map(|rule| rule["context"].as_str().expect("context key"))
+            .collect();
+        let expected: Vec<&str> = runtara_dsl::step_context_rules::STEP_CONTEXT_RULES
+            .iter()
+            .map(|rule| rule.key)
+            .collect();
+        assert_eq!(rendered, expected);
+        let text = section.to_string();
+        for code in [
+            "E028", "E029", "E131", "E132", "W074", "W075", "W076", "W077", "W078",
+        ] {
+            assert!(text.contains(code), "{code} missing from {text}");
+        }
     }
 
     /// SYN-451: the authoring schema's advertised condition `op` enum must list

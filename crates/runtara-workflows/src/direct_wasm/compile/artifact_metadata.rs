@@ -306,6 +306,7 @@ pub(super) fn resolve_agent_component_dependencies(
     extra_component_dirs: &[std::path::PathBuf],
     components: &[DirectAgentComponentRequirement],
     workflow_agents: &std::collections::BTreeSet<String>,
+    capability_sites: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
 ) -> Result<Vec<ResolvedComponentDependency>, DirectCompileError> {
     components
         .iter()
@@ -372,9 +373,13 @@ pub(super) fn resolve_agent_component_dependencies(
                 &component.bundle_wasm_filename,
                 &component.bundle_meta_filename,
             )?;
+            let meta_path = dir.join(&component.bundle_meta_filename);
+            if let Some(sites) = capability_sites.get(&component.agent_id) {
+                check_sidecar_suspends(&component.agent_id, &meta_path, sites)?;
+            }
             let grants = AgentImportGrants::for_agent(
                 &component.agent_id,
-                sidecar_declares_suspends(&dir.join(&component.bundle_meta_filename)),
+                sidecar_declares_suspends(&meta_path),
                 !from_staging_dir,
             );
             check_agent_component_imports(
@@ -476,6 +481,44 @@ fn agent_import_granted(import: &str, grants: AgentImportGrants) -> bool {
     } else {
         grants.control && CONTROL_AGENT_IMPORTS.contains(&import)
     }
+}
+
+/// Refuse an agent whose sidecar and the compiled call sites disagree on
+/// whether a called capability suspends. The compile classifies each site from
+/// the agent catalog (or treats it as non-suspending without one); a site
+/// lowered the other way round would bind the wrong interface.
+fn check_sidecar_suspends(
+    agent_id: &str,
+    meta: &Path,
+    sites: &std::collections::BTreeMap<String, bool>,
+) -> Result<(), DirectCompileError> {
+    let capabilities = fs::read(meta)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|meta| meta.get("capabilities").cloned())
+        .and_then(|capabilities| capabilities.as_array().cloned())
+        .unwrap_or_default();
+    for (capability, compiled) in sites {
+        let declared = capabilities.iter().any(|entry| {
+            entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id.eq_ignore_ascii_case(capability))
+                && entry
+                    .get("suspends")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+        });
+        if declared != *compiled {
+            return Err(DirectCompileError::Component(format!(
+                "agent `{agent_id}` capability `{capability}`: its component's .meta.json \
+                 declares suspends={declared}, but the workflow was compiled with \
+                 suspends={compiled}; recompile against the agent catalog of the installed \
+                 components"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// True when a sidecar declares any capability `suspends`. A missing or
@@ -974,6 +1017,7 @@ mod tests {
             &[staging.path().to_path_buf()],
             &[component],
             &workflow_agents,
+            &Default::default(),
         )
         .map(|_| ())
     }
@@ -1056,6 +1100,7 @@ mod tests {
                 &[staging.path().to_path_buf()],
                 &[component],
                 &Default::default(),
+                &Default::default(),
             )
             .map(|_| ())
             .expect_err("composition refuses a core module agent");
@@ -1094,6 +1139,7 @@ mod tests {
             dir.path(),
             &[],
             &[component],
+            &Default::default(),
             &Default::default(),
         )
         .map(|_| ())
@@ -1161,8 +1207,58 @@ mod tests {
             &[staging.path().to_path_buf()],
             &[component],
             &Default::default(),
+            &Default::default(),
         )
         .map(|_| ())
+    }
+
+    #[test]
+    fn the_sidecar_must_agree_with_the_compiled_sites_on_suspension() {
+        let resolve = |declared: bool, compiled: bool| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let component = crate::direct_wasm::component::agent_component("pauser");
+            fs::write(
+                dir.path().join(&component.bundle_wasm_filename),
+                component_importing(&[]),
+            )
+            .expect("write component");
+            fs::write(
+                dir.path().join(&component.bundle_meta_filename),
+                serde_json::to_vec(&serde_json::json!({"capabilities": [
+                    {"id": "pause", "tags": [], "suspends": declared},
+                    {"id": "plain", "tags": []}]}))
+                .expect("serialize sidecar"),
+            )
+            .expect("write sidecar");
+            let sites = std::collections::BTreeMap::from([(
+                "pauser".to_string(),
+                std::collections::BTreeMap::from([
+                    ("pause".to_string(), compiled),
+                    ("plain".to_string(), false),
+                ]),
+            )]);
+            resolve_agent_component_dependencies(
+                dir.path(),
+                &[],
+                &[component],
+                &Default::default(),
+                &sites,
+            )
+            .map(|_| ())
+        };
+        resolve(true, true).expect("agreeing sites compose");
+        resolve(false, false).expect("agreeing sites compose");
+        // Compiled without a catalog (or against a stale one): the site calls
+        // `capabilities` although the component suspends, and the reverse.
+        for (declared, compiled) in [(true, false), (false, true)] {
+            let error = resolve(declared, compiled).expect_err("mismatch refused");
+            let text = error.to_string();
+            assert!(text.contains("`pause`"), "{text}");
+            assert!(
+                text.contains(&format!("declares suspends={declared}")),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -1312,6 +1408,7 @@ mod tests {
                 &[staging.path().to_path_buf()],
                 &[component],
                 &workflow_agents,
+                &Default::default(),
             )
             .map(|resolved| {
                 assert_eq!(resolved.len(), 1);

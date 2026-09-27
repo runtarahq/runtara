@@ -149,10 +149,13 @@ pub(super) fn parallel_agent_body<'a>(
     // shape stops the workflow from starting at all, and an Agent's maxRetries
     // defaults to 3, so the overwhelming majority of authored Splits carry a
     // retry policy they never opted into.
+    // An operation-scoped (suspending or control) call anywhere in the body
+    // keeps one identity per operation only if items run one at a time, so
+    // the body serializes (advisory W075).
     if *breakpoint
         || *agent_retries > 0
         || static_data.agent_is_workflow_agent(*agent_id)
-        || static_data.agent_suspends(*agent_id)
+        || crate::direct_wasm::plan::plan_contains_operation_scoped(nested_plan)
     {
         return None;
     }

@@ -486,19 +486,22 @@ pub(super) fn concurrent_branch_pools(
     if !static_data.parallel_enabled {
         return None;
     }
+    // An operation-scoped (suspending or control) call anywhere in a branch,
+    // composites included, never shares a concurrent window: the whole group
+    // serializes (advisory W075).
+    if branches
+        .iter()
+        .any(crate::direct_wasm::plan::plan_contains_operation_scoped)
+    {
+        return None;
+    }
     let chains: Vec<Vec<&DirectRunPlan>> = branches.iter().map(branch_chain).collect();
     let ok = chains.iter().flatten().all(|node| match node {
         DirectRunPlan::Agent {
             agent_id,
             max_retries,
             ..
-        } => {
-            // An operation-scoped (suspending) site parks the whole workflow,
-            // so it never shares a concurrent window: the group serializes.
-            !static_data.agent_is_workflow_agent(*agent_id)
-                && !static_data.agent_suspends(*agent_id)
-                && *max_retries == 0
-        }
+        } => !static_data.agent_is_workflow_agent(*agent_id) && *max_retries == 0,
         _ => true, // sync steps have no invoke
     });
     if !ok {
@@ -684,10 +687,11 @@ fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunP
             // (assemble-last), which handles the inline breakpoint-pause.
             !node_has_breakpoint(node)
                 && match node {
-                    DirectRunPlan::Agent { agent_id, .. } => {
-                        !static_data.agent_is_workflow_agent(*agent_id)
-                            && !static_data.agent_suspends(*agent_id)
-                    }
+                    DirectRunPlan::Agent {
+                        agent_id,
+                        operation_scoped,
+                        ..
+                    } => !static_data.agent_is_workflow_agent(*agent_id) && !operation_scoped,
                     DirectRunPlan::Log { .. }
                     | DirectRunPlan::Filter { .. }
                     | DirectRunPlan::SwitchValue { .. }

@@ -23,7 +23,8 @@
 //!
 //! Tracer scope (spike S0.2): one top-level, durable, timed, non-retrying
 //! Agent step under the invoke ABI. [`check_sites`] refuses every other shape
-//! instead of miscompiling it.
+//! instead of miscompiling it, together with the operation-scoped backstops
+//! every control or suspending site needs.
 
 use std::collections::BTreeSet;
 
@@ -43,7 +44,7 @@ use super::{
     DirectCoreFunctionIndices, DirectWorkflowManifest,
 };
 use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
-use crate::direct_wasm::manifest::DirectGraphManifest;
+use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
 
 // Canonical layout of `result<outcome, error-info>` in the retptr area, where
 // `outcome = variant { completed(list<u8>), suspended(suspension) }`,
@@ -83,82 +84,243 @@ const CURSOR: u32 = DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL;
 const END: u32 = DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL;
 const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 
-/// Refuse every suspending site the tracer lowering does not cover.
+/// Compile-time backstop for operation-scoped (suspending or control) Agent
+/// call sites. Validation reports the same rules with stable codes (E028,
+/// E029, E131, E132); this refuses whatever reaches the compiler anyway, plus
+/// shapes only the compiler can see:
+///
+/// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
+///   AiAgent call, a workflow embedded as an AiAgent tool, the `CliRunHttp`
+///   ABI (it blocks instead of parking), the `AgentCapabilities` ABI (a
+///   published workflow-agent), the composed runtime binding, an omitted
+///   runtime, scoped isolation, and a control call compiled without the agent
+///   catalog (it could not be classified);
+/// - a suspending site: non-durable, untimed, or an onError handler;
+/// - until the lowering widens past the S0.2 tracer: a suspending site nested
+///   in a loop or `onWait`, inside an embedded workflow, or retrying.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
     abi: WorkflowAbi,
     omit_runtime: bool,
     runtime_binding: RuntimeBinding,
     scoped_agents: &BTreeSet<String>,
+    has_catalog: bool,
 ) -> Result<(), DirectCompileError> {
-    let unsupported = |step: &str, why: &str| {
-        Err(DirectCompileError::Component(format!(
-            "Agent step `{step}` calls a suspending capability, which {why}"
-        )))
+    let target = SiteTarget {
+        abi,
+        omit_runtime,
+        runtime_binding,
+        scoped_agents,
     };
-    fn nested_suspending(graph: &DirectGraphManifest) -> Option<&str> {
-        graph.steps.iter().find_map(|step| {
-            step.nested_graphs.iter().find_map(|nested| {
-                nested
-                    .graph
-                    .agents
-                    .iter()
-                    .find(|agent| agent.suspends)
-                    .map(|agent| agent.step_id.as_str())
-                    .or_else(|| nested_suspending(&nested.graph))
-            })
-        })
-    }
-    if let Some(step) = nested_suspending(&manifest.graph) {
-        return unsupported(step, "is supported only at the top level of a workflow");
-    }
-    for child in &manifest.child_workflows {
-        if let Some(agent) = child.graph.agents.iter().find(|agent| agent.suspends) {
-            return unsupported(&agent.step_id, "cannot run inside an embedded workflow");
-        }
-        if let Some(step) = nested_suspending(&child.graph) {
-            return unsupported(step, "cannot run inside an embedded workflow");
-        }
-    }
-    let graph = &manifest.graph;
-    for agent in graph.agents.iter().filter(|agent| agent.suspends) {
-        let step = agent.step_id.as_str();
-        if agent.step_type != "Agent" || agent.purpose != "agent.config" {
-            return unsupported(step, "cannot back an AiAgent");
-        }
-        if abi != WorkflowAbi::InvokeHostImports
-            || omit_runtime
-            || runtime_binding != RuntimeBinding::HostImport
-        {
-            return unsupported(
+    if !has_catalog {
+        let control = std::iter::once(&manifest.graph)
+            .chain(manifest.child_workflows.iter().map(|child| &child.graph))
+            .find_map(|graph| find_agent(graph, &|agent| is_control_agent(&agent.agent_id)));
+        if let Some(step) = control {
+            return refuse(
                 step,
-                "needs the lifecycle invoke ABI with the host-imported runtime",
+                "a control-agent",
+                "cannot be classified without the agent catalog; compile with the catalog",
             );
         }
-        if scoped_agents.contains(&agent.agent_id) {
-            return unsupported(step, "cannot run under scoped isolation");
+    }
+    // Embed call sites reached as AiAgent tools, then every embed below them.
+    let mut tool_embeds = BTreeSet::new();
+    for graph in std::iter::once(&manifest.graph)
+        .chain(manifest.child_workflows.iter().map(|child| &child.graph))
+    {
+        collect_ai_targets(graph, &mut tool_embeds);
+    }
+    loop {
+        let before = tool_embeds.len();
+        for child in &manifest.child_workflows {
+            if tool_embeds.contains(&child.step_id) {
+                collect_embed_steps(&child.graph, &mut tool_embeds);
+            }
         }
-        if !agent.durable {
-            return unsupported(step, "must be durable");
+        if tool_embeds.len() == before {
+            break;
         }
-        if agent.timeout.unwrap_or(0) == 0 {
-            return unsupported(step, "needs a timeout");
+    }
+    check_graph(&manifest.graph, SiteDepth::TopLevel, false, &target)?;
+    for child in &manifest.child_workflows {
+        let tool = tool_embeds.contains(&child.step_id);
+        check_graph(&child.graph, SiteDepth::Embedded, tool, &target)?;
+    }
+    Ok(())
+}
+
+/// Where the graph holding a site sits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SiteDepth {
+    TopLevel,
+    Nested,
+    Embedded,
+}
+
+/// The compile target every operation-scoped site must support.
+struct SiteTarget<'a> {
+    abi: WorkflowAbi,
+    omit_runtime: bool,
+    runtime_binding: RuntimeBinding,
+    scoped_agents: &'a BTreeSet<String>,
+}
+
+fn refuse(step: &str, kind: &str, why: &str) -> Result<(), DirectCompileError> {
+    Err(DirectCompileError::Component(format!(
+        "Agent step `{step}` calls {kind} capability, which {why}"
+    )))
+}
+
+fn is_control_agent(agent_id: &str) -> bool {
+    runtara_dsl::agent_meta::canonical_agent_id(agent_id)
+        == runtara_dsl::agent_meta::CONTROL_AGENT_ID
+}
+
+fn find_agent<'a>(
+    graph: &'a DirectGraphManifest,
+    matches: &dyn Fn(&DirectAgentManifest) -> bool,
+) -> Option<&'a str> {
+    graph
+        .agents
+        .iter()
+        .find(|agent| matches(agent))
+        .map(|agent| agent.step_id.as_str())
+        .or_else(|| {
+            graph.steps.iter().find_map(|step| {
+                step.nested_graphs
+                    .iter()
+                    .find_map(|nested| find_agent(&nested.graph, matches))
+            })
+        })
+}
+
+/// An AiAgent edge other than its continuation or onError: a tool, MCP or
+/// memory edge.
+fn is_ai_edge(graph: &DirectGraphManifest, edge: &DirectEdgeManifest) -> bool {
+    !matches!(edge.label.as_deref(), None | Some("next") | Some("onError"))
+        && graph
+            .steps
+            .iter()
+            .any(|step| step.id == edge.from_step && step.step_type == "AiAgent")
+}
+
+/// Targets of AiAgent tool and memory edges in `graph` and its nested graphs.
+fn collect_ai_targets(graph: &DirectGraphManifest, targets: &mut BTreeSet<String>) {
+    for edge in graph.edges.iter().filter(|edge| is_ai_edge(graph, edge)) {
+        targets.insert(edge.to_step.clone());
+    }
+    for step in &graph.steps {
+        for nested in &step.nested_graphs {
+            collect_ai_targets(&nested.graph, targets);
         }
-        if agent.max_retries.unwrap_or(1) != 0 {
-            return unsupported(step, "must set maxRetries to 0");
+    }
+}
+
+fn collect_embed_steps(graph: &DirectGraphManifest, embeds: &mut BTreeSet<String>) {
+    for step in &graph.steps {
+        if step.step_type == "EmbedWorkflow" {
+            embeds.insert(step.id.clone());
+        }
+        for nested in &step.nested_graphs {
+            collect_embed_steps(&nested.graph, embeds);
+        }
+    }
+}
+
+fn check_graph(
+    graph: &DirectGraphManifest,
+    depth: SiteDepth,
+    in_tool_workflow: bool,
+    target: &SiteTarget<'_>,
+) -> Result<(), DirectCompileError> {
+    for agent in graph.agents.iter().filter(|agent| agent.operation_scoped) {
+        let step = agent.step_id.as_str();
+        let kind = if agent.suspends {
+            "a suspending"
+        } else {
+            "a control-agent"
+        };
+        if agent.step_type != "Agent" || agent.purpose != "agent.config" {
+            return refuse(step, kind, "cannot back an AiAgent");
         }
         let callers = graph.edges.iter().filter(|edge| edge.to_step == step);
-        for edge in callers {
-            let from_ai = graph
-                .steps
-                .iter()
-                .any(|from| from.id == edge.from_step && from.step_type == "AiAgent");
-            if from_ai {
-                return unsupported(step, "cannot be an AI tool");
+        if callers.clone().any(|edge| is_ai_edge(graph, edge)) {
+            return refuse(step, kind, "cannot be an AiAgent tool or memory provider");
+        }
+        if in_tool_workflow {
+            return refuse(
+                step,
+                kind,
+                "cannot run in a workflow embedded as an AiAgent tool",
+            );
+        }
+        match target.abi {
+            WorkflowAbi::InvokeHostImports => {}
+            WorkflowAbi::CliRunHttp => {
+                return refuse(
+                    step,
+                    kind,
+                    "needs the lifecycle invoke ABI; the CliRunHttp ABI blocks instead of parking",
+                );
             }
-            if edge.label.as_deref() == Some("onError") {
-                return unsupported(step, "cannot run in an onError handler");
+            WorkflowAbi::AgentCapabilities => {
+                return refuse(step, kind, "cannot be published as a workflow-agent");
             }
+        }
+        if target.runtime_binding != RuntimeBinding::HostImport {
+            return refuse(
+                step,
+                kind,
+                "cannot compile under the composed runtime binding; use the host-imported runtime",
+            );
+        }
+        if target.omit_runtime {
+            return refuse(step, kind, "needs the host-imported workflow runtime");
+        }
+        if target.scoped_agents.contains(&agent.agent_id) {
+            return refuse(step, kind, "cannot run under scoped isolation");
+        }
+        if !agent.suspends {
+            continue;
+        }
+        if !agent.durable {
+            return refuse(step, kind, "must be durable");
+        }
+        if agent.timeout.unwrap_or(0) == 0 {
+            return refuse(step, kind, "needs a timeout");
+        }
+        if callers
+            .clone()
+            .any(|edge| edge.label.as_deref() == Some("onError"))
+        {
+            return refuse(step, kind, "cannot run in an onError handler");
+        }
+        // Limits of the S0.2 tracer lowering, lifted when it widens.
+        match depth {
+            SiteDepth::TopLevel => {}
+            SiteDepth::Nested => {
+                return refuse(
+                    step,
+                    kind,
+                    "is supported only at the top level of a workflow",
+                );
+            }
+            SiteDepth::Embedded => {
+                return refuse(step, kind, "cannot run inside an embedded workflow");
+            }
+        }
+        if agent.max_retries.unwrap_or(1) != 0 {
+            return refuse(step, kind, "must set maxRetries to 0");
+        }
+    }
+    let nested_depth = match depth {
+        SiteDepth::Embedded => SiteDepth::Embedded,
+        SiteDepth::TopLevel | SiteDepth::Nested => SiteDepth::Nested,
+    };
+    for step in &graph.steps {
+        for nested in &step.nested_graphs {
+            check_graph(&nested.graph, nested_depth, in_tool_workflow, target)?;
         }
     }
     Ok(())

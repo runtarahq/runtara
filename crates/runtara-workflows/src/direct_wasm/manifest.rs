@@ -92,6 +92,37 @@ impl DirectWorkflowManifest {
         ids
     }
 
+    /// Every capability each agent is called with, anywhere in the root graph,
+    /// its nested graphs or its embedded children, mapped to whether the
+    /// compile treated the call as suspending. Composition checks it against
+    /// each agent's `.meta.json`.
+    pub fn agent_capability_sites(
+        &self,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>> {
+        type Sites = std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>;
+        fn collect(graph: &DirectGraphManifest, sites: &mut Sites) {
+            for agent in &graph.agents {
+                let suspends = sites
+                    .entry(agent.agent_id.clone())
+                    .or_default()
+                    .entry(agent.capability_id.clone())
+                    .or_default();
+                *suspends |= agent.suspends;
+            }
+            for step in &graph.steps {
+                for nested in &step.nested_graphs {
+                    collect(&nested.graph, sites);
+                }
+            }
+        }
+        let mut sites = Sites::new();
+        collect(&self.graph, &mut sites);
+        for child in &self.child_workflows {
+            collect(&child.graph, &mut sites);
+        }
+        sites
+    }
+
     /// Agent ids with a suspending call site anywhere in the root graph, its
     /// nested graphs or its embedded children. Each is imported through both
     /// `capabilities` and `suspendable`.
@@ -475,6 +506,11 @@ pub struct DirectAgentManifest {
     /// when false so existing manifests stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suspends: bool,
+    /// Whether the call is operation-scoped (catalog: the capability suspends
+    /// or belongs to the control agent). Such a site never shares a parallel
+    /// window. Skipped when false so existing manifests stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub operation_scoped: bool,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
     /// Required capability inputs validated after runtime references resolve.
@@ -1061,6 +1097,9 @@ fn step_manifest(
                 suspends: agent_catalog.is_some_and(|catalog| {
                     catalog.capability_suspends(&agent_id, &step.capability_id)
                 }),
+                operation_scoped: agent_catalog.is_some_and(|catalog| {
+                    catalog.is_operation_scoped(&agent_id, &step.capability_id)
+                }),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(
                     agent_catalog,
@@ -1210,6 +1249,7 @@ fn step_manifest(
                 ),
                 is_workflow_agent: false,
                 suspends: false,
+                operation_scoped: false,
                 input_mapping_id,
                 required_inputs: required_agent_inputs(agent_catalog, "ai-tools", capability_id),
                 // Retries are opt-in for AiAgent (default 0 — LLM calls
@@ -1263,7 +1303,14 @@ fn step_manifest(
                             },
                         rate_limited: false,
                         is_workflow_agent: false,
-                        suspends: false,
+                        // Classified like any call, so the compiler refuses an
+                        // operation-scoped memory provider instead of lowering it.
+                        suspends: agent_catalog.is_some_and(|catalog| {
+                            catalog.capability_suspends(&mem_agent, capability)
+                        }),
+                        operation_scoped: agent_catalog.is_some_and(|catalog| {
+                            catalog.is_operation_scoped(&mem_agent, capability)
+                        }),
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1306,6 +1353,7 @@ fn step_manifest(
                         ),
                         is_workflow_agent: false,
                         suspends: false,
+                        operation_scoped: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1347,6 +1395,7 @@ fn step_manifest(
                         ),
                         is_workflow_agent: false,
                         suspends: false,
+                        operation_scoped: false,
                         input_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,

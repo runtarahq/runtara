@@ -390,7 +390,7 @@ fn compile_nested_agents_with_parent(
     let mut agents = Vec::new();
     for level in 0..depth {
         let safety = runtara_workflows::direct_wasm::support::analyze_workflow_agent_safety(
-            &graph, &children,
+            &graph, &children, None,
         );
         anyhow::ensure!(
             !safety.may_suspend_or_sleep,

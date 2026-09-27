@@ -623,7 +623,7 @@ fn a_breakpoint_is_not_a_publication_hazard() {
         "finish":{"id":"finish","stepType":"Finish","inputMapping":{}}},
         "executionPlan":[{"fromStep":"work","toStep":"finish"}]}))
         .expect("graph parses");
-    let report = crate::direct_wasm::analyze_workflow_agent_safety(&graph, &[]);
+    let report = crate::direct_wasm::analyze_workflow_agent_safety(&graph, &[], None);
     assert!(
         !report
             .violations

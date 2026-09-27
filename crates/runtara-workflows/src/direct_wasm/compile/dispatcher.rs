@@ -571,6 +571,8 @@ pub(super) fn emit_run_plan_mapping(
             input_mapping_id,
             durable_checkpoint,
             breakpoint,
+            // Sequencing only: parallel lowering keeps these sites serialized.
+            operation_scoped: _,
             max_retries,
             retry_delay_ms,
             rate_limit_budget_ms,

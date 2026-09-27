@@ -873,6 +873,7 @@ mod tests {
             rate_limited: false,
             is_workflow_agent: false,
             suspends: false,
+            operation_scoped: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries: None,

@@ -456,5 +456,13 @@ mod tests {
             schema["properties"]["runLabel"]["maxLength"],
             json!(runtara_dsl::run_label::MAX_RUN_LABEL_LENGTH)
         );
+        // The validator reads these fields for W074 and W077.
+        use runtara_dsl::step_context_rules as rules;
+        for field in [
+            rules::CONTROL_START_WORKFLOW_ID_FIELD,
+            rules::CONTROL_START_RUN_LABEL_FIELD,
+        ] {
+            assert!(schema["properties"].get(field).is_some(), "{field}");
+        }
     }
 }

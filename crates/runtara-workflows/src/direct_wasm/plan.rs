@@ -143,6 +143,9 @@ pub(super) enum DirectRunPlan {
         input_mapping_id: u32,
         durable_checkpoint: bool,
         breakpoint: bool,
+        /// Operation-scoped (suspending or control) call: never launched in a
+        /// parallel window (see [`plan_contains_operation_scoped`]).
+        operation_scoped: bool,
         max_retries: u32,
         retry_delay_ms: u64,
         rate_limit_budget_ms: u64,
@@ -914,6 +917,7 @@ fn step_run_plan_inner(
                 input_mapping_id: agent.input_mapping_id,
                 durable_checkpoint,
                 breakpoint: step_breakpoint_enabled(graph, step),
+                operation_scoped: agent.operation_scoped,
                 max_retries,
                 retry_delay_ms,
                 rate_limit_budget_ms,
@@ -2068,6 +2072,138 @@ pub(super) fn ai_tool_suspends(tool: &DirectAiToolPlan) -> bool {
         DirectAiToolPlan::Wait { .. } => true,
         DirectAiToolPlan::Embed { child_plan, .. } => plan_contains_suspension(child_plan),
         DirectAiToolPlan::Agent { .. } => false,
+    }
+}
+
+/// Whether `plan` holds an operation-scoped (suspending or control) Agent call
+/// anywhere: continuations, arms, loop bodies, error routes and embedded
+/// children. Such a region never runs in a parallel window, so a Split body or
+/// branch group holding one runs sequentially. AiAgent tools and memory never
+/// hold one: `agent_suspend::check_sites` refuses them before planning.
+pub(super) fn plan_contains_operation_scoped(plan: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    let error_route = |error_plan: &Option<DirectErrorRoutePlan>| {
+        error_plan.as_ref().is_some_and(|route| {
+            route
+                .branches
+                .iter()
+                .any(|branch| plan_contains_operation_scoped(&branch.plan))
+                || route
+                    .default_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_contains_operation_scoped(plan))
+        })
+    };
+    let merge = |merge_plan: &Option<Box<DirectRunPlan>>| {
+        merge_plan
+            .as_ref()
+            .is_some_and(|plan| plan_contains_operation_scoped(plan))
+    };
+    match plan {
+        P::Agent {
+            operation_scoped,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            *operation_scoped
+                || plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+        }
+        P::AiAgent {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::AiAgentLoop {
+            next_plan,
+            error_plan,
+            ..
+        } => plan_contains_operation_scoped(next_plan) || error_route(error_plan),
+        P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
+        P::Filter { next_plan, .. }
+        | P::SwitchValue { next_plan, .. }
+        | P::GroupBy { next_plan, .. }
+        | P::Log { next_plan, .. } => plan_contains_operation_scoped(next_plan),
+        P::Delay { next_plan, .. } => plan_contains_operation_scoped(next_plan),
+        P::WaitForSignal {
+            next_plan,
+            error_plan,
+            on_wait_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+                || on_wait_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_contains_operation_scoped(plan))
+        }
+        P::Conditional {
+            true_plan,
+            false_plan,
+            merge_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(true_plan)
+                || plan_contains_operation_scoped(false_plan)
+                || merge(merge_plan)
+        }
+        P::SwitchRoute {
+            branches,
+            default_plan,
+            merge_plan,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|branch| plan_contains_operation_scoped(&branch.plan))
+                || plan_contains_operation_scoped(default_plan)
+                || merge(merge_plan)
+        }
+        P::EdgeRoute {
+            branches,
+            default_plan,
+            merge_plan,
+        } => {
+            branches
+                .iter()
+                .any(|branch| plan_contains_operation_scoped(&branch.plan))
+                || plan_contains_operation_scoped(default_plan)
+                || merge(merge_plan)
+        }
+        P::While {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::Split {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(nested_plan)
+                || plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+        }
+        P::EmbedWorkflow {
+            child_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(child_plan)
+                || plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+        }
+        P::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            branches.iter().any(plan_contains_operation_scoped)
+                || plan_contains_operation_scoped(merge_plan)
+        }
     }
 }
 
@@ -3830,6 +3966,7 @@ mod tests {
             rate_limited,
             is_workflow_agent: false,
             suspends: false,
+            operation_scoped: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries,

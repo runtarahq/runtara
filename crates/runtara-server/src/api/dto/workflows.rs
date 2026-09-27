@@ -651,6 +651,22 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            ValidationError::SuspendingCapabilityNotDurable { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("durable".to_string()),
+                None,
+            ),
+            ValidationError::SuspendingCapabilityMissingTimeout { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("timeout".to_string()),
+                None,
+            ),
+            ValidationError::SuspendingCapabilityUnsupportedContext { step_id, .. }
+            | ValidationError::ControlCapabilityUnsupportedContext { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
         };
 
         Self {
@@ -1486,6 +1502,60 @@ mod tests {
         assert_eq!(dto.field_name.as_deref(), Some("maxRetries"));
         assert!(dto.message.contains("4294967294"));
         assert!(dto.message.contains("4294967295"));
+    }
+
+    #[test]
+    fn operation_scoped_errors_map_to_their_step_and_field() {
+        let cases = [
+            (
+                ValidationError::SuspendingCapabilityNotDurable {
+                    step_id: "wait".into(),
+                    capability: "control:wait".into(),
+                    child_workflow_id: None,
+                },
+                "E028",
+                Some("durable"),
+            ),
+            (
+                ValidationError::SuspendingCapabilityMissingTimeout {
+                    step_id: "wait".into(),
+                    capability: "control:wait".into(),
+                },
+                "E029",
+                Some("timeout"),
+            ),
+            (
+                ValidationError::SuspendingCapabilityUnsupportedContext {
+                    step_id: "wait".into(),
+                    capability: "control:wait".into(),
+                    context: "on-wait".into(),
+                    child_workflow_id: None,
+                },
+                "E131",
+                None,
+            ),
+            (
+                ValidationError::ControlCapabilityUnsupportedContext {
+                    step_id: "wait".into(),
+                    capability: "control:get".into(),
+                    context: "ai-agent-tool".into(),
+                    child_workflow_id: Some("child".into()),
+                },
+                "E132",
+                None,
+            ),
+        ];
+        for (error, code, field) in cases {
+            let dto = ValidationErrorDto::from_runtara_error(&error);
+            assert_eq!(dto.code, code);
+            assert_eq!(dto.step_id.as_deref(), Some("wait"));
+            assert_eq!(dto.field_name.as_deref(), field);
+            assert!(
+                dto.message.starts_with(&format!("[{code}]")),
+                "{}",
+                dto.message
+            );
+        }
     }
 
     #[test]
