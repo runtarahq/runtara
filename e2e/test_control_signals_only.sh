@@ -10,7 +10,7 @@
 # submission (the same operation id is still free) lets it finish.
 #
 # This is why signals alone cannot express "wait for whichever approval
-# finishes first" and control:wait exists. See docs/control-agent.md
+# finishes first" and the WaitForInstances step exists. See docs/control-agent.md
 # ("Signals-only parallel approvals (S0.1)").
 #
 # Usage:  POSTGRES_PORT=55432 POSTGRES_USER=postgres ./e2e/test_control_signals_only.sh

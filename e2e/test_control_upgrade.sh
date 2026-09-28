@@ -1,5 +1,6 @@
 #!/bin/bash
-# E2E Test: parked control:wait parents survive a binary and bundle upgrade.
+# E2E Test: parents parked on WaitForInstances survive a binary and bundle
+# upgrade.
 #
 # Release N (server binary + component bundle) parks two parents on their
 # Finance and Legal approvals; one approval of the second parent is answered
@@ -7,7 +8,9 @@
 # same databases with a control agent whose digest differs (asserted). Both
 # parked parents keep their compiled packages and bound images, the old
 # control pin stays approved beside the new one, and both resume to their
-# results once their approvals are answered. A parent started on N+1 runs too.
+# results once their approvals are answered; each then makes a control:get
+# after the wake, which runs on the old pin through the approved history. A
+# parent started on N+1 runs too.
 #
 # N defaults to the current build and N+1 to the same binary with a forced
 # version bump of the control agent in a scratch copy of the bundle (the crate
@@ -236,13 +239,16 @@ parked_parent() {
     echo "${parent} ${finance} ${legal}"
 }
 parked_or_exit() { [ -n "${3:-}" ] || { print_error "No parked parent"; exit 1; }; }
-# Wait until the parent finishes and check it saw both approvals.
+# Wait until the parent finishes, check it saw both approvals, and that its
+# control call after the wake read its finance approval.
 expect_resumed() {
-    local parent="$1" out
+    local parent="$1" finance="$2" out
     [ "$(wait_status "${parent}" completed 180)" = "completed" ] || { print_error "Parent ${parent} did not resume: $(instance_row "${parent}")"; exit 1; }
     out=$(instance_output "${parent}")
     [ "$(echo "${out}" | jq -r '.result.resolution + "|" + (.result.finished | length | tostring)')" = "satisfied|2" ] \
         || { print_error "Unexpected result for ${parent}: ${out}"; exit 1; }
+    [ "$(echo "${out}" | jq -r '.read.instance.instanceId + "|" + .read.instance.status')" = "${finance}|completed" ] \
+        || { print_error "The control call after the wake did not read ${finance}: ${out}"; exit 1; }
 }
 
 control_pin_of() {
@@ -324,16 +330,19 @@ APPROVER_GRAPH=$(jq -n '{
 PARENT_GRAPH=$(jq -n --argjson finance "$(approvals_step finance)" --argjson legal "$(approvals_step legal)" '{
     name: "upgrade-approvals", durable: true, entryPoint: "finance",
     steps: { finance: $finance, legal: $legal,
-             wait: { id: "wait", stepType: "Agent", agentId: "control", capabilityId: "wait",
-                     maxRetries: 0, durable: true, timeout: 600000, inputMapping: {
-                         instanceIds: { valueType: "composite", value: [
-                             { valueType: "reference", value: "steps.finance.outputs.instanceId" },
-                             { valueType: "reference", value: "steps.legal.outputs.instanceId" } ] },
-                         mode: { valueType: "immediate", value: "all" } } },
+             wait: { id: "wait", stepType: "WaitForInstances", name: "Wait for approvals",
+                     instanceIds: { valueType: "composite", value: [
+                         { valueType: "reference", value: "steps.finance.outputs.instanceId" },
+                         { valueType: "reference", value: "steps.legal.outputs.instanceId" } ] },
+                     mode: "all" },
+             read: { id: "read", stepType: "Agent", agentId: "control", capabilityId: "get",
+                     maxRetries: 0, inputMapping: {
+                         instanceId: { valueType: "reference", value: "steps.finance.outputs.instanceId" } } },
              finish: { id: "finish", stepType: "Finish", inputMapping: {
-                 result: { valueType: "reference", value: "steps.wait.outputs" } } } },
+                 result: { valueType: "reference", value: "steps.wait.outputs" },
+                 read: { valueType: "reference", value: "steps.read.outputs" } } } },
     executionPlan: [ { fromStep: "finance", toStep: "legal" }, { fromStep: "legal", toStep: "wait" },
-                     { fromStep: "wait", toStep: "finish" } ],
+                     { fromStep: "wait", toStep: "read" }, { fromStep: "read", toStep: "finish" } ],
     variables: {}, outputSchema: {}, inputSchema: { approver: { type: "string", required: true } }
 }')
 read -r APPROVER_WF _ <<< "$(make_workflow upgrade-approver "${APPROVER_GRAPH}")"
@@ -370,8 +379,8 @@ print_step "Release N+1: answering the remaining approvals..."
 answer "${P1_FIN}" true
 answer "${P1_LEG}" false
 answer "${P2_LEG}" true
-expect_resumed "${P1}"
-expect_resumed "${P2}"
+expect_resumed "${P1}" "${P1_FIN}"
+expect_resumed "${P2}" "${P2_FIN}"
 [ "$(bound_image "${P1}")" = "${P1_IMAGE}" ] && [ "$(bound_image "${P2}")" = "${P2_IMAGE}" ] \
     || { print_error "A parked parent was rebound to another image"; exit 1; }
 [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id IN ('${P1_IMAGE}', '${P2_IMAGE}')")" -ge 1 ] \
@@ -383,7 +392,7 @@ read -r P3 P3_FIN P3_LEG <<< "$(parked_parent "${PARENT_WF}" "${DATA}")"
 parked_or_exit "${P3:-}" "${P3_FIN:-}" "${P3_LEG:-}"
 answer "${P3_LEG}" true
 answer "${P3_FIN}" true
-expect_resumed "${P3}"
+expect_resumed "${P3}" "${P3_FIN}"
 print_success "A parent started on N+1 completes ✓"
 
 echo
