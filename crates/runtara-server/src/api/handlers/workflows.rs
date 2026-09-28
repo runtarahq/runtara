@@ -3031,8 +3031,8 @@ pub async fn get_workflow_dependents_handler(
 
 /// Get schemas for a specific workflow version
 ///
-/// Returns the input schema, output schema, and variables from the execution graph
-/// of a specific workflow version.
+/// Returns the input schema, output schema, state schema, and variables from
+/// the execution graph of a specific workflow version.
 #[utoipa::path(
     get,
     path = "/api/runtime/workflows/{id}/versions/{version}/schemas",
@@ -3063,11 +3063,7 @@ pub async fn get_version_schemas_handler(
         .get_version_schemas(&tenant_id, &workflow_id, version)
         .await
     {
-        Ok((input_schema, output_schema, variables)) => Ok(Json(VersionSchemasResponse {
-            input_schema,
-            output_schema,
-            variables,
-        })),
+        Ok(schemas) => Ok(Json(schemas)),
         Err(ServiceError::NotFound(msg)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {

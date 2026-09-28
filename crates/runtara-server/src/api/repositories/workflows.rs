@@ -4,7 +4,10 @@ use serde_json::Value;
 use sha2::Digest;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
-use crate::api::dto::workflows::{Note, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat};
+use crate::api::dto::workflows::{
+    Note, VersionSchemasResponse, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat,
+    state_schema_from_definition,
+};
 use crate::types::MemoryTier;
 
 #[derive(sqlx::FromRow)]
@@ -902,6 +905,7 @@ impl WorkflowRepository {
                     .get("outputSchema")
                     .cloned()
                     .unwrap_or(serde_json::json!({}));
+                let state_schema = state_schema_from_definition(&execution_graph);
                 let variables = execution_graph
                     .get("variables")
                     .cloned()
@@ -924,6 +928,7 @@ impl WorkflowRepository {
                     execution_graph: serde_json::json!({}),
                     input_schema,
                     output_schema,
+                    state_schema,
                     variables,
                     current_version_number: current_version,
                     last_version_number: row.1.unwrap_or(0),
@@ -1020,6 +1025,7 @@ impl WorkflowRepository {
                 .get("outputSchema")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
+            let state_schema = state_schema_from_definition(execution_graph);
             let variables = execution_graph
                 .get("variables")
                 .cloned()
@@ -1042,6 +1048,7 @@ impl WorkflowRepository {
                 execution_graph: r.0.clone(),
                 input_schema,
                 output_schema,
+                state_schema,
                 variables,
                 current_version_number: current_version,
                 last_version_number: r.5.unwrap_or(0),
@@ -2441,13 +2448,14 @@ impl WorkflowRepository {
 
     /// Get schemas and variables from a specific workflow version's execution graph
     ///
-    /// Returns (input_schema, output_schema, variables) extracted from the execution_graph JSON.
+    /// Returns the input, output and state schemas and the variables
+    /// extracted from the execution_graph JSON.
     pub async fn get_version_schemas(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<Option<(Value, Value, Value)>, sqlx::Error> {
+    ) -> Result<Option<VersionSchemasResponse>, sqlx::Error> {
         let row: Option<(Value,)> = sqlx::query_as(
             r#"
             SELECT sd.definition
@@ -2463,21 +2471,7 @@ impl WorkflowRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(execution_graph,)| {
-            let input_schema = execution_graph
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let output_schema = execution_graph
-                .get("outputSchema")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let variables = execution_graph
-                .get("variables")
-                .cloned()
-                .unwrap_or(Value::Array(vec![]));
-            (input_schema, output_schema, variables)
-        }))
+        Ok(row.map(|(execution_graph,)| VersionSchemasResponse::from_definition(&execution_graph)))
     }
 
     /// Get execution timeout for a workflow version from the executionGraph
