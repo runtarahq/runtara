@@ -161,7 +161,7 @@ interface continuation {
   Publishing no longer compiles a different ABI.
 - The return value is the **only** terminal channel. `runtime.complete`,
   `runtime.fail` and `runtime.load-input` are deleted: input is the argument,
-  and the result is the return.
+  and the result is the return. This lands separately, as Phase 6.
 - A non-suspending agent may only return `completed`. `suspended` from an agent
   whose metadata does not declare `suspends` fails the step with the existing
   `AGENT_UNEXPECTED_SUSPEND` code.
@@ -320,6 +320,9 @@ legacy versions today.
 
 ### Phase 0: verify tooling (spike, no production change)
 
+Done. All three checks hold; `frozen_abi_tests.rs` keeps the semver check as
+a regression test.
+
 1. A component importing `runtara:host/timers@1.0.0` links against a
    wasmtime 46 `Linker` that defines only `@1.1.0` (with an extra function).
 2. `wit_bindgen::generate!` with `inline:` plus `path: [WIT_DIR/agent, …]`
@@ -333,6 +336,8 @@ linking the old name; nothing else changes.
 
 ### Phase 1: extract `isolation_package`
 
+Done (8f53964a).
+
 Move `runtara-workflow-wit/src/isolation_package*` to
 `runtara-invocation-contract` unchanged. Repoint `runtara-component-host`,
 `runtara-environment`, `runtara-server` and `runtara-workflows` (all
@@ -340,6 +345,8 @@ currently use feature `isolation-package`). This is a pure move, independent
 of everything else, and can land first.
 
 ### Phase 1b: delete the composed runtime component
+
+Done (c8e540ad).
 
 `runtara-workflow-runtime` is a guest component that *exports*
 `runtara:workflow-runtime/runtime` and talks to core over HTTP through
@@ -391,6 +398,8 @@ guest bindgen site and a whole binding axis from the test battery.
 
 ### Phase 2: create `runtara-wit`
 
+Done (11e33fd0).
+
 - Write the six packages from the existing files, applying the Phase 3 column
   of the rename map. `workflow/tasks` `use`s `lifecycle.{wake}` inside the same
   package; `workflow/operation` `use`s `runtara:agent/suspension.{wake}`;
@@ -409,6 +418,11 @@ guest bindgen site and a whole binding axis from the test battery.
 Nothing consumes the crate yet; the workspace still builds.
 
 ### Phase 3: atomic switch (one PR)
+
+Done (d2b66430), together with Phase 4: moving the WASI deps broke the old
+crates, so they were deleted in the same commit. `signal-wait` keeps its
+`checkpoint-id` field name. The trusted-executor grant landed separately
+(d5d201c1).
 
 Guests and host must agree on names, and there is no compatibility shim, so
 this is one change. Mechanical, grep-driven:
@@ -447,6 +461,8 @@ this is one change. Mechanical, grep-driven:
 
 ### Phase 4: delete
 
+Done as part of Phase 3.
+
 - Delete crates `runtara-workflow-wit` and `runtara-agent-wit`, and the `wit/`
   dirs of `runtara-agent-trusted` and `runtara-agent-suspension`.
 - Delete the 27 `crates/agents/*/build.rs` WIT generators, the 27 committed
@@ -470,7 +486,8 @@ Sub-step 5e can follow separately.
   above. `capabilities.invoke` returns `outcome`.
 - Delete `runtara:workflow/lifecycle` and the per-agent `suspendable`
   interface; `agent_package` loses `AgentShape::Suspending`.
-- Delete `runtime.load-input`, `runtime.complete` and `runtime.fail`.
+- `runtime.load-input`, `runtime.complete` and `runtime.fail` stay until
+  Phase 6.
 - `workflow/tasks` `task-outcome` and `workflow/operation.suspend` `use`
   `runtara:agent/types.{wake}`.
 
@@ -517,12 +534,11 @@ Sub-step 5e can follow separately.
     `AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE`, `emit_agent_control_return`,
     `emit_agent_suspend_sentinel_check`, and the `…:user` remap in
     `direct_json.rs:5627-5638`.
-- **Terminal status from the return value only.**
-  - Delete the `runtime.complete`/`fail` calls and `report_terminal_status`
-    (`core_imports.rs:916-936`).
-  - Delete `load-input`: input is always the argument.
-  - A child workflow-agent then needs no special case: its return goes to its
-    parent.
+- **Terminal status is unchanged here.** A top-level run still reports through
+  `runtime.complete`/`fail`, and a published workflow-agent still suppresses
+  them (`report_terminal_status`). The three-way `WorkflowAbi` becomes one
+  "published agent" flag that sets the export package id and that
+  suppression. Phase 6 removes the flag's second job.
 - **Bump** `DIRECT_WORKFLOW_INVOKE_ABI_VERSION` again (to 4), so Phase 3
   artifacts built by a development server recompile.
 
@@ -537,13 +553,10 @@ Sub-step 5e can follow separately.
     `SuspendableOutcome`) merge into one set.
   - `TaskOutcome::Suspended` carries the unified wakes.
 - **Runner** (`runtara-environment/src/runner/embedded.rs`):
-  - Persist terminal status from the returned `completed`/error. Today the
-    payloads are only logged (`:1694-1713`).
+  - Terminal persistence moves to the runner in Phase 6, not here.
   - `park_invoke_suspend` reads wait ids from `instances` wakes.
   - Keep the "pure `on-resume` is already acked" early return (`:1396-1399`);
     instance waits can no longer be lost behind it because they are wakes now.
-  - Check against `deferred_terminal.rs` and the "terminal result published
-    only after execution is destroyed" rule.
 - **Gates:**
   - `image_registry.rs:70-85`, `compilation.rs:1446-1449`
     (`require_lifecycle_invoke_file`) and `embedded.rs:928-935` require the
@@ -618,6 +631,213 @@ Sub-step 5e can follow separately.
   - `docs/control-agent.md:617` and `:731`.
 - Publication errors get dedicated codes instead of a generic
   `CompilationError` mapped to HTTP 500 (`workflows.rs:772-775`).
+
+### Phase 6: the return value is the only terminal channel
+
+A separate commit after Phase 5, in the same release. After Phase 5 every
+workflow already returns `result<outcome, error-info>`. Phase 6 makes that
+value the only way a run finishes, so the host stops receiving the result
+twice.
+
+#### Why
+
+- **Two channels.** A top-level run calls `runtime.complete(output)` or
+  `runtime.fail(error)`, and the host persists from that call. It also returns
+  the same result, which the embedded runner only logs
+  (`runner/embedded.rs:1694-1713`).
+  - Scoped runs stage the call in `DeferredTerminal` and then cross-check it
+    against the return value (`workflow/deferred_terminal.rs:45-60`).
+  - A published workflow-agent must suppress both calls
+    (`report_terminal_status`, `compile/core_imports.rs:929-935`), or it would
+    finish its parent.
+- **Errors lost today.** About 90 guest paths (`return_if_retptr_error`,
+  `abi.rs:130-147`) return `Err(error-info)` without calling `fail`: a failing
+  checkpoint write, `custom-event`, `register-input` or `stdlib.error`.
+  - Nothing persists those runs. The monitor later finds them still `running`
+    and records `failed` with `termination_reason = crashed` and the message
+    "Process terminated without SDK event" (`handlers.rs:1426-1450`,
+    `observed_exit.rs:56-90`).
+  - The real error is only logged.
+
+#### Contract changes (`runtara-wit`)
+
+- **Delete from `runtara:workflow/runtime`:** `load-input` (unused once Phase
+  5 removes `CliRunHttp`), `complete` and `fail`.
+- **Append one field to `runtara:agent/types.error-info`:**
+
+  ```wit
+  /// The producer's full structured error as JSON, when it has more to say
+  /// than the fields above (a workflow's failing step, agent and child-run
+  /// chain). Hosts persist it verbatim as the run's error. Agents leave it none.
+  details: option<string>,
+  ```
+
+  **Why a field:** `error-info` cannot carry what `runtime.fail` persists today.
+  The fail bytes are the stdlib's error envelope, and `invoke-error-fields`
+  (`direct_json.rs:5596-5657`) drops:
+  - `stepId` and `stepName` (Error step, `direct_json.rs:3322-3340`);
+  - `stepId`, `agentId` and `capabilityId` (agent errors, `3143-3162`);
+  - `stepId`, `stepType`, `childWorkflowId` and the whole nested `childError`
+    chain (embed failures, `6263-6293`). The message alone would only say
+    "Child workflow X failed".
+
+  With `details` set to the exact bytes `fail` receives today, `instances.error`
+  stays byte-for-byte identical for every error that reaches it now.
+
+  **Why it is safe to append:** appending leaves every existing offset
+  unchanged.
+  - `error-info` grows from 72 to 80 bytes. The error arm at @8 ends at @88,
+    flush against the @88/@92 staging slots, which are only read after the
+    record is written.
+  - `details` sits at @76 (tag), @80/@84 (string).
+  - The agent retptr area also stays under the agent-args scratch at 128.
+- 1.0.0 is not released yet, so this edits it in place (see "Rename map").
+
+#### Persistence rule
+
+The runner persists once, from the returned value:
+
+| Exit | Persisted |
+|---|---|
+| `Completed(output)` | `Completed` with `output` |
+| `Failed(error-info)` | `Failed` with `details` verbatim when present. Otherwise the plain `message` when `code` is empty (today's plain-text fail payloads), else JSON built from the fields (`{code, message, category, severity, retryable, retryAfterMs?, attributes?}`) |
+| `Suspended(wakes)` | Unchanged: `park_invoke_suspend` |
+| `Trapped` / `Timeout` / `Cancelled` / `CleanupAborted` | Unchanged |
+
+The rules around that write:
+- **The same guards as today's `PersistenceRuntimeHost::event`**
+  (`runtime_host.rs:341-376`), moved into the runner:
+  - drop the write when the run's cancel flag or token is set;
+  - write through `complete_instance(...).if_running()`;
+  - then `record_unacknowledged_cancel_exit`.
+
+  Insert the completed or failed event row through the same
+  `handle_instance_event` path, so event rows, observers and the store triggers
+  (`wake_instance_waiters`, `close_terminal_instance_inputs`) fire exactly as
+  now.
+- **Before the completion guard drops.** Persist inside the runner task,
+  before `TaskCompletionGuard` drops (`embedded.rs:203-212`). Otherwise the
+  monitor's `settle_with_retry` sees `running` and records `crashed` first.
+  - Retry transient store errors the way `settle_with_retry` does, because the
+    guest can no longer retry by calling again.
+- **Exactly once.** One write per run, guarded by `if_running`. A replayed
+  guest can no longer publish twice, so `DeferredTerminal`'s conflict
+  detection has nothing left to detect.
+
+#### Emitter
+
+- **Delete the three calls and what surrounds them:**
+  - the `complete`/`fail` calls and their indices (`core_imports.rs:25-27`,
+    `198-208`, `726-729`, `1192-1197`);
+  - `emit_complete` (`core_module.rs:1060-1070`) and its two call sites (entry
+    epilogue and the terminal onError handler, `agent_error.rs:581-611`);
+  - the `runtime.fail` call inside `emit_runtime_fail_return`
+    (`compile.rs:1794-1831`) and `emit_fail_if_retptr_error_inplace`;
+  - `report_terminal_status`, and with it the last job of Phase 5's "published
+    agent" flag. The flag then only sets the export package id.
+- **Fill `details`.** `stdlib.invoke-error-fields` returns `details` = the
+  input bytes (lossy UTF-8, like `message`). The err-arm fallback
+  (`abi.rs:229-282`) also points `details` at the staged raw bytes.
+- **Parents.** A parent that receives a workflow-agent child's `error-info`
+  keeps its `details` as the `childError` of its own agent-error envelope.
+  Today it has only the flattened fields.
+- **Bump** `DIRECT_WORKFLOW_INVOKE_ABI_VERSION` so no cached artifact that
+  still imports `complete` is reused (the cache tag includes it,
+  `compile.rs:1055-1066`).
+
+#### Host and runner
+
+- **Plain path** (`runner/embedded.rs`):
+  - replace the logging match with the persistence rule above;
+  - `PersistenceRuntimeHost` loses `load_input`, `complete`, `fail` and their
+    cancel suppression, which now lives in the runner.
+- **Scoped root** (`workflow/scoped_execution.rs`):
+  - delete `DeferredTerminal` and the staged-versus-returned validation
+    (`:201-216`);
+  - `terminal.publish(exit)` (`:260-293`) persists from the exit through
+    `ScopedRootRuntime::publishable()`, then the persistence rule.
+  - Every other step keeps its order: teardown → `close(cleanup_ok)` →
+    `finalize()` → publish only if cleanup succeeded, not cancelled and within
+    budget → release the lease.
+- **Scoped children** (`runtime_host/scoped.rs:290-361`,
+  `scoped/invocation.rs:238-258`): delete `ChildTerminal` staging and
+  `check_terminal`. The child's terminal already comes from the exit
+  (`execution_host.rs:129-161`, `invocation_io.rs:156-200`).
+- **`RuntimeHost` trait** (`component-host/src/runtime_host.rs:139-148`):
+  drop the three methods and their linker bindings (`:325-363`).
+  - The cleanup-alarm check in `require_host` stays for the remaining runtime
+    calls.
+
+#### Guarantees, before and after
+
+| Pinned today (`terminal_publication_tests.rs`) | After Phase 6 |
+|---|---|
+| Expired cleanup alarm rejects a new runtime publication (`:167`) | Other runtime calls keep the check. Publication has no guest call left to reject: the run is `CleanupAborted` and nothing persists |
+| Coordinator closes after cleanup; no publication on cleanup failure (`:300`) | Unchanged: publish still gated on `cleanup_ok` |
+| Native stop precedes terminal validation (`:345`) | Unchanged ordering; "validation" is now reading the exit |
+| Pending coordinator IO bounded by timeout, cancel, abandonment (`:385`) | Unchanged |
+| Callback waits for descendant cleanup, discarded on failure (`:432`) | The exit is published after cleanup and discarded on failure |
+| Discarded on root trap, conflict, late cancel (`:456`) | Trap and late cancel unchanged. "Conflict" cannot happen with one channel, so that case goes |
+| Publication failure, timeout, abandonment supervised (`:490`) | Unchanged |
+| Fail payload preserved; identical callbacks publish once (`:533`) | `details` preserves the payload. Once per run is by construction |
+| Publication does not restart the timeout after cleanup (`:566`) | Unchanged |
+| Output mismatch cannot publish a stale success (`:586`) | Cannot happen with one channel; the test goes |
+
+Fail-after-cleanup ordering (`agent_deadline_tests.rs:187-205`,
+`parallel_agent_deadline_tests.rs:346-360`,
+`checkpoint_failure_tests.rs:324,350`) is still owned by the guest: it returns
+only after sibling cleanup. Those tests observe the return instead of the
+`fail` call.
+
+#### Behaviour changes
+
+- **Errors that were lost now surface.** The ~90 paths that returned an error
+  without `fail` now end `failed` with their real message and no
+  `termination_reason`, instead of `crashed` with "Process terminated without
+  SDK event".
+- **Unchanged:**
+  - the persisted error bytes of every run that fails through `fail` today;
+  - statuses, events and triggers;
+  - the admission and launch release that follows persistence.
+- **Timing.** A top-level run's terminal write now happens right after the
+  guest returns rather than just before. It still precedes the completion
+  guard, the monitor and the launch release.
+
+#### Tests
+
+- **The `direct_wasm_execute` harness** derives `output_json` and `error_json`
+  from the returned exit instead of `CapturingRuntimeHost` callbacks. Its
+  error-shape assertions (`stepId`, …) read `details`.
+  - Tests that count `complete_calls` (`:2343`, `:9869`, `:10096`, `:10331`)
+    assert on the returned outcome and on exactly one persisted terminal.
+- **New tests:**
+  - A run whose checkpoint write fails ends `failed` with the host's message,
+    not `crashed`.
+  - The persisted error of an Error step, an agent failure and an embed
+    failure is byte-identical to the envelope the stdlib builds.
+  - A cancelled run's return does not overwrite `cancelled`.
+  - A transient store error on the terminal write is retried before the
+    monitor can record `crashed`.
+- **Rework the terminal-publication suite** per the table above.
+- **Update the runtime function list** in `runtara-wit`'s structural test.
+- **Gate the commit on:**
+  - the component-host, `direct_wasm_execute` and scoped-runner suites;
+  - the environment DB suite;
+  - the SIGKILL and replay e2e stages (`test_control_agent`,
+    `test_recovery_environment_restart`), `test_durable_delay_parks_and_wakes`
+    and `test_workflow_agent_parity`, on an isolated server.
+
+#### Risks
+
+- **Ordering in the plain path.** The write must stay ahead of the completion
+  guard; the new retry test pins it.
+- **Error-arm layout.** `details` is the only change to a hand-laid-out
+  record. Every existing offset stays put; a `wit_parser::SizeAlign` test pins
+  the new `details` offset.
+- **Consumers of `instances.error`.** The API, UI, MCP and launch rows read the
+  persisted string. Because `details` carries today's bytes, they see no
+  change. Only the formerly `crashed` paths gain a real error, whose shape
+  follows the persistence rule.
 
 ## Rollout
 
