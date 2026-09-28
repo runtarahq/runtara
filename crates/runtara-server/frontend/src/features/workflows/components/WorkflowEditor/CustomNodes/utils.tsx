@@ -153,6 +153,7 @@ export function composeExecutionGraph(
     >;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
+    stateSchema?: Record<string, unknown>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
     durable?: boolean | null;
@@ -180,6 +181,9 @@ export function composeExecutionGraph(
   }
   if (options?.outputSchema) {
     executionGraph.outputSchema = options.outputSchema;
+  }
+  if (options?.stateSchema && Object.keys(options.stateSchema).length > 0) {
+    executionGraph.stateSchema = options.stateSchema;
   }
   if (options?.executionTimeoutSeconds !== undefined) {
     executionGraph.executionTimeoutSeconds = options.executionTimeoutSeconds;

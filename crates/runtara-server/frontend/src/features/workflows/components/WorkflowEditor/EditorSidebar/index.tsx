@@ -9,6 +9,7 @@ export interface WorkflowData {
   variables?: UIVariable[];
   inputSchemaFields?: SchemaField[];
   outputSchemaFields?: SchemaField[];
+  stateSchemaFields?: SchemaField[];
   executionTimeoutSeconds?: number;
   rateLimitBudgetMs?: number;
   durable?: boolean | null;

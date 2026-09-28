@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Settings, Variable, Download, Upload } from 'lucide-react';
+import { Settings, Variable, Download, Upload, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Form,
@@ -34,7 +34,7 @@ import {
 } from '../WorkflowEditor/EditorSidebar/SchemaFieldsEditor';
 import type { MemoryTier } from '@/generated/RuntaraRuntimeApi';
 
-type SettingsSection = 'general' | 'variables' | 'input' | 'output';
+type SettingsSection = 'general' | 'variables' | 'input' | 'output' | 'state';
 
 const sections: {
   id: SettingsSection;
@@ -65,6 +65,12 @@ const sections: {
     label: 'Output',
     icon: <Upload className="size-4" />,
     description: 'Output schema fields',
+  },
+  {
+    id: 'state',
+    label: 'State',
+    icon: <Activity className="size-4" />,
+    description: 'State a run exposes',
   },
 ];
 
@@ -192,6 +198,13 @@ export function SettingsContent({
               onChange={(outputSchemaFields) =>
                 onChange({ outputSchemaFields })
               }
+              readOnly={readOnly}
+            />
+          )}
+          {activeSection === 'state' && (
+            <StateSchemaSection
+              fields={workflow.stateSchemaFields || []}
+              onChange={(stateSchemaFields) => onChange({ stateSchemaFields })}
               readOnly={readOnly}
             />
           )}
@@ -554,5 +567,34 @@ function OutputSchemaSection({
       hideLabel
       showEnum
     />
+  );
+}
+
+function StateSchemaSection({
+  fields,
+  onChange,
+  readOnly,
+}: {
+  fields: SchemaField[];
+  onChange: (fields: SchemaField[]) => void;
+  readOnly: boolean;
+}) {
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">
+        Declare the typed state a run of this workflow exposes, with labels,
+        formats and allowed values. State starts empty and is written by steps.
+      </p>
+      <SchemaFieldsEditor
+        label="State schema"
+        fields={fields}
+        onChange={onChange}
+        readOnly={readOnly}
+        emptyMessage="No state fields defined. Declare the state a run exposes, such as its stage or amount."
+        hideLabel
+        showEnum
+        mode="state"
+      />
+    </div>
   );
 }
