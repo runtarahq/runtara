@@ -883,16 +883,6 @@ impl RuntimeClient {
         self.waits()?.poll_wait(tenant, waiter, wait_id).await
     }
 
-    /// Close a wait; `false` when it was unknown or already closed.
-    pub async fn close_instance_wait(
-        &self,
-        tenant: &str,
-        waiter: &str,
-        wait_id: &str,
-    ) -> runtara_core::persistence::waits::WaitResult<bool> {
-        self.waits()?.close_wait(tenant, waiter, wait_id).await
-    }
-
     /// The narrow status read that authorizes a wait's targets.
     pub async fn wait_target_statuses(
         &self,
