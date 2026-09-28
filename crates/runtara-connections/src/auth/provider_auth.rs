@@ -964,6 +964,9 @@ pub async fn revoke_oauth_token(
     let Some((basic_auth, body, endpoint)) = build_revoke_request(oauth_config, params) else {
         return Ok(());
     };
+    // Re-check the endpoint before the token (and any Basic credentials) leave.
+    crate::net::validate_credentialed_endpoint(&endpoint)
+        .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
     let mut request = client
         .post(endpoint)
         .header("Content-Type", "application/json")
