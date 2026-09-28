@@ -1027,6 +1027,66 @@ mod tests {
     }
 
     #[test]
+    fn surfaces_state_schema_warnings_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": { "stepType": "Finish", "id": "finish" }
+                },
+                "entryPoint": "finish",
+                "stateSchema": {
+                    "amount": { "type": "number", "label": "Amount", "format": "currency" },
+                    "stage": { "type": "string", "label": "Stage", "required": true }
+                }
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+        assert_eq!(
+            response
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("[W081]"))
+                .count(),
+            1,
+            "{:?}",
+            response.warnings
+        );
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("[W081]") && warning.contains("'stage'")),
+            "{:?}",
+            response.warnings
+        );
+    }
+
+    #[test]
+    fn validates_state_schema_fields_with_shared_validator() {
+        let response = validate_schema_fields_json_impl(
+            "State schema",
+            r#"[
+                {"name":"stage","type":"string"},
+                {"name":"stage","type":"string"}
+            ]"#,
+        );
+
+        assert!(!response.valid);
+        assert_eq!(response.schema_errors.len(), 1);
+        assert_eq!(response.schema_errors[0].code, "E008");
+        assert!(
+            response.schema_errors[0]
+                .message
+                .starts_with("[E008] State schema field name 'stage'"),
+            "{}",
+            response.schema_errors[0].message
+        );
+    }
+
+    #[test]
     fn rejects_finish_output_without_name_from_backend_validator() {
         let response = validate_execution_graph_json_impl(
             r#"{

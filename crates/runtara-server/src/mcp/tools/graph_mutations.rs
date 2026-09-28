@@ -701,6 +701,25 @@ pub struct RemoveInputSchemaFieldParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct GetStateSchemaParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetStateSchemaParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(
+        description = "State schema fields in DSL flat-map format, replacing the whole stateSchema (e.g., {\"stage\": {\"type\": \"string\", \"label\": \"Stage\", \"enum\": [\"received\", \"approval\"]}, \"amount\": {\"type\": \"number\", \"label\": \"Amount\", \"format\": \"currency\"}}). Pass {} to clear it."
+    )]
+    #[schemars(schema_with = "json_object_schema")]
+    pub fields: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetOutputSchemaParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -823,7 +842,7 @@ pub struct RemoveVariableParams {
 #[serde(deny_unknown_fields)]
 pub struct BatchGraphMutation {
     #[schemars(
-        description = "Operation name. Supported: set_workflow_metadata, add_step, remove_step, update_step, patch_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_input_schema_field, remove_input_schema_field, set_output_schema, set_variable, remove_variable"
+        description = "Operation name. Supported: set_workflow_metadata, add_step, remove_step, update_step, patch_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_input_schema_field, remove_input_schema_field, set_output_schema, set_state_schema (root graph only), set_variable, remove_variable"
     )]
     pub op: String,
     pub step_id: Option<String>,
@@ -1348,11 +1367,13 @@ pub async fn summarize_workflow(
             "edges": edges.len(),
             "inputFields": sorted_object_keys(target.get("inputSchema")).len(),
             "outputFields": sorted_object_keys(target.get("outputSchema")).len(),
+            "stateFields": sorted_object_keys(target.get("stateSchema")).len(),
             "variables": sorted_object_keys(target.get("variables")).len(),
         },
         "stepTypeCounts": step_type_counts,
         "inputFields": sorted_object_keys(target.get("inputSchema")),
         "outputFields": sorted_object_keys(target.get("outputSchema")),
+        "stateFields": sorted_object_keys(target.get("stateSchema")),
         "variables": sorted_object_keys(target.get("variables")),
         "warnings": warnings,
     }))
@@ -2452,6 +2473,83 @@ pub async fn set_output_schema(
     }))
 }
 
+/// The root graph's `stateSchema` and its field count; `{}` when absent.
+fn state_schema_of(graph: &serde_json::Value) -> (serde_json::Value, usize) {
+    let state_schema = graph
+        .get("stateSchema")
+        .filter(|schema| !schema.is_null())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let count = state_schema
+        .as_object()
+        .map(|fields| fields.len())
+        .unwrap_or(0);
+    (state_schema, count)
+}
+
+/// Replace the root graph's `stateSchema`. State is declared once per
+/// workflow, so a nested subgraph `path` is refused, and an empty object
+/// removes the key.
+fn replace_state_schema(
+    graph: &mut serde_json::Value,
+    path: &[String],
+    fields: serde_json::Value,
+) -> Result<(), rmcp::ErrorData> {
+    if !path.is_empty() {
+        return Err(err(
+            "stateSchema is declared on the root workflow graph only; omit path",
+        ));
+    }
+    let serde_json::Value::Object(fields) = fields else {
+        return Err(err("stateSchema fields must be a JSON object"));
+    };
+    let graph = graph
+        .as_object_mut()
+        .ok_or_else(|| err("Workflow graph is not a JSON object"))?;
+    if fields.is_empty() {
+        graph.remove("stateSchema");
+    } else {
+        graph.insert("stateSchema".to_string(), serde_json::Value::Object(fields));
+    }
+    Ok(())
+}
+
+pub async fn get_state_schema(
+    server: &SmoMcpServer,
+    params: GetStateSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let (state_schema, count) = state_schema_of(&graph);
+
+    json_result(serde_json::json!({
+        "workflowId": params.workflow_id,
+        "stateSchema": state_schema,
+        "count": count,
+    }))
+}
+
+pub async fn set_state_schema(
+    server: &SmoMcpServer,
+    params: SetStateSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let fields = normalize_json_arg(params.fields, "fields")?;
+    let (_guard, mut graph, latest, current) =
+        fetch_latest_graph_locked(server, &params.workflow_id).await?;
+
+    replace_state_schema(&mut graph, &[], fields)?;
+    let (_, count) = state_schema_of(&graph);
+
+    let (version, new_version) =
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
+    json_result(serde_json::json!({
+        "success": true,
+        "workflowId": params.workflow_id,
+        "version": version,
+        "newVersion": new_version,
+        "count": count,
+    }))
+}
+
 pub async fn list_variables(
     server: &SmoMcpServer,
     params: ListVariablesParams,
@@ -2606,6 +2704,7 @@ pub async fn find_references(
     for (scope, value) in [
         ("inputSchema", target.get("inputSchema")),
         ("outputSchema", target.get("outputSchema")),
+        ("stateSchema", target.get("stateSchema")),
         ("variables", target.get("variables")),
         ("executionPlan", target.get("executionPlan")),
     ] {
@@ -3561,6 +3660,13 @@ pub async fn apply_graph_mutations(
                     target["outputSchema"] =
                         required_object_value(operation.fields.as_ref(), "fields", &operation.op)?;
                 }
+                "set_state_schema" => {
+                    // With an empty batch path `target` is the root graph;
+                    // any other path is refused.
+                    let fields =
+                        required_object_value(operation.fields.as_ref(), "fields", &operation.op)?;
+                    replace_state_schema(target, &path, fields)?;
+                }
                 "set_variable" => {
                     let name = required_string(operation.name.as_ref(), "name", &operation.op)?;
                     let variable = required_object_value(
@@ -3884,5 +3990,125 @@ mod add_agent_step_tests {
 
         let (_, hint) = agent_step_and_hint(&params(None, None), &serde_json::json!({"id": "get"}));
         assert!(!hint.contains("suspends"), "{hint}");
+    }
+}
+
+#[cfg(test)]
+mod state_schema_tests {
+    use super::*;
+
+    fn owner_state_schema() -> serde_json::Value {
+        serde_json::json!({
+            "order":    { "type": "string", "label": "Order" },
+            "customer": { "type": "string", "label": "Customer" },
+            "amount":   { "type": "number", "label": "Amount", "format": "currency" },
+            "stage":    {
+                "type": "string",
+                "label": "Stage",
+                "enum": ["received", "credit_check", "approval", "fulfilment", "delivered"]
+            },
+            "dueAt":    { "type": "string", "format": "datetime", "label": "Due" }
+        })
+    }
+
+    fn root_graph() -> serde_json::Value {
+        serde_json::json!({
+            "name": "Orders",
+            "entryPoint": "finish",
+            "steps": { "finish": { "id": "finish", "stepType": "Finish" } },
+            "executionPlan": []
+        })
+    }
+
+    #[test]
+    fn set_then_get_round_trips_the_state_schema() {
+        let mut graph = root_graph();
+        assert_eq!(state_schema_of(&graph), (serde_json::json!({}), 0));
+
+        replace_state_schema(&mut graph, &[], owner_state_schema()).unwrap();
+        assert_eq!(state_schema_of(&graph), (owner_state_schema(), 5));
+
+        let parsed = runtara_dsl::parse_execution_graph(&graph).expect("graph parses");
+        assert_eq!(
+            parsed.state_schema["amount"].format.as_deref(),
+            Some("currency")
+        );
+        assert_eq!(parsed.state_schema["dueAt"].label.as_deref(), Some("Due"));
+    }
+
+    #[test]
+    fn an_empty_object_clears_the_state_schema() {
+        let mut graph = root_graph();
+        replace_state_schema(&mut graph, &[], owner_state_schema()).unwrap();
+        replace_state_schema(&mut graph, &[], serde_json::json!({})).unwrap();
+        assert!(graph.get("stateSchema").is_none());
+        assert_eq!(state_schema_of(&graph).1, 0);
+    }
+
+    #[test]
+    fn a_subgraph_path_or_non_object_is_refused() {
+        let mut graph = root_graph();
+        let e = replace_state_schema(&mut graph, &["loop".to_string()], owner_state_schema())
+            .unwrap_err();
+        assert!(e.message.contains("root workflow graph"), "{}", e.message);
+
+        let e = replace_state_schema(&mut graph, &[], serde_json::json!(["stage"])).unwrap_err();
+        assert!(e.message.contains("JSON object"), "{}", e.message);
+        assert!(graph.get("stateSchema").is_none());
+    }
+
+    #[test]
+    fn state_schema_params_are_root_only() {
+        let params: SetStateSchemaParams = serde_json::from_value(serde_json::json!({
+            "workflow_id": "wf",
+            "fields": owner_state_schema(),
+        }))
+        .unwrap();
+        assert_eq!(params.fields, owner_state_schema());
+
+        assert!(
+            serde_json::from_value::<SetStateSchemaParams>(serde_json::json!({
+                "workflow_id": "wf",
+                "fields": {},
+                "path": ["loop"],
+            }))
+            .is_err(),
+            "set_state_schema takes no path"
+        );
+        assert!(
+            serde_json::from_value::<GetStateSchemaParams>(serde_json::json!({
+                "workflow_id": "wf",
+                "path": ["loop"],
+            }))
+            .is_err(),
+            "get_state_schema takes no path"
+        );
+
+        let schema = serde_json::to_value(schemars::schema_for!(SetStateSchemaParams)).unwrap();
+        assert_eq!(
+            schema.pointer("/properties/fields/type"),
+            Some(&serde_json::json!("object"))
+        );
+    }
+
+    #[test]
+    fn batch_advertises_and_accepts_set_state_schema() {
+        let schema = serde_json::to_value(schemars::schema_for!(BatchGraphMutation)).unwrap();
+        let description = schema
+            .pointer("/properties/op/description")
+            .and_then(|d| d.as_str())
+            .expect("op description");
+        assert!(description.contains("set_state_schema"), "{description}");
+
+        let operation: BatchGraphMutation = serde_json::from_value(serde_json::json!({
+            "op": "set_state_schema",
+            "fields": owner_state_schema(),
+        }))
+        .unwrap();
+        let fields =
+            required_object_value(operation.fields.as_ref(), "fields", &operation.op).unwrap();
+        let mut graph = root_graph();
+        replace_state_schema(&mut graph, &[], fields).unwrap();
+        assert_eq!(graph["stateSchema"], owner_state_schema());
     }
 }

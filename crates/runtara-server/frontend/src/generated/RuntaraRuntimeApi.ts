@@ -1011,6 +1011,11 @@ export interface ApiResponseWorkflowDto {
     slug?: string | null;
     started?: string | null;
     /**
+     * Typed state a run of this version exposes (`executionGraph.stateSchema`).
+     * A declaration only; `{}` when the version declares none.
+     */
+    stateSchema?: any;
+    /**
      * Whether this version can hold a conversation, i.e. whether it contains a
      * step that waits for a reply. See `graph_supports_chat`. Consumers use it
      * to decide whether to offer chat at all, rather than opening a surface
@@ -2206,6 +2211,14 @@ export interface ExecutionGraph {
    * @min 0
    */
   rateLimitBudgetMs?: number;
+  /**
+   * Schema declaring the typed state a run of this workflow exposes.
+   * Keys are state field names, values define the field type, label and
+   * display format. State starts empty and is written by steps, so
+   * `required`, `default` and `visibleWhen` have no effect here. This is a
+   * declaration only: it is not compiled into the workflow.
+   */
+  stateSchema?: Partial<Record<string, SchemaField>>;
   /** Map of step IDs to step definitions */
   steps: Partial<Record<string, Step>>;
   /**
@@ -3519,6 +3532,8 @@ export interface SchemaField {
    *
    * For `string` type: `textarea`, `date`, `datetime`, `email`, `url`,
    * `tel`, `color`, `password`, `markdown`.
+   * For `number` and `integer` types: `currency` (display as a currency
+   * amount).
    * Unknown formats fall back to the default input for the type.
    */
   format?: string | null;
@@ -4408,6 +4423,11 @@ export interface VersionSchemasResponse {
   inputSchema: any;
   /** Output schema definition from the execution graph */
   outputSchema: any;
+  /**
+   * State schema definition from the execution graph: the typed state a
+   * run exposes. `{}` when the version declares none.
+   */
+  stateSchema: any;
   /** Variables defined in the execution graph */
   variables: any;
 }
@@ -4708,6 +4728,11 @@ export interface WorkflowDto {
    */
   slug?: string | null;
   started?: string | null;
+  /**
+   * Typed state a run of this version exposes (`executionGraph.stateSchema`).
+   * A declaration only; `{}` when the version declares none.
+   */
+  stateSchema?: any;
   /**
    * Whether this version can hold a conversation, i.e. whether it contains a
    * step that waits for a reply. See `graph_supports_chat`. Consumers use it
@@ -7605,7 +7630,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns the input schema, output schema, and variables from the execution graph of a specific workflow version.
+     * @description Returns the input schema, output schema, state schema, and variables from the execution graph of a specific workflow version.
      *
      * @tags workflow-controller
      * @name GetVersionSchemasHandler

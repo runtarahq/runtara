@@ -598,6 +598,47 @@ describe('Backend DSL serialization', () => {
     });
   });
 
+  it('serializes the state schema and omits an empty one', () => {
+    const nodes = [
+      {
+        id: 'agent',
+        type: NODE_TYPES.BasicNode,
+        position: { x: 0, y: 0 },
+        data: {
+          id: 'agent',
+          stepType: 'Agent',
+          name: 'Agent',
+          agentId: 'utils',
+          capabilityId: 'noop',
+          inputMapping: [],
+        },
+      },
+    ] as any;
+    const stateSchema = {
+      amount: { type: 'number', label: 'Amount', format: 'currency' },
+      dueAt: { type: 'string', label: 'Due', format: 'datetime' },
+    };
+
+    const graph = composeExecutionGraph(nodes, [], {
+      name: 'stateful',
+      stateSchema,
+    });
+    expect(graph).toMatchObject({ stateSchema });
+
+    const { nodes: loaded, edges } = executionGraphToReactFlow(graph as any);
+    const round = composeExecutionGraph(loaded, edges, {
+      name: 'stateful',
+      stateSchema: (graph as any).stateSchema,
+    });
+    expect((round as any).stateSchema).toEqual(stateSchema);
+
+    const empty = composeExecutionGraph(nodes, [], {
+      name: 'stateless',
+      stateSchema: {},
+    });
+    expect(empty).not.toHaveProperty('stateSchema');
+  });
+
   it('serializes execution-plan edge conditions and priority', () => {
     const graph = composeExecutionGraph(
       [

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildSchemaFromFields,
+  buildStateSchemaFromFields,
   inferSchemaFromMapping,
   parseSchema,
 } from './schema';
@@ -93,6 +94,44 @@ describe('parseSchema/buildSchemaFromFields', () => {
     expect(buildSchemaFromFields(fields).note.visibleWhen).toEqual({
       field: 'status',
       notEquals: 'closed',
+    });
+  });
+});
+
+describe('buildStateSchemaFromFields', () => {
+  const ownerStateSchema = {
+    order: { type: 'string', label: 'Order' },
+    customer: { type: 'string', label: 'Customer' },
+    amount: { type: 'number', label: 'Amount', format: 'currency' },
+    stage: {
+      type: 'string',
+      label: 'Stage',
+      enum: ['received', 'credit_check', 'approval', 'fulfilment', 'delivered'],
+    },
+    dueAt: { type: 'string', format: 'datetime', label: 'Due' },
+  };
+
+  it('round-trips the state schema without adding required', () => {
+    const fields = parseSchema(ownerStateSchema);
+    expect(fields.map((field) => field.name)).toEqual([
+      'order',
+      'customer',
+      'amount',
+      'stage',
+      'dueAt',
+    ]);
+    expect(buildStateSchemaFromFields(fields)).toEqual(ownerStateSchema);
+  });
+
+  it('leaves new rows without required and keeps an explicit required', () => {
+    expect(
+      buildStateSchemaFromFields([
+        { name: 'stage', type: 'string' },
+        { name: 'amount', type: 'number', required: true },
+      ])
+    ).toEqual({
+      stage: { type: 'string' },
+      amount: { type: 'number', required: true },
     });
   });
 });

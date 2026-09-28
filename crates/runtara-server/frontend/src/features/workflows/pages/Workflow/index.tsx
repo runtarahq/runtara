@@ -69,6 +69,7 @@ import {
 import {
   parseSchema,
   buildSchemaFromFields,
+  buildStateSchemaFromFields,
   type SchemaField,
 } from '@/features/workflows/utils/schema';
 import { NODE_TYPES } from '@/features/workflows/config/workflow';
@@ -168,6 +169,7 @@ export function Workflow() {
     variables?: WorkflowVariable[];
     inputSchemaFields?: SchemaField[];
     outputSchemaFields?: SchemaField[];
+    stateSchemaFields?: SchemaField[];
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
     durable?: boolean | null;
@@ -615,6 +617,9 @@ export function Workflow() {
               }),
               ...(savedStagedChanges.outputSchemaFields !== undefined && {
                 outputSchemaFields: savedStagedChanges.outputSchemaFields,
+              }),
+              ...(savedStagedChanges.stateSchemaFields !== undefined && {
+                stateSchemaFields: savedStagedChanges.stateSchemaFields,
               }),
               ...(savedStagedChanges.executionTimeoutSeconds !== undefined && {
                 executionTimeoutSeconds:
@@ -1428,10 +1433,17 @@ export function Workflow() {
       stagedWorkflowChanges.inputSchemaFields ?? data.inputSchemaFields ?? [];
     const outputSchemaFieldsToUse =
       stagedWorkflowChanges.outputSchemaFields ?? data.outputSchemaFields ?? [];
+    const stateSchemaFieldsToUse =
+      stagedWorkflowChanges.stateSchemaFields ?? data.stateSchemaFields ?? [];
 
-    const [inputSchemaValidation, outputSchemaValidation] = await Promise.all([
+    const [
+      inputSchemaValidation,
+      outputSchemaValidation,
+      stateSchemaValidation,
+    ] = await Promise.all([
       validateSchemaFieldsWithRust('Input schema', inputSchemaFieldsToUse),
       validateSchemaFieldsWithRust('Output schema', outputSchemaFieldsToUse),
+      validateSchemaFieldsWithRust('State schema', stateSchemaFieldsToUse),
     ]);
     // WASM unavailability is an unknown state, not a failure — surface it as
     // a warning and continue. The backend validator is authoritative for
@@ -1439,7 +1451,7 @@ export function Workflow() {
     // users for an environment problem (e.g. agent components not staged).
     // Mirrors the execution-graph path's treatment of `unavailable` below.
     const schemaFieldUnavailableWarnings = convertClientWarnings(
-      [inputSchemaValidation, outputSchemaValidation]
+      [inputSchemaValidation, outputSchemaValidation, stateSchemaValidation]
         .filter((result) => result.status === 'unavailable')
         .map((result) => result.message),
       finalState.nodes
@@ -1455,6 +1467,11 @@ export function Workflow() {
         ? outputSchemaValidation.errors.length > 0
           ? outputSchemaValidation.errors
           : [outputSchemaValidation.message]
+        : []),
+      ...(stateSchemaValidation.status === 'invalid'
+        ? stateSchemaValidation.errors.length > 0
+          ? stateSchemaValidation.errors
+          : [stateSchemaValidation.message]
         : []),
     ];
 
@@ -1475,6 +1492,10 @@ export function Workflow() {
     const outputSchema =
       outputSchemaFieldsToUse.length > 0
         ? buildSchemaFromFields(outputSchemaFieldsToUse)
+        : undefined;
+    const stateSchema =
+      stateSchemaFieldsToUse.length > 0
+        ? buildStateSchemaFromFields(stateSchemaFieldsToUse)
         : undefined;
 
     // Get execution timeout from staged changes or original data
@@ -1513,6 +1534,7 @@ export function Workflow() {
         variables,
         inputSchema,
         outputSchema,
+        stateSchema,
         executionTimeoutSeconds,
         rateLimitBudgetMs,
         durable,
@@ -1886,6 +1908,12 @@ export function Workflow() {
       outputSchemaFieldsToUse.length > 0
         ? buildSchemaFromFields(outputSchemaFieldsToUse)
         : undefined;
+    const stateSchemaFieldsToUse =
+      stagedWorkflowChanges.stateSchemaFields ?? data.stateSchemaFields ?? [];
+    const stateSchema =
+      stateSchemaFieldsToUse.length > 0
+        ? buildStateSchemaFromFields(stateSchemaFieldsToUse)
+        : undefined;
 
     // Get execution timeout for export
     const exportExecutionTimeoutSeconds =
@@ -1915,6 +1943,7 @@ export function Workflow() {
       variables,
       inputSchema,
       outputSchema,
+      stateSchema,
       executionTimeoutSeconds: exportExecutionTimeoutSeconds,
       rateLimitBudgetMs: exportRateLimitBudgetMs,
       durable: exportDurable,
@@ -2010,6 +2039,8 @@ export function Workflow() {
         const outputSchemaFields = normalizeSchemaFields(
           parseSchema(executionGraph.outputSchema)
         );
+        // State fields keep `required` unset: it has no effect on state.
+        const stateSchemaFields = parseSchema(executionGraph.stateSchema);
 
         // Extract execution timeout from execution graph
         const executionTimeoutSeconds = executionGraph.executionTimeoutSeconds;
@@ -2020,6 +2051,7 @@ export function Workflow() {
         workflowChanges.variables = variables;
         workflowChanges.inputSchemaFields = inputSchemaFields;
         workflowChanges.outputSchemaFields = outputSchemaFields;
+        workflowChanges.stateSchemaFields = stateSchemaFields;
         if (parsed.name !== undefined || executionGraph.name !== undefined) {
           workflowChanges.name = parsed.name ?? executionGraph.name ?? '';
         }
@@ -2135,6 +2167,8 @@ export function Workflow() {
         stagedWorkflowChanges.outputSchemaFields ??
         data.outputSchemaFields ??
         [],
+      stateSchemaFields:
+        stagedWorkflowChanges.stateSchemaFields ?? data.stateSchemaFields ?? [],
       executionTimeoutSeconds:
         stagedWorkflowChanges.executionTimeoutSeconds ??
         data.executionTimeoutSeconds,
@@ -2161,6 +2195,7 @@ export function Workflow() {
       stagedWorkflowChanges.variables,
       stagedWorkflowChanges.inputSchemaFields,
       stagedWorkflowChanges.outputSchemaFields,
+      stagedWorkflowChanges.stateSchemaFields,
       stagedWorkflowChanges.executionTimeoutSeconds,
       stagedWorkflowChanges.rateLimitBudgetMs,
       stagedWorkflowChanges.durable,
@@ -2173,6 +2208,7 @@ export function Workflow() {
       data.variables,
       data.inputSchemaFields,
       data.outputSchemaFields,
+      data.stateSchemaFields,
       data.executionTimeoutSeconds,
       data.rateLimitBudgetMs,
       data.durable,

@@ -166,6 +166,24 @@ const KNOWN_STRING_FORMATS = [
   'markdown',
 ];
 
+/**
+ * Display format hints documented for `number` and `integer` fields.
+ */
+const KNOWN_NUMBER_FORMATS = ['currency'];
+
+function knownFormatsForType(type: string | undefined): string[] {
+  return type === 'number' || type === 'integer'
+    ? KNOWN_NUMBER_FORMATS
+    : KNOWN_STRING_FORMATS;
+}
+
+/**
+ * `form` edits input/output-style fields. `state` edits a workflow's
+ * `stateSchema`: state starts empty and is written by steps, so the
+ * `required`, `default` and `visibleWhen` settings are not offered.
+ */
+export type SchemaFieldsEditorMode = 'form' | 'state';
+
 const FORMAT_NONE = '__none__';
 
 export type VisibleWhenOperator = 'equals' | 'notEquals';
@@ -477,12 +495,14 @@ function NestedFieldsEditor({
   onChange,
   readOnly,
   showEnum,
+  mode,
 }: {
   label: string;
   fields: SchemaField[];
   onChange: (fields: SchemaField[]) => void;
   readOnly: boolean;
   showEnum: boolean;
+  mode: SchemaFieldsEditorMode;
 }) {
   return (
     <div className="rounded-md border-l-2 border-muted bg-muted/20 p-2 pl-3">
@@ -492,6 +512,7 @@ function NestedFieldsEditor({
         onChange={onChange}
         readOnly={readOnly}
         showEnum={showEnum}
+        mode={mode}
         emptyMessage="No nested fields defined."
       />
     </div>
@@ -504,12 +525,14 @@ function AdvancedSchemaFieldDialog({
   onApply,
   siblingNames,
   showEnum,
+  mode,
 }: {
   field: SchemaField;
   readOnly: boolean;
   onApply: (field: SchemaField) => void;
   siblingNames: string[];
   showEnum: boolean;
+  mode: SchemaFieldsEditorMode;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<AdvancedSchemaDraft | null>(null);
@@ -529,12 +552,12 @@ function AdvancedSchemaFieldDialog({
   }, [draft?.pattern]);
 
   const formatOptions = useMemo(() => {
-    const options = [...KNOWN_STRING_FORMATS];
+    const options = [...knownFormatsForType(fieldType)];
     if (draft?.format && !options.includes(draft.format)) {
       options.push(draft.format);
     }
     return options;
-  }, [draft?.format]);
+  }, [draft?.format, fieldType]);
 
   const extensionCount = field.extensions
     ? Object.keys(field.extensions).length
@@ -755,6 +778,7 @@ function AdvancedSchemaFieldDialog({
                     }
                     readOnly={readOnly}
                     showEnum={showEnum}
+                    mode={mode}
                   />
                 )}
               </DialogSection>
@@ -771,140 +795,151 @@ function AdvancedSchemaFieldDialog({
                   onChange={(nested) => updateDraft({ properties: nested })}
                   readOnly={readOnly}
                   showEnum={showEnum}
+                  mode={mode}
                 />
               </DialogSection>
             )}
 
-            <DialogSection
-              title="Conditional visibility"
-              hint="Show this field only when a sibling field matches a value."
-            >
-              {draft.visibleWhenRows.length === 0 ? (
-                !readOnly && (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    bordered
-                    size="sm"
-                    onClick={addVisibleWhenRow}
-                  >
-                    <Plus className="mr-2 size-4" />
-                    Add visibility rule
-                  </Button>
-                )
-              ) : (
-                <div className="space-y-2">
-                  <div className="w-64 space-y-1">
-                    <Label htmlFor={`${baseId}-vw-field`}>Sibling field</Label>
-                    <Input
-                      id={`${baseId}-vw-field`}
-                      list={siblingListId}
-                      value={draft.visibleWhenField}
-                      onChange={(e) =>
-                        updateDraft({ visibleWhenField: e.target.value })
-                      }
-                      placeholder="fieldName"
-                      disabled={readOnly}
-                      className="font-mono"
-                    />
-                    <datalist id={siblingListId}>
-                      {siblingNames.map((name) => (
-                        <option key={name} value={name} />
-                      ))}
-                    </datalist>
-                  </div>
-                  {draft.visibleWhenRows.map((row, rowIndex) => {
-                    const otherOperators = new Set(
-                      draft.visibleWhenRows
-                        .filter((_, i) => i !== rowIndex)
-                        .map((other) => other.operator)
-                    );
-                    return (
-                      <div key={rowIndex} className="flex items-center gap-2">
-                        <Select
-                          value={row.operator}
-                          onValueChange={(value) => {
-                            const rows = [...draft.visibleWhenRows];
-                            rows[rowIndex] = {
-                              ...rows[rowIndex],
-                              operator: value as VisibleWhenOperator,
-                            };
-                            updateDraft({ visibleWhenRows: rows });
-                          }}
-                          disabled={readOnly}
-                        >
-                          <SelectTrigger className="w-36">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem
-                              value="equals"
-                              disabled={otherOperators.has('equals')}
-                            >
-                              equals
-                            </SelectItem>
-                            <SelectItem
-                              value="notEquals"
-                              disabled={otherOperators.has('notEquals')}
-                            >
-                              not equals
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <Input
-                          value={row.value}
-                          onChange={(e) => {
-                            const rows = [...draft.visibleWhenRows];
-                            rows[rowIndex] = {
-                              ...rows[rowIndex],
-                              value: e.target.value,
-                            };
-                            updateDraft({ visibleWhenRows: rows });
-                          }}
-                          placeholder='manual, true, 5, "quoted string"'
-                          disabled={readOnly}
-                          className="flex-1 font-mono"
-                          aria-label={`Visibility ${
-                            row.operator === 'equals' ? 'equals' : 'not equals'
-                          } value`}
-                        />
-                        {!readOnly && (
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            size="icon-sm"
-                            aria-label="Remove visibility condition"
-                            onClick={() =>
-                              updateDraft({
-                                visibleWhenRows: draft.visibleWhenRows.filter(
-                                  (_, i) => i !== rowIndex
-                                ),
-                              })
-                            }
-                          >
-                            <Trash2 className="size-3" />
-                          </Button>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {!readOnly && draft.visibleWhenRows.length < 2 && (
+            {(mode === 'form' || draft.visibleWhenRows.length > 0) && (
+              <DialogSection
+                title="Conditional visibility"
+                hint={
+                  mode === 'state'
+                    ? 'Visibility rules have no effect on state fields. Remove them.'
+                    : 'Show this field only when a sibling field matches a value.'
+                }
+              >
+                {draft.visibleWhenRows.length === 0 ? (
+                  !readOnly && (
                     <Button
                       type="button"
                       variant="secondary"
+                      bordered
                       size="sm"
                       onClick={addVisibleWhenRow}
                     >
                       <Plus className="mr-2 size-4" />
-                      Add condition
+                      Add visibility rule
                     </Button>
-                  )}
-                </div>
-              )}
-              {errors.visibleWhen && (
-                <FieldError>{errors.visibleWhen}</FieldError>
-              )}
-            </DialogSection>
+                  )
+                ) : (
+                  <div className="space-y-2">
+                    <div className="w-64 space-y-1">
+                      <Label htmlFor={`${baseId}-vw-field`}>
+                        Sibling field
+                      </Label>
+                      <Input
+                        id={`${baseId}-vw-field`}
+                        list={siblingListId}
+                        value={draft.visibleWhenField}
+                        onChange={(e) =>
+                          updateDraft({ visibleWhenField: e.target.value })
+                        }
+                        placeholder="fieldName"
+                        disabled={readOnly}
+                        className="font-mono"
+                      />
+                      <datalist id={siblingListId}>
+                        {siblingNames.map((name) => (
+                          <option key={name} value={name} />
+                        ))}
+                      </datalist>
+                    </div>
+                    {draft.visibleWhenRows.map((row, rowIndex) => {
+                      const otherOperators = new Set(
+                        draft.visibleWhenRows
+                          .filter((_, i) => i !== rowIndex)
+                          .map((other) => other.operator)
+                      );
+                      return (
+                        <div key={rowIndex} className="flex items-center gap-2">
+                          <Select
+                            value={row.operator}
+                            onValueChange={(value) => {
+                              const rows = [...draft.visibleWhenRows];
+                              rows[rowIndex] = {
+                                ...rows[rowIndex],
+                                operator: value as VisibleWhenOperator,
+                              };
+                              updateDraft({ visibleWhenRows: rows });
+                            }}
+                            disabled={readOnly}
+                          >
+                            <SelectTrigger className="w-36">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem
+                                value="equals"
+                                disabled={otherOperators.has('equals')}
+                              >
+                                equals
+                              </SelectItem>
+                              <SelectItem
+                                value="notEquals"
+                                disabled={otherOperators.has('notEquals')}
+                              >
+                                not equals
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Input
+                            value={row.value}
+                            onChange={(e) => {
+                              const rows = [...draft.visibleWhenRows];
+                              rows[rowIndex] = {
+                                ...rows[rowIndex],
+                                value: e.target.value,
+                              };
+                              updateDraft({ visibleWhenRows: rows });
+                            }}
+                            placeholder='manual, true, 5, "quoted string"'
+                            disabled={readOnly}
+                            className="flex-1 font-mono"
+                            aria-label={`Visibility ${
+                              row.operator === 'equals'
+                                ? 'equals'
+                                : 'not equals'
+                            } value`}
+                          />
+                          {!readOnly && (
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="icon-sm"
+                              aria-label="Remove visibility condition"
+                              onClick={() =>
+                                updateDraft({
+                                  visibleWhenRows: draft.visibleWhenRows.filter(
+                                    (_, i) => i !== rowIndex
+                                  ),
+                                })
+                              }
+                            >
+                              <Trash2 className="size-3" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {!readOnly && draft.visibleWhenRows.length < 2 && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={addVisibleWhenRow}
+                      >
+                        <Plus className="mr-2 size-4" />
+                        Add condition
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {errors.visibleWhen && (
+                  <FieldError>{errors.visibleWhen}</FieldError>
+                )}
+              </DialogSection>
+            )}
 
             <details className="rounded-md border">
               <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
@@ -960,6 +995,7 @@ interface SchemaFieldsEditorProps {
   emptyMessage?: string;
   hideLabel?: boolean;
   showEnum?: boolean;
+  mode?: SchemaFieldsEditorMode;
 }
 
 export function SchemaFieldsEditor({
@@ -970,7 +1006,9 @@ export function SchemaFieldsEditor({
   emptyMessage = 'No fields defined.',
   hideLabel = false,
   showEnum = false,
+  mode = 'form',
 }: SchemaFieldsEditorProps) {
+  const formSettings = mode === 'form';
   const [schemaFieldValidationErrors, setSchemaFieldValidationErrors] =
     useState<RustSchemaFieldsValidationError[]>([]);
 
@@ -1016,7 +1054,12 @@ export function SchemaFieldsEditor({
   const handleAdd = () => {
     onChange([
       ...fields,
-      { name: '', type: 'string', required: true, description: '' },
+      {
+        name: '',
+        type: 'string',
+        required: formSettings,
+        description: '',
+      },
     ]);
   };
 
@@ -1045,10 +1088,12 @@ export function SchemaFieldsEditor({
             <tr className="border-b">
               <EditorTh>Field Name</EditorTh>
               <EditorTh>Type</EditorTh>
-              <EditorTh className="w-20 text-center">Required</EditorTh>
+              {formSettings && (
+                <EditorTh className="w-20 text-center">Required</EditorTh>
+              )}
               <EditorTh className="w-20 text-center">Nullable</EditorTh>
               <EditorTh>Description</EditorTh>
-              <EditorTh>Default</EditorTh>
+              {formSettings && <EditorTh>Default</EditorTh>}
               <EditorTh>Format</EditorTh>
               {showEnum && <EditorTh>Enum</EditorTh>}
               <EditorTh className="w-20 text-center">Advanced</EditorTh>
@@ -1111,15 +1156,17 @@ export function SchemaFieldsEditor({
                       </SelectContent>
                     </Select>
                   </td>
-                  <td className="w-20 p-2 text-center align-top">
-                    <Checkbox
-                      checked={field.required}
-                      onCheckedChange={(checked) =>
-                        handleChange(index, 'required', !!checked)
-                      }
-                      disabled={readOnly}
-                    />
-                  </td>
+                  {formSettings && (
+                    <td className="w-20 p-2 text-center align-top">
+                      <Checkbox
+                        checked={field.required}
+                        onCheckedChange={(checked) =>
+                          handleChange(index, 'required', !!checked)
+                        }
+                        disabled={readOnly}
+                      />
+                    </td>
+                  )}
                   <td className="w-20 p-2 text-center align-top">
                     <Checkbox
                       checked={!!field.nullable}
@@ -1140,21 +1187,23 @@ export function SchemaFieldsEditor({
                       className="h-auto border-0 p-1 text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
                   </td>
-                  <td className="p-2 align-top">
-                    <Input
-                      value={formatFieldValue(field.defaultValue)}
-                      onChange={(e) =>
-                        handleChange(
-                          index,
-                          'defaultValue',
-                          parseDefaultValue(e.target.value, field.type)
-                        )
-                      }
-                      placeholder="Default"
-                      disabled={readOnly}
-                      className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
-                    />
-                  </td>
+                  {formSettings && (
+                    <td className="p-2 align-top">
+                      <Input
+                        value={formatFieldValue(field.defaultValue)}
+                        onChange={(e) =>
+                          handleChange(
+                            index,
+                            'defaultValue',
+                            parseDefaultValue(e.target.value, field.type)
+                          )
+                        }
+                        placeholder="Default"
+                        disabled={readOnly}
+                        className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                      />
+                    </td>
+                  )}
                   <td className="p-2 align-top">
                     <Input
                       value={field.format || ''}
@@ -1165,7 +1214,11 @@ export function SchemaFieldsEditor({
                           e.target.value || undefined
                         )
                       }
-                      placeholder="date, email..."
+                      placeholder={
+                        field.type === 'number' || field.type === 'integer'
+                          ? 'currency'
+                          : 'date, email...'
+                      }
                       disabled={readOnly}
                       className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
@@ -1193,6 +1246,7 @@ export function SchemaFieldsEditor({
                       field={field}
                       readOnly={readOnly}
                       showEnum={showEnum}
+                      mode={mode}
                       siblingNames={fields
                         .filter((_, otherIndex) => otherIndex !== index)
                         .map((other) => other.name)
@@ -1223,7 +1277,11 @@ export function SchemaFieldsEditor({
             {fields.length === 0 && (
               <tr>
                 <td
-                  colSpan={(readOnly ? 8 : 9) + (showEnum ? 1 : 0)}
+                  colSpan={
+                    (readOnly ? 8 : 9) +
+                    (showEnum ? 1 : 0) -
+                    (formSettings ? 0 : 2)
+                  }
                   className="p-4 text-center text-sm text-muted-foreground"
                 >
                   {emptyMessage}

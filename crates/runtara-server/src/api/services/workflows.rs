@@ -257,6 +257,7 @@ impl WorkflowService {
             }),
             input_schema: serde_json::json!({}),
             output_schema: serde_json::json!({}),
+            state_schema: serde_json::json!({}),
             variables: serde_json::json!({}),
             current_version_number: 1,
             last_version_number: 1,
@@ -1156,13 +1157,14 @@ impl WorkflowService {
 
     /// Get schemas and variables from a specific workflow version's execution graph
     ///
-    /// Returns (input_schema, output_schema, variables) extracted from the execution_graph
+    /// Returns the input, output and state schemas and the variables
+    /// extracted from the execution_graph
     pub async fn get_version_schemas(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<(Value, Value, Value), ServiceError> {
+    ) -> Result<VersionSchemasResponse, ServiceError> {
         let schemas = self
             .repository
             .get_version_schemas(tenant_id, workflow_id, version)

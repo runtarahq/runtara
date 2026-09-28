@@ -126,6 +126,37 @@ mod tests {
     }
 
     #[test]
+    fn detects_duplicate_state_schema_field_names() {
+        let issues = validate_schema_fields(
+            "State schema",
+            &[
+                EditableSchemaField {
+                    name: "stage".to_string(),
+                    field_type: Some("string".to_string()),
+                },
+                EditableSchemaField {
+                    name: "amount".to_string(),
+                    field_type: Some("number".to_string()),
+                },
+                EditableSchemaField {
+                    name: "stage ".to_string(),
+                    field_type: Some("string".to_string()),
+                },
+            ],
+        );
+
+        assert_eq!(
+            issues,
+            vec![SchemaFieldValidationIssue {
+                code: "E008".to_string(),
+                message: "[E008] State schema field name 'stage' is duplicated. Field names must be unique.".to_string(),
+                field_name: Some("stage".to_string()),
+                row_indices: vec![0, 2],
+            }]
+        );
+    }
+
+    #[test]
     fn ignores_blank_schema_field_names() {
         let issues = validate_schema_fields(
             "Input schema",

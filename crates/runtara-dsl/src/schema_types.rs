@@ -15,7 +15,7 @@
 // including module.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.3.0";
+pub const DSL_VERSION: &str = "3.4.0";
 
 // ============================================================================
 // Root Types
@@ -123,6 +123,14 @@ pub struct ExecutionGraph {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_schema: HashMap<String, SchemaField>,
 
+    /// Schema declaring the typed state a run of this workflow exposes.
+    /// Keys are state field names, values define the field type, label and
+    /// display format. State starts empty and is written by steps, so
+    /// `required`, `default` and `visibleWhen` have no effect here. This is a
+    /// declaration only: it is not compiled into the workflow.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub state_schema: HashMap<String, SchemaField>,
+
     /// Visual annotations for UI (not used in compilation)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<Note>>,
@@ -182,6 +190,7 @@ impl Default for ExecutionGraph {
             variables: HashMap::new(),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            state_schema: HashMap::new(),
             notes: None,
             nodes: None,
             edges: None,
@@ -1894,6 +1903,8 @@ pub struct SchemaField {
     ///
     /// For `string` type: `textarea`, `date`, `datetime`, `email`, `url`,
     /// `tel`, `color`, `password`, `markdown`.
+    /// For `number` and `integer` types: `currency` (display as a currency
+    /// amount).
     /// Unknown formats fall back to the default input for the type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,

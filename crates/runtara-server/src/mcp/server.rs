@@ -90,7 +90,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}. Steps is a map keyed by step ID, not an array. inputMapping is not universal: Error uses top-level code/message/category/severity and mapping-capable context, and rejects inputMapping."
+        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?, stateSchema?}. Steps is a map keyed by step ID, not an array. inputMapping is not universal: Error uses top-level code/message/category/severity and mapping-capable context, and rejects inputMapping."
     )]
     async fn update_workflow(
         &self,
@@ -819,6 +819,26 @@ impl SmoMcpServer {
         tools::graph_mutations::set_output_schema(self, params.0).await
     }
 
+    #[tool(
+        description = "Get the state schema (DSL flat-map format) of a workflow: the typed state a run exposes, with labels, formats and enums. Declared on the root graph only."
+    )]
+    async fn get_state_schema(
+        &self,
+        params: Parameters<tools::graph_mutations::GetStateSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_state_schema(self, params.0).await
+    }
+
+    #[tool(
+        description = "Replace the state schema (DSL flat-map format) on the root graph; {} clears it. A declaration only: runs do not write state yet. required, default and visibleWhen have no effect on state fields (W081). Updates the latest version in-place."
+    )]
+    async fn set_state_schema(
+        &self,
+        params: Parameters<tools::graph_mutations::SetStateSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::set_state_schema(self, params.0).await
+    }
+
     #[tool(description = "List all variables defined on a workflow graph.")]
     async fn list_variables(
         &self,
@@ -1107,7 +1127,7 @@ impl ServerHandler for SmoMcpServer {
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
-                **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
+                **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, get_state_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_state_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All except the root-only state schema tools support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\
                 **Connections**: list_connections, list_integrations, get_integration, describe_connection, resolve_connection_resource. To wire a connection into an Agent step:\n\
                   1. `list_agents` — each entry carries `supportsConnections` and `integrationIds`. Skip agents where `supportsConnections=false`.\n\
@@ -1129,7 +1149,7 @@ impl ServerHandler for SmoMcpServer {
                 **Error step authoring**: Error does NOT accept `inputMapping`. Author static `code`, `message`, `category`, and `severity` directly on the step; `message` is a literal string with no reference/template interpolation. Put dynamic mappings in `context`, for example `{\"id\":\"fail\",\"stepType\":\"Error\",\"code\":\"PREP_FAILED\",\"message\":\"Preparation failed after cleanup\",\"category\":\"permanent\",\"context\":{\"original_error\":{\"valueType\":\"reference\",\"value\":\"steps.__error\"}}}`. This emits a new static error envelope and preserves the captured error as context/attributes; it is not a literal rethrow.\n\
                 **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. The captured error is exposed to mapping-capable fields (such as Agent/Finish `inputMapping` and Error/Log `context`) and edge conditions at `steps.__error.*` (alias `steps.error.*`); the bare `__error.*` root also resolves for back-compat but is not typo-checked. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `steps.__error.code`, `steps.__error.message`, `steps.__error.category`, `steps.__error.severity`, `steps.__error.attributes`, and `steps.__error.stepId`; referencing `steps.__error` preserves the full envelope. The envelope survives successful handler steps, but a later handled failure replaces it, so persist/snapshot the original before cleanup if it must survive cleanup failures. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
                 ## Execution Graph Shape\n\n\
-                `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}`. Note: `steps` is a map keyed by step ID (not an array), fields depend on `stepType`, and edges go in `executionPlan` (not `edges`).",
+                `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?, stateSchema?}`. Note: `steps` is a map keyed by step ID (not an array), fields depend on `stepType`, and edges go in `executionPlan` (not `edges`).",
             )
     }
 }
@@ -1192,6 +1212,33 @@ mod tests {
             Some("object"),
             "advertised step schema missing `type: object`: {}",
             serde_json::to_string_pretty(step_schema).unwrap()
+        );
+    }
+
+    #[test]
+    fn state_schema_tools_are_registered_and_listed() {
+        let router = SmoMcpServer::tool_router();
+        for name in ["get_state_schema", "set_state_schema"] {
+            let tool = router
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is registered"));
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .expect("properties");
+            assert!(properties.contains_key("workflow_id"), "{name}");
+            assert!(!properties.contains_key("path"), "{name} is root-only");
+        }
+        let set = router.get("set_state_schema").unwrap();
+        assert!(set.input_schema["properties"].get("fields").is_some());
+
+        let update = router.get("update_workflow").unwrap();
+        assert!(
+            update
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("stateSchema?"))
         );
     }
 

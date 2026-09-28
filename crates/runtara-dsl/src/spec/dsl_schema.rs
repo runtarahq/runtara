@@ -113,6 +113,28 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.4.0",
+                "date": "2026-09-28",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "execution-graph",
+                        "description": "stateSchema on the execution graph: a map of SchemaField rows declaring the typed state a run exposes, with labels, formats and enums, next to inputSchema and outputSchema. It is a declaration only and is not compiled; state starts empty and is written by steps."
+                    },
+                    {
+                        "type": "added",
+                        "component": "schema-field",
+                        "description": "The currency format hint for number and integer schema fields (display as a currency amount). Format values stay unvalidated; unknown formats fall back to the default input."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "W081: a stateSchema field that sets required, default or visibleWhen, which have no effect for state."
+                    }
+                ]
+            },
+            {
                 "version": "3.3.0",
                 "date": "2026-09-28",
                 "breaking": false,
@@ -214,6 +236,38 @@ mod tests {
             schema.get("x-dsl-version").and_then(|v| v.as_str()),
             Some(DSL_VERSION)
         );
+    }
+
+    #[test]
+    fn test_generated_schema_declares_state_schema() {
+        let schema = generate_dsl_schema();
+        let defs = schema
+            .get("$defs")
+            .or_else(|| schema.get("definitions"))
+            .expect("schema has definitions");
+        let graph = defs
+            .get("ExecutionGraph")
+            .expect("ExecutionGraph definition");
+        let state_schema = graph
+            .pointer("/properties/stateSchema")
+            .expect("ExecutionGraph declares stateSchema");
+        assert!(
+            state_schema.to_string().contains("SchemaField"),
+            "stateSchema values are SchemaField rows: {state_schema}"
+        );
+        let required = graph
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(!required.contains(&json!("stateSchema")));
+    }
+
+    #[test]
+    fn test_changelog_leads_with_current_version() {
+        let changelog = get_dsl_changelog();
+        assert_eq!(changelog["version"], DSL_VERSION);
+        assert_eq!(changelog["changes"][0]["version"], DSL_VERSION);
     }
 
     #[test]
