@@ -73,8 +73,9 @@ pub fn reference_segments(path: &str) -> Vec<String> {
 /// [`reference_segments`] silently drops such segments, so a caller that wants
 /// to reject them must look at the raw text; but a bracket body is one opaque
 /// key, so `data["a..b"]` names the literal key `a..b` and is not flagged.
-/// Bracket bodies are skipped with the same scan as [`reference_segments`]: up
-/// to the first `]`, or the rest of the path when unterminated.
+/// Only a *closed* body is skipped: an unterminated `[` is a malformed path,
+/// not a key, so `outputs[0..name` (missing `]`) is still flagged even though
+/// [`reference_segments`] would read the rest of it as one key.
 pub fn has_consecutive_dots(path: &str) -> bool {
     let mut previous_dot = false;
     let mut chars = path.chars();
@@ -84,12 +85,11 @@ pub fn has_consecutive_dots(path: &str) -> bool {
             '.' if previous_dot => return true,
             '.' => previous_dot = true,
             '[' => {
+                let Some(close) = chars.as_str().find(']') else {
+                    return chars.as_str().contains("..");
+                };
+                chars = chars.as_str()[close + 1..].chars();
                 previous_dot = false;
-                for next in chars.by_ref() {
-                    if next == ']' {
-                        break;
-                    }
-                }
             }
             _ => previous_dot = false,
         }
@@ -274,8 +274,10 @@ mod tests {
         assert!(!has_consecutive_dots("data.order.id"));
         assert!(!has_consecutive_dots(r#"data.["a"].b"#));
         assert!(!has_consecutive_dots(""));
-        // Unterminated bracket swallows the rest, as in the tokenizer.
-        assert!(!has_consecutive_dots("data[a..b"));
+        // An unterminated bracket is a malformed path, not an opaque key.
+        assert!(has_consecutive_dots("data[a..b"));
+        assert!(has_consecutive_dots("steps.fetch.outputs[0..name"));
+        assert!(!has_consecutive_dots("data[a.b"));
     }
 
     #[test]

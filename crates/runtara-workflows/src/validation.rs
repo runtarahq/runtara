@@ -2550,8 +2550,9 @@ fn validate_reference(
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
-    // Check for empty path segments. Dots inside a `[..]` body belong to the
-    // key (`data["a..b"]`), so only the text outside brackets is inspected.
+    // Reject consecutive dots outside a closed `[..]` body. Dots inside one
+    // belong to the key (`data["a..b"]`). Leading/trailing dots and empty
+    // bracket keys are not caught here.
     if has_consecutive_dots(ref_path) {
         result.errors.push(ValidationError::InvalidReferencePath {
             step_id: step_id.to_string(),
@@ -7225,7 +7226,12 @@ mod tests {
 
     #[test]
     fn test_consecutive_dots_outside_bracket_key_stay_rejected() {
-        for reference in [r#"data["a..b"]..c"#, "data..a", r#"data.a..b["c"]"#] {
+        for reference in [
+            r#"data["a..b"]..c"#,
+            "data..a",
+            r#"data.a..b["c"]"#,
+            "data[a..b",
+        ] {
             let result = validate_data_reference_with_schema_key(reference, "a..b");
             assert!(
                 result.errors.iter().any(|error| matches!(
