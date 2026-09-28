@@ -5,6 +5,7 @@ import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { pauseInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import { Spinner } from '@/shared/components/ui/spinner';
 import {
@@ -39,7 +40,11 @@ export function PauseButton(props: Props) {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const handleConfirm = async () => {
-    if (!token) return;
+    // Local and trusted-header auth modes send no bearer token; only OIDC needs one.
+    if (isOidcAuth && !token) {
+      toast.error('Your session has expired. Sign in again to pause this run.');
+      return;
+    }
 
     setConfirmOpen(false);
     setIsLoading(true);
