@@ -18,17 +18,43 @@ import {
   MappingValueInput,
   ValueMode,
 } from './InputMappingField/MappingValueInput';
+import { CompositeValueEditor } from './InputMappingField/CompositeValueEditor';
+import type { CompositeArrayValue } from '@/features/workflows/stores/nodeFormStore';
 
 type WaitForInstancesStepFieldProps = {
   name: string;
 };
 
 /**
- * `instanceIds` must resolve to an array of ids: a reference (typically
- * `steps.<start>.outputs...`) or a literal JSON array. A template renders to
- * a string, so it is not offered.
+ * `instanceIds` must resolve to an array of ids: a reference to an id array,
+ * a literal JSON array, or a composite array of references (typically one
+ * `steps.<start>.outputs.instanceId` per control start step). A template
+ * renders to a string, so it is not offered.
  */
-const INSTANCE_IDS_MODES: readonly ValueMode[] = ['reference', 'immediate'];
+const INSTANCE_IDS_MODES: readonly ValueMode[] = [
+  'reference',
+  'immediate',
+  'composite',
+];
+
+/** The composite array carried into composite mode from the current value. */
+function compositeArray(value: unknown): CompositeArrayValue {
+  if (Array.isArray(value)) return value as CompositeArrayValue;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => ({
+          valueType: 'immediate',
+          value: item,
+        })) as CompositeArrayValue;
+      }
+    } catch {
+      // Not a JSON array: start from an empty list.
+    }
+  }
+  return [];
+}
 
 /** `timeoutMs` must resolve to a positive integer. */
 const TIMEOUT_MODES: readonly ValueMode[] = ['immediate', 'reference'];
@@ -148,19 +174,28 @@ export function WaitForInstancesStepField({
         <FormLabel>Instance IDs *</FormLabel>
         <FormDescription>
           Array of 1 to 1000 distinct instance ids, each a direct child of this
-          run — usually a reference to the ids a control start step returned.
+          run — a reference to an id array, or a composite list of each control
+          start step's <code>outputs.instanceId</code>.
         </FormDescription>
         <FormControl>
           <MappingValueInput
             value={
               idsValueType === 'composite'
-                ? null
+                ? ''
                 : String(getValue('instanceIds'))
             }
             onChange={(value) => updateField('instanceIds', value ?? '')}
             valueType={idsValueType}
             onValueTypeChange={(vt) =>
-              updateField('instanceIds', getValue('instanceIds'), vt)
+              updateField(
+                'instanceIds',
+                vt === 'composite'
+                  ? compositeArray(getValue('instanceIds'))
+                  : idsValueType === 'composite'
+                    ? ''
+                    : getValue('instanceIds'),
+                vt
+              )
             }
             modes={INSTANCE_IDS_MODES}
             fieldType="array"
@@ -168,6 +203,17 @@ export function WaitForInstancesStepField({
             placeholder='["instance-id-1", "instance-id-2"]'
           />
         </FormControl>
+        {idsValueType === 'composite' && (
+          <div className="overflow-hidden rounded-md border bg-muted/20">
+            <CompositeValueEditor
+              value={compositeArray(getValue('instanceIds'))}
+              onChange={(value) =>
+                updateField('instanceIds', value, 'composite')
+              }
+              showCloseButton={false}
+            />
+          </div>
+        )}
       </FormItem>
 
       <FormItem>

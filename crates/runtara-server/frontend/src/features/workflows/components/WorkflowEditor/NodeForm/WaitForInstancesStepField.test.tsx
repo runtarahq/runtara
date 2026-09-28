@@ -106,6 +106,38 @@ describe('WaitForInstancesStepField', () => {
     );
   });
 
+  it('edits a composite list of start outputs in the composite editor', () => {
+    renderField(
+      {
+        inputMapping: [
+          {
+            type: 'instanceIds',
+            value: [
+              {
+                valueType: 'reference',
+                value: 'steps.startA.outputs.instanceId',
+              },
+              {
+                valueType: 'reference',
+                value: 'steps.startB.outputs.instanceId',
+              },
+            ],
+            typeHint: 'array',
+            valueType: 'composite',
+          },
+        ],
+      },
+      'waitRuns'
+    );
+
+    expect(
+      screen.getByText('Composite array - configure below')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/steps\.startA\.outputs\.instanceId/)
+    ).toBeInTheDocument();
+  });
+
   it('renders nothing for another step type', () => {
     const { container } = renderField({
       stepType: 'WaitForSignal',
