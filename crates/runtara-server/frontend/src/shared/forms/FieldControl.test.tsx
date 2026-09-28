@@ -230,6 +230,16 @@ describe('period ranges', () => {
 
   it('infers a range selector for a from/to object of date-times', () => {
     expect(inferControlKind(period)).toBe('date_range');
+    // Workflow input schemas spell the format `datetime`.
+    expect(
+      inferControlKind({
+        type: 'object',
+        properties: {
+          from: { type: 'string', format: 'datetime' },
+          to: { type: 'string', format: 'datetime' },
+        },
+      })
+    ).toBe('date_range');
   });
 
   it('applies a preset at once and custom bounds on Apply', () => {
@@ -281,23 +291,26 @@ describe('period ranges', () => {
     });
   });
 
-  it('stores a single date-time field in UTC', () => {
-    const onChange = vi.fn();
-    render(
-      <FieldControl
-        id="at"
-        field={{ type: 'string', format: 'date-time' }}
-        value="2026-03-01T08:15:00.000Z"
-        disabled={false}
-        onChange={onChange}
-      />
-    );
-    const input = document.getElementById('at') as HTMLInputElement;
-    expect(input.type).toBe('datetime-local');
-    expect(input.value).toBe(toLocalInput('2026-03-01T08:15:00.000Z'));
-    fireEvent.change(input, { target: { value: '2026-03-02T10:00' } });
-    expect(onChange).toHaveBeenCalledWith(
-      new Date(2026, 2, 2, 10, 0).toISOString()
-    );
-  });
+  it.each(['date-time', 'datetime'])(
+    'stores a single %s field in UTC',
+    (format) => {
+      const onChange = vi.fn();
+      render(
+        <FieldControl
+          id="at"
+          field={{ type: 'string', format }}
+          value="2026-03-01T08:15:00.000Z"
+          disabled={false}
+          onChange={onChange}
+        />
+      );
+      const input = document.getElementById('at') as HTMLInputElement;
+      expect(input.type).toBe('datetime-local');
+      expect(input.value).toBe(toLocalInput('2026-03-01T08:15:00.000Z'));
+      fireEvent.change(input, { target: { value: '2026-03-02T10:00' } });
+      expect(onChange).toHaveBeenCalledWith(
+        new Date(2026, 2, 2, 10, 0).toISOString()
+      );
+    }
+  );
 });
