@@ -5,6 +5,8 @@ import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { pauseInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { refreshRunViews } from '../refreshRunViews';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import { Spinner } from '@/shared/components/ui/spinner';
@@ -36,6 +38,7 @@ export function PauseButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -50,6 +53,7 @@ export function PauseButton(props: Props) {
     setIsLoading(true);
     try {
       await pauseInstance(token, instanceId);
+      await refreshRunViews(queryClient);
       toast.success('Workflow instance has been paused');
     } catch (error) {
       console.error('Error pausing instance:', error);

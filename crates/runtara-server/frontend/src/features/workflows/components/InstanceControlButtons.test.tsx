@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const auth = vi.hoisted(() => ({ oidc: false, token: '' }));
@@ -24,13 +25,22 @@ vi.mock('@/shared/components/ui/tooltip.tsx', () => ({
 import { StopButton } from './StopButton';
 import { PauseButton } from './PauseButton';
 import { ResumeButton } from './ResumeButton';
+import { queryKeys } from '@/shared/queries/query-keys';
+
+let queryClient: QueryClient;
+
+function renderWithQueries(ui: React.ReactElement) {
+  return render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
+  );
+}
 
 const cases = [
   {
     name: 'Stop',
     call: queries.stopInstance,
     click: () => {
-      render(<StopButton instanceId="run-1" />);
+      renderWithQueries(<StopButton instanceId="run-1" />);
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     },
   },
@@ -38,7 +48,7 @@ const cases = [
     name: 'Pause',
     call: queries.pauseInstance,
     click: () => {
-      render(<PauseButton instanceId="run-1" />);
+      renderWithQueries(<PauseButton instanceId="run-1" />);
       fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
       fireEvent.click(screen.getByRole('button', { name: 'Pause Instance' }));
     },
@@ -47,7 +57,7 @@ const cases = [
     name: 'Resume',
     call: queries.resumeInstance,
     click: () => {
-      render(<ResumeButton instanceId="run-1" />);
+      renderWithQueries(<ResumeButton instanceId="run-1" />);
       fireEvent.click(
         screen.getByRole('button', { name: 'Resume from last checkpoint' })
       );
@@ -58,6 +68,7 @@ const cases = [
 describe.each(cases)('$name button', ({ call, click }) => {
   beforeEach(() => {
     vi.clearAllMocks();
+    queryClient = new QueryClient();
   });
 
   it('sends the request without a token when auth is not OIDC', async () => {
@@ -66,6 +77,18 @@ describe.each(cases)('$name button', ({ call, click }) => {
     click();
     await waitFor(() => expect(call).toHaveBeenCalledWith('', 'run-1'));
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the run lists after the request succeeds', async () => {
+    auth.oidc = false;
+    auth.token = '';
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    click();
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: queryKeys.executions.lists(),
+      })
+    );
   });
 
   it('sends the request with the OIDC token', async () => {
