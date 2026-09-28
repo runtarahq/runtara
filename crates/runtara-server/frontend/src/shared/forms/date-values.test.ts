@@ -34,6 +34,7 @@ describe('date values', () => {
   it('recognizes a from/to object of dates or date-times as a range', () => {
     expect(rangeFormat(range('date'))).toBe('date');
     expect(rangeFormat(range('date-time'))).toBe('date-time');
+    expect(rangeFormat(range('datetime'))).toBe('date-time');
     expect(rangeFormat(range('email'))).toBeUndefined();
     expect(
       rangeFormat({

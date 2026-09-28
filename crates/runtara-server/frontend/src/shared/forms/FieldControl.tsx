@@ -303,7 +303,7 @@ export function FieldControl({
 
   const isNumber = kind === 'number';
   // A date-time is stored in UTC and picked in local time.
-  const utc = kind === 'datetime' && field.format === 'date-time';
+  const utc = kind === 'datetime';
   return (
     <Input
       {...common}
