@@ -5,7 +5,7 @@
 //! A resumed run replays its completed steps and re-enters a parked one, so
 //! the producer emits their start (and end) again. Those later events are
 //! replays; a record must not be repeated for them.
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use serde_json::json;
 
 use crate::domain::EventType;
@@ -46,8 +46,12 @@ async fn emit(
     events: &[(Mark, &str, Option<&str>)],
 ) -> chrono::DateTime<Utc> {
     // Distinct, increasing timestamps a second apart, backdated so none is in
-    // the future.
-    let base = Utc::now() - Duration::minutes(10);
+    // the future, and whole seconds so they survive Postgres's microsecond
+    // storage unchanged (Linux clocks carry nanoseconds).
+    let base = Utc::now()
+        .with_nanosecond(0)
+        .expect("zero nanoseconds is valid")
+        - Duration::minutes(10);
     for (n, (mark, unit, scope)) in events.iter().enumerate() {
         let mut payload = json!({ "unit_id": unit, "unit_kind": "Kind", "seq": n });
         if let Some(scope) = scope {
