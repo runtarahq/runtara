@@ -1,9 +1,4 @@
-import {
-  keepPreviousData,
-  useQueries,
-  useQueryClient,
-} from '@tanstack/react-query';
-import { useAuth } from 'react-oidc-context';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Schema,
   CreateSchemaRequest,
@@ -18,7 +13,6 @@ import {
 } from '../queries';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { useCustomQuery, useCustomMutation } from '@/shared/hooks/api';
-import { isOidcAuth } from '@/shared/config/runtimeConfig';
 
 /**
  * Hook to fetch all object schemas
@@ -44,57 +38,6 @@ export function useObjectSchemaDtos(connectionId?: string | null) {
       return failureCount < 2;
     },
   });
-}
-
-/**
- * Fetch schemas for several Object Model database connections at once.
- * Report authoring uses this so a source-level connection switch can browse
- * that connection's schema list instead of the page default.
- */
-export function useObjectSchemaDtosByConnectionIds(
-  connectionIds: Array<string | null | undefined>
-) {
-  const auth = useAuth();
-  const token = auth.user?.access_token;
-  const uniqueConnectionIds = Array.from(
-    new Set(connectionIds.filter((id): id is string => Boolean(id)))
-  );
-
-  const results = useQueries({
-    queries: uniqueConnectionIds.map((connectionId) => ({
-      queryKey: queryKeys.objects.schemas.all(connectionId),
-      queryFn: () => getAllSchemas(token ?? '', connectionId),
-      enabled: (!!token || !isOidcAuth) && Boolean(connectionId),
-      refetchOnWindowFocus: false,
-      placeholderData: keepPreviousData,
-      retry: (
-        failureCount: number,
-        error: Error & { code?: string; response?: unknown }
-      ) => {
-        if (
-          error.message?.includes('fetch') ||
-          error.code === 'ERR_NETWORK' ||
-          !error.response
-        ) {
-          return false;
-        }
-        return failureCount < 2;
-      },
-    })),
-  });
-
-  const schemasByConnectionId = Object.fromEntries(
-    uniqueConnectionIds.map((connectionId, index) => [
-      connectionId,
-      results[index]?.data ?? [],
-    ])
-  ) as Record<string, Schema[]>;
-
-  return {
-    schemasByConnectionId,
-    isFetching: results.some((result) => result.isFetching),
-    isLoading: results.some((result) => result.isLoading),
-  };
 }
 
 /**
