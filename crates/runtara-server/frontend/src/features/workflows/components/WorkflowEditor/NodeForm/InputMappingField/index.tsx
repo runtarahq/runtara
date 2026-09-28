@@ -12,6 +12,7 @@ import { composeConditionSuggestions } from '../InputMappingValueField/VariableS
 import { SwitchCasesField } from '../SwitchCasesField';
 import { SimpleInputMappingEditor } from './SimpleInputMappingEditor';
 import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
+import { applyRequiredEnumPrefills } from './required-enum-prefill';
 import { ValueType } from '../TypeHintSelector';
 import { parseSchema } from '@/features/workflows/utils/schema';
 import { findAgentById } from '@/shared/utils/agent-id';
@@ -51,7 +52,7 @@ function getValueTypeFromSchemaType(schemaType: string): ValueType {
 
 export function InputMappingField(props: any) {
   const { label, name } = props;
-  const { watch, setValue } = useFormContext();
+  const { watch, setValue, getValues } = useFormContext();
   const {
     agents,
     workflows,
@@ -295,6 +296,56 @@ export function InputMappingField(props: any) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capabilityId, agentId, stepType, agents, name, setValue, connectionId]);
+
+  // Required string-enum fields already pre-filled for this step, keyed by
+  // `${nodeId}:${agentId}:${capabilityId}:${fieldName}`. Each field is pre-filled at
+  // most once so a later user choice is never overwritten.
+  const enumPrefilledRef = useRef<Set<string>>(new Set());
+
+  // Pre-fill required string-enum inputs that have no default and no mapping
+  // with the enum's first value (e.g. control `start.parentClosePolicy` ->
+  // "cancel"). Written to form state like a user selection so it is saved and
+  // no longer flagged as a missing required input. Runs after the
+  // auto-populate effect above, which may have just seeded an empty row.
+  useEffect(() => {
+    if (stepType !== 'Agent' || !capabilityId || !agentId || !agents) return;
+    const capability = findAgentById(agents, agentId)?.supportedCapabilities?.[
+      capabilityId
+    ];
+    if (!capability?.inputs || !Array.isArray(capability.inputs)) return;
+
+    const keyPrefix = `${nodeId ?? ''}:${agentId}:${capabilityId}:`;
+    const skip = new Set(
+      [...enumPrefilledRef.current]
+        .filter((key) => key.startsWith(keyPrefix))
+        .map((key) => key.slice(keyPrefix.length))
+    );
+    const current = getValues(name);
+    const result = applyRequiredEnumPrefills(
+      capability.inputs,
+      Array.isArray(current) ? current : [],
+      (field) => getValueTypeFromSchemaType(field.type || 'any'),
+      skip
+    );
+    if (!result) return;
+
+    result.prefilled.forEach((fieldName) =>
+      enumPrefilledRef.current.add(`${keyPrefix}${fieldName}`)
+    );
+    setValue(name, result.entries, { shouldDirty: true, shouldValidate: true });
+  }, [
+    nodeId,
+    stepType,
+    agentId,
+    capabilityId,
+    agents,
+    name,
+    getValues,
+    setValue,
+    // Re-check when rows are added/removed (e.g. a late auto-populate);
+    // current values are read via getValues.
+    watchFieldArray.length,
+  ]);
 
   // Hide input mapping when Agent step type is selected but no capability is chosen yet
   // This allows the user to focus on selecting agent and capability first

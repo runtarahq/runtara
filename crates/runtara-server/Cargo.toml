@@ -29,7 +29,9 @@ path = "src/bin/dump_openapi.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
-component-integration-tests = []
+# The composed control test drives the environment runner with its
+# in-process test precompiler.
+component-integration-tests = ["runtara-environment/db-integration-tests"]
 valkey-integration-tests = []
 valkey-tls-integration-tests = ["valkey-integration-tests"]
 
@@ -53,9 +55,29 @@ path = "tests/core_instance_api.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "termination_reason_enum"
+path = "tests/termination_reason_enum.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "managed_actions"
 path = "tests/managed_actions.rs"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "control_service"
+path = "tests/control_service.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "control_component"
+path = "tests/control_component.rs"
+required-features = ["db-integration-tests", "component-integration-tests"]
+
+[[test]]
+name = "wait_for_instances"
+path = "tests/wait_for_instances.rs"
+required-features = ["db-integration-tests", "component-integration-tests"]
 
 [[test]]
 name = "session_delivery"
@@ -80,6 +102,16 @@ required-features = ["db-integration-tests"]
 [[test]]
 name = "object_model_connection_e2e"
 path = "tests/object_model_connection_e2e.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "object_model_raw_sql"
+path = "tests/object_model_raw_sql.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "object_model_sql_roles"
+path = "tests/object_model_sql_roles.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
@@ -113,6 +145,8 @@ runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }
+runtara-control-contract = { path = "../runtara-control-contract" }
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }

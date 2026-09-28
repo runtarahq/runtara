@@ -116,7 +116,7 @@ pub(super) fn emit_agent_retry_delay(
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_delay_ms));
+    super::abi::emit_call_wide_result(body, indices.stdlib_agent_retry_delay_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));

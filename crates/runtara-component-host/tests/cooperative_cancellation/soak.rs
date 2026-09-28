@@ -121,7 +121,7 @@ async fn cycle(
         }
     })?;
 
-    let state = HostState::new(Arc::new(CallContext::for_test("fixture-tenant", "")))
+    let state = HostState::new(Arc::new(CallContext::for_test("fixture-tenant")))
         .with_outbound_http(Arc::new(crate::outbound_fixture::PublicHttp::default()));
     let mut store = Store::new(engine, state);
     let instance = linker.instantiate_async(&mut store, component).await?;

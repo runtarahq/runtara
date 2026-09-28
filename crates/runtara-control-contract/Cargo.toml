@@ -1,0 +1,20 @@
+[package]
+name = "runtara-control-contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Contract of the runtara control service: caps, error codes, capacity share and start input"
+keywords = ["workflow", "control", "contract"]
+categories = ["api-bindings"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+runtara-dsl = { path = "../runtara-dsl", default-features = false }

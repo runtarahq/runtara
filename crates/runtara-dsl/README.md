@@ -40,7 +40,7 @@ Pass optional `runLabel` alongside `inputs` when starting an execution:
 }
 ```
 
-Labels contain 1–250 printable ASCII bytes with at least one non-space character.
+Labels contain 1–1024 printable ASCII bytes with at least one non-space character.
 Accepted strings are preserved exactly, including case and surrounding spaces.
 Empty, control-character, non-ASCII, and oversized labels are rejected. Omission
 or null starts an unlabeled execution. Labels are non-unique references, separate

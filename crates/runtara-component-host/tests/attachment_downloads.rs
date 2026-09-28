@@ -7,7 +7,7 @@ use runtara_component_host::outbound_http::{
     Destination, OutboundContext, OutboundError, OutboundHttpHost, RequestOptions, Response,
 };
 use runtara_component_host::{
-    ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
+    ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -92,13 +92,7 @@ async fn workflow_agents_download_only_on_explicit_invocation() -> anyhow::Resul
             std::fs::copy(common::bundle_dir().join(&name), bundle.path().join(name))?;
         }
     }
-    let dispatcher = ComponentDispatcherService::from_dir(
-        bundle.path(),
-        DispatcherEnv {
-            core_http_url: "http://127.0.0.1:1".into(),
-        },
-    )
-    .await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     dispatcher.set_outbound_http(Arc::new(DownloadService(requests.clone())))?;
     let call = |agent: &str, capability: &str, input| TestCapabilityRequest {
         tenant_id: "attachments-test".into(),

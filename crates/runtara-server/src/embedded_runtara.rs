@@ -34,8 +34,6 @@ pub struct EmbeddedRuntaraConfig {
     pub data_dir: PathBuf,
     /// Bind address for runtara-core QUIC server (instance protocol).
     pub core_bind_addr: SocketAddr,
-    /// Address workflow guests use to reach runtara-core.
-    pub core_client_addr: SocketAddr,
     /// Optional bind address for runtara-core's HTTP instance API.
     /// When set, an HTTP server is started alongside QUIC for the instance protocol.
     pub core_http_bind_addr: Option<SocketAddr>,
@@ -55,6 +53,16 @@ pub struct EmbeddedRuntara {
     environment: EnvironmentRuntime,
     #[allow(dead_code)]
     persistence: Arc<dyn Persistence>,
+    approved_builtins: runtara_environment::approved_builtins::ApprovedBuiltins,
+}
+
+/// The control executor and the control pins to approve at boot: the
+/// executor's own bytes and the compile bundle's, which may differ.
+pub struct ControlBoot {
+    /// Host executor of the installed control agent.
+    pub executor: Arc<runtara_component_host::control_executor::ControlExecutor>,
+    /// `runtara:builtin-artifacts/control-…` pins to approve.
+    pub approve: Vec<String>,
 }
 
 impl EmbeddedRuntara {
@@ -65,15 +73,45 @@ impl EmbeddedRuntara {
     /// - runtara-environment (management protocol for images, instances)
     ///
     /// Note: Migrations should be run before calling this via `run_migrations()`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         config: EmbeddedRuntaraConfig,
         trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
+        control: Option<ControlBoot>,
+        instance_waits: Option<Arc<dyn runtara_component_host::InstanceWaitHost>>,
         connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
         database: Arc<dyn runtara_component_host::DatabaseHost>,
         outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
         event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
+
+        // Decision D2: approve the installed control bytes and load the
+        // approved history before anything can wake or recover a run.
+        // Revocations (set by an operator) apply from this boot on.
+        let approved_builtins = match &control {
+            Some(boot) => {
+                runtara_environment::approved_builtins::ApprovedBuiltins::install(
+                    &config.pool,
+                    &boot.executor,
+                    &boot.approve,
+                )
+                .await?
+            }
+            None => Default::default(),
+        };
+        // Trusted pins, option B: record the installed trusted built-ins in
+        // the same history and hand the approved, non-revoked trusted pins to
+        // the executor, so a parked run pinned to an earlier approved version
+        // keeps presigning on wake or resume (on the installed bytes). Starts
+        // never use the history; readiness stays installed-only.
+        if let Some(trusted) = &trusted {
+            runtara_environment::approved_builtins::ApprovedBuiltins::install_trusted(
+                &config.pool,
+                trusted,
+            )
+            .await?;
+        }
 
         // Create shared persistence layer. The metrics sink is what turns
         // Core's terminal-state facts into OTLP workflow metrics; without it
@@ -83,7 +121,8 @@ impl EmbeddedRuntara {
                 .with_metrics_sink(Arc::new(runtara_environment::metrics::OtlpMetricsSink)),
         );
 
-        // Start Core (instance protocol - workflows connect here via HTTP)
+        // Start Core. Workflow guests never connect to it: every runtime
+        // call is a host import satisfied in-process by the runner.
         let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);
         info!(addr = %core_http_addr, "Starting runtara-core...");
         let mut core_builder = CoreRuntime::builder()
@@ -97,22 +136,20 @@ impl EmbeddedRuntara {
         info!("✓ runtara-core started on {}", core_http_addr);
 
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
-        // and executed on the embedded in-process engine.
-        // Legacy composed artifacts call core through HTTP, while modern ones
-        // use host imports. Use the configured client address rather than the
-        // bind address: it is the endpoint a guest is meant to reach.
-        let core_http_url = format!("http://{}", config.core_client_addr);
+        // and executed on the embedded in-process engine; they reach core
+        // through host imports, so no core address enters a guest.
         let runner: Arc<dyn runtara_environment::runner::Runner> =
             runtara_environment::runner::build_runner_configured(
                 persistence.clone(),
                 event_observer,
-                Some(core_http_url),
                 config
                     .isolation_policy
                     .as_ref()
                     .map(|policy| policy.runner_config()),
                 runtara_environment::runner::HostServices {
                     trusted,
+                    control: control.map(|boot| boot.executor),
+                    instance_waits,
                     connections: Some(connections),
                     database: Some(database),
                     outbound_http: Some(outbound_http),
@@ -144,7 +181,13 @@ impl EmbeddedRuntara {
             core,
             environment,
             persistence,
+            approved_builtins,
         })
+    }
+
+    /// The approved built-in artifact history loaded at boot.
+    pub fn approved_builtins(&self) -> &runtara_environment::approved_builtins::ApprovedBuiltins {
+        &self.approved_builtins
     }
 
     /// The environment's shared handler state, for callers that drive it
@@ -291,8 +334,11 @@ pub async fn create_runtara_pool(
 /// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS`,
 /// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
 /// already parsed at startup. It applies only to the pool this process opens.
+#[allow(clippy::too_many_arguments)]
 pub async fn maybe_start_embedded(
     trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
+    control: Option<ControlBoot>,
+    instance_waits: Option<Arc<dyn runtara_component_host::InstanceWaitHost>>,
     connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     database: Arc<dyn runtara_component_host::DatabaseHost>,
     outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
@@ -352,15 +398,13 @@ pub async fn maybe_start_embedded(
         std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string())
     );
 
-    // Workflow guests run in-process, so no IP transformation is needed —
-    // 127.0.0.1 reaches runtara-core directly.
-    // Core HTTP port is used for both binding and client connections (QUIC is gone)
+    // Core binds loopback only; workflow guests run in-process and reach it
+    // through host imports, never over the network.
     let core_http_addr = core_http_port;
     let config = EmbeddedRuntaraConfig {
         pool,
         data_dir,
         core_bind_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
-        core_client_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
         core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
         core_overrides,
         execution_timeout_policy,
@@ -370,6 +414,8 @@ pub async fn maybe_start_embedded(
     let runtara = EmbeddedRuntara::start(
         config,
         trusted,
+        control,
+        instance_waits,
         connections,
         database,
         outbound_http,

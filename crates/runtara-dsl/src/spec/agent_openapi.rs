@@ -267,6 +267,15 @@ fn generate_schemas(agents: &[Value]) -> Value {
                 },
                 "hasSideEffects": {"type": "boolean"},
                 "isIdempotent": {"type": "boolean"},
+                "rateLimited": {"type": "boolean"},
+                "trusted": {
+                    "type": "boolean",
+                    "description": "Runs in a fresh host-managed instance with host-authorized credentials; false when absent"
+                },
+                "suspends": {
+                    "type": "boolean",
+                    "description": "May park its workflow with a typed suspension instead of returning; omitted when false"
+                },
                 "isInterfaceCapability": {"type": "boolean"},
                 "interfaceCategory": {"type": ["string", "null"]}
             }
@@ -524,4 +533,18 @@ pub fn get_agent_changelog() -> Value {
             }
         ]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_schema_documents_execution_flags() {
+        let spec = generate_agent_openapi_spec(vec![]);
+        let properties = &spec["components"]["schemas"]["CapabilityInfo"]["properties"];
+        for flag in ["rateLimited", "trusted", "suspends"] {
+            assert_eq!(properties[flag]["type"], "boolean", "{flag}");
+        }
+    }
 }

@@ -136,6 +136,7 @@ pub fn runtara_instance_to_dto_with_info(
     WorkflowInstanceDto {
         id: inst.instance_id.clone(),
         run_label: inst.run_label,
+        parent_instance_id: inst.parent_instance_id,
         completed_at: inst.finished_at.map(|t| t.to_rfc3339()),
         created: inst.created_at.to_rfc3339(),
         updated: inst
@@ -143,6 +144,7 @@ pub fn runtara_instance_to_dto_with_info(
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| inst.created_at.to_rfc3339()),
         status,
+        suspension_reason: inst.suspension_reason,
         termination_type: None, // Not available from Runtara summary
         error: None,            // Summary carries only `has_error`, not the message
         workflow_id,
@@ -189,10 +191,12 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
     WorkflowInstanceDto {
         id: info.instance_id.clone(),
         run_label: info.run_label.clone(),
+        parent_instance_id: info.parent_instance_id.clone(),
         completed_at: info.finished_at.map(|t| t.to_rfc3339()),
         created,
         updated,
         status,
+        suspension_reason: info.suspension_reason,
         termination_type: None,
         error: info.error.clone(),
         workflow_id,
@@ -239,10 +243,12 @@ pub fn runtara_info_to_execution_with_metadata(
     let instance = WorkflowInstanceDto {
         id: info.instance_id.clone(),
         run_label: info.run_label.clone(),
+        parent_instance_id: info.parent_instance_id.clone(),
         completed_at: info.finished_at.map(|t| t.to_rfc3339()),
         created,
         updated,
         status,
+        suspension_reason: info.suspension_reason,
         termination_type: None,
         error: info.error.clone(),
         workflow_id,

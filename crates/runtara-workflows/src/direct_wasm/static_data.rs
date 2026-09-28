@@ -39,6 +39,23 @@ pub(super) const AGENT_TIMEOUT_FIELDS: [&str; 4] = [
     "timeout",
     "error",
 ];
+/// The step error of an operation-scoped site whose `scope.enter` the host
+/// refused (a malformed key, or a second operation entered in one run).
+pub(super) const AGENT_OPERATION_SCOPE_FIELDS: [&str; 4] = [
+    "AGENT_OPERATION_SCOPE",
+    "The host refused the step's operation scope",
+    "permanent",
+    "error",
+];
+/// The step error of a suspension the host refused: it broke the caps (no
+/// wakes, more than 16, a wait id over 64 bytes, a state over 64 KiB) or named
+/// an instance wait its operation did not register.
+pub(super) const AGENT_INVALID_SUSPENSION_FIELDS: [&str; 4] = [
+    runtara_agent_suspension::AGENT_INVALID_SUSPENSION,
+    "The agent returned a suspension the host refused",
+    "permanent",
+    "error",
+];
 /// Structured failure payload emitted when a `While` step exceeds its configured
 /// timeout. Generated Rust parses `WhileConfig.timeout` but does not enforce it;
 /// direct mode is the first to honor the documented "if exceeded, step fails"
@@ -189,6 +206,16 @@ pub(super) struct DirectCoreStaticData {
     /// `agent-scope-input` envelope wrap that namespaces the composed child's
     /// checkpoint ids under the invocation site.
     agent_workflow_agents: BTreeSet<u32>,
+    /// Agents whose capability suspends: invoked through `suspendable.invoke`
+    /// inside an operation scope, never inside a parallel window.
+    agent_suspending: BTreeSet<u32>,
+    agent_operation_scoped: BTreeSet<u32>,
+    /// `AGENT_OPERATION_SCOPE_FIELDS`, laid out only when an operation-scoped
+    /// site exists, so every other artifact keeps its exact bytes.
+    pub(super) operation_scope_error: Option<DirectDataSegment>,
+    /// `AGENT_INVALID_SUSPENSION_FIELDS`, laid out only when a suspending site
+    /// exists.
+    pub(super) invalid_suspension_error: Option<DirectDataSegment>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -371,6 +398,8 @@ impl DirectCoreStaticData {
         let mut agent_connection_literals = BTreeSet::new();
         let mut agent_connection_refs = BTreeSet::new();
         let mut agent_workflow_agents = BTreeSet::new();
+        let mut agent_suspending = BTreeSet::new();
+        let mut agent_operation_scoped = BTreeSet::new();
         collect_static_agent_data(
             graph,
             &mut offset,
@@ -378,6 +407,8 @@ impl DirectCoreStaticData {
             &mut agent_connection_literals,
             &mut agent_connection_refs,
             &mut agent_workflow_agents,
+            &mut agent_suspending,
+            &mut agent_operation_scoped,
         )?;
         for child in child_workflows {
             collect_static_agent_data(
@@ -387,8 +418,26 @@ impl DirectCoreStaticData {
                 &mut agent_connection_literals,
                 &mut agent_connection_refs,
                 &mut agent_workflow_agents,
+                &mut agent_suspending,
+                &mut agent_operation_scoped,
             )?;
         }
+        let operation_scope_error = if agent_operation_scoped.is_empty() {
+            None
+        } else {
+            let fields = AGENT_OPERATION_SCOPE_FIELDS.concat();
+            let segment = DirectDataSegment::new(offset, fields.as_bytes());
+            offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
+            Some(segment)
+        };
+        let invalid_suspension_error = if agent_suspending.is_empty() {
+            None
+        } else {
+            let fields = AGENT_INVALID_SUSPENSION_FIELDS.concat();
+            let segment = DirectDataSegment::new(offset, fields.as_bytes());
+            offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
+            Some(segment)
+        };
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
@@ -426,6 +475,10 @@ impl DirectCoreStaticData {
             agent_connection_literals,
             agent_connection_refs,
             agent_workflow_agents,
+            agent_suspending,
+            agent_operation_scoped,
+            operation_scope_error,
+            invalid_suspension_error,
             heap_base: offset,
             memory_min_pages,
         })
@@ -479,6 +532,17 @@ impl DirectCoreStaticData {
         self.agent_workflow_agents.contains(&agent_id)
     }
 
+    /// True when the Agent's capability suspends (catalog `suspends`).
+    pub(super) fn agent_suspends(&self, agent_id: u32) -> bool {
+        self.agent_suspending.contains(&agent_id)
+    }
+
+    /// True when the Agent's site is operation-scoped (suspending or
+    /// control): it runs inside `runtara:workflow-operation/scope`.
+    pub(super) fn agent_operation_scoped(&self, agent_id: u32) -> bool {
+        self.agent_operation_scoped.contains(&agent_id)
+    }
+
     pub(super) fn data_segments(&self) -> Vec<&DirectDataSegment> {
         let mut segments = vec![
             &self.manifest,
@@ -506,6 +570,8 @@ impl DirectCoreStaticData {
         ];
         segments.extend(self.step_ids.values());
         segments.extend(self.agent_capability_ids.values());
+        segments.extend(self.operation_scope_error.as_ref());
+        segments.extend(self.invalid_suspension_error.as_ref());
         segments
     }
 }
@@ -551,6 +617,7 @@ fn collect_static_step_ids(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_static_agent_data(
     graph: &DirectGraphManifest,
     offset: &mut i32,
@@ -558,6 +625,8 @@ fn collect_static_agent_data(
     agent_connection_literals: &mut BTreeSet<u32>,
     agent_connection_refs: &mut BTreeSet<u32>,
     agent_workflow_agents: &mut BTreeSet<u32>,
+    agent_suspending: &mut BTreeSet<u32>,
+    agent_operation_scoped: &mut BTreeSet<u32>,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
         let segment = DirectDataSegment::new(*offset, agent.capability_id.as_bytes());
@@ -581,6 +650,12 @@ fn collect_static_agent_data(
         if agent.is_workflow_agent {
             agent_workflow_agents.insert(agent.id);
         }
+        if agent.suspends {
+            agent_suspending.insert(agent.id);
+        }
+        if agent.operation_scoped {
+            agent_operation_scoped.insert(agent.id);
+        }
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
@@ -591,6 +666,8 @@ fn collect_static_agent_data(
                 agent_connection_literals,
                 agent_connection_refs,
                 agent_workflow_agents,
+                agent_suspending,
+                agent_operation_scoped,
             )?;
         }
     }
@@ -855,6 +932,8 @@ mod tests {
             durable: false,
             rate_limited: false,
             is_workflow_agent: false,
+            suspends: false,
+            operation_scoped: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries: None,

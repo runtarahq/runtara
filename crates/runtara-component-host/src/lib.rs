@@ -13,6 +13,8 @@ mod outbound_test_fixture;
 pub mod bindings;
 mod cleanup_alarm;
 pub mod connection_resolver_host;
+pub mod control_executor;
+pub mod control_host;
 pub mod database_host;
 pub use database_host::DatabaseHost;
 pub mod outbound_http;
@@ -22,8 +24,11 @@ pub mod engine;
 pub mod execution_host;
 pub(crate) mod host_io;
 pub mod host_state;
+pub mod instance_wait_host;
+pub use instance_wait_host::InstanceWaitHost;
 pub mod isolated_tasks;
 pub mod lifecycle;
+pub mod operation_scope_host;
 pub mod precompile;
 pub mod registry;
 pub mod runtime_host;
@@ -33,8 +38,7 @@ pub mod workflow;
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
 pub use connection_resolver_host::{CONNECTION_RESOLVER_INTERFACE_NAME, ConnectionResolverHost};
 pub use dispatcher::{
-    ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
-    TestError, TestResult,
+    ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest, TestError, TestResult,
 };
 pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};

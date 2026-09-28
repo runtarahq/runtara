@@ -19,6 +19,15 @@ pub mod invocations;
 /// Authoritative external input requests and immutable acceptance receipts.
 pub mod inputs;
 
+/// Intent-first, success-only receipts of control mutations.
+pub mod control_receipts;
+
+/// Durable instance waits: a run parks until other runs finish.
+pub mod waits;
+
+/// Attempt-tagged per-operation continuations of suspending agent capabilities.
+pub mod continuations;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -71,6 +80,202 @@ pub struct InstanceRecord {
     /// Checkpoint count observed at the last auto-recovery, as text. Compared
     /// against the current count to distinguish "made progress" from "stuck".
     pub recovery_marker: Option<String>,
+    /// The run that started this one through `control:start`, with the
+    /// author's parent-close policy and the admission time. `None` for a
+    /// top-level run.
+    pub parent: Option<ParentLink>,
+}
+
+/// Parent-close policies a child may carry, in the order the editor offers
+/// them (`cancel` is preselected).
+pub const PARENT_CLOSE_POLICIES: [&str; 2] = ["cancel", "leave_running"];
+
+/// How a child run relates to the run that started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentLink {
+    /// The parent run, always of the child's tenant.
+    pub parent_instance_id: String,
+    /// `cancel` or `leave_running` ([`PARENT_CLOSE_POLICIES`]).
+    pub parent_close_policy: String,
+    /// When `control:start` admitted the child; orders a parent's children.
+    pub admitted_at: DateTime<Utc>,
+}
+
+impl ParentLink {
+    /// Reject a link no backend may store: an empty or self parent, or an
+    /// unknown policy.
+    pub fn validate(&self, instance_id: &str) -> Result<(), CoreError> {
+        let invalid = |message: &str| CoreError::ValidationError {
+            field: "parentInstanceId".into(),
+            message: message.into(),
+        };
+        if self.parent_instance_id.trim().is_empty() {
+            return Err(invalid("the parent instance id must not be empty"));
+        }
+        if self.parent_instance_id == instance_id {
+            return Err(invalid("a run cannot be its own parent"));
+        }
+        if !PARENT_CLOSE_POLICIES.contains(&self.parent_close_policy.as_str()) {
+            return Err(CoreError::ValidationError {
+                field: "parentClosePolicy".into(),
+                message: "the parent-close policy must be cancel or leave_running".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// How a child admitted by `control:start` ended without ever launching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalOutcomeKind {
+    /// Its admission expired or was refused before a launch.
+    NotStarted,
+    /// It was cancelled while still in admission.
+    Cancelled,
+}
+
+impl ExternalOutcomeKind {
+    /// Storage spelling (`not_started`, `cancelled`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parse the storage spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "not_started" => Some(Self::NotStarted),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// The fenced outcome of a child that never launched: the host publishes it
+/// once, and only while no instance row exists for the id. The row a launch
+/// writes and this outcome exclude each other (see
+/// [`Persistence::publish_external_outcome`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalOutcome {
+    /// The child's instance id.
+    pub instance_id: String,
+    /// The child's tenant.
+    pub tenant_id: String,
+    /// The run that started it.
+    pub parent_instance_id: String,
+    /// `not_started` or `cancelled`.
+    pub outcome: ExternalOutcomeKind,
+    /// Why, when known (the admission's terminal or cancel reason).
+    pub reason: Option<String>,
+    /// When `control:start` admitted it.
+    pub admitted_at: DateTime<Utc>,
+    /// The workflow it would have run.
+    pub workflow_id: Option<String>,
+    /// The resolved workflow version.
+    pub workflow_version: Option<i32>,
+    /// Its per-parent run label.
+    pub run_label: Option<String>,
+}
+
+/// A published [`ExternalOutcome`] and when it was published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalOutcomeRecord {
+    /// The outcome as published (the first publication wins).
+    pub outcome: ExternalOutcome,
+    /// When it was published; retention ages it from here.
+    pub published_at: DateTime<Utc>,
+}
+
+/// What [`Persistence::publish_external_outcome`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// This call published the outcome.
+    Published,
+    /// An outcome for the id was already published; it stands unchanged.
+    AlreadyPublished,
+    /// The id has an instance row: the launch won, and nothing was written.
+    Launched,
+}
+
+/// What a parked run can be woken by, besides its deadline: the custom
+/// signals it waits on and the instance waits
+/// ([`waits::InstanceWaits`]) it registered.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParkTargets<'a> {
+    /// Signal ids of a [`crate::lifecycle::ParkReason::Signal`] park.
+    pub signal_ids: &'a [String],
+    /// Wait ids of a [`crate::lifecycle::ParkReason::Instances`] park.
+    pub wait_ids: &'a [String],
+}
+
+/// Longest external-outcome reason a backend stores.
+pub const MAX_EXTERNAL_OUTCOME_REASON_BYTES: usize = 1024;
+
+impl ExternalOutcome {
+    /// Reject an outcome no backend may store.
+    pub fn validate(&self) -> Result<(), CoreError> {
+        let invalid = |field: &str, message: &str| CoreError::ValidationError {
+            field: field.into(),
+            message: message.into(),
+        };
+        if self.instance_id.trim().is_empty() || self.tenant_id.trim().is_empty() {
+            return Err(invalid("instanceId", "the instance and tenant must be set"));
+        }
+        if self.parent_instance_id.trim().is_empty() || self.parent_instance_id == self.instance_id
+        {
+            return Err(invalid(
+                "parentInstanceId",
+                "an external outcome needs another run as its parent",
+            ));
+        }
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > MAX_EXTERNAL_OUTCOME_REASON_BYTES)
+        {
+            return Err(invalid(
+                "reason",
+                "the outcome reason must be at most 1024 bytes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Where a retention pass has read up to: the last terminal instance it saw,
+/// in `(finished_at, instance_id)` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionCursor {
+    /// `finished_at` of the last row read.
+    pub finished_at: DateTime<Utc>,
+    /// Its instance id (ties broken bytewise).
+    pub instance_id: String,
+}
+
+/// One page of a retention pass over terminal instances.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetentionPage {
+    /// Terminal instances past retention that may be deleted.
+    pub eligible: Vec<String>,
+    /// Terminal children past their own retention that stay because their
+    /// parent is not terminal, or finished too recently.
+    pub pinned: u64,
+    /// Where the next page starts; `None` when the pass is done.
+    pub next: Option<RetentionCursor>,
+}
+
+/// One page of a prune pass over pinned terminal children.
+///
+/// See [`Persistence::prune_pinned_terminal`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrunePage {
+    /// Children on this page that had anything left to prune. A child pruned
+    /// by an earlier pass is read again but not counted, so a rerun reports 0.
+    pub pruned: u64,
+    /// Where the next page starts; `None` when the pass is done.
+    pub next: Option<RetentionCursor>,
 }
 
 /// Checkpoint record from the persistence layer.
@@ -146,6 +351,9 @@ pub struct CancelledInstance {
     /// Tenant to notify when releasing execution admission.
     pub tenant_id: String,
 }
+
+/// Instance whose pending pause was applied without a running guest.
+pub type PausedInstance = CancelledInstance;
 
 /// Pending custom signal scoped to a specific checkpoint.
 #[derive(Debug, Clone)]
@@ -468,6 +676,24 @@ pub trait Persistence: Send + Sync {
         None
     }
 
+    /// Optional receipts of control mutations. Control fails closed without
+    /// them rather than mutating without replay safety.
+    fn control_receipts(&self) -> Option<&dyn control_receipts::ControlReceipts> {
+        None
+    }
+
+    /// Optional durable instance waits. A `WaitForInstances` step fails
+    /// closed without them.
+    fn instance_waits(&self) -> Option<&dyn waits::InstanceWaits> {
+        None
+    }
+
+    /// Optional per-operation continuations of suspending agent capabilities.
+    /// Typed agent suspension fails closed without them.
+    fn agent_continuations(&self) -> Option<&dyn continuations::AgentContinuations> {
+        None
+    }
+
     /// Insert a new instance row for `instance_id`, owned by `tenant_id`, in
     /// its initial pending state.
     ///
@@ -523,6 +749,65 @@ pub trait Persistence: Send + Sync {
             self.store_instance_input(instance_id, input).await?;
         }
         Ok(true)
+    }
+
+    /// Atomically register a child of `parent.parent_instance_id`, like
+    /// [`Self::try_register_instance_with_label`] plus the parent link.
+    ///
+    /// The parent must be a run of the same tenant; anything else is a
+    /// `ValidationError` on `parentInstanceId` and writes nothing, so a
+    /// child can never hang off another tenant's run. `Ok(false)` when the
+    /// id is already taken (the existing row is not touched).
+    ///
+    /// Backends without parent links refuse every child.
+    async fn try_register_child_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+        parent: &ParentLink,
+    ) -> Result<bool, CoreError> {
+        let _ = (instance_id, tenant_id, input, run_label, parent);
+        Err(CoreError::ValidationError {
+            field: "parentInstanceId".into(),
+            message: "This persistence backend does not support parent links".into(),
+        })
+    }
+
+    /// Publish the outcome of a child that never launched, fenced against its
+    /// launch.
+    ///
+    /// Under the same per-instance fence that
+    /// [`Self::try_register_child_instance`] (and any host path that writes a
+    /// child's instance row) takes, in one step: an existing instance row
+    /// wins and nothing is written ([`PublishOutcome::Launched`]); else the
+    /// first outcome for the id is stored ([`PublishOutcome::Published`]) and
+    /// later ones leave it unchanged ([`PublishOutcome::AlreadyPublished`]).
+    /// A launch that follows a published outcome is refused, so an id never
+    /// has both an instance row and an outcome.
+    ///
+    /// Backends without external outcomes refuse every publication.
+    async fn publish_external_outcome(
+        &self,
+        outcome: &ExternalOutcome,
+    ) -> Result<PublishOutcome, CoreError> {
+        let _ = outcome;
+        Err(CoreError::ValidationError {
+            field: "instanceId".into(),
+            message: "This persistence backend does not support external outcomes".into(),
+        })
+    }
+
+    /// The published outcome of `instance_id` in `tenant_id`, if any. A
+    /// foreign or unknown id is `None`.
+    async fn get_external_outcome(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<ExternalOutcomeRecord>, CoreError> {
+        let _ = (tenant_id, instance_id);
+        Ok(None)
     }
 
     /// Read an instance's full row, launch input included.
@@ -806,6 +1091,36 @@ pub trait Persistence: Send + Sync {
         self.park_instance(instance_id, request).await
     }
 
+    /// Park with every target that can wake this execution, in one step:
+    /// [`Self::park_instance_on_signals`] for `targets.signal_ids`, plus the
+    /// instance waits `targets.wait_ids` of a
+    /// [`crate::lifecycle::ParkReason::Instances`] park.
+    ///
+    /// In the park's own transaction a backend with instance waits evaluates
+    /// each wait (persisting a resolution the first time) and schedules an
+    /// immediate wake when one already resolved, is closed or is missing, so
+    /// a target that finished between the wait's registration and this park
+    /// is never lost. Later, a target finishing wakes the parked run when
+    /// its wait holds; a paused run (no suspension reason) is never woken.
+    ///
+    /// Without wait ids this is exactly [`Self::park_instance_on_signals`];
+    /// backends without instance waits refuse wait ids.
+    async fn park_instance_on_targets(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+        targets: ParkTargets<'_>,
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        if !targets.wait_ids.is_empty() {
+            return Err(CoreError::PersistenceError {
+                operation: "park_instance_on_targets".into(),
+                details: "instance waits are not implemented by this backend".into(),
+            });
+        }
+        self.park_instance_on_signals(instance_id, request, targets.signal_ids)
+            .await
+    }
+
     /// Atomically cancel suspended instances with pending cancel commands, clear
     /// their wake deadlines, and acknowledge those exact commands. Returns only
     /// newly cancelled instances. Active runs and terminal instances are untouched.
@@ -816,6 +1131,24 @@ pub trait Persistence: Send + Sync {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<CancelledInstance>, CoreError>;
+
+    /// Atomically pause suspended instances with pending pause commands
+    /// (decision D4: a parked run pauses immediately): acknowledge the exact
+    /// command, keep the instance suspended, and clear its suspension reason
+    /// and wake, so no timer or signal relaunches it until an explicit resume.
+    /// Returns only newly paused instances; running and terminal instances
+    /// keep their command. `Some(id)` targets an API request; `None` recovers
+    /// interrupted delivery in bounded batches.
+    async fn pause_suspended_instances(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: i64,
+    ) -> Result<Vec<PausedInstance>, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "pause_suspended_instances".into(),
+            details: "parked pause is not implemented by this backend".into(),
+        })
+    }
 
     /// Replace the retained value at an instance/checkpoint address. Last write
     /// wins; every successful write receives a fresh signal ID, even for identical
@@ -1159,17 +1492,73 @@ pub trait Persistence: Send + Sync {
     // Data Retention / Cleanup (optional - default implementations no-op)
     // ========================================================================
 
-    /// Get terminal instance IDs older than the specified timestamp.
+    /// One page of a retention pass: up to `limit` terminal instances
+    /// (completed, failed, cancelled) that finished before `older_than`,
+    /// strictly after `after`, in `(finished_at, instance_id)` order.
     ///
-    /// Only returns instances with terminal status: completed, failed, cancelled.
-    /// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
+    /// Each row read is either eligible for deletion or pinned. A child
+    /// (`parent` set) is pinned while its parent exists and is not terminal,
+    /// or finished at or after `older_than`: a finished child stays readable
+    /// until its parent is terminal, and its age counts from the later of
+    /// the two finishes. Pinning is one level deep (a grandchild depends on
+    /// its own parent only) and a missing parent counts as terminal.
+    ///
+    /// The caller starts a pass with `after = None` and follows
+    /// [`RetentionPage::next`] until it is `None`, so pinned rows are read
+    /// once per pass rather than once per page.
     async fn get_terminal_instances_older_than(
         &self,
         _older_than: DateTime<Utc>,
+        _after: Option<&RetentionCursor>,
         _limit: i64,
-    ) -> Result<Vec<String>, CoreError> {
-        // Default: empty list (no cleanup supported)
-        Ok(vec![])
+    ) -> Result<RetentionPage, CoreError> {
+        // Default: nothing to sweep (no cleanup supported)
+        Ok(RetentionPage::default())
+    }
+
+    /// One page of a prune pass: strip the bulky, no-longer-needed data of
+    /// terminal children that retention would already have deleted were they
+    /// not pinned, and keep their `instances` row and outcome.
+    ///
+    /// A child is on the page when it is terminal, finished before
+    /// `older_than` by its own `finished_at`, and its parent (same tenant)
+    /// exists and is not terminal: the inverse of the retention pin in
+    /// [`Self::get_terminal_instances_older_than`], narrowed to live parents.
+    /// A child of a recently finished parent is left alone; retention deletes
+    /// it outright soon.
+    ///
+    /// Pruning drops the child's checkpoints, lifecycle and custom signals,
+    /// closed input requests, input park, invocation lease and attempts, and
+    /// clears its `input` and `stderr`. It keeps the row itself (status,
+    /// output, error, termination reason, parent link, run label, metadata),
+    /// its events, and its accepted input requests, whose receipts a replayed
+    /// `send-signal` still returns; so `get` and `wait` read the same result
+    /// before and after.
+    ///
+    /// Up to `limit` children strictly after `after`, in `(finished_at,
+    /// instance_id)` order, one transaction per page. The caller starts with
+    /// `after = None` and follows [`PrunePage::next`] until it is `None`.
+    /// Pruning an already pruned child changes nothing.
+    async fn prune_pinned_terminal(
+        &self,
+        _older_than: DateTime<Utc>,
+        _after: Option<&RetentionCursor>,
+        _limit: i64,
+    ) -> Result<PrunePage, CoreError> {
+        Ok(PrunePage::default())
+    }
+
+    /// Delete up to `limit` external outcomes published before `older_than`
+    /// whose parent is terminal and finished before `older_than`, or gone:
+    /// the same pin as [`Self::get_terminal_instances_older_than`], aged by
+    /// `published_at`. Returns how many were removed; callers loop until it
+    /// is below `limit`.
+    async fn delete_external_outcomes_older_than(
+        &self,
+        _older_than: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<u64, CoreError> {
+        Ok(0)
     }
 
     /// Delete instances by their IDs.

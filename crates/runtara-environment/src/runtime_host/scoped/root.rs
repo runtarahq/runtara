@@ -98,6 +98,10 @@ impl RuntimeHost for ScopedRootRuntime {
         self.owner.ensure_open()?;
         self.owner.root.load_input().await
     }
+    fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
+        self.owner.root.trusted_launch()
+    }
+
     fn instance_id(&self) -> Result<String, String> {
         self.owner.ensure_open()?;
         self.owner.root.instance_id()

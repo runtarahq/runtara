@@ -73,7 +73,10 @@ export function DebugStepInspector() {
   const stepName = (selectedNode.data as any)?.name || selectedNodeId;
   const stepType = (selectedNode.data as any)?.stepType || '';
   const isCurrentBreakpoint = breakpointHit?.stepId === selectedNodeId;
-  const isSuspendedStep = nodeStatus?.status === 'suspended';
+  // Only the step the run stopped at carries the breakpoint marker; a step
+  // parked by a waiting run is `suspended` too but is not at a breakpoint.
+  const isSuspendedStep =
+    isCurrentBreakpoint && nodeStatus?.status === 'suspended';
 
   // Determine what inputs/outputs to show:
   // - Current breakpoint step: inputs from breakpointHit.inputs (resolved values about to be processed)

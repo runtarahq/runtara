@@ -35,6 +35,7 @@ export async function getAllExecutions(
       size: pageSize,
       search: filters.search || undefined,
       runLabel: filters.runLabel || undefined,
+      parentInstanceId: filters.parentInstanceId || undefined,
       workflowId: filters.workflowId || undefined,
       status: filters.status || undefined,
       createdFrom: filters.createdFrom || undefined,
@@ -70,6 +71,8 @@ export async function getAllExecutions(
       maxMemoryMb: instance.maxMemoryMb ?? null,
       tags: instance.tags || [],
       hasPendingInput: instance.hasPendingInput ?? false,
+      suspensionReason: instance.suspensionReason ?? null,
+      parentInstanceId: instance.parentInstanceId ?? null,
     })
   );
 

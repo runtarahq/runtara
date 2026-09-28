@@ -361,6 +361,7 @@ async fn prepared_root_parent_controls_cancellation_through_real_launcher() {
     let root = Component::new(fx.executor.engine(), parent_wat("")).unwrap();
     let package = crate::precompile::CompiledWorkflowPackage {
         invocations: None,
+        control_importers: Default::default(),
         root,
         artifacts: BTreeMap::from([(
             "compiled-child".into(),
@@ -636,4 +637,115 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
         assert!(result.is_err(), "accepted malformed {case}");
         assert_eq!(fx.signals.initialized.load(Ordering::Acquire), 0);
     }
+}
+
+/// S0.3: the lifecycle `wake` ABI is frozen. An artifact whose
+/// `lifecycle@0.2.0` wake grew a fourth case (say `instances(string)` for
+/// instance waits) is a different type: Wasmtime type-checks variants case for
+/// case, so the host's three-case `WorkflowWake` cannot bind its `invoke`, and
+/// every deployed host would refuse such an artifact. Typed agent suspension
+/// therefore parks through the existing `at` wake and attaches instance waits
+/// host-side instead of changing the lifecycle.
+#[tokio::test]
+async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
+    #[derive(
+        Debug,
+        wasmtime::component::ComponentType,
+        wasmtime::component::Lift,
+        wasmtime::component::Lower,
+    )]
+    #[component(variant)]
+    enum FourCaseWake {
+        #[component(name = "at")]
+        At(u64),
+        #[component(name = "on-signal")]
+        OnSignal(crate::lifecycle::SignalWait),
+        #[component(name = "on-resume")]
+        OnResume,
+        #[component(name = "instances")]
+        Instances(String),
+    }
+    #[derive(
+        Debug,
+        wasmtime::component::ComponentType,
+        wasmtime::component::Lift,
+        wasmtime::component::Lower,
+    )]
+    #[component(variant)]
+    enum FourCaseOutcome {
+        #[component(name = "completed")]
+        Completed(Vec<u8>),
+        #[component(name = "suspended")]
+        Suspended(Vec<FourCaseWake>),
+    }
+
+    let source = format!(
+        r#"(component
+      (core module $m
+        {MEMORY}
+        (func (export "invoke") (param i32 i32) (result i32)
+          (i32.store (i32.const 2056) (i32.const 1))
+          (i32.store (i32.const 2060) (i32.const 4096))
+          (i32.store (i32.const 2064) (i32.const 1))
+          (i32.store8 (i32.const 4096) (i32.const 3))
+          (i32.store (i32.const 4104) (i32.const 4200))
+          (i32.store (i32.const 4108) (i32.const 1))
+          i32.const 2048))
+      (core instance $m (instantiate $m))
+      {ERROR_TYPE}
+      (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+        (case "instances" string)))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
+      (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+        (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
+      (instance $lifecycle (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+        (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+      (export "{}" (instance $lifecycle)))"#,
+        runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME
+    );
+    let engine = crate::engine::build_engine(&Default::default()).unwrap();
+    let component = Component::new(&engine, source).expect("a valid four-case component");
+    let mut store = Store::new(&engine, ());
+    // The engine interrupts on epochs; no ticker runs here.
+    store.set_epoch_deadline(1 << 40);
+    let instance = wasmtime::component::Linker::<()>::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await
+        .unwrap();
+    let interface = instance
+        .get_export_index(
+            &mut store,
+            None,
+            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME,
+        )
+        .unwrap();
+    let invoke = instance
+        .get_export_index(&mut store, Some(&interface), "invoke")
+        .unwrap();
+
+    let Err(error) = instance.get_typed_func::<(Vec<u8>,), (
+        Result<crate::lifecycle::WorkflowOutcome, crate::lifecycle::WorkflowErrorInfo>,
+    )>(&mut store, invoke) else {
+        panic!("the three-case host wake must not bind a four-case artifact");
+    };
+    let reason = format!("{error:#}");
+    assert!(
+        reason.contains("case") || reason.contains("variant"),
+        "the mismatch is the wake variant's cases: {reason}"
+    );
+
+    // Control: the same export binds a four-case mirror, so the refusal above
+    // is the wake shape and nothing else.
+    let four_case = instance
+        .get_typed_func::<
+            (Vec<u8>,),
+            (Result<FourCaseOutcome, crate::lifecycle::WorkflowErrorInfo>,),
+        >(&mut store, invoke)
+        .expect("a four-case host type binds");
+    let (result,) = four_case.call_async(&mut store, (vec![],)).await.unwrap();
+    assert!(matches!(
+        result,
+        Ok(FourCaseOutcome::Suspended(wakes)) if matches!(wakes.as_slice(), [FourCaseWake::Instances(_)])
+    ));
 }

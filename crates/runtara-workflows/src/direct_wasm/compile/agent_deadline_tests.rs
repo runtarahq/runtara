@@ -17,6 +17,17 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// A harness hang guard, never an asserted budget. A host callback that waits
+/// for a fixture event asserts order by blocking: the guest cannot go on until
+/// the event happens, so the guard only ends a broken run. It stays below the
+/// invocation's own hang guard in `invoke_with_connections`.
+const FIXTURE_WATCHDOG: Duration = Duration::from_secs(10);
+
+/// A step budget that a cold component start and first request must fit in
+/// under a loaded parallel suite. Tests using it assert what the budget
+/// cancels, or which scope owns it, never its magnitude.
+const PENDING_BUDGET_MS: u64 = 3_000;
+
 #[path = "deadline_cleanup_tests.rs"]
 mod cleanup;
 
@@ -34,6 +45,12 @@ mod embed_tool;
 
 #[path = "nested_suspend_tests.rs"]
 mod nested_suspend;
+
+#[path = "agent_suspend_tests.rs"]
+mod agent_suspend;
+
+#[path = "reserved_code_tests.rs"]
+mod reserved_code;
 
 struct CheckpointFault {
     pattern: String,
@@ -83,9 +100,22 @@ struct Host {
     /// encodes its whole call path, so this also shows that replay rebuilds
     /// the same route after a park.
     input_keys: Mutex<Vec<String>>,
+    /// Typed agent suspension continuations by `(op_hash, attempt)`, standing
+    /// in for the durable continuation store.
+    continuations: Mutex<HashMap<(String, u32), Vec<u8>>>,
+    /// Every `operation_release`, in order.
+    released_operations: Mutex<Vec<String>>,
+    /// Every `operation_wait_close`, in order.
+    closed_waits: Mutex<Vec<String>>,
+    /// When the run reported completion. Under a loaded suite the invocation
+    /// can return seconds after this, so budget timing is measured here.
+    completed_at: Mutex<Option<Instant>>,
 }
 impl Host {
     fn new() -> Self {
+        // Before `started`: a host network filter's once-per-process
+        // first-flow stall must not be charged to any budget measured here.
+        outbound_fixture::warm_up_process_network();
         Self {
             database: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
@@ -119,6 +149,10 @@ impl Host {
             suspend_after_input_poll: AtomicUsize::new(usize::MAX),
             cancel_after_input_poll: AtomicUsize::new(usize::MAX),
             input_keys: Mutex::new(Vec::new()),
+            continuations: Mutex::new(HashMap::new()),
+            released_operations: Mutex::new(Vec::new()),
+            closed_waits: Mutex::new(Vec::new()),
+            completed_at: Mutex::new(None),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -158,12 +192,13 @@ impl RuntimeHost for Host {
         Ok("agent-deadline".into())
     }
     async fn complete(&self, _: Vec<u8>) -> Result<(), String> {
+        *self.completed_at.lock().unwrap() = Some(Instant::now());
         Ok(())
     }
     async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
         let cleanup = self.failure_cleanup.lock().unwrap().clone();
         if let Some(cleanup) = cleanup {
-            tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
+            tokio::time::timeout(FIXTURE_WATCHDOG, cleanup.notified())
                 .await
                 .map_err(|_| "storage failure preceded peer cleanup")?;
             self.failure_observed.store(true, Ordering::SeqCst);
@@ -188,7 +223,7 @@ impl RuntimeHost for Host {
         {
             let cleanup = self.recovery_cleanup.lock().unwrap().clone();
             if let Some(cleanup) = cleanup {
-                tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
+                tokio::time::timeout(FIXTURE_WATCHDOG, cleanup.notified())
                     .await
                     .map_err(|_| "Embed recovery preceded child cleanup")?;
                 self.recovery_observed.store(true, Ordering::SeqCst);
@@ -336,7 +371,7 @@ impl RuntimeHost for Host {
         }
         let cleanup = self.cancel_cleanup.lock().unwrap().clone();
         if let Some(cleanup) = cleanup {
-            tokio::time::timeout(Duration::from_secs(2), cleanup.notified())
+            tokio::time::timeout(FIXTURE_WATCHDOG, cleanup.notified())
                 .await
                 .map_err(|_| "cancellation acknowledgement preceded pending call cleanup")?;
         }
@@ -360,6 +395,43 @@ impl RuntimeHost for Host {
     }
     async fn durable_sleep_checkpoint(&self, _: String, _: Vec<u8>, _: u64) -> Result<(), String> {
         Err("lifecycle retry must park, not sleep in the host".into())
+    }
+    async fn operation_continuation_load(
+        &self,
+        op_hash: String,
+        attempt: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .continuations
+            .lock()
+            .unwrap()
+            .get(&(op_hash, attempt))
+            .cloned())
+    }
+    async fn operation_continuation_store(
+        &self,
+        op_hash: String,
+        attempt: u32,
+        state: Vec<u8>,
+    ) -> Result<(), String> {
+        // One continuation per operation, like the durable store: a later
+        // attempt's replaces an earlier one's.
+        let mut continuations = self.continuations.lock().unwrap();
+        continuations.retain(|(stored, _), _| *stored != op_hash);
+        continuations.insert((op_hash, attempt), state);
+        Ok(())
+    }
+    async fn operation_wait_close(&self, op_hash: String) -> Result<(), String> {
+        self.closed_waits.lock().unwrap().push(op_hash);
+        Ok(())
+    }
+    async fn operation_release(&self, op_hash: String) -> Result<(), String> {
+        self.continuations
+            .lock()
+            .unwrap()
+            .retain(|(stored, _), _| *stored != op_hash);
+        self.released_operations.lock().unwrap().push(op_hash);
+        Ok(())
     }
     fn now_ms(&self) -> Result<u64, String> {
         let clock = self.clock_override.load(Ordering::SeqCst);
@@ -728,7 +800,9 @@ async fn invoke_with_connections(
                 trusted_tenant: Some("fixture".into()),
                 env: HashMap::new(),
                 stderr: None,
-                timeout: Duration::from_secs(5),
+                // A hang guard only: no test here expects the run to time out,
+                // and the longest emitted budget (8s) must end first.
+                timeout: Duration::from_secs(15),
                 cancel: None,
                 limits: Default::default(),
                 runtime: Some(host),
@@ -739,7 +813,7 @@ async fn invoke_with_connections(
         .exit)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Response {
     Hang,
     Ok,
@@ -775,6 +849,8 @@ async fn run_shaped(
     let server_host = host.clone();
     let first_request = Arc::new(Mutex::new(None));
     let first = first_request.clone();
+    let retry_request = Arc::new(Mutex::new(None));
+    let retry = retry_request.clone();
     let req = requests.clone();
     let eof = closed.clone();
     let server = tokio::spawn(async move {
@@ -792,6 +868,9 @@ async fn run_shaped(
                 "Agent invoked after cancelled preparation"
             );
             let attempt = req.fetch_add(1, Ordering::SeqCst);
+            if attempt == 1 {
+                *retry.lock().unwrap() = Some(Instant::now());
+            }
             if attempt == 0 {
                 *first.lock().unwrap() = Some(Instant::now());
                 if matches!(
@@ -864,7 +943,7 @@ async fn run_shaped(
             executor.execute_invoke(&pre, WorkflowRunSpec {
                 trusted_instance: None,
                 trusted_tenant: Some("fixture".into()), env: HashMap::new(), stderr: None,
-                timeout: Duration::from_secs(5), cancel: None, limits: Default::default(), runtime: Some(host.clone()),
+                timeout: Duration::from_secs(15), cancel: None, limits: Default::default(), runtime: Some(host.clone()),
             }, b"{}".to_vec()).await.exit
         } else { invoke(&compiled, host.clone()).await? };
         if matches!(response, Response::RootCancel) {
@@ -874,7 +953,7 @@ async fn run_shaped(
             );
             assert!(host.acknowledged.load(Ordering::SeqCst));
             assert_eq!(requests.load(Ordering::SeqCst), 1);
-            tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::timeout(FIXTURE_WATCHDOG, async {
                 while closed.load(Ordering::SeqCst) != 1 {
                     tokio::task::yield_now().await;
                 }
@@ -1013,17 +1092,45 @@ async fn run_shaped(
             response,
             Response::RetryThenHang | Response::RollbackThenHang
         ) {
-            let elapsed = first_request.lock().unwrap().unwrap().elapsed();
+            let budget = Duration::from_millis(timeout);
+            assert!(first_request.lock().unwrap().is_some());
+            // The expiry is observed when the recovered run reports completion,
+            // which follows the pending call's cleanup. The invocation's own
+            // return can lag that by seconds of host teardown under a loaded
+            // suite, and would charge that teardown to the budget.
+            let completed_at = host
+                .completed_at
+                .lock()
+                .unwrap()
+                .expect("the recovered run reported completion");
             // The budget starts before component initialization and the first
             // provider request. Measure its lower bound from invocation entry.
-            let active_elapsed = host.first_invocation_start.lock().unwrap().expect("invocation start recorded").elapsed();
-            assert!(
-                active_elapsed >= Duration::from_millis(1_700),
-                "wall clock jump shortened a live budget: {active_elapsed:?}"
+            let active_elapsed = completed_at.duration_since(
+                host.first_invocation_start
+                    .lock()
+                    .unwrap()
+                    .expect("invocation start recorded"),
             );
             assert!(
-                elapsed < Duration::from_millis(2_700),
-                "a retry restarted the two-second budget: {elapsed:?}"
+                active_elapsed >= budget.mul_f64(0.85),
+                "wall clock jump shortened a live budget: {active_elapsed:?}"
+            );
+            // A budget restarted by the retry could not expire until nearly a
+            // whole budget after the retry's request (less the request's own
+            // latency), so ending sooner proves it was not restarted. The
+            // retry delay plus initialization is the slack left for a late
+            // timer under a loaded suite.
+            let retried_at = retry_request
+                .lock()
+                .unwrap()
+                .expect("the retry reached the provider");
+            let since_retry = completed_at.duration_since(retried_at);
+            let backoff = retried_at.duration_since(first_request.lock().unwrap().unwrap());
+            assert!(
+                since_retry < budget - Duration::from_millis(250),
+                "{response:?}: a retry restarted the {budget:?} budget: {since_retry:?} after \
+                 the retry, which came {backoff:?} after the first attempt; {active_elapsed:?} \
+                 since invocation"
             );
         }
         if !durable && !matches!(shape, Shape::InheritedWhile { .. }) {
@@ -1047,7 +1154,7 @@ async fn run_shaped(
             Response::Hang | Response::RetryThenHang | Response::RollbackThenHang
         ) && timeout != 0
         {
-            tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::timeout(FIXTURE_WATCHDOG, async {
                 while closed.load(Ordering::SeqCst) != requests.load(Ordering::SeqCst) {
                     tokio::task::yield_now().await;
                 }
@@ -1071,7 +1178,7 @@ async fn agent_deadline_cancels_pending_http_before_recovery() -> anyhow::Result
         for retries in [0, 5] {
             // Leave room for first component activation before requiring an
             // observed pending request. The zero-budget case is tested below.
-            run(Response::Hang, 1_000, durable, retries, 60_000).await?;
+            run(Response::Hang, PENDING_BUDGET_MS, durable, retries, 60_000).await?;
         }
     }
     Ok(())
@@ -1088,7 +1195,7 @@ async fn agent_deadline_includes_retry_backoff_and_durable_replay() -> anyhow::R
     for durable in [false, true] {
         run(
             Response::Error,
-            if durable { 60_000 } else { 1_000 },
+            if durable { 60_000 } else { PENDING_BUDGET_MS },
             durable,
             5,
             60_000,
@@ -1109,8 +1216,12 @@ async fn agent_deadline_success_and_saturating_budget_preserve_output() -> anyho
 
 #[tokio::test]
 async fn agent_deadline_covers_later_attempt_without_resetting_budget() -> anyhow::Result<()> {
+    // A long retry delay inside the budget keeps a restarted budget far from
+    // a correct one, so a loaded machine's late timer cannot pass for either.
+    // The budget left after the delay (5s) absorbs a slow component start and
+    // first request, which must fit before the retry can reach the provider.
     for response in [Response::RetryThenHang, Response::RollbackThenHang] {
-        run(response, 2_000, false, 5, 1_000).await?;
+        run(response, 8_000, false, 5, 3_000).await?;
     }
     Ok(())
 }
@@ -1129,9 +1240,9 @@ async fn agent_deadline_published_workflows_use_standard_clock_without_runtime()
     // Include cold callable-component startup while still reaching pending I/O.
     for depth in [1, 2] {
         for (response, timeout, retries, delay) in [
-            (Response::Hang, 1_000, 5, 60_000),
+            (Response::Hang, PENDING_BUDGET_MS, 5, 60_000),
             (Response::Hang, 0, 5, 60_000),
-            (Response::Error, 1_000, 5, 60_000),
+            (Response::Error, PENDING_BUDGET_MS, 5, 60_000),
             (Response::Ok, u64::MAX, 0, 0),
             (Response::RootCancel, 60_000, 5, 60_000),
         ] {
@@ -1211,7 +1322,15 @@ async fn agent_deadline_inventory_includes_inline_nested_definitions() -> anyhow
         for response in [Response::Hang, Response::Ok, Response::Error] {
             // Include cold component activation while still requiring the
             // first request to enter before testing its timeout/error path.
-            run_shaped(response, 1_000, false, 0, 0, Shape::InlineWhile(depth)).await?;
+            run_shaped(
+                response,
+                PENDING_BUDGET_MS,
+                false,
+                0,
+                0,
+                Shape::InlineWhile(depth),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -1219,17 +1338,20 @@ async fn agent_deadline_inventory_includes_inline_nested_definitions() -> anyhow
 
 #[tokio::test]
 async fn agent_deadline_inherited_while_owns_pending_child_cancellation() -> anyhow::Result<()> {
+    // The short budget must still reach the provider, and it starts after the
+    // outer one, so the outer budget exceeds it by a whole short budget.
+    let (short, outer) = (PENDING_BUDGET_MS, 2 * PENDING_BUDGET_MS);
     for durable in [false, true] {
         for (depth, inner, agent) in [
             (1, None, None),
             (2, None, None),
             (2, Some(60_000), Some(60_000)),
-            (2, Some(50), Some(60_000)),
-            (2, Some(60_000), Some(50)),
+            (2, Some(short), Some(60_000)),
+            (2, Some(60_000), Some(short)),
         ] {
             run_shaped(
                 Response::Hang,
-                200,
+                outer,
                 durable,
                 3,
                 60_000,
@@ -1256,7 +1378,7 @@ async fn agent_deadline_inherited_timeout_bypasses_split_aggregation_and_retry()
                     Response::Hang,
                     // Leave startup headroom so this proves cancellation of
                     // pending I/O, not expiry before the first request.
-                    1_000,
+                    PENDING_BUDGET_MS,
                     durable,
                     3,
                     60_000,
@@ -1296,14 +1418,14 @@ async fn agent_deadline_inherited_scopes_preserve_success_error_and_root_cancel(
         }
         run_shaped(
             Response::Hang,
-            200,
+            2 * PENDING_BUDGET_MS,
             durable,
             0,
             60_000,
             Shape::InheritedWhile {
                 depth: 2,
                 inner: Some(60_000),
-                agent: Some(50),
+                agent: Some(PENDING_BUDGET_MS),
                 split: None,
             },
         )
@@ -1391,7 +1513,15 @@ async fn agent_deadline_interrupts_connection_preparation_without_invocation() -
 {
     for durable in [false, true] {
         {
-            run_shaped(Response::Hang, 500, durable, 3, 0, Shape::Preparation).await?;
+            run_shaped(
+                Response::Hang,
+                PENDING_BUDGET_MS,
+                durable,
+                3,
+                0,
+                Shape::Preparation,
+            )
+            .await?;
             run_shaped(
                 Response::RootCancel,
                 5_000,

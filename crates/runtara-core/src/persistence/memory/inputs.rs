@@ -8,6 +8,8 @@ pub(super) struct InputPark {
     /// Also set when a timer claims this park. Further responses must not
     /// shorten its launch lease or failed-launch retry deadline.
     pub wake_scheduled: bool,
+    /// Instance waits of an instances park.
+    pub waits: Vec<String>,
 }
 
 fn wake_candidates(store: &Store, instance: &str, all_accepted: bool) -> Vec<(String, String)> {

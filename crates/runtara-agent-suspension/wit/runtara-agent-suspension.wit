@@ -1,0 +1,62 @@
+// Typed agent suspension.
+//
+// A capability declared `suspends` may answer an invocation with a suspension
+// instead of a result: the host keeps `state` as the operation's continuation
+// (at most 64 KiB), parks the calling workflow runner-free, and re-invokes the
+// capability when ANY wake fires or the step deadline passes. A suspending
+// agent exports `runtara:agent-<id>/suspendable@0.4.0`:
+//
+//     interface suspendable {
+//         use runtara:agent/types@0.4.0.{error-info};
+//         use runtara:agent-suspension/types@0.1.0.{outcome};
+//         invoke: async func(capability-id: string, input: list<u8>)
+//             -> result<outcome, error-info>;
+//     }
+//
+// beside its ordinary `capabilities` export, whose `invoke` refuses a
+// suspending capability. `suspendable.invoke` deliberately takes no
+// continuation argument: the workflow logic that calls it never sees one. The
+// agent reads it through `context`.
+//
+// Released WIT is never edited, only versioned.
+package runtara:agent-suspension@0.1.0;
+
+interface types {
+    /// When the host should re-invoke a suspended capability. Wakes form a
+    /// set with re-invoke-on-ANY semantics; the step deadline always applies
+    /// in addition.
+    variant wake {
+        /// Re-invoke at (or after) this wall-clock ms since the Unix epoch.
+        at(u64),
+        /// Re-invoke when the host-owned instance wait with this id settles.
+        instances(string),
+    }
+
+    /// A capability's request to be re-invoked later with `state` as its
+    /// continuation. `wakes` is non-empty.
+    record suspension {
+        wakes: list<wake>,
+        state: list<u8>,
+    }
+
+    /// The success arm of `suspendable.invoke`.
+    variant outcome {
+        /// Terminal output (JSON bytes), exactly like `capabilities.invoke`.
+        completed(list<u8>),
+        /// Park the operation and re-invoke later.
+        suspended(suspension),
+    }
+}
+
+/// Continuation delivery for ordinary suspending agents.
+interface context {
+    /// The state saved by the last suspension of the operation this call runs
+    /// in, or none on its first invocation. The host derives the operation
+    /// from its own execution state, never from guest arguments.
+    continuation: func() -> option<list<u8>>;
+}
+
+/// What an ordinary suspending agent imports.
+world suspending-agent {
+    import context;
+}

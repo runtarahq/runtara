@@ -238,10 +238,30 @@ pub(super) fn emit_agent_plan(
         }
     }
 
-    let invoke = indices
-        .agent_invokes
-        .get(agent_component_id)
-        .expect("direct Agent run plans have matching component imports");
+    // A suspending site calls the type-identical `suspendable` interface of the
+    // same agent instance; every other site calls its standard interface.
+    let suspends = static_data.agent_suspends(agent_id);
+    // An operation-scoped site (suspending or control) runs its invoke inside
+    // `runtara:workflow-operation/scope`, entered with the site's checkpoint
+    // key — durable or not — and left on every path.
+    let scoped = suspends || static_data.agent_operation_scoped(agent_id);
+    debug_assert!(
+        !scoped || memo_slot_ptr_local.is_none(),
+        "operation-scoped sites never run in a parallel window"
+    );
+    debug_assert!(
+        !suspends || (durable_checkpoint && memo_slot_ptr_local.is_none()),
+        "agent_suspend::check_sites admits only durable sequential suspending sites"
+    );
+    let invoke = if suspends {
+        indices.agent_import(
+            agent_component_id,
+            super::core_imports::AgentInterface::Suspendable,
+        )
+    } else {
+        indices.agent_invoke(agent_component_id)
+    }
+    .expect("direct Agent run plans have matching component imports");
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");
@@ -325,6 +345,18 @@ pub(super) fn emit_agent_plan(
                 }));
                 body.instruction(&Instruction::Else);
             }
+            if scoped {
+                // Each attempt is its own continuation: a suspending site
+                // loads the one this attempt saved before its last park.
+                super::agent_suspend::emit_enter(
+                    body,
+                    indices,
+                    static_data,
+                    (route_ptr_local, route_len_local),
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
+                    suspends,
+                );
+            }
             emit_agent_invoke(
                 body,
                 indices,
@@ -342,6 +374,16 @@ pub(super) fn emit_agent_plan(
                     None
                 }),
             );
+            if scoped {
+                super::agent_suspend::emit_entered_end(body);
+                if suspends {
+                    // A suspension parks here without an `::attempt::`
+                    // checkpoint; only a failure reaches the one below.
+                    super::agent_suspend::emit_after_invoke(body, indices, static_data);
+                } else {
+                    super::agent_suspend::emit_exit(body, indices);
+                }
+            }
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
             }
@@ -435,6 +477,27 @@ pub(super) fn emit_agent_plan(
                 }));
                 body.instruction(&Instruction::Else);
             }
+            if scoped {
+                // A non-durable site has no cache key yet: derive the same
+                // checkpoint key the durable path would use.
+                emit_agent_cache_key(
+                    body,
+                    indices,
+                    agent_id,
+                    source_ptr_local,
+                    source_len_local,
+                    route_ptr_local,
+                    route_len_local,
+                );
+                super::agent_suspend::emit_enter(
+                    body,
+                    indices,
+                    static_data,
+                    (route_ptr_local, route_len_local),
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
+                    false,
+                );
+            }
             emit_agent_invoke(
                 body,
                 indices,
@@ -452,6 +515,10 @@ pub(super) fn emit_agent_plan(
                     None
                 }),
             );
+            if scoped {
+                super::agent_suspend::emit_entered_end(body);
+                super::agent_suspend::emit_exit(body, indices);
+            }
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
             }
@@ -667,6 +734,29 @@ pub(super) fn emit_agent_plan(
             );
             body.instruction(&Instruction::End);
         } else {
+            if scoped {
+                if !durable_checkpoint {
+                    // A non-durable site has no cache key yet: derive the
+                    // same checkpoint key the durable path would use.
+                    emit_agent_cache_key(
+                        body,
+                        indices,
+                        agent_id,
+                        source_ptr_local,
+                        source_len_local,
+                        route_ptr_local,
+                        route_len_local,
+                    );
+                }
+                super::agent_suspend::emit_enter(
+                    body,
+                    indices,
+                    static_data,
+                    (route_ptr_local, route_len_local),
+                    None,
+                    suspends,
+                );
+            }
             emit_agent_invoke(
                 body,
                 indices,
@@ -684,6 +774,14 @@ pub(super) fn emit_agent_plan(
                     None
                 }),
             );
+            if scoped {
+                super::agent_suspend::emit_entered_end(body);
+                if suspends {
+                    super::agent_suspend::emit_after_invoke(body, indices, static_data);
+                } else {
+                    super::agent_suspend::emit_exit(body, indices);
+                }
+            }
         }
         super::deadline_scope::propagate(
             body,
@@ -726,6 +824,9 @@ pub(super) fn emit_agent_plan(
             output_ptr_local,
             output_len_local,
         );
+        if suspends {
+            super::agent_suspend::emit_release(body, indices, route_ptr_local, route_len_local);
+        }
         body.instruction(&Instruction::End);
     }
 

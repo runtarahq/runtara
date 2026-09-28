@@ -7,7 +7,9 @@
 //! database, no external toolchain. Agent metadata is read from the
 //! `runtara_agent_*.meta.json` sidecars in the components directory; child
 //! workflows for `EmbedWorkflow` steps (at any nesting depth) are provided as
-//! files via repeatable `--child` flags.
+//! files via repeatable `--child` flags. A parent calling a published
+//! workflow-agent finds it in an `--extra-components-dir`, the CLI's counterpart
+//! of the server's per-tenant staging dir.
 //!
 //! ```text
 //! runtara-compile --workflow flow.json --components-dir <dir> --output ./flow.wasm
@@ -22,7 +24,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use runtara_dsl::agent_meta::AgentCatalog;
+use runtara_dsl::agent_meta::{AgentCatalog, canonical_agent_id};
 use runtara_workflows::ExecutionGraph;
 use runtara_workflows::compile::{
     CompilationInput, DirectWorkflowCompileOptions, compile_workflow_direct,
@@ -50,6 +52,13 @@ OPTIONS:
     --child <id>=<path>      Execution graph for child workflow <id>
                              (repeatable; needed for EmbedWorkflow steps at
                              any nesting depth — children, grandchildren, …)
+    --extra-components-dir <dir>
+                             Extra components directory holding published
+                             workflow-agents (runtara_agent_<slug>.wasm +
+                             .meta.json), the counterpart of the server's
+                             per-tenant staging dir (repeatable). A parent
+                             calling a workflow-agent composes it only from
+                             here, never from --components-dir.
     --output <path>          Copy the composed workflow.wasm here
     --workflow-id <id>       Workflow ID (default: workflow file stem)
     --tenant <id>            Tenant ID, used for the build directory layout
@@ -78,6 +87,10 @@ EXAMPLES:
     runtara-compile --workflow parent.json \
         --child child-wf=child.json --child grandchild-wf=grandchild.json
 
+    # Parent calling a published workflow-agent
+    runtara-compile --workflow parent.json \
+        --extra-components-dir ./published-agents
+
     # Validate only (uses agent metadata from the components dir)
     runtara-compile --workflow my-flow.json --validate
 "#
@@ -88,6 +101,7 @@ struct Args {
     workflow_path: PathBuf,
     components_dir: Option<PathBuf>,
     children: Vec<(String, PathBuf)>,
+    extra_components_dirs: Vec<PathBuf>,
     output_path: Option<PathBuf>,
     workflow_id: Option<String>,
     tenant_id: String,
@@ -106,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
     let mut workflow_path: Option<PathBuf> = None;
     let mut components_dir: Option<PathBuf> = None;
     let mut children: Vec<(String, PathBuf)> = Vec::new();
+    let mut extra_components_dirs: Vec<PathBuf> = Vec::new();
     let mut output_path: Option<PathBuf> = None;
     let mut workflow_id: Option<String> = None;
     let mut tenant_id = "local".to_string();
@@ -147,6 +162,16 @@ fn parse_args() -> Result<Args, String> {
                 }
                 children.push((id.to_string(), PathBuf::from(path)));
             }
+            "--extra-components-dir" => {
+                let dir = PathBuf::from(take_value(&mut i, "--extra-components-dir")?);
+                if !dir.is_dir() {
+                    return Err(format!(
+                        "Extra components directory does not exist: {}",
+                        dir.display()
+                    ));
+                }
+                extra_components_dirs.push(dir);
+            }
             "--output" => output_path = Some(PathBuf::from(take_value(&mut i, "--output")?)),
             "--workflow-id" => workflow_id = Some(take_value(&mut i, "--workflow-id")?),
             "--tenant" => tenant_id = take_value(&mut i, "--tenant")?,
@@ -173,6 +198,7 @@ fn parse_args() -> Result<Args, String> {
         workflow_path,
         components_dir,
         children,
+        extra_components_dirs,
         output_path,
         workflow_id,
         tenant_id,
@@ -228,6 +254,41 @@ fn resolve_components_dir(flag: Option<PathBuf>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Merge the published workflow-agents found in `dirs` into `base`, the way
+/// the server overlays a tenant's staging dir: a sidecar claiming a trusted
+/// capability, or an id a bundled agent already owns, is skipped.
+fn catalog_with_workflow_agents(
+    base: AgentCatalog,
+    dirs: &[PathBuf],
+) -> Result<AgentCatalog, String> {
+    if dirs.is_empty() {
+        return Ok(base);
+    }
+    let mut agents = base.agents().to_vec();
+    let mut known: std::collections::HashSet<String> = agents
+        .iter()
+        .map(|agent| canonical_agent_id(&agent.id))
+        .collect();
+    for dir in dirs {
+        let staged = AgentCatalog::from_meta_dir(dir)
+            .map_err(|e| format!("Failed to load workflow-agents from {}: {e}", dir.display()))?;
+        for agent in staged.agents() {
+            if agent.capabilities.iter().any(|c| c.trusted) {
+                eprintln!(
+                    "warning: skipping workflow-agent '{}' in {}: it claims a trusted capability",
+                    agent.id,
+                    dir.display()
+                );
+                continue;
+            }
+            if known.insert(canonical_agent_id(&agent.id)) {
+                agents.push(agent.clone());
+            }
+        }
+    }
+    Ok(AgentCatalog::from_agents(agents))
+}
+
 fn read_json(path: &Path, what: &str) -> Result<serde_json::Value, String> {
     let bytes = fs::read(path)
         .map_err(|e| format!("Failed to read {what} file {}: {e}", path.display()))?;
@@ -265,6 +326,7 @@ fn run() -> Result<(), String> {
             components_dir.display()
         )
     })?;
+    let catalog = catalog_with_workflow_agents(catalog, &args.extra_components_dirs)?;
     if args.verbose {
         eprintln!(
             "Loaded {} agents from {}",
@@ -367,7 +429,7 @@ fn run() -> Result<(), String> {
         },
         DirectWorkflowCompileOptions {
             output_dir: build_output_dir(&args),
-            extra_component_dirs: Vec::new(),
+            extra_component_dirs: args.extra_components_dirs.clone(),
             components_dir,
             source_checksum: Some(source_checksum),
         },

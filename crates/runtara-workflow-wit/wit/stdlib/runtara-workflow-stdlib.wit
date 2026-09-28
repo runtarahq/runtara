@@ -14,6 +14,12 @@ interface json {
         rate-limited: bool,
     }
 
+    // One WaitForInstances read: still pending, and its persisted deadline.
+    record wait-instances-progress {
+        pending: bool,
+        deadline-ms: option<u64>,
+    }
+
     // Structured fields for the invoke export's Err arm. Field order matches
     // the lifecycle error-info record EXACTLY: the canonical-ABI layout of
     // `result<invoke-error, string>`'s ok arm at retptr+8 is byte-identical
@@ -337,6 +343,42 @@ interface json {
         signal-id: string,
         signal-payload: list<u8>,
         source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // WaitForInstances: the step's canonical v2 `wait-instances` key. The host
+    // hashes it into the step's wait id; the settled wait is checkpointed
+    // under it.
+    wait-instances-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    // WaitForInstances: the JSON wait request (`instanceIds`, `mode`, and
+    // `deadlineMs = now-ms + timeoutMs` with a timeout). The error is a wait
+    // error JSON (`{code, message}`), like the host's.
+    wait-instances-request: func(
+        step-id: string,
+        source: list<u8>,
+        now-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    // WaitForInstances: whether a JSON wait read is pending, and its deadline.
+    wait-instances-state: func(
+        wait: list<u8>,
+    ) -> result<wait-instances-progress, string>;
+
+    // WaitForInstances: store a settled wait as the step's outputs; returns
+    // the steps context.
+    wait-instances-output: func(
+        step-id: string,
+        wait: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // WaitForInstances: a wait error JSON as the step's structured error.
+    wait-instances-error: func(
+        step-id: string,
+        error: list<u8>,
     ) -> result<list<u8>, string>;
 
     // Build the per-call signal id for a WaitForSignal step used as an AiAgent

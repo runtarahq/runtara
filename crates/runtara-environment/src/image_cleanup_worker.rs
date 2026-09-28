@@ -14,8 +14,14 @@
 //!    always safe to delete immediately.
 //!
 //! 2. **Stale DB images**: images older than `max_age` with no active (non-terminal)
-//!    instances referencing them. Both the database record and disk files are removed.
+//!    instances referencing them and no launch generation (`instance_launches`)
+//!    holding them. Both the database record and disk files are removed.
 //!    The `ON DELETE CASCADE` on `instance_images.image_id` handles join table cleanup.
+//!    A parked run is non-terminal, so the image it wakes on stays however
+//!    old it is and whatever the workflow was recompiled to since. Launch
+//!    rows live as long as their instance row, so a terminal child pinned by
+//!    a live parent keeps its image while retention keeps the child. Both
+//!    are excluded by the query, so they never fill the batch.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -143,6 +149,11 @@ impl ImageCleanupWorker {
         .await;
     }
 
+    /// Run one cleanup cycle now.
+    pub async fn run_once(&self) -> Result<()> {
+        self.cleanup_images().await
+    }
+
     /// Run both cleanup phases.
     async fn cleanup_images(&self) -> Result<()> {
         let orphaned_cleaned = self.cleanup_orphaned_directories().await;
@@ -254,6 +265,13 @@ impl ImageCleanupWorker {
                     inst.status NOT IN ('completed', 'failed', 'cancelled')
                     OR ii.created_at > $1
                   )
+              )
+              -- A launch generation references its image ON DELETE RESTRICT,
+              -- so such an image cannot be deleted yet. Selecting it anyway
+              -- would fail its delete every cycle and, oldest first, keep
+              -- deletable images behind it out of the batch for good.
+              AND NOT EXISTS (
+                SELECT 1 FROM instance_launches il WHERE il.image_id = i.image_id
               )
             ORDER BY i.updated_at ASC
             LIMIT $2

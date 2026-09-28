@@ -152,7 +152,7 @@ async fn cancellation(partial: bool) -> anyhow::Result<()> {
         });
         let output = run_cancellation_fixture(
             bytes,
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             started,
             cleaned,
             server,
@@ -193,7 +193,7 @@ async fn invoke_response(
         Duration::from_secs(10),
         invoke_named_agent(
             "stripe",
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             capability,
             input,
         ),
@@ -298,7 +298,7 @@ async fn stripe_transport_response_and_missing_connection_errors_stay_distinct()
         Duration::from_secs(10),
         invoke_named_agent(
             "stripe",
-            FixtureContext::with_upstream("fixture-tenant", "http://127.0.0.1:1/unused", ""),
+            FixtureContext::with_upstream("fixture-tenant", "http://127.0.0.1:1/unused"),
             "get-balance",
             b"{}".to_vec(),
         ),

@@ -3,11 +3,11 @@
 [![Crates.io](https://img.shields.io/crates/v/runtara-agent-wit.svg)](https://crates.io/crates/runtara-agent-wit)
 [![Docs.rs](https://docs.rs/runtara-agent-wit/badge.svg)](https://docs.rs/runtara-agent-wit)
 
-The canonical `runtara:agent@0.1.0` WIT package. Every runtara agent component implements this contract; the host (`runtara-component-host`) consumes it.
+The canonical `runtara:agent@0.4.0` WIT package. Every runtara agent component implements this contract; the host (`runtara-component-host`) consumes it.
 
 ## What's in here
 
-- [`wit/runtara-agent.wit`](wit/runtara-agent.wit) — the package definition. One world (`agent`) exporting one interface (`capabilities`) with three functions: `get-module-info`, `list-capabilities`, `invoke`.
+- [`wit/runtara-agent.wit`](wit/runtara-agent.wit) — the package definition. One world (`agent`) exporting one interface (`capabilities`) with one async function, `invoke(capability-id, input) -> result<list<u8>, error-info>`; capability metadata ships in each agent's `.meta.json` sidecar.
 - [`wit/deps.toml`](wit/deps.toml) + [`wit/deps/`](wit/deps/) — pinned WASI 0.2.3 dependencies (http, cli, clocks, io, random, filesystem, sockets), managed by [`wit-deps`](https://github.com/bytecodealliance/wit-deps).
 - [`src/lib.rs`](src/lib.rs) — exposes `RUNTARA_AGENT_WIT: &str` (the WIT source baked in via `include_str!`) so consumers can reference the contract without filesystem lookups.
 
@@ -39,13 +39,7 @@ Agents use typed Runtara host interfaces for outbound HTTP, connections, SQL, an
 
 ## Guest usage
 
-The guest's per-agent crate (e.g. `runtara-agent-crypto`) imports this WIT via `cargo component`'s metadata:
-
-```toml
-[package.metadata.component.target]
-path = "../runtara-agent-wit/wit"
-world = "agent"
-```
+Each agent crate under `crates/agents` generates its own `wit/agent.wit` in `build.rs` from a template in [`templates/`](templates/) (package `runtara:agent-<id>@0.4.0`, using `runtara:agent/types@0.4.0`) and builds with plain Cargo through `scripts/build-agent-components.sh`; there is no `cargo component` step and no committed `bindings.rs`. Agents with a suspending capability also use `runtara:agent-suspension@0.1.0` (see `runtara-agent-suspension`).
 
 ## Host usage
 

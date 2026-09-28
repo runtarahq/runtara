@@ -15,6 +15,7 @@ export function InvocationHistory() {
     status: searchParams.get('status') || undefined,
     search: searchParams.get('search') || undefined,
     runLabel: searchParams.get('runLabel') || undefined,
+    parentInstanceId: searchParams.get('parentInstanceId') || undefined,
   }));
 
   useEffect(() => {
@@ -24,6 +25,7 @@ export function InvocationHistory() {
         status: searchParams.get('status') || undefined,
         search: searchParams.get('search') || undefined,
         runLabel: searchParams.get('runLabel') || undefined,
+        parentInstanceId: searchParams.get('parentInstanceId') || undefined,
       };
       return (Object.keys(fromUrl) as (keyof typeof fromUrl)[]).every(
         (key) => previous[key] === fromUrl[key]
@@ -47,7 +49,7 @@ export function InvocationHistory() {
     } else {
       params.delete('status');
     }
-    for (const key of ['search', 'runLabel'] as const) {
+    for (const key of ['search', 'runLabel', 'parentInstanceId'] as const) {
       if (newFilters[key]) params.set(key, newFilters[key]);
       else params.delete(key);
     }

@@ -437,7 +437,7 @@ echo "  caller parked while the nested agent waits (${PARKED}) ✓"
 WAIT_SIGNAL=""
 for _ in {1..30}; do
     RESP=$(curl -sS "${API}/workflows/${WAIT_PARENT_ID}/instances/${WAIT_INSTANCE}/pending-input")
-    WAIT_SIGNAL=$(echo "${RESP}" | jq -r '.data.pendingInputs[]?.signalId // empty' | head -1)
+    WAIT_SIGNAL=$(echo "${RESP}" | jq -r '.data.pendingInputs[]?.requestId // empty' | head -1)
     [ -n "${WAIT_SIGNAL}" ] && break
     sleep 1
 done
@@ -447,7 +447,7 @@ echo "  nested wait discoverable through pending-input ✓"
 
 # A nested route carries JSON punctuation of its own — runtara:v2:["wait",...] —
 # so it must be escaped into the body, never interpolated into a string.
-SIGNAL_BODY=$(jq -nc --arg signal "${WAIT_SIGNAL}" '{signalId: $signal, payload: {decision: "approved-nested"}}')
+SIGNAL_BODY=$(jq -nc --arg signal "${WAIT_SIGNAL}" '{requestId: $signal, operationId: ("e2e-" + $signal), payload: {decision: "approved-nested"}}')
 RESP=$(api_post "/signals/${WAIT_INSTANCE}" "${SIGNAL_BODY}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "nested signal submit failed: ${RESP}"; exit 1; }
@@ -541,7 +541,7 @@ EMB_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
 
 # Build a signal submit body; route ids carry quotes, so let jq escape them.
 signal_body() {
-    jq -nc --arg signal "$1" --arg decision "$2" '{signalId: $signal, payload: {decision: $decision}}'
+    jq -nc --arg signal "$1" --arg decision "$2" '{requestId: $signal, operationId: ("e2e-" + $signal), payload: {decision: $decision}}'
 }
 
 # Discover a site's open signal id via pending-input. Signal ids are
@@ -553,8 +553,7 @@ discover_signal() {
         local resp
         resp=$(curl -sS "${API}/workflows/${EMB_PARENT_ID}/instances/${instance}/pending-input")
         found=$(echo "${resp}" | jq -r --arg m "${marker}" \
-            '.data.pendingInputs[]?.signalId // empty
-             | select(contains("[\"" + $m + "\"]") and endswith("\"approve\"]]"))' | head -1)
+            '.data.pendingInputs[]? | select(.signalId | contains("[\"" + $m + "\"]") and endswith("\"approve\"]]")) | .requestId' | head -1)
         [ -n "${found}" ] && { echo "${found}"; return 0; }
         sleep 2
     done

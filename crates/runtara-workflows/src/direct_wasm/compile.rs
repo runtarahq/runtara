@@ -31,6 +31,7 @@ mod agent_error;
 mod agent_invoke;
 mod agent_io;
 mod agent_retry;
+mod agent_suspend;
 mod ai_agent_loop;
 mod artifact_metadata;
 mod branch_parallel;
@@ -63,7 +64,11 @@ mod step_context;
 mod step_error;
 mod switch_route;
 mod trusted;
+pub use trusted::{
+    bundled_builtin_pin, bundled_trusted_pin, staged_dependency_is_stale, trusted_artifact_pins,
+};
 mod wait;
+mod wait_instances;
 mod while_loop;
 
 use std::borrow::Cow;
@@ -87,8 +92,10 @@ pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
 use abi::push_retptr_arg;
 pub use artifact_metadata::{
+    AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
     DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    DirectComponentSidecarMetadata, DirectIsolationMetadata, STAGED_WORKFLOW_AGENT_DENIED_PREFIXES,
+    check_agent_component_imports,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -564,6 +571,15 @@ pub struct DirectCompilationResult {
     /// Agent dependencies emitted with the private logical-context interface.
     /// Composition must bind every selected dependency to a reviewed adapter.
     pub scoped_agents: std::collections::BTreeSet<String>,
+    /// Agents the emitted code treats as workflow-agents: their invokes
+    /// re-raise the reserved park and suspend codes. Composition refuses any
+    /// of them that does not resolve as a staged workflow-agent.
+    pub workflow_agents: std::collections::BTreeSet<String>,
+    /// Every capability each agent is called with, and whether the compile
+    /// treated it as suspending. Composition refuses an agent whose
+    /// `.meta.json` disagrees.
+    pub agent_capability_sites:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
     /// Path to the primary emitted Wasm artifact.
     ///
     /// Before static composition this is the directly emitted
@@ -706,6 +722,8 @@ fn compose_direct_workflow_selected(
         components_dir,
         extra_component_dirs,
         &result.component_artifacts.agent_components,
+        &result.workflow_agents,
+        &result.agent_capability_sites,
     )?;
     if let Some(report) = &result.artifact_metadata.isolation_selection {
         for (package, digest) in &report.shared_components {
@@ -810,7 +828,7 @@ fn compose_direct_workflow_selected(
         composed_bytes = composed_wasm.len(),
         "compose: in-process wac-graph composition complete",
     );
-    trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components)?;
+    trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
     let isolation = if bindings.is_empty() {
         None
     } else {
@@ -986,9 +1004,14 @@ pub fn compile_direct_workflow_composed(
 /// `RUNTARA_DIRECT_RUNTIME_BINDING` — the operational rollback lever.
 ///
 /// Default (unset or anything else): `HostImport`. `composed` reverts new
-/// compiles to the legacy composed-runtime shape (guest HTTP loopback), which
-/// the runner still executes fully — set it on the server and recompile if a
-/// host-import regression ever needs a same-day escape hatch.
+/// compiles to the legacy composed-runtime shape (guest HTTP loopback). It is
+/// no longer an escape hatch: such an artifact cannot reach core under the
+/// production runner. Its runtime traps on the first call to core, and past
+/// that the outbound guard would refuse the loopback HTTP and guests receive
+/// no runtime address; the run ends promptly as `crashed` (pinned by
+/// `a_composed_runtime_artifact_crashes_promptly_under_the_production_runner`
+/// in runtara-environment). The lever is kept (not failed closed) until no
+/// deployment is confirmed to set it.
 fn runtime_binding_from_env() -> super::component::RuntimeBinding {
     runtime_binding_from_raw(
         std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING")
@@ -1053,6 +1076,18 @@ pub fn compile_direct_workflow_composed_configured(
         _ => None,
     };
     let mut result = compile_direct_workflow_with_abi(input, abi, omit_runtime)?;
+    // The inner compile checked its sites against the environment's binding;
+    // this entry re-emits under `binding`, so check them again.
+    let manifest: DirectWorkflowManifest =
+        serde_json::from_slice(&fs::read(&result.manifest_path)?)?;
+    agent_suspend::check_sites(
+        &manifest,
+        abi,
+        result.omit_runtime,
+        binding,
+        &result.scoped_agents,
+        true,
+    )?;
     let agent_ids: Vec<String> = result
         .component_artifacts
         .agent_components
@@ -1071,9 +1106,12 @@ pub fn compile_direct_workflow_composed_configured(
         &result.parallel_pools,
         result.component_artifacts.has_connections,
         &Default::default(),
+        &result.component_artifacts.suspending_agents.clone(),
+        result.component_artifacts.operation_scope,
         result.component_artifacts.has_timers,
         result.component_artifacts.needs_monotonic_clock,
-    );
+    )
+    .with_wait_instances(result.component_artifacts.wait_instances);
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
         &result.world_wit_path,
@@ -1144,7 +1182,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1303,8 +1341,11 @@ fn compile_direct_workflow_inner(
             report: Box::new(support_report),
         });
     }
-    let workflow_agent_safety =
-        analyze_workflow_agent_safety(&input.execution_graph, &input.child_workflows);
+    let workflow_agent_safety = analyze_workflow_agent_safety(
+        &input.execution_graph,
+        &input.child_workflows,
+        agent_catalog,
+    );
     let child_workflow_metadata =
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
@@ -1367,6 +1408,14 @@ fn compile_direct_workflow_inner(
             )));
         }
     }
+    agent_suspend::check_sites(
+        &manifest,
+        abi,
+        omit_runtime,
+        runtime_binding,
+        &scoped_agents,
+        agent_catalog.is_some(),
+    )?;
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1398,9 +1447,12 @@ fn compile_direct_workflow_inner(
         &parallel_pools,
         has_connections,
         &scoped_agents,
+        &manifest.suspending_agent_ids(),
+        manifest.has_operation_scoped_sites(),
         super::plan::needs_cooperative_timers(&manifest),
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
-    );
+    )
+    .with_wait_instances(manifest.has_wait_for_instances());
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -1450,6 +1502,8 @@ fn compile_direct_workflow_inner(
             )?)
         },
         scoped_agents,
+        workflow_agents: manifest.workflow_agent_ids(),
+        agent_capability_sites: manifest.agent_capability_sites(),
         wasm_path,
         workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
         manifest_path,
@@ -1583,7 +1637,7 @@ fn emit_direct_component(
     let parallel_pools =
         split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
     let has_connections = core_config.static_data.has_connections();
-    let (resolve, world) = build_direct_component_resolve_scoped(
+    let (resolve, world) = build_direct_component_resolve_with_waits(
         &manifest.feature_summary.agent_ids,
         abi,
         omit_runtime,
@@ -1591,8 +1645,11 @@ fn emit_direct_component(
         &parallel_pools,
         has_connections,
         scoped_agents,
+        &manifest.suspending_agent_ids(),
+        manifest.has_operation_scoped_sites(),
         super::plan::needs_cooperative_timers(manifest),
         core_config.static_data.needs_monotonic_clock(),
+        manifest.has_wait_for_instances(),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1653,6 +1710,8 @@ fn build_direct_component_resolve_configured(
         parallel_pools,
         has_connections,
         &Default::default(),
+        &Default::default(),
+        false,
         // Structural tests use a superset world; production derives this from
         // the actual manifest, including Agent-free composite retry waits.
         !omit_runtime,
@@ -1660,6 +1719,7 @@ fn build_direct_component_resolve_configured(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_scoped(
     agents: &[String],
@@ -1669,9 +1729,46 @@ fn build_direct_component_resolve_scoped(
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
     scoped_agents: &std::collections::BTreeSet<String>,
+    suspending_agents: &std::collections::BTreeSet<String>,
+    operation_scope: bool,
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
+    build_direct_component_resolve_with_waits(
+        agents,
+        abi,
+        omit_runtime,
+        export_agent_id,
+        parallel_pools,
+        has_connections,
+        scoped_agents,
+        suspending_agents,
+        operation_scope,
+        needs_timers,
+        needs_monotonic_clock,
+        false,
+    )
+}
+
+/// [`build_direct_component_resolve_scoped`], also importing
+/// `runtara:workflow-wait/instances` when a WaitForInstances step needs it.
+#[allow(clippy::too_many_arguments)]
+fn build_direct_component_resolve_with_waits(
+    agents: &[String],
+    abi: super::component::WorkflowAbi,
+    omit_runtime: bool,
+    export_agent_id: Option<&str>,
+    parallel_pools: &std::collections::BTreeMap<String, u32>,
+    has_connections: bool,
+    scoped_agents: &std::collections::BTreeSet<String>,
+    suspending_agents: &std::collections::BTreeSet<String>,
+    operation_scope: bool,
+    needs_timers: bool,
+    needs_monotonic_clock: bool,
+    wait_instances: bool,
+) -> Result<(Resolve, WorldId), DirectCompileError> {
+    // Control sites need the scope without any suspending agent.
+    let operation_scope = operation_scope || !suspending_agents.is_empty();
     let mut resolve = Resolve::default();
     if needs_monotonic_clock {
         resolve
@@ -1696,6 +1793,11 @@ fn build_direct_component_resolve_scoped(
     if !omit_runtime {
         resolve
             .push_str("runtara-workflow-runtime.wit", RUNTIME_WIT)
+            .map_err(component_error)?;
+    }
+    if wait_instances {
+        resolve
+            .push_str("runtara-workflow-wait.wit", runtara_workflow_wit::WAIT_WIT)
             .map_err(component_error)?;
     }
     match abi {
@@ -1739,11 +1841,30 @@ fn build_direct_component_resolve_scoped(
                 .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
                 .map_err(component_error)?;
         }
+        if operation_scope {
+            // The suspension types, then the operation scope that `use`s them.
+            resolve
+                .push_str(
+                    "runtara-agent-suspension.wit",
+                    runtara_agent_suspension::WIT,
+                )
+                .map_err(component_error)?;
+            resolve
+                .push_str(
+                    "runtara-workflow-operation.wit",
+                    runtara_workflow_wit::OPERATION_WIT,
+                )
+                .map_err(component_error)?;
+        }
         for agent in agents {
             resolve
                 .push_str(
                     format!("runtara-agent-{agent}.wit"),
-                    &agent_wit_package_configured(agent, scoped_agents.contains(agent)),
+                    &agent_wit_package_with_interfaces(
+                        agent,
+                        scoped_agents.contains(agent),
+                        suspending_agents.contains(agent),
+                    ),
                 )
                 .map_err(component_error)?;
             // Phantom pool-member packages (structurally identical interface
@@ -1783,6 +1904,18 @@ fn build_direct_component_resolve_scoped(
             runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
         ));
     }
+    if operation_scope {
+        workflow_wit.push_str(&format!(
+            "    import {};\n",
+            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+        ));
+    }
+    if wait_instances {
+        workflow_wit.push_str(&format!(
+            "    import {};\n",
+            runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME
+        ));
+    }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
             "scoped-capabilities-v3"
@@ -1792,6 +1925,12 @@ fn build_direct_component_resolve_scoped(
         workflow_wit.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION};\n",
         ));
+        if suspending_agents.contains(agent) {
+            workflow_wit.push_str(&format!(
+                "    import runtara:agent-{agent}/{}@{AGENT_WIT_VERSION};\n",
+                runtara_agent_suspension::SUSPENDABLE_INTERFACE
+            ));
+        }
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom = split_parallel::pool_member_component_id(agent, member);
@@ -1831,6 +1970,24 @@ fn agent_wit_package(agent: &str) -> String {
 }
 
 fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
+    agent_wit_package_with_interfaces(agent, scoped, false)
+}
+
+/// The per-agent package the workflow logic is encoded against. A suspending
+/// agent's package also declares `suspendable`, so the world can import both
+/// of its type-identical invoke interfaces.
+fn agent_wit_package_with_interfaces(agent: &str, scoped: bool, suspendable: bool) -> String {
+    let (suspendable_interface, suspendable_export) = if suspendable {
+        (
+            runtara_agent_suspension::SUSPENDABLE_INTERFACE_WIT,
+            format!(
+                "    export {};\n",
+                runtara_agent_suspension::SUSPENDABLE_INTERFACE
+            ),
+        )
+    } else {
+        ("", String::new())
+    };
     let interface = if scoped {
         "scoped-capabilities-v3"
     } else {
@@ -1852,9 +2009,11 @@ fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
                  {context}\n\
              ) -> result<list<u8>, error-info>;\n\
          }}\n\
+         {suspendable_interface}\
          \n\
          world agent {{\n\
              export {interface};\n\
+         {suspendable_export}\
          }}\n"
     )
 }
@@ -1963,7 +2122,16 @@ mod tests;
 mod retry_bounds_tests;
 
 #[cfg(test)]
+mod operation_scoped_tests;
+
+#[cfg(test)]
 mod wait_failure_tests;
+
+#[cfg(test)]
+mod wide_result_tests;
+
+#[cfg(test)]
+mod wait_instances_tests;
 
 // AUDIT-05 timer scratch and nested deadline frames (append-only local layout).
 const DIRECT_LOOP_KEY_PTR_LOCAL: u32 = 130;

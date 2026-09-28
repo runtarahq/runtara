@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { useToken } from '@/shared/hooks';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -9,6 +9,7 @@ import {
   toHierarchicalStep,
   calculateMinTimestamp,
   calculateMaxTimestamp,
+  isOpenEndedStep,
 } from '@/features/workflows/types/timeline';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
@@ -93,9 +94,26 @@ export function useHierarchicalTimeline(
     refetchInterval,
   });
 
+  // An unfinished (running or parked) step's bar runs up to now, so re-lay
+  // the timeline on a clock while one is open, not only when the data changes.
+  const [nowTick, setNowTick] = useState(0);
+  const hasOpenEndedStep = useMemo(
+    () => rootData?.data?.steps?.some(isOpenEndedStep) ?? false,
+    [rootData]
+  );
+  useEffect(() => {
+    if (!hasOpenEndedStep || !refetchInterval) return;
+    const timer = setInterval(
+      () => setNowTick((tick) => tick + 1),
+      refetchInterval
+    );
+    return () => clearInterval(timer);
+  }, [hasOpenEndedStep, refetchInterval]);
+
   // Process root steps when data changes
   useEffect(() => {
     if (rootData?.data?.steps) {
+      const nowMs = Date.now();
       const allSteps = rootData.data.steps;
 
       // Filter to only root steps (those without parentScopeId)
@@ -110,10 +128,10 @@ export function useHierarchicalTimeline(
 
       if (steps.length > 0) {
         const minTs = calculateMinTimestamp(steps);
-        const maxTs = calculateMaxTimestamp(steps);
+        const maxTs = calculateMaxTimestamp(steps, nowMs);
 
         const hierarchicalSteps = steps.map((step) =>
-          toHierarchicalStep(step, 0, minTs)
+          toHierarchicalStep(step, 0, minTs, nowMs)
         );
 
         setRootSteps(hierarchicalSteps, totalCount, minTs, maxTs);
@@ -121,7 +139,8 @@ export function useHierarchicalTimeline(
         setRootSteps([], totalCount, 0, 0);
       }
     }
-  }, [rootData, setRootSteps]);
+    // nowTick re-runs this while a step is open-ended.
+  }, [rootData, setRootSteps, nowTick]);
 
   // Update loading state
   useEffect(() => {

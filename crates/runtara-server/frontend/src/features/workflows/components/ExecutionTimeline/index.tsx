@@ -3,7 +3,7 @@ import {
   ManagedInputScope,
   InputRetryPanel,
 } from '@/features/workflows/components/ManagedInputSubmissions';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import {
   Play,
   Pause,
@@ -25,6 +25,7 @@ import {
   Wrench,
   Hand,
   Brain,
+  Merge,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
@@ -35,7 +36,13 @@ import {
   CardTitle,
 } from '@/shared/components/ui/card';
 import { useHierarchicalTimeline } from '@/features/workflows/hooks/useHierarchicalTimeline';
-import { HierarchicalStep } from '@/features/workflows/types/timeline';
+import {
+  HierarchicalStep,
+  barLabelPlacement,
+  estimateBarLabelPx,
+  timelineBarPosition,
+} from '@/features/workflows/types/timeline';
+import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
 import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -46,6 +53,7 @@ import {
 } from '@/features/workflows/queries';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
 import { isActiveStatus } from '@/shared/utils/status-display';
+import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import { getRunEventsEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { Spinner } from '@/shared/components/ui/spinner';
 
@@ -170,8 +178,16 @@ const stepTypeConfig: Record<
     bg: 'bg-amber-500/10',
     border: 'border-amber-500',
     dot: 'bg-amber-500',
-    label: 'Wait For Signal',
+    label: 'Wait for Signal',
     icon: Hand,
+  },
+  WaitForInstances: {
+    text: 'text-amber-500',
+    bg: 'bg-amber-500/10',
+    border: 'border-amber-500',
+    dot: 'bg-amber-500',
+    label: 'Wait for Instances',
+    icon: Merge,
   },
   Default: {
     text: 'text-gray-500',
@@ -190,6 +206,8 @@ const statusTextClasses: Record<string, string> = {
   failed: 'text-destructive',
   pending: 'text-muted-foreground',
   waiting: 'text-warning',
+  // Unfinished while its run is suspended (parked wait, Delay, signal).
+  suspended: 'text-warning',
 };
 
 const formatTime = (ms: number | null | undefined): string => {
@@ -308,14 +326,27 @@ function ExecutionTimelineContent({
     return () => clearInterval(interval);
   }, [isPlaying, totalDuration]);
 
-  const getStepPosition = (step: HierarchicalStep) => {
-    if (totalDuration === 0) {
-      return { left: '0%', width: '100%' };
-    }
-    const left = (step.startMs / totalDuration) * 100;
-    const width = ((step.durationMs || 1) / totalDuration) * 100;
-    return { left: `${left}%`, width: `${Math.max(width, 1)}%` };
-  };
+  const getStepPosition = (step: HierarchicalStep) =>
+    timelineBarPosition(step, totalDuration);
+
+  // Track width, to tell when a bar is too narrow for its label and badge.
+  const [trackEl, setTrackEl] = useState<HTMLDivElement | null>(null);
+  const [trackPx, setTrackPx] = useState(0);
+  useLayoutEffect(() => {
+    if (!trackEl) return;
+    const measure = () => setTrackPx(trackEl.clientWidth);
+    measure();
+    window.addEventListener('resize', measure);
+    const observer =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(measure)
+        : null;
+    observer?.observe(trackEl);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
+  }, [trackEl]);
 
   const inputCards = showInputs && (
     <>
@@ -489,7 +520,7 @@ function ExecutionTimelineContent({
             <div className="w-48 shrink-0 px-4 text-xs text-muted-foreground">
               Time →
             </div>
-            <div className="relative flex-1">
+            <div className="relative flex-1" ref={setTrackEl}>
               {[0, 25, 50, 75, 100].map((pct) => (
                 <div
                   key={pct}
@@ -510,9 +541,9 @@ function ExecutionTimelineContent({
             const Icon = config.icon;
             const isActive =
               playhead >= step.startMs &&
-              playhead <= step.startMs + (step.durationMs || 0);
+              playhead <= step.startMs + step.spanMs;
             const isCompleted =
-              playhead > step.startMs + (step.durationMs || 0);
+              !step.isOpenEnded && playhead > step.startMs + step.spanMs;
             const isHovered = hoveredStep === step.stepId;
             const isSelected = selectedStep === step.stepId;
 
@@ -525,6 +556,56 @@ function ExecutionTimelineContent({
                   (!!pi.toolName && step.stepId.includes(pi.toolName))
               );
             const displayStatus = isWaitingForInput ? 'waiting' : step.status;
+
+            // Duration + status badge, inside the bar when they fit, else
+            // just outside it (right, or left at the track end).
+            const durationText = formatTime(
+              step.isOpenEnded ? step.spanMs : step.durationMs
+            );
+            const statusDisplay = stepStatusDisplay(step.status);
+            const labelPlacement = barLabelPlacement(
+              pos,
+              trackPx,
+              displayStatus === 'waiting'
+                ? estimateBarLabelPx(durationText, 'waiting for input', true)
+                : estimateBarLabelPx(
+                    durationText,
+                    statusDisplay.label,
+                    statusDisplay.spin
+                  )
+            );
+            const selectStep = () =>
+              setSelectedStep(
+                step.stepId === selectedStep ? null : step.stepId
+              );
+            const barLabel = (
+              <>
+                <span
+                  className={`whitespace-nowrap text-xs font-medium ${config.text}`}
+                  title={
+                    step.isOpenEnded
+                      ? `Unfinished — ${formatTime(step.spanMs)} so far`
+                      : undefined
+                  }
+                >
+                  {durationText}
+                </span>
+                {displayStatus === 'waiting' ? (
+                  <Badge
+                    variant="outline"
+                    className="border-warning px-1.5 py-0 text-xs text-warning"
+                  >
+                    <Hand className="mr-1 size-3" />
+                    waiting for input
+                  </Badge>
+                ) : (
+                  <StepStatusBadge
+                    status={step.status}
+                    className="px-1.5 py-0 text-xs"
+                  />
+                )}
+              </>
+            );
 
             // Calculate indentation based on depth
             const indentStyle = {
@@ -601,9 +682,16 @@ function ExecutionTimelineContent({
                     style={{ left: `${(playhead / totalDuration) * 100}%` }}
                   />
 
-                  {/* Step Bar */}
+                  {/* Step Bar. An unfinished (running or parked) step runs
+                      up to now and ends open: dashed right edge, no rounding. */}
                   <div
+                    data-timeline-bar={step.stepId}
+                    data-open-ended={step.isOpenEnded || undefined}
                     className={`absolute bottom-2 top-2 flex min-w-[60px] cursor-pointer items-center gap-2 overflow-hidden rounded border-l-[3px] px-2 transition-all duration-150 ${config.bg} ${config.border} ${
+                      step.isOpenEnded
+                        ? 'rounded-r-none border-r-2 [border-right-style:dashed]'
+                        : ''
+                    } ${
                       isActive ? 'z-10 ring-2 ring-foreground/50' : ''
                     } ${isHovered || isSelected ? 'z-10 ring-2 ring-purple-500/50' : ''}`}
                     style={{
@@ -611,42 +699,29 @@ function ExecutionTimelineContent({
                       width: pos.width,
                       opacity: isCompleted ? 0.7 : 1,
                     }}
-                    onClick={() =>
-                      setSelectedStep(
-                        step.stepId === selectedStep ? null : step.stepId
-                      )
-                    }
+                    onClick={selectStep}
                     onMouseEnter={() => setHoveredStep(step.stepId)}
                     onMouseLeave={() => setHoveredStep(null)}
                   >
-                    <span
-                      className={`whitespace-nowrap text-xs font-medium ${config.text}`}
-                    >
-                      {formatTime(step.durationMs)}
-                    </span>
-                    <Badge
-                      variant={
-                        displayStatus === 'completed'
-                          ? 'default'
-                          : displayStatus === 'waiting'
-                            ? 'outline'
-                            : displayStatus === 'running'
-                              ? 'secondary'
-                              : 'destructive'
-                      }
-                      className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-warning text-warning' : ''}`}
-                    >
-                      {displayStatus === 'running' && (
-                        <Spinner className="mr-1 size-3" />
-                      )}
-                      {displayStatus === 'waiting' && (
-                        <Hand className="mr-1 size-3" />
-                      )}
-                      {displayStatus === 'waiting'
-                        ? 'waiting for input'
-                        : displayStatus}
-                    </Badge>
+                    {labelPlacement.side === 'inside' && barLabel}
                   </div>
+                  {labelPlacement.side !== 'inside' && (
+                    <div
+                      data-timeline-label={step.stepId}
+                      data-label-side={labelPlacement.side}
+                      className="absolute bottom-2 top-2 z-10 flex cursor-pointer items-center gap-2 whitespace-nowrap"
+                      style={
+                        labelPlacement.side === 'right'
+                          ? { left: `${labelPlacement.leftPx}px` }
+                          : { right: `${labelPlacement.rightPx}px` }
+                      }
+                      onClick={selectStep}
+                      onMouseEnter={() => setHoveredStep(step.stepId)}
+                      onMouseLeave={() => setHoveredStep(null)}
+                    >
+                      {barLabel}
+                    </div>
+                  )}
                 </div>
               </div>
             );

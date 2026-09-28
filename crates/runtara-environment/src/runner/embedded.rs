@@ -216,9 +216,6 @@ impl Drop for TaskCompletionGuard {
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
     scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
-    /// Address legacy HTTP-composed artifacts use for runtara-core. Modern
-    /// HostImport-composed artifacts receive the native runtime host instead.
-    core_http_url: Option<String>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
@@ -631,6 +628,19 @@ impl Drop for ManagedPrecompileChild {
 }
 
 /// Operational capacity checks read only the semaphore.
+/// The trusted-call launch kind of a durable launch kind.
+fn trusted_launch(
+    kind: crate::launch_queue::LaunchKind,
+) -> runtara_component_host::trusted::TrustedLaunch {
+    use crate::launch_queue::LaunchKind;
+    use runtara_component_host::trusted::TrustedLaunch;
+    match kind {
+        LaunchKind::Start => TrustedLaunch::Start,
+        LaunchKind::Wake => TrustedLaunch::Wake,
+        LaunchKind::Resume => TrustedLaunch::Resume,
+    }
+}
+
 fn compute_occupancy(limit: usize, available: usize) -> RunnerOccupancy {
     RunnerOccupancy {
         limit: limit as u64,
@@ -662,7 +672,6 @@ impl EmbeddedWasmRunner {
         }
         Ok(Self {
             config,
-            core_http_url: None,
             scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits,
@@ -719,6 +728,28 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach the host executor of the approved control agent.
+    pub fn with_control_executor(
+        self,
+        executor: Arc<runtara_component_host::control_executor::ControlExecutor>,
+    ) -> Result<Self> {
+        self.executor
+            .set_control_executor(executor)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
+    /// Attach the durable instance wait service shared by all runs.
+    pub fn with_instance_wait_host(
+        self,
+        host: Arc<dyn runtara_component_host::InstanceWaitHost>,
+    ) -> Result<Self> {
+        self.executor
+            .set_instance_wait_host(host)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach the approved built-in trusted capability executor.
     pub fn with_trusted_executor(
         self,
@@ -761,25 +792,19 @@ impl EmbeddedWasmRunner {
         self
     }
 
-    /// Give legacy HTTP-composed artifacts the core API address.
-    ///
-    /// This is deliberately a runner setting rather than an inherited process
-    /// environment variable: guest execution receives only the explicitly
-    /// constructed environment in [`Self::merged_env`].
-    pub fn with_core_http_url(mut self, core_http_url: String) -> Self {
-        self.core_http_url = Some(core_http_url);
-        self
-    }
-
+    /// The guest environment: the runner's own variables plus the launch's.
+    /// Guests never receive a runtime address — every runtime call is a host
+    /// import — so a `RUNTARA_HTTP_URL` in the free-form launch environment is
+    /// dropped rather than handed to the guest.
     fn merged_env(&self, options: &LaunchOptions) -> HashMap<String, String> {
         let mut env = common::build_env(
             &self.config,
             &options.instance_id,
             &options.tenant_id,
             options.checkpoint_id.as_deref(),
-            self.core_http_url.as_deref(),
         );
         env.extend(options.env.clone());
+        env.remove(common::RUNTIME_URL_ENV);
         env
     }
 
@@ -809,7 +834,10 @@ impl EmbeddedWasmRunner {
         // A guest that asks for its input through the host interface gets the
         // same bytes the launch already has, rather than a second read of what
         // was just written. Unset on wake/resume, so those still read the store.
-        .with_prepersisted_input(prepared_input);
+        .with_prepersisted_input(prepared_input)
+        // Host authority for trusted calls under an earlier approved pin:
+        // only a wake or resume of a parked run may make them.
+        .with_trusted_launch(trusted_launch(options.launch_kind));
         // Share the run's cancel flag: it is how the host stops a guest that
         // woke from an interrupted sleep and ignored the cancel, without
         // routing the cancel through the guest's catchable error channel.
@@ -1341,6 +1369,10 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 ///   (the wake scheduler relaunches at the deadline).
 /// - `on-signal` with NO deadline → suspended, `sleep_until` left NULL; the
 ///   custom-signal waker stamps it when the signal arrives (the only wake path).
+/// - `instance_waits` (the durable instance waits the run's suspensions
+///   registered) → parked `waiting_instances` on them, in the same
+///   transaction that evaluates them: a wait that already resolved wakes the
+///   run at once, and a target finishing later wakes it then.
 /// - only `on-resume` (breakpoint/drain pause) → left untouched: those recorded
 ///   `status=suspended` inline via their ack, and stamping `sleep_until` would
 ///   wrongly schedule an immediate wake.
@@ -1348,19 +1380,20 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 /// The park is `if_running`-guarded (a guest that already reported a terminal
 /// complete/fail must not be resurrected as suspended — the same race guard
 /// `handle_instance_event`'s suspend path uses), and stamps a
-/// `termination_reason` marker naming the wake shape: `waiting_signal` for
-/// on-signal parks (the ONLY rows the custom-signal waker may relaunch — a
-/// pause/breakpoint suspend has no marker and must never be signal-woken) or
-/// `sleeping` for pure timed parks. Relaunch clears the marker with the
-/// running transition.
+/// `termination_reason` marker naming the wake shape: `waiting_instances` for
+/// parks on instance waits, `waiting_signal` for on-signal parks (the ONLY
+/// rows the custom-signal waker may relaunch — a pause/breakpoint suspend has
+/// no marker and must never be signal-woken) or `sleeping` for pure timed
+/// parks. Relaunch clears the marker with the running transition.
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+    instance_waits: &[String],
 ) {
     let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
     let deadline_ms = earliest_wake_deadline_ms(wakes);
-    if deadline_ms.is_none() && !has_on_signal_wake(wakes) {
+    if deadline_ms.is_none() && !has_on_signal_wake(wakes) && instance_waits.is_empty() {
         // Pure on-resume: already handled by the ack path.
         return;
     }
@@ -1375,7 +1408,9 @@ async fn park_invoke_suspend(
         );
     }
     let request = ParkRequest {
-        reason: if has_on_signal_wake(wakes) {
+        reason: if !instance_waits.is_empty() {
+            ParkReason::Instances
+        } else if has_on_signal_wake(wakes) {
             ParkReason::Signal
         } else {
             ParkReason::Timer
@@ -1387,7 +1422,14 @@ async fn park_invoke_suspend(
         .map(str::to_owned)
         .collect();
     match persistence
-        .park_instance_on_signals(instance_id, request, &signals)
+        .park_instance_on_targets(
+            instance_id,
+            request,
+            runtara_core::persistence::ParkTargets {
+                signal_ids: &signals,
+                wait_ids: instance_waits,
+            },
+        )
         .await
     {
         Ok(Decision::Applied(_)) => {}
@@ -1405,7 +1447,9 @@ async fn park_invoke_suspend(
     }
     // Close the arrival-before-park race. Later arrivals observe suspended state
     // and schedule their own immediate wake. Never overwrite it with the timer.
-    wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+    if request.reason == ParkReason::Signal {
+        wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+    }
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
@@ -1634,8 +1678,8 @@ impl Runner for EmbeddedWasmRunner {
                     .await
                 } else {
                     executor
-                        .execute_invoke_with_start_confirmation(
-                            workflow.instance_pre(),
+                        .execute_prepared_invoke_with_start_confirmation(
+                            &workflow,
                             spec,
                             input,
                             start_confirmation.clone(),
@@ -1656,7 +1700,13 @@ impl Runner for EmbeddedWasmRunner {
                         // Store-freeing durable sleep: the guest exited with a
                         // timed wake instead of blocking; park it so the wake
                         // scheduler relaunches at the deadline.
-                        park_invoke_suspend(persistence.as_ref(), &instance_id, wakes).await;
+                        park_invoke_suspend(
+                            persistence.as_ref(),
+                            &instance_id,
+                            wakes,
+                            &run.instance_waits,
+                        )
+                        .await;
                     }
                     InvokeExit::Failed(_) => {
                         warn!(instance_id = %instance_id, "Embedded workflow run returned error");
@@ -2162,6 +2212,55 @@ mod tests {
         assert_eq!(earliest_wake_deadline_ms(&wakes), None);
     }
 
+    /// A guest never receives a runtime address, even when the free-form
+    /// launch environment carries one.
+    #[tokio::test]
+    async fn no_guest_env_holds_a_runtime_address() {
+        let runner = super::EmbeddedWasmRunner::new(
+            super::WorkflowRunnerConfig {
+                data_dir: std::env::temp_dir(),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::new(runtara_core::persistence::memory::InMemoryPersistence::new()),
+        )
+        .expect("runner builds");
+        let mut options = super::LaunchOptions {
+            launch_id: "launch-env".into(),
+            instance_id: "instance-env".into(),
+            tenant_id: "tenant-env".into(),
+            wasm_path: std::path::PathBuf::from("/unused/workflow.wasm"),
+            requires_lifecycle_invoke: true,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: serde_json::Value::Null,
+            timeout: Duration::from_secs(30),
+            checkpoint_id: Some("checkpoint-env".into()),
+            env: HashMap::new(),
+            prepersisted_input: None,
+            launch_kind: crate::launch_queue::LaunchKind::Start,
+            start_gate: None,
+        };
+        let env = runner.merged_env(&options);
+        assert!(!env.contains_key(super::common::RUNTIME_URL_ENV), "{env:?}");
+        assert_eq!(
+            env.get("RUNTARA_INSTANCE_ID").map(String::as_str),
+            Some("instance-env")
+        );
+
+        options.env = HashMap::from([
+            (
+                super::common::RUNTIME_URL_ENV.to_string(),
+                "http://127.0.0.1:8003".to_string(),
+            ),
+            ("CUSTOM".to_string(), "kept".to_string()),
+        ]);
+        let env = runner.merged_env(&options);
+        assert!(!env.contains_key(super::common::RUNTIME_URL_ENV), "{env:?}");
+        assert_eq!(env.get("CUSTOM").map(String::as_str), Some("kept"));
+    }
+
     /// A timed signal wait parks until its stored persistence deadline, not the
     /// guest's skewed clock; waits without a managed record keep theirs.
     #[tokio::test]
@@ -2243,6 +2342,7 @@ mod tests {
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::At(deadline_ms)],
+            &[],
         )
         .await;
 
@@ -2278,6 +2378,7 @@ mod tests {
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::OnResume],
+            &[],
         )
         .await;
 
@@ -2310,6 +2411,7 @@ mod tests {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: None,
             })],
+            &[],
         )
         .await;
 
@@ -2356,6 +2458,7 @@ mod tests {
                 checkpoint_id: "raced-sig".into(),
                 deadline_ms: None,
             })],
+            &[],
         )
         .await;
 
@@ -2397,6 +2500,7 @@ mod tests {
                 checkpoint_id: "quiet-sig".into(),
                 deadline_ms: None,
             })],
+            &[],
         )
         .await;
 
@@ -2435,6 +2539,7 @@ mod tests {
             persistence.as_ref(),
             &instance_id,
             &[WorkflowWake::At(1_900_000_000_000u64)],
+            &[],
         )
         .await;
 
@@ -2454,6 +2559,115 @@ mod tests {
         );
     }
 
+    /// The run's registered instance waits park it `waiting_instances` on
+    /// its timed wake (the wait's deadline): the timer stays the fallback,
+    /// and the target finishing wakes the run at once, in its own commit.
+    /// A wait that already resolved wakes the run from the park itself.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn park_attaches_instance_waits_and_a_finish_wakes_the_run() {
+        use runtara_core::persistence::waits::{WaitMode, WaitSpec};
+        let (persistence, waiter) = running_instance().await;
+        let tenant = persistence
+            .get_instance(&waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let register_child = |name: &str| format!("{waiter}-{name}");
+        let children = [register_child("a"), register_child("b")];
+        for child in &children {
+            persistence
+                .try_register_child_instance(
+                    child,
+                    &tenant,
+                    None,
+                    None,
+                    &runtara_core::persistence::ParentLink {
+                        parent_instance_id: waiter.clone(),
+                        parent_close_policy: "cancel".into(),
+                        admitted_at: chrono::Utc::now(),
+                    },
+                )
+                .await
+                .unwrap();
+            persistence
+                .update_instance_status(child, CoreInstanceStatus::Running, None)
+                .await
+                .unwrap();
+        }
+        let waits = persistence.instance_waits().expect("instance waits");
+        waits
+            .register_or_evaluate(
+                &tenant,
+                &waiter,
+                "op-wait",
+                &WaitSpec::new(children.iter().cloned(), WaitMode::Any, None),
+            )
+            .await
+            .unwrap();
+        let deadline_ms = 1_960_000_000_000u64;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &waiter,
+            &[WorkflowWake::At(deadline_ms)],
+            &["op-wait".to_string()],
+        )
+        .await;
+        let parked = persistence.get_instance(&waiter).await.unwrap().unwrap();
+        assert_eq!(parked.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            parked.termination_reason.as_deref(),
+            Some("waiting_instances")
+        );
+        assert_eq!(
+            parked.sleep_until.map(|at| at.timestamp_millis() as u64),
+            Some(deadline_ms),
+            "the wait's deadline is the timed fallback"
+        );
+        persistence
+            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
+                &children[1],
+                CoreInstanceStatus::Completed,
+            ))
+            .await
+            .unwrap();
+        let woken = persistence.get_instance(&waiter).await.unwrap().unwrap();
+        assert_eq!(
+            woken.wake_reason,
+            Some(runtara_core::domain::WakeReason::InstancesTerminal)
+        );
+        assert!(woken.sleep_until.is_some_and(|at| at <= chrono::Utc::now()));
+
+        // Relaunched and parked again on the now-resolved wait: the park
+        // wakes it by itself.
+        persistence
+            .update_instance_status(
+                &waiter,
+                CoreInstanceStatus::Running,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .unwrap();
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &waiter,
+            &[WorkflowWake::At(deadline_ms)],
+            &["op-wait".to_string()],
+        )
+        .await;
+        let again = persistence.get_instance(&waiter).await.unwrap().unwrap();
+        assert_eq!(again.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            again.wake_reason,
+            Some(runtara_core::domain::WakeReason::InstancesTerminal)
+        );
+        assert!(again.sleep_until.is_some_and(|at| at <= chrono::Utc::now()));
+        let mut ids = children.to_vec();
+        ids.push(waiter);
+        persistence.delete_instances_batch(&ids).await.unwrap();
+    }
+
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_stamps_on_signal_timeout_deadline_as_the_fallback() {
@@ -2466,6 +2680,7 @@ mod tests {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: Some(deadline_ms),
             })],
+            &[],
         )
         .await;
 

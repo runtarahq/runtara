@@ -329,7 +329,7 @@ pub struct CompileWorkflowParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowParams {
-    /// Optional exact execution reference (1–250 printable ASCII bytes).
+    /// Optional exact execution reference (1–1024 printable ASCII bytes).
     pub run_label: Option<String>,
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -345,7 +345,7 @@ pub struct ExecuteWorkflowParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowSyncParams {
-    /// Optional exact immutable execution reference (1–250 printable ASCII bytes).
+    /// Optional exact immutable execution reference (1–1024 printable ASCII bytes).
     pub run_label: Option<String>,
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -444,6 +444,172 @@ pub async fn get_workflow_authoring_schema(
     json_result(workflow_authoring_schema(&agent_id, &capability_id))
 }
 
+/// The control agent's author reference, the same text as the "As built"
+/// section of `docs/control-agent.md`. Every number comes from
+/// `runtara-control-contract`, `runtara-agent-suspension` or the instance
+/// wait service.
+pub(crate) fn control_agent_reference() -> serde_json::Value {
+    use crate::api::services::instance_waits as waits;
+    use runtara_agent_suspension::{
+        AGENT_CONTINUATION_REJECTED, AGENT_INVALID_SUSPENSION, MAX_CONTINUATION_BYTES,
+    };
+    use runtara_control_contract as c;
+    let kib = |bytes: usize| bytes / 1024;
+    let mib = |bytes: usize| bytes / (1024 * 1024);
+    serde_json::json!({
+        "agentId": runtara_dsl::agent_meta::CONTROL_AGENT_ID,
+        "availability": "Every pricing tier, whatever the agent allowlist says. Mutations only run as steps of a workflow run: test_capability answers CONTROL_REQUIRES_INSTANCE for capabilities tagged runtime:requires-run.",
+        "capabilities": {
+            "start": "Durably admit a child run of another workflow and return {instanceId, workflowId, version, runLabel, replayed} once it is accepted, without waiting for it.",
+            "get": "Read one run of the tenant: status, suspensionReason, parentInstanceId, output or error.",
+            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission.",
+            "list-pending-signals": "List open WaitForSignal requests of one run, a workflow, or the calling run's children.",
+            "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
+            "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
+            "pause": "Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint.",
+            "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request."
+        },
+        "authorization": [
+            "Reads (get, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
+            "cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
+            "send-signal answers a child, an ancestor, or any run whose WaitForSignal request opted in with action.key when the step passes the same actionKey; anything else is CONTROL_DENIED.",
+            "No mutation may target the calling run (CONTROL_INVALID). Tenant, caller and operation come from the host, never from step inputs."
+        ],
+        "start": {
+            "inputs": "workflowId (an id, not a slug), optional version (default: the current version, fixed at admission), inputs ({data, variables}, validated against the child's input schema), optional runLabel, and a required parentClosePolicy (cancel, which the editor preselects, or leave_running).",
+            "runLabel": format!("At most {} bytes of printable ASCII. It names one child per parent for the parent's whole lifetime: reusing it from another step or iteration is CONTROL_LABEL_CONFLICT, and a retry of a failed child needs a new label. Other parents, and runs without a parent, may reuse it.", c::MAX_RUN_LABEL_BYTES),
+            "depth": format!("Lineage is capped at depth {} (a top-level run is depth 1): a run at depth {} cannot start a child (CONTROL_INVALID).", c::MAX_LINEAGE_DEPTH, c::MAX_LINEAGE_DEPTH),
+            "fastFailure": "A missing workflow or version is CONTROL_NOT_FOUND and a permanently failed compilation CONTROL_NOT_RUNNABLE. A workflow not compiled yet is admitted and launches once it compiles, until the admission deadline (then the child fails with launch_deadline_not_compiled).",
+            "parentLink": "The child records the calling run as parentInstanceId, reported by get, query, the executions API and the invocation history."
+        },
+        "capacity": {
+            "rule": "Children count against the tenant concurrency limit (MAX_CONCURRENT_EXECUTIONS, or the maxConcurrentExecutions entitlement if lower), which counts only starting and running runs: a parked run gives its slot back.",
+            "controlShare": format!("Control-started children may hold at most max(1, floor(0.8 x limit)) slots (limit 10 -> {}, limit 5 -> {}), so outside triggers keep headroom.", c::control_share(10), c::control_share(5)),
+            "atTheShare": format!("start fails with retryable {} carrying a retry hint of {}-{} s; set maxRetries on the step to try again.", c::CONTROL_CAPACITY_RATE_LIMITED, c::CAPACITY_RETRY_MIN_MS / 1000, c::CAPACITY_RETRY_MAX_MS / 1000),
+            "unsatisfiable": format!("With a limit of at most 1 the calling run holds the only slot, so start fails permanently with {} (the server warns at boot).", c::CONTROL_CAPACITY_UNSATISFIABLE)
+        },
+        "statuses": {
+            "values": ["queued", "pending", "running", "suspended", "completed", "failed", "cancelled", "not_started"],
+            "queued": "A child still in admission: accepted by start, not launched yet. It can be cancelled but not paused or resumed.",
+            "not_started": "A child that never launched: its one fenced outcome is not_started or cancelled. get and query report it; the public executions list does not.",
+            "suspensionReason": "For a suspended run: paused (explicitly paused, only a resume relaunches it), waiting_signal, waiting_instances (a WaitForInstances step), sleeping or shutdown. The executions API reports the same as suspensionReason.",
+            "terminal": "completed, failed and cancelled (including execution timeout). A child's failure is outcome data, never a retryable control error."
+        },
+        "waitForInstances": {
+            "step": "Waiting on children is the WaitForInstances step, not a control capability: start the children, then wait on their instanceIds.",
+            "fields": format!("instanceIds (distinct direct children, at most {}), mode all (default) or any, optional timeoutMs (a business deadline counted from the first registration).", waits::MAX_WAIT_TARGETS),
+            "output": "{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, output or error}], remaining: [ids], deadlineMs}.",
+            "semantics": [
+                "all settles when every target is terminal, any when at least one is; repeat any with remaining to process results as they arrive.",
+                "An empty instanceIds returns resolution empty at once. Already finished targets count at once.",
+                "Too many, missing, non-child or ancestor targets fail the step (INSTANCE_WAIT_<CODE>) and register nothing.",
+                "timeoutMs is a business timeout: the wait returns resolution deadline with what finished; it never cancels children.",
+                "The run parks without holding a runner or a concurrency slot and survives restarts; the wake is recorded in the same commit as the child that satisfies it.",
+                "The wait registers once per step and loop position: a replayed any keeps its choice, and the first deadline stands."
+            ],
+            "stepRequirements": "The workflow must be durable (E028), and the step may not sit in onError, a WaitForSignal onWait or an AiAgent tool or memory target (E131)."
+        },
+        "limits": {
+            "inputBytes": format!("{} MiB per control call", mib(c::MAX_INPUT_BYTES)),
+            "getOutputInline": format!("{} MiB output, {} KiB error, else outputOmitted/errorOmitted with the size", mib(c::GET_OUTPUT_INLINE_BYTES), kib(c::GET_ERROR_INLINE_BYTES)),
+            "pageSize": format!("{}-{} (default 20) for query and list-pending-signals", c::PAGE_SIZE_MIN, c::PAGE_SIZE_MAX),
+            "waitTargets": waits::MAX_WAIT_TARGETS,
+            "waitInline": format!("{} KiB output and {} KiB error per child, {} MiB per wait; larger values are omitted and flagged", kib(waits::WAIT_OUTPUT_INLINE_BYTES), kib(waits::WAIT_ERROR_INLINE_BYTES), mib(waits::WAIT_TOTAL_INLINE_BYTES)),
+            "runLabelBytes": c::MAX_RUN_LABEL_BYTES,
+            "lineageDepth": c::MAX_LINEAGE_DEPTH,
+            "cancelGraceMs": format!("0-{} (default {})", c::MAX_CANCEL_GRACE_MS, c::DEFAULT_CANCEL_GRACE_MS),
+            "parentCloseGraceMs": c::PARENT_CLOSE_GRACE_MS,
+            "continuationBytes": format!("{} KiB of suspension state per step operation and attempt", kib(MAX_CONTINUATION_BYTES)),
+            "controlCallMs": format!("{} ms per control call, below the step's own timeout (CONTROL_TIMEOUT)", c::EXECUTION_TIME_LIMIT_MS)
+        },
+        "replay": {
+            "identity": "Each control step call has an operation identity: the step plus its loop position. A retried attempt, a crash recovery and a resumed run replay the same identity.",
+            "table": [
+                {"capability": "get, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
+                {"capability": "start", "onReplay": "Returns the same child (replayed: true), also after a crash between admission and the checkpoint. Other arguments are CONTROL_REPLAY_CONFLICT."},
+                {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."}
+            ],
+            "suspension": format!("A suspending step keeps at most {} KiB of state per operation and attempt; a failed step discards it, so a retry starts afresh ({} when a capability refuses its saved state, {} when the host refuses a suspension).", kib(MAX_CONTINUATION_BYTES), AGENT_CONTINUATION_REJECTED, AGENT_INVALID_SUSPENSION)
+        },
+        "validation": {
+            "E028": "A suspending step (WaitForInstances, or an agent capability that suspends) is not durable.",
+            "E029": "A suspending step has no timeout, or timeout 0.",
+            "E131": "A suspending step sits in an onError region, a WaitForSignal onWait, or an AiAgent tool or memory target.",
+            "E132": "A control step sits in a WaitForSignal onWait, or an AiAgent tool or memory target.",
+            "W073": "A Split's parallelism is ignored: its body holds an operation-scoped step (or another shape that forces sequential execution).",
+            "W074": "A control start in a Split or While uses a literal runLabel; the second iteration fails with CONTROL_LABEL_CONFLICT.",
+            "W075": "A control or suspending step in a parallel Split or an unconditioned branch group; that region runs serialized.",
+            "W076": "A control or suspending step under a retrying Split or EmbedWorkflow; a region retry replays the operation's first outcome.",
+            "W077": "A control start whose workflowId is not a literal; the target is only checked when the step runs.",
+            "W078": format!("A suspending step's timeout is at most {} ms, so it times out instead of parking.", runtara_dsl::step_context_rules::SUSPEND_DEADLINE_MARGIN_MS),
+            "publishing": "A workflow with control or suspending steps (or embedding one) cannot be published as a workflow-agent, and the composed runtime binding (RUNTARA_DIRECT_RUNTIME_BINDING=composed) cannot compile it."
+        },
+        "lifecycle": [
+            format!("parentClosePolicy cancel cancels a still-running child whenever its parent ends (completed, failed, cancelled, or gone), with a {} s grace, even when the parent crashed or was stopped from outside; leave_running leaves it alone. A suspended parent has not ended.", c::PARENT_CLOSE_GRACE_MS / 1000),
+            "Pausing a waiting run (parked on a timer, a signal or its children) pauses it at once, in control and in the public API; it loses its wake, and only an explicit resume relaunches it. Signal answers and finished children are kept and seen after the resume.",
+            "Pausing a parent does not pause its children, and neither an any result nor a wait deadline cancels the remaining children; cancel them explicitly.",
+            "A finished child stays readable through get and WaitForInstances until its parent is terminal (one level deep), then follows normal retention.",
+            "Cancellation is not rollback of the child's business side effects."
+        ],
+        "errorCodes": c::ErrorCode::all_agent_codes()
+    })
+}
+
+/// The WaitForInstances step as authors write it: fields, edges, placement,
+/// output and failures. The limits come from the instance wait service.
+pub(crate) fn wait_for_instances_step_shape() -> serde_json::Value {
+    use crate::api::services::instance_waits as waits;
+    serde_json::json!({
+        "purpose": "Park the run, without holding a runner or a concurrency slot, until direct child runs it started with control start have finished.",
+        "required": ["id", "stepType", "instanceIds"],
+        "optionalFields": ["name", "mode", "timeoutMs", "breakpoint"],
+        "doesNotAccept": ["inputMapping", "durable", "maxRetries", "retryDelay", "timeout"],
+        "fields": {
+            "instanceIds": format!("MappingValue resolving to an array of 1 to {} distinct, non-empty instance ids, each a direct child of this run: a composite array of control start outputs (steps.<start>.outputs.instanceId) or a reference to an array of ids. An empty array settles at once with resolution empty.", waits::MAX_WAIT_TARGETS),
+            "mode": "all (default): settle when every run has finished. any: settle when the first has; wait again on remaining to handle the rest.",
+            "timeoutMs": "Optional MappingValue resolving to a positive integer: a business deadline from the first time the step runs. When it passes the step settles with resolution deadline and what finished; it never cancels children and is not an error. The first deadline stands on replay.",
+            "breakpoint": "Pause before the step in debug mode."
+        },
+        "edges": "Normal next and condition edges, and onError edges for its failures. It cannot be an AiAgent tool.",
+        "placement": "The workflow must be durable (E028). The step may not sit in an onError region, a WaitForSignal onWait, or an AiAgent tool or memory target (E131). In a parallel Split or unconditioned branch group the region runs serialized (W075); under a retrying Split or EmbedWorkflow a region retry replays the first outcome (W076).",
+        "literalChecks": format!("E133 rejects a literal instanceIds that is not a non-empty array of at most {} distinct non-empty strings, and a literal timeoutMs that is not a positive integer.", waits::MAX_WAIT_TARGETS),
+        "output": {
+            "reference": "steps.<id>.outputs",
+            "shape": "{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, finishedAtMs, output, outputBytes, outputOmitted, error, errorOmitted}], remaining: [ids], deadlineMs}",
+            "inline": format!("Each finished run's output is inlined up to {} KiB and its error up to {} KiB, {} MiB per wait; larger values are omitted and flagged with outputOmitted or errorOmitted.", waits::WAIT_OUTPUT_INLINE_BYTES / 1024, waits::WAIT_ERROR_INLINE_BYTES / 1024, waits::WAIT_TOTAL_INLINE_BYTES / (1024 * 1024))
+        },
+        "errors": {
+            "codes": [
+                "INSTANCE_WAIT_INVALID",
+                "INSTANCE_WAIT_DENIED",
+                "INSTANCE_WAIT_NOT_CHILD",
+                "INSTANCE_WAIT_NOT_FOUND",
+                "INSTANCE_WAIT_TOO_LARGE",
+                "INSTANCE_WAIT_REPLAY_CONFLICT",
+                "INSTANCE_WAIT_CLOSED",
+                "INSTANCE_WAIT_UNAVAILABLE",
+                "INSTANCE_WAIT_FAILED"
+            ],
+            "meaning": "A target that is the run itself is INVALID, an ancestor DENIED, any other non-child NOT_CHILD, an unknown one NOT_FOUND, too many TOO_LARGE; a refused registration registers nothing. UNAVAILABLE is transient. Route failures with an onError edge."
+        },
+        "suspension": "A run parked on the step is suspended with suspensionReason waiting_instances; pausing it pauses it at once, and finished children are seen after the resume.",
+        "example": {
+            "id": "waitApprovals",
+            "stepType": "WaitForInstances",
+            "name": "Wait for approvals",
+            "instanceIds": {
+                "valueType": "composite",
+                "value": [
+                    {"valueType": "reference", "value": "steps.startLegal.outputs.instanceId"},
+                    {"valueType": "reference", "value": "steps.startFinance.outputs.instanceId"}
+                ]
+            },
+            "mode": "all",
+            "timeoutMs": {"valueType": "immediate", "value": 86400000}
+        }
+    })
+}
+
 /// Build the canonical workflow-authoring schema returned by
 /// `get_workflow_authoring_schema`. Extracted as a pure function so the advertised
 /// condition-operator enum can be drift-tested against `ConditionOperator`
@@ -462,12 +628,17 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "steps": {
                     "stepId": {
                         "id": "stepId",
-                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Connection | Error | Filter | GroupBy | Delay | WaitForSignal",
+                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances | AiAgent",
                         "name": "Human label",
                         "stepSpecificFields": "Use stepShapes below or get_step_type_schema. inputMapping is not a universal step field."
                     }
                 },
                 "executionPlan": [{"fromStep": "stepId", "toStep": "nextStepId"}],
+                "inputSchema": "optional; map of field name to SchemaField",
+                "outputSchema": "optional; map of field name to SchemaField",
+                "stateSchema": {
+                    "fieldName": {"type": "string | number | integer | boolean | array | object", "label": "Display label", "format": "optional display hint", "enum": ["optional allowed values"]}
+                },
                 "conditionalBranches": [
                     {"fromStep": "conditionalStepId", "toStep": "whenTrueStepId", "label": "true"},
                     {"fromStep": "conditionalStepId", "toStep": "whenFalseStepId", "label": "false"}
@@ -478,7 +649,8 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "For step types that declare it, use inputMapping, not inputMappings",
                 "Error steps do not accept inputMapping; put static error fields directly on the step and dynamic mappings in context",
                 "executionPlan edges use fromStep/toStep",
-                "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges"
+                "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges",
+                "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. It is a declaration only: runs do not write state yet. State starts empty and is written by steps, so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
             ]
         },
         "stepShapes": {
@@ -523,7 +695,8 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                     "lifetime": "The captured envelope remains available through successful handler steps. If a later handled step fails, steps.__error is replaced by that newer error; persist or snapshot the original first when it must survive cleanup failures.",
                     "rethrowSemantics": "An Error step emits a new error envelope. Referencing steps.__error from context preserves the original as metadata; it does not replace the new error's top-level static code or message."
                 }
-            }
+            },
+            "WaitForInstances": wait_for_instances_step_shape()
         },
         "mappingValue": {
             "reference": {"valueType": "reference", "value": "data.foo"},
@@ -599,6 +772,8 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 }
             }
         ],
+        "operationScopedSteps": runtara_dsl::step_context_rules::step_context_rules_json(),
+        "controlAgent": control_agent_reference(),
         "completeExamples": {
             "conditionalBranching": {
                 "name": "Route empty input",
@@ -1663,9 +1838,15 @@ pub async fn diff_workflow_versions(
         }
     }
 
-    // Check for top-level graph changes (inputSchema, outputSchema, name, etc.)
+    // Check for top-level graph changes (inputSchema, outputSchema, stateSchema, name, etc.)
     let mut graph_changes = Vec::new();
-    for key in ["name", "description", "inputSchema", "outputSchema"] {
+    for key in [
+        "name",
+        "description",
+        "inputSchema",
+        "outputSchema",
+        "stateSchema",
+    ] {
         let val_a = graph_a.get(key);
         let val_b = graph_b.get(key);
         if val_a != val_b {
@@ -1749,6 +1930,276 @@ mod tests {
 
         serde_json::from_value::<runtara_dsl::Step>(error["example"].clone())
             .expect("advertised Error example must parse as a real Error step");
+    }
+
+    /// The control reference quotes the contract's numbers and codes, not
+    /// copies of them: a changed cap or a new error code must show up here.
+    #[test]
+    fn control_reference_matches_the_contract() {
+        use runtara_control_contract as c;
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let reference = &schema["controlAgent"];
+        assert_eq!(reference, &control_agent_reference());
+        let limits = &reference["limits"];
+        assert_eq!(
+            limits["waitTargets"],
+            crate::api::services::instance_waits::MAX_WAIT_TARGETS
+        );
+        assert_eq!(limits["runLabelBytes"], c::MAX_RUN_LABEL_BYTES);
+        assert_eq!(limits["lineageDepth"], c::MAX_LINEAGE_DEPTH);
+        assert_eq!(limits["parentCloseGraceMs"], c::PARENT_CLOSE_GRACE_MS);
+        assert_eq!(c::MAX_LINEAGE_DEPTH, 16, "decision D6");
+        assert_eq!(c::control_share(10), 8, "decision D5: 0.8 of the limit");
+        assert_eq!(c::control_share(1), 1);
+        assert!(!c::capacity_satisfiable(1));
+        assert_eq!(runtara_agent_suspension::MAX_CONTINUATION_BYTES, 64 * 1024);
+        let text = reference.to_string();
+        for needle in [
+            format!("{}-{} (default {})", c::PAGE_SIZE_MIN, c::PAGE_SIZE_MAX, 20),
+            format!(
+                "0-{} (default {})",
+                c::MAX_CANCEL_GRACE_MS,
+                c::DEFAULT_CANCEL_GRACE_MS
+            ),
+            format!("at depth {}", c::MAX_LINEAGE_DEPTH),
+            "max(1, floor(0.8 x limit))".to_string(),
+            "64 KiB".to_string(),
+            runtara_agent_suspension::AGENT_CONTINUATION_REJECTED.to_string(),
+        ] {
+            assert!(text.contains(&needle), "{needle} missing from {text}");
+        }
+        // Every agent-facing code is listed, and the prose names the ones an
+        // author has to handle.
+        let codes: Vec<_> = reference["errorCodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect();
+        assert_eq!(codes, c::ErrorCode::all_agent_codes());
+        for code in [
+            c::CONTROL_CAPACITY_RATE_LIMITED,
+            c::CONTROL_CAPACITY_UNSATISFIABLE,
+            c::CONTROL_REQUIRES_INSTANCE,
+            "CONTROL_REPLAY_CONFLICT",
+            "CONTROL_LABEL_CONFLICT",
+            "CONTROL_NOT_CHILD",
+            "CONTROL_DENIED",
+            "CONTROL_NOT_FOUND",
+            "CONTROL_NOT_RUNNABLE",
+            "CONTROL_NOT_PAUSED",
+        ] {
+            assert!(text.contains(code), "{code} missing from the prose");
+        }
+        // The validation codes match the step-context rules.
+        let validation = reference["validation"].as_object().unwrap();
+        for rule in runtara_dsl::step_context_rules::STEP_CONTEXT_RULES {
+            for code in [rule.suspending.code(), rule.control.code()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(validation.contains_key(code), "{code} not explained");
+            }
+        }
+        assert!(validation.contains_key("W073"));
+        // Statuses and suspension reasons are the control agent's vocabulary.
+        assert_eq!(
+            reference["statuses"]["values"],
+            serde_json::json!([
+                "queued",
+                "pending",
+                "running",
+                "suspended",
+                "completed",
+                "failed",
+                "cancelled",
+                "not_started"
+            ])
+        );
+        for reason in [
+            "paused",
+            "waiting_signal",
+            "waiting_instances",
+            "sleeping",
+            "shutdown",
+        ] {
+            let label = serde_json::to_value(
+                serde_json::from_value::<crate::types::SuspensionReason>(serde_json::json!(reason))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(label, reason);
+            assert!(
+                reference["statuses"]["suspensionReason"]
+                    .as_str()
+                    .unwrap()
+                    .contains(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_step_type_lists_match_the_registry() {
+        use std::collections::BTreeSet;
+        let registry: BTreeSet<&str> = runtara_dsl::agent_meta::get_all_step_types()
+            .map(|meta| meta.id)
+            .collect();
+
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let authoring: BTreeSet<&str> =
+            schema["graphShape"]["shape"]["steps"]["stepId"]["stepType"]
+                .as_str()
+                .unwrap()
+                .split(" | ")
+                .collect();
+        assert_eq!(authoring, registry, "authoring schema stepType list");
+
+        // The server instructions are built inline in `get_info`; check the
+        // advertised line in its source.
+        let instructions = include_str!("../server.rs");
+        let line = instructions
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("**Step types**: "))
+            .expect("server instructions list the step types");
+        let listed: BTreeSet<&str> = line
+            .split(" (no Start type).")
+            .next()
+            .unwrap()
+            .split(", ")
+            .collect();
+        assert_eq!(listed, registry, "server instructions step types");
+    }
+
+    #[test]
+    fn authoring_schema_documents_the_wait_for_instances_step() {
+        use crate::api::services::instance_waits as waits;
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let step_types = schema["graphShape"]["shape"]["steps"]["stepId"]["stepType"]
+            .as_str()
+            .unwrap();
+        assert!(
+            step_types.split(" | ").any(|t| t == "WaitForInstances"),
+            "{step_types}"
+        );
+
+        let shape = &schema["stepShapes"]["WaitForInstances"];
+        assert_eq!(shape, &wait_for_instances_step_shape());
+        assert_eq!(
+            shape["required"],
+            serde_json::json!(["id", "stepType", "instanceIds"])
+        );
+        let parsed: runtara_dsl::Step = serde_json::from_value(shape["example"].clone())
+            .expect("advertised WaitForInstances example must parse as a real step");
+        let runtara_dsl::Step::WaitForInstances(step) = parsed else {
+            panic!("a WaitForInstances step");
+        };
+        assert_eq!(step.mode, runtara_dsl::WaitForInstancesMode::All);
+        assert!(step.timeout_ms.is_some());
+
+        // Every optional field is a real field and every refused one is
+        // refused by the step's deny_unknown_fields.
+        let mut full = shape["example"].clone();
+        full["breakpoint"] = serde_json::json!(true);
+        serde_json::from_value::<runtara_dsl::Step>(full.clone()).unwrap();
+        for refused in shape["doesNotAccept"].as_array().unwrap() {
+            let mut bad = full.clone();
+            bad[refused.as_str().unwrap()] = serde_json::json!(1);
+            assert!(
+                serde_json::from_value::<runtara_dsl::Step>(bad).is_err(),
+                "{refused} must be rejected"
+            );
+        }
+
+        let text = shape.to_string();
+        assert!(text.contains(&format!("1 to {} distinct", waits::MAX_WAIT_TARGETS)));
+        for needle in ["E028", "E131", "E133", "W075", "W076", "waiting_instances"] {
+            assert!(text.contains(needle), "{needle} missing from {text}");
+        }
+        let codes: Vec<_> = shape["errors"]["codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect();
+        assert_eq!(codes.len(), 9);
+        assert!(codes.iter().all(|code| code.starts_with("INSTANCE_WAIT_")));
+        for field in ["resolution", "finished", "remaining", "deadlineMs"] {
+            assert!(
+                shape["output"]["shape"].as_str().unwrap().contains(field),
+                "{field} missing from the output shape"
+            );
+        }
+    }
+
+    /// list_step_types and get_step_type_schema serve the DSL registry; the
+    /// step is there under its display name, with its output shape.
+    #[test]
+    fn step_type_catalog_exposes_wait_for_instances() {
+        let meta = runtara_dsl::agent_meta::get_all_step_types()
+            .find(|meta| meta.id == "WaitForInstances")
+            .expect("WaitForInstances is a registered step type");
+        assert_eq!(meta.display_name, "Wait for Instances");
+        assert_eq!(meta.category, "control");
+
+        let schema = runtara_dsl::spec::dsl_schema::get_step_type_schema("WaitForInstances")
+            .expect("get_step_type_schema serves WaitForInstances");
+        assert_eq!(schema["displayName"], "Wait for Instances");
+        let fields: Vec<_> = schema["outputShape"]["outputs"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            fields,
+            ["mode", "resolution", "finished", "remaining", "deadlineMs"]
+        );
+        let properties = schema["schema"].to_string();
+        for field in ["instanceIds", "mode", "timeoutMs", "breakpoint"] {
+            assert!(
+                properties.contains(field),
+                "{field} missing from the schema"
+            );
+        }
+    }
+
+    #[test]
+    fn authoring_schema_describes_state_schema() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let graph_shape = &schema["graphShape"];
+        assert!(graph_shape["shape"].get("stateSchema").is_some());
+        assert!(
+            !graph_shape["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("stateSchema"))
+        );
+        let notes = graph_shape["notes"].to_string();
+        for needle in ["stateSchema", "currency", "W081", "set_state_schema"] {
+            assert!(notes.contains(needle), "{needle} missing from {notes}");
+        }
+    }
+
+    #[test]
+    fn authoring_schema_renders_every_operation_scoped_rule() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let section = &schema["operationScopedSteps"];
+        let rules = section["rules"].as_array().expect("rules");
+        let rendered: Vec<&str> = rules
+            .iter()
+            .map(|rule| rule["context"].as_str().expect("context key"))
+            .collect();
+        let expected: Vec<&str> = runtara_dsl::step_context_rules::STEP_CONTEXT_RULES
+            .iter()
+            .map(|rule| rule.key)
+            .collect();
+        assert_eq!(rendered, expected);
+        let text = section.to_string();
+        for code in [
+            "E028", "E029", "E131", "E132", "W074", "W075", "W076", "W077", "W078",
+        ] {
+            assert!(text.contains(code), "{code} missing from {text}");
+        }
     }
 
     /// SYN-451: the authoring schema's advertised condition `op` enum must list

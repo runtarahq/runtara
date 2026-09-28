@@ -271,6 +271,27 @@ export function buildSchemaFromFields(
   }, {});
 }
 
+/**
+ * Build a workflow `stateSchema` from editor rows. State starts empty and is
+ * written by steps, so an unset `required` stays unset instead of defaulting
+ * to `true` as it does for input and output schemas. An explicit
+ * `required: true`, a default or a visibility rule is kept, so validation can
+ * warn about it (W081).
+ */
+export function buildStateSchemaFromFields(
+  fields: SchemaField[]
+): Record<string, any> {
+  const schema = buildSchemaFromFields(
+    fields.map((field) => ({ ...field, required: field.required ?? false }))
+  );
+  for (const field of Object.values(schema)) {
+    if (field.required === false) {
+      delete field.required;
+    }
+  }
+  return schema;
+}
+
 export function inferSchemaFromMapping(
   mappings: {
     type?: string | null | undefined;

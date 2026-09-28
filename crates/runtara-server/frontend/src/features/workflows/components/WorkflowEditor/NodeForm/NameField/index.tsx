@@ -19,6 +19,7 @@ import {
   useWorkflowStore,
 } from '@/features/workflows/stores/workflowStore';
 import { NodeFormContext } from '../NodeFormContext';
+import { SuspendsBadge } from '@/features/workflows/components/CapabilityBadges';
 import { CapabilityPickerModal } from '../CapabilityPickerModal';
 import { ConnectionPickerModal } from '../ConnectionPickerModal';
 import { findAgentById, sameAgentId } from '@/shared/utils/agent-id';
@@ -276,6 +277,9 @@ export function NameField({ name }: { name: string }) {
           >
             {agent?.name || agentId} → {capabilityId}
           </button>
+          <SuspendsBadge
+            capability={agent?.supportedCapabilities?.[capabilityId]}
+          />
           {supportsConnections && (
             <>
               <span className="shrink-0">•</span>

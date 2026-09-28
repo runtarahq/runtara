@@ -27,7 +27,7 @@ use super::abi::{
     push_segment_args, zero_return_function,
 };
 use super::core_imports::{
-    DirectCoreFunctionIndices, DirectCoreImportIndices, agent_id_for_import, import_core_function,
+    DirectCoreFunctionIndices, DirectCoreImportIndices, agent_import_for, import_core_function,
     is_wasi_cli_run_export,
 };
 use super::dispatcher::emit_run_plan_mapping;
@@ -206,7 +206,7 @@ pub(super) fn emit_direct_core_module(
     let has_agents = world
         .imports
         .keys()
-        .any(|name| agent_id_for_import(resolve, Some(name)).is_some());
+        .any(|name| agent_import_for(resolve, Some(name)).is_some());
     let has_async_calls = has_agents
         || world
             .imports
@@ -343,9 +343,9 @@ pub(super) fn emit_direct_core_module(
             let WorldItem::Interface { id, .. } = import else {
                 continue;
             };
-            let agent_id = agent_id_for_import(resolve, Some(name));
+            let agent_key = agent_import_for(resolve, Some(name));
             for function in resolve.interfaces[*id].functions.values() {
-                let agent_invoke = agent_id.is_some() && function.name == "invoke";
+                let agent_invoke = agent_key.is_some() && function.name == "invoke";
                 let describe = super::core_imports::is_connection_resolver_import(
                     resolve,
                     Some(name),
@@ -376,9 +376,9 @@ pub(super) fn emit_direct_core_module(
                     &field,
                     wasm_encoder::EntityType::Function(type_index),
                 );
-                if let Some(agent_id) = &agent_id {
+                if let Some(agent_key) = &agent_key {
                     import_indices.agent_invokes_async.insert(
-                        agent_id.clone(),
+                        agent_key.clone(),
                         super::DirectAgentInvokeImport {
                             function_index: imported_function_count,
                             params: signature.params.clone(),
@@ -406,10 +406,10 @@ pub(super) fn emit_direct_core_module(
     let scoped_async = import_indices
         .agent_invokes_async
         .keys()
-        .filter(|agent| {
+        .filter(|key| {
             import_indices
                 .agent_invokes
-                .get(*agent)
+                .get(*key)
                 .is_some_and(|invoke| invoke.is_scoped())
         })
         .cloned()
@@ -427,10 +427,11 @@ pub(super) fn emit_direct_core_module(
             &mut code,
             imported_function_count,
             &mut next_defined_function,
+            import_indices.operation_scope.is_some(),
         );
-        for agent in scoped_async {
-            let params = import_indices.agent_invokes[&agent].params.clone();
-            let invoke = import_indices.agent_invokes_async.get_mut(&agent).unwrap();
+        for key in scoped_async {
+            let params = import_indices.agent_invokes[&key].params.clone();
+            let invoke = import_indices.agent_invokes_async.get_mut(&key).unwrap();
             if invoke.params != [WasmType::Pointer, WasmType::Pointer] {
                 return Err(super::component_error(
                     "unexpected scoped async invoke canonical signature",
@@ -587,6 +588,7 @@ pub(super) fn emit_direct_core_module(
             &mut code,
             imported_function_count,
             &mut next_defined_function,
+            import_indices.operation_scope.is_some(),
         );
     }
     export_initialize(
@@ -720,6 +722,11 @@ fn export_realloc(
     code: &mut CodeSection,
     imported_function_count: u32,
     next_defined_function: &mut u32,
+    // Honour the requested alignment. Needed once an 8-aligned value (the
+    // `wake` list of a suspension) is lowered into this memory; without such
+    // a site the historic unaligned bump allocator keeps every other workflow
+    // byte-identical.
+    aligned: bool,
 ) {
     let type_index = push_core_type(
         types,
@@ -736,8 +743,23 @@ fn export_realloc(
 
     let mut body = WasmFunction::new([(3, ValType::I32)]);
     body.instruction(&Instruction::GlobalGet(0));
+    if aligned {
+        // `align` (param 2) is a power of two by the canonical ABI.
+        body.instruction(&Instruction::LocalGet(2));
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::I32Sub);
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalGet(2));
+        body.instruction(&Instruction::I32Sub);
+        body.instruction(&Instruction::I32And);
+    }
     body.instruction(&Instruction::LocalSet(4));
-    body.instruction(&Instruction::GlobalGet(0));
+    body.instruction(&if aligned {
+        Instruction::LocalGet(4)
+    } else {
+        Instruction::GlobalGet(0)
+    });
     body.instruction(&Instruction::LocalGet(3));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(5));

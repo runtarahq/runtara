@@ -17,6 +17,7 @@ import {
 } from '@/features/workflows/utils/validation-helpers';
 import {
   buildSchemaFromFields,
+  buildStateSchemaFromFields,
   type SchemaField,
 } from '@/features/workflows/utils/schema';
 
@@ -34,6 +35,7 @@ type WorkflowValidationContext = {
   }>;
   inputSchemaFields?: SchemaField[];
   outputSchemaFields?: SchemaField[];
+  stateSchemaFields?: SchemaField[];
   executionTimeoutSeconds?: number;
   rateLimitBudgetMs?: number;
   durable?: boolean | null;
@@ -237,6 +239,9 @@ function buildGraphOptions(workflow?: WorkflowValidationContext) {
       : undefined,
     outputSchema: workflow?.outputSchemaFields?.length
       ? buildSchemaFromFields(workflow.outputSchemaFields)
+      : undefined,
+    stateSchema: workflow?.stateSchemaFields?.length
+      ? buildStateSchemaFromFields(workflow.stateSchemaFields)
       : undefined,
     executionTimeoutSeconds: workflow?.executionTimeoutSeconds,
     rateLimitBudgetMs: workflow?.rateLimitBudgetMs,

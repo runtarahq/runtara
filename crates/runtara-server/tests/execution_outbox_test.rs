@@ -12,8 +12,8 @@ use std::time::Duration;
 use runtara_environment::launch_dispatcher::LaunchLifecycleObserver;
 use runtara_server::api::dto::trigger_event::TriggerEvent;
 use runtara_server::workers::execution_outbox::{
-    DurableLaunchClaim, ExecutionAdmissionLifecycleObserver, ExecutionOutbox, ExecutionOutboxError,
-    ExecutionOutboxPolicy, source_idempotency_key,
+    ChildAdmission, DurableLaunchClaim, ExecutionAdmissionLifecycleObserver, ExecutionOutbox,
+    ExecutionOutboxError, ExecutionOutboxPolicy, source_idempotency_key,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -683,7 +683,7 @@ async fn start_label_is_durable_non_unique_and_conflicting_replays_are_rejected(
     let stored: TriggerEvent = serde_json::from_value(payload).unwrap();
     assert_eq!(stored.run_label.as_deref(), Some(" Order_123 "));
     assert_eq!(reserved_count(&pool, &tenant).await, 2);
-    for invalid in ["".into(), "bad\nlabel".into(), "x".repeat(251)] {
+    for invalid in ["".into(), "bad\nlabel".into(), "x".repeat(1025)] {
         request.run_label = Some(invalid);
         assert!(matches!(
             outbox.enqueue(&tenant, &request, "invalid", 10).await,
@@ -691,5 +691,723 @@ async fn start_label_is_durable_non_unique_and_conflicting_replays_are_rejected(
         ));
     }
     assert_eq!(reserved_count(&pool, &tenant).await, 2);
+    let longest = "x".repeat(1024);
+    request.instance_id = Uuid::new_v4().to_string();
+    request.run_label = Some(longest.clone());
+    let accepted = outbox
+        .enqueue(&tenant, &request, "longest", 10)
+        .await
+        .unwrap();
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT trigger_event FROM execution_requests WHERE request_id = $1")
+            .bind(accepted.request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stored: TriggerEvent = serde_json::from_value(payload).unwrap();
+    assert_eq!(stored.run_label, Some(longest));
+    assert_eq!(reserved_count(&pool, &tenant).await, 3);
     cleanup(&pool, &tenant).await;
+}
+
+// ---------------------------------------------------------------------------
+// control:start children (slice 7)
+// ---------------------------------------------------------------------------
+
+fn child_event(tenant_id: &str, parent: &str, label: Option<&str>) -> TriggerEvent {
+    TriggerEvent::control(
+        Uuid::new_v4().to_string(),
+        tenant_id.to_string(),
+        "child-workflow".to_string(),
+        1,
+        serde_json::json!({"data": {}, "variables": {}}),
+        false,
+        parent.to_string(),
+        "cancel".to_string(),
+        "op".to_string(),
+        label.map(str::to_owned),
+        chrono::Utc::now().timestamp_millis(),
+    )
+}
+
+fn child<'a>(parent: &'a str, fingerprint: &'a str, share: u64) -> ChildAdmission<'a> {
+    ChildAdmission {
+        parent_instance_id: parent,
+        parent_close_policy: "cancel",
+        operation: "op",
+        fingerprint,
+        control_share: share,
+    }
+}
+
+#[tokio::test]
+async fn a_start_replays_its_child_and_conflicts_on_other_arguments() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-replay-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+    let key = "control:parent-1:op-1";
+
+    let event = child_event(&tenant_id, "parent-1", Some("order-1"));
+    let first = outbox
+        .enqueue_child(&tenant_id, &event, key, 10, child("parent-1", "v1:a", 8))
+        .await
+        .expect("admit the child");
+    assert!(!first.duplicate);
+    // The same operation with the same arguments is the same child, even
+    // under a fresh instance id.
+    let replay = outbox
+        .enqueue_child(
+            &tenant_id,
+            &child_event(&tenant_id, "parent-1", Some("order-1")),
+            key,
+            10,
+            child("parent-1", "v1:a", 8),
+        )
+        .await
+        .expect("replay");
+    assert!(replay.duplicate);
+    assert_eq!(replay.instance_id, first.instance_id);
+    // Other arguments are a conflict and admit nothing.
+    let conflict = outbox
+        .enqueue_child(
+            &tenant_id,
+            &child_event(&tenant_id, "parent-1", Some("order-1")),
+            key,
+            10,
+            child("parent-1", "v1:b", 8),
+        )
+        .await;
+    assert!(matches!(
+        conflict,
+        Err(ExecutionOutboxError::StartReplayConflict)
+    ));
+    assert_eq!(reserved_count(&pool, &tenant_id).await, 1);
+
+    let stored = outbox
+        .control_start(&tenant_id, key)
+        .await
+        .unwrap()
+        .expect("the admission is readable by its key");
+    assert_eq!(stored.instance_id, first.instance_id);
+    assert_eq!(stored.parent_instance_id.as_deref(), Some("parent-1"));
+    assert_eq!(stored.parent_close_policy.as_deref(), Some("cancel"));
+    assert_eq!(stored.run_label.as_deref(), Some("order-1"));
+    assert_eq!(stored.start_fingerprint.as_deref(), Some("v1:a"));
+    assert_eq!(stored.workflow_version, Some(1));
+    assert!(stored.in_admission());
+    assert_eq!(
+        outbox
+            .control_child(&tenant_id, &first.instance_id)
+            .await
+            .unwrap()
+            .map(|row| row.request_id),
+        Some(stored.request_id)
+    );
+    let admitted = outbox
+        .admitted_children(&tenant_id, "parent-1")
+        .await
+        .unwrap();
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 1);
+    cleanup(&pool, &tenant_id).await;
+}
+
+#[tokio::test]
+async fn a_run_label_names_one_child_per_parent_even_under_a_race() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-label-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+
+    // Eight operations of one parent race for one label: exactly one wins.
+    let attempts = (0..8).map(|attempt| {
+        let outbox = outbox.clone();
+        let tenant_id = tenant_id.clone();
+        async move {
+            let key = format!("control:parent-1:op-{attempt}");
+            let fingerprint = format!("v1:{attempt}");
+            outbox
+                .enqueue_child(
+                    &tenant_id,
+                    &child_event(&tenant_id, "parent-1", Some("shared")),
+                    &key,
+                    100,
+                    child("parent-1", &fingerprint, 80),
+                )
+                .await
+        }
+    });
+    let results = futures::future::join_all(attempts).await;
+    let admitted = results.iter().filter(|result| result.is_ok()).count();
+    let conflicts = results
+        .iter()
+        .filter(|result| matches!(result, Err(ExecutionOutboxError::ParentRunLabelConflict)))
+        .count();
+    assert_eq!((admitted, conflicts), (1, 7), "{results:?}");
+    // Losers hand their reservation back.
+    assert_eq!(reserved_count(&pool, &tenant_id).await, 1);
+    assert_eq!(
+        outbox
+            .parent_label_holder(&tenant_id, "parent-1", "shared")
+            .await
+            .unwrap(),
+        Some(
+            results
+                .into_iter()
+                .find_map(Result::ok)
+                .unwrap()
+                .instance_id
+        )
+    );
+
+    // The label is free for another parent, and unlabelled children never
+    // conflict.
+    for (parent, key, label) in [
+        ("parent-2", "control:parent-2:op", Some("shared")),
+        ("parent-1", "control:parent-1:unlabelled-1", None),
+        ("parent-1", "control:parent-1:unlabelled-2", None),
+    ] {
+        outbox
+            .enqueue_child(
+                &tenant_id,
+                &child_event(&tenant_id, parent, label),
+                key,
+                100,
+                child(parent, key, 80),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+    }
+    // The label stays taken for the parent's lifetime, also after the child
+    // left admission.
+    sqlx::query(
+        "UPDATE execution_requests SET state = 'terminal' WHERE tenant_id = $1 AND parent_instance_id = 'parent-1' AND run_label = 'shared'",
+    )
+    .bind(&tenant_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        outbox
+            .enqueue_child(
+                &tenant_id,
+                &child_event(&tenant_id, "parent-1", Some("shared")),
+                "control:parent-1:late",
+                100,
+                child("parent-1", "v1:late", 80),
+            )
+            .await,
+        Err(ExecutionOutboxError::ParentRunLabelConflict)
+    ));
+    cleanup(&pool, &tenant_id).await;
+}
+
+#[tokio::test]
+async fn control_children_hold_at_most_their_share_and_outside_triggers_keep_headroom() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    for limit in [1u32, 2, 5, 10] {
+        let tenant_id = format!("child-share-{limit}-{}", Uuid::new_v4());
+        let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+        let share = u64::from(runtara_control_contract::control_share(limit));
+        let limit = u64::from(limit);
+        // Concurrent starts cannot overshoot the share.
+        let attempts = (0..share + 3).map(|attempt| {
+            let outbox = outbox.clone();
+            let tenant_id = tenant_id.clone();
+            async move {
+                let key = format!("control:parent:op-{attempt}");
+                outbox
+                    .enqueue_child(
+                        &tenant_id,
+                        &child_event(&tenant_id, "parent", None),
+                        &key,
+                        limit,
+                        child("parent", &key, share),
+                    )
+                    .await
+            }
+        });
+        let results = futures::future::join_all(attempts).await;
+        let admitted = results.iter().filter(|result| result.is_ok()).count() as u64;
+        assert_eq!(admitted, share, "limit {limit}: {results:?}");
+        assert!(
+            results.iter().all(|result| matches!(
+                result,
+                Ok(_)
+                    | Err(ExecutionOutboxError::ControlShareFull { .. })
+                    | Err(ExecutionOutboxError::AdmissionFull { .. })
+            )),
+            "limit {limit}: {results:?}"
+        );
+        assert_eq!(
+            outbox.control_reservations(&tenant_id).await.unwrap() as u64,
+            share
+        );
+
+        // An outside trigger is admitted while control holds its share,
+        // until the limit itself is reached.
+        let mut outside = 0;
+        while share + outside < limit {
+            outbox
+                .enqueue(
+                    &tenant_id,
+                    &event(&tenant_id, Uuid::new_v4()),
+                    &format!("http-api:{outside}"),
+                    limit,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("limit {limit}: outside trigger refused: {error}"));
+            outside += 1;
+        }
+        assert!(outside >= 1 || limit == 1, "limit {limit} left no headroom");
+        assert!(matches!(
+            outbox
+                .enqueue(
+                    &tenant_id,
+                    &event(&tenant_id, Uuid::new_v4()),
+                    "http-api:over",
+                    limit,
+                )
+                .await,
+            Err(ExecutionOutboxError::AdmissionFull { .. })
+        ));
+
+        // A parked child frees its slot and its share.
+        let parked = results.into_iter().find_map(Result::ok).unwrap();
+        assert!(
+            outbox
+                .release_admission(parked.request_id, "runtime_suspended")
+                .await
+                .unwrap()
+        );
+        outbox
+            .enqueue_child(
+                &tenant_id,
+                &child_event(&tenant_id, "parent", None),
+                "control:parent:after-park",
+                limit,
+                child("parent", "v1:after-park", share),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("limit {limit}: {error}"));
+        cleanup(&pool, &tenant_id).await;
+    }
+}
+
+#[tokio::test]
+async fn a_child_not_compiled_yet_is_requeued_until_its_deadline() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-compile-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+    let event = child_event(&tenant_id, "parent", None);
+    let admitted = outbox
+        .enqueue_child(
+            &tenant_id,
+            &event,
+            "control:parent:op",
+            10,
+            child("parent", "v1:a", 8),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE execution_requests SET state = 'delivered' WHERE request_id = $1")
+        .bind(admitted.request_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE execution_outbox SET state = 'delivered' WHERE request_id = $1")
+        .bind(admitted.request_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Each launch attempt finds the workflow not compiled and hands the
+    // request back; the next delivery claims it again.
+    for attempt in 0..3 {
+        assert_eq!(
+            outbox
+                .claim_for_launch(
+                    admitted.request_id,
+                    &tenant_id,
+                    &event.instance_id,
+                    "worker"
+                )
+                .await
+                .unwrap(),
+            DurableLaunchClaim::Claimed,
+            "attempt {attempt}"
+        );
+        assert!(
+            outbox
+                .release_launch_claim(admitted.request_id, "worker", "workflow_not_compiled")
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        outbox
+            .control_child(&tenant_id, &event.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .in_admission()
+    );
+
+    // At the deadline it expires as never compiled and frees its slot.
+    sqlx::query(
+        "UPDATE execution_requests SET deadline_at = NOW() - INTERVAL '1 second' WHERE request_id = $1",
+    )
+    .bind(admitted.request_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The reaper spans every tenant of the database; this tenant's row is
+    // checked below.
+    assert!(outbox.expire_due().await.unwrap() >= 1);
+    let expired = outbox
+        .control_child(&tenant_id, &event.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expired.state, "expired");
+    assert_eq!(
+        expired.terminal_reason.as_deref(),
+        Some("launch_deadline_not_compiled")
+    );
+    assert!(!expired.in_admission());
+    assert_eq!(reserved_count(&pool, &tenant_id).await, 0);
+    assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 0);
+    cleanup(&pool, &tenant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Ownership (slice 8): cancel in every admission state, fenced outcomes
+// ---------------------------------------------------------------------------
+
+async fn deliver(pool: &PgPool, request_id: Uuid) {
+    sqlx::query("UPDATE execution_requests SET state = 'delivered' WHERE request_id = $1")
+        .bind(request_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE execution_outbox SET state = 'delivered' WHERE request_id = $1")
+        .bind(request_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn admit(
+    outbox: &ExecutionOutbox,
+    tenant_id: &str,
+    parent: &str,
+    op: &str,
+) -> (Uuid, String) {
+    let event = child_event(tenant_id, parent, None);
+    let admitted = outbox
+        .enqueue_child(
+            tenant_id,
+            &event,
+            &format!("control:{parent}:{op}"),
+            10,
+            child(parent, "v1:a", 8),
+        )
+        .await
+        .expect("admit a child");
+    (admitted.request_id, event.instance_id)
+}
+
+/// `queued` and `delivered` children are cancelled in admission (their
+/// reservation and control share freed, a `cancelled` outcome due);
+/// `launching` stores an intent; `accepted` is Environment's; an ended
+/// admission and a stranger are reported as such. The first cancel stands.
+#[tokio::test]
+async fn cancel_works_in_every_admission_state() {
+    use runtara_server::workers::execution_outbox::AdmissionCancel;
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-cancel-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+
+    // queued
+    let (queued_request, queued) = admit(&outbox, &tenant_id, "parent", "q").await;
+    assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 1);
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &queued, "not needed", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::Cancelled
+    );
+    assert_eq!(outbox.control_reservations(&tenant_id).await.unwrap(), 0);
+    assert_eq!(reserved_count(&pool, &tenant_id).await, 0);
+    let row = outbox
+        .control_child(&tenant_id, &queued)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            row.state.as_str(),
+            row.outcome.as_deref(),
+            row.outcome_reason.as_deref()
+        ),
+        ("cancelled", Some("cancelled"), Some("not needed"))
+    );
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &queued, "again", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::AlreadyEnded {
+            state: "cancelled".into()
+        }
+    );
+    // A stream entry delivered before the cancel can no longer launch it.
+    assert_eq!(
+        outbox
+            .claim_for_launch(queued_request, &tenant_id, &queued, "worker")
+            .await
+            .unwrap(),
+        DurableLaunchClaim::Rejected
+    );
+
+    // delivered
+    let (delivered_request, delivered) = admit(&outbox, &tenant_id, "parent", "d").await;
+    deliver(&pool, delivered_request).await;
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &delivered, "parent ended", 5000)
+            .await
+            .unwrap(),
+        AdmissionCancel::Cancelled
+    );
+
+    // launching: an intent, kept through a second cancel.
+    let (launching_request, launching) = admit(&outbox, &tenant_id, "parent", "l").await;
+    deliver(&pool, launching_request).await;
+    assert_eq!(
+        outbox
+            .claim_for_launch(launching_request, &tenant_id, &launching, "worker")
+            .await
+            .unwrap(),
+        DurableLaunchClaim::Claimed
+    );
+    for reason in ["first", "second"] {
+        assert_eq!(
+            outbox
+                .cancel_request(&tenant_id, &launching, reason, 2500)
+                .await
+                .unwrap(),
+            AdmissionCancel::IntentStored
+        );
+    }
+    let (reason, grace): (Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT cancel_reason, cancel_grace_ms FROM execution_requests WHERE request_id = $1",
+    )
+    .bind(launching_request)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((reason.as_deref(), grace), (Some("first"), Some(2500)));
+    assert_eq!(
+        outbox.control_reservations(&tenant_id).await.unwrap(),
+        1,
+        "a launching child keeps its slot"
+    );
+
+    // accepted
+    assert!(
+        outbox
+            .mark_launch_accepted(launching_request, "worker")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &launching, "late", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::Accepted
+    );
+
+    // A top-level request is not a child.
+    let top = Uuid::new_v4();
+    outbox
+        .enqueue(
+            &tenant_id,
+            &event(&tenant_id, top),
+            &source_idempotency_key("http-api", "top"),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outbox
+            .cancel_request(&tenant_id, &top.to_string(), "x", 0)
+            .await
+            .unwrap(),
+        AdmissionCancel::NotFound
+    );
+    cleanup(&pool, &tenant_id).await;
+}
+
+/// Races around the launch handoff: an intent follows the child to
+/// `accepted` (and is applied once), back to admission, or into an expiry
+/// that makes its outcome `cancelled`; a refused launch is `not_started`
+/// with its terminal reason. Each outcome is published once.
+#[tokio::test]
+async fn cancel_intents_and_outcomes_follow_launching_races() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("child-races-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+    let ours = |rows: Vec<runtara_server::workers::execution_outbox::ControlChildPending>| {
+        rows.into_iter()
+            .filter(|row| row.tenant_id == tenant_id)
+            .map(|row| row.child.instance_id)
+            .collect::<Vec<_>>()
+    };
+
+    // Intent while launching, then accepted: due for Environment once.
+    let (accepted_request, accepted) = admit(&outbox, &tenant_id, "parent", "a").await;
+    deliver(&pool, accepted_request).await;
+    outbox
+        .claim_for_launch(accepted_request, &tenant_id, &accepted, "w")
+        .await
+        .unwrap();
+    outbox
+        .cancel_request(&tenant_id, &accepted, "stop", 0)
+        .await
+        .unwrap();
+    assert!(
+        ours(outbox.pending_cancel_intents(100).await.unwrap()).is_empty(),
+        "a launching child waits for its handoff"
+    );
+    outbox
+        .mark_launch_accepted(accepted_request, "w")
+        .await
+        .unwrap();
+    assert_eq!(
+        ours(outbox.pending_cancel_intents(100).await.unwrap()),
+        vec![accepted.clone()]
+    );
+    assert!(outbox.mark_intent_applied(accepted_request).await.unwrap());
+    assert!(!outbox.mark_intent_applied(accepted_request).await.unwrap());
+    assert!(ours(outbox.pending_cancel_intents(100).await.unwrap()).is_empty());
+
+    // Intent while launching, then the handoff returns it to admission.
+    let (returned_request, returned) = admit(&outbox, &tenant_id, "parent", "r").await;
+    deliver(&pool, returned_request).await;
+    outbox
+        .claim_for_launch(returned_request, &tenant_id, &returned, "w")
+        .await
+        .unwrap();
+    outbox
+        .cancel_request(&tenant_id, &returned, "stop", 0)
+        .await
+        .unwrap();
+    outbox
+        .release_launch_claim(returned_request, "w", "workflow_not_compiled")
+        .await
+        .unwrap();
+    assert_eq!(
+        ours(outbox.pending_cancel_intents(100).await.unwrap()),
+        vec![returned.clone()]
+    );
+
+    // Intent while launching, then the lease and deadline lapse: expired,
+    // and the outcome is the requested cancel.
+    let (expiring_request, expiring) = admit(&outbox, &tenant_id, "parent", "e").await;
+    deliver(&pool, expiring_request).await;
+    outbox
+        .claim_for_launch(expiring_request, &tenant_id, &expiring, "w")
+        .await
+        .unwrap();
+    outbox
+        .cancel_request(&tenant_id, &expiring, "stop it", 0)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_requests SET deadline_at = NOW() - INTERVAL '1 second' WHERE request_id = $1",
+    )
+    .bind(expiring_request)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_outbox SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE request_id = $1",
+    )
+    .bind(expiring_request)
+    .execute(&pool)
+    .await
+    .unwrap();
+    outbox.expire_due().await.unwrap();
+    let row = outbox
+        .control_child(&tenant_id, &expiring)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            row.state.as_str(),
+            row.outcome.as_deref(),
+            row.outcome_reason.as_deref()
+        ),
+        ("expired", Some("cancelled"), Some("stop it"))
+    );
+
+    // A launch refused after the handoff is `not_started`, with its reason.
+    let (refused_request, refused) = admit(&outbox, &tenant_id, "parent", "t").await;
+    deliver(&pool, refused_request).await;
+    outbox
+        .claim_for_launch(refused_request, &tenant_id, &refused, "w")
+        .await
+        .unwrap();
+    outbox
+        .terminalize_launch_claim(refused_request, "w", "environment_launch_failed")
+        .await
+        .unwrap();
+    let row = outbox
+        .control_child(&tenant_id, &refused)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (row.outcome.as_deref(), row.outcome_reason.as_deref()),
+        (Some("not_started"), Some("environment_launch_failed"))
+    );
+    let due = ours(outbox.unpublished_outcomes(100).await.unwrap());
+    assert!(due.contains(&expiring) && due.contains(&refused), "{due:?}");
+
+    // Publication is recorded once; a launch that won clears the outcome.
+    assert!(
+        outbox
+            .mark_outcome_published(refused_request, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !outbox
+            .mark_outcome_published(refused_request, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        outbox
+            .mark_outcome_published(expiring_request, true)
+            .await
+            .unwrap()
+    );
+    let row = outbox
+        .control_child(&tenant_id, &expiring)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.outcome, None, "the launch won the fence");
+    assert!(ours(outbox.unpublished_outcomes(100).await.unwrap()).is_empty());
+    cleanup(&pool, &tenant_id).await;
 }

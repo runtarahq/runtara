@@ -1089,6 +1089,268 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
     context.cleanup().await;
 }
 
+/// A runner that never durably crossed the start gate ends its run as
+/// `start_gate_failed`. The label was written but missing from the enum, so
+/// the terminal write failed with 22P02 and the run only ended later, as a
+/// launch-queue timeout.
+#[tokio::test]
+async fn a_failed_start_gate_ends_the_run_as_start_gate_failed() {
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    let owner = "gate-owner";
+
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("launch must enqueue");
+    let claimed = repository
+        .claim_ready(owner, Duration::from_secs(60), 1)
+        .await
+        .expect("launch must claim")
+        .pop()
+        .expect("one launch must claim");
+    repository
+        .begin_start(&launch_id, owner, claimed.attempt_count)
+        .await
+        .expect("start transition must succeed")
+        .expect("launch must enter starting");
+    let running = repository
+        .mark_running(&launch_id, owner, claimed.attempt_count)
+        .await
+        .expect("running transition must succeed")
+        .expect("launch must become running");
+
+    let message = "runner did not durably cross start gate";
+    let failed = repository
+        .fail_unconfirmed_running(&launch_id, running.attempt_count, message)
+        .await
+        .expect("the terminal write must succeed")
+        .expect("the matching attempt terminalizes its own launch");
+    assert_eq!(failed.state, LaunchState::Failed);
+
+    let launch_state: String =
+        sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1")
+            .bind(&launch_id)
+            .fetch_one(&context.pool)
+            .await
+            .expect("launch must remain readable");
+    assert_eq!(launch_state, "failed");
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await,
+        (
+            "failed".to_string(),
+            Some("start_gate_failed".to_string()),
+            Some(message.to_string()),
+        )
+    );
+
+    context.cleanup().await;
+}
+
+/// A runner that accepts a gated handoff but never crosses the gate: it
+/// either cancels the gate before the dispatcher can open it, or leaves it for
+/// the monitor to time out. The inner mock never sees the gate, so it never
+/// confirms it.
+struct GateBreakingRunner {
+    inner: MockRunner,
+    cancel_before_open: bool,
+}
+
+#[async_trait::async_trait]
+impl Runner for GateBreakingRunner {
+    fn runner_type(&self) -> &'static str {
+        "gate-breaking"
+    }
+
+    async fn try_launch_detached(
+        &self,
+        options: &runtara_environment::runner::LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        let mut options = options.clone();
+        let gate = options
+            .start_gate
+            .take()
+            .expect("the dispatcher gates Start");
+        if self.cancel_before_open {
+            assert!(gate.cancel(), "the gate is still closed during launch");
+        }
+        self.inner.try_launch_detached(&options).await
+    }
+
+    async fn is_running(&self, handle: &RunnerHandle) -> bool {
+        self.inner.is_running(handle).await
+    }
+
+    async fn stop(&self, handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        self.inner.stop(handle).await
+    }
+
+    async fn collect_result(
+        &self,
+        handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        self.inner.collect_result(handle).await
+    }
+}
+
+#[derive(Default)]
+struct RecordingObserver {
+    released: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl runtara_environment::launch_dispatcher::LaunchLifecycleObserver for RecordingObserver {
+    async fn release_admission(
+        &self,
+        _tenant_id: &str,
+        instance_id: &str,
+        reason: &str,
+    ) -> std::result::Result<(), String> {
+        self.released
+            .lock()
+            .unwrap()
+            .push((instance_id.to_string(), reason.to_string()));
+        Ok(())
+    }
+}
+
+/// Drive a Start through the dispatcher with a runner that never crosses the
+/// start gate, and check what production writes: the run ends
+/// `start_gate_failed`, the launch `failed`, the observer releases admission
+/// with that reason, and a later expiry sweep leaves it alone.
+async fn a_failed_gate_through_the_dispatcher(cancel_before_open: bool) {
+    use runtara_environment::launch_dispatcher::{
+        LaunchDispatcherConfig, LaunchLifecycleObservers,
+    };
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    std::fs::write(context.data_dir.join("test_binary"), b"mock workflow")
+        .expect("test artifact must be writable");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    let queue_timeout = Duration::from_secs(3);
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            queue_timeout,
+        ))
+        .await
+        .expect("queue row must be inserted");
+    let enqueued_at = tokio::time::Instant::now();
+
+    let observer = Arc::new(RecordingObserver::default());
+    let observers = LaunchLifecycleObservers::default();
+    observers.install(observer.clone()).await;
+    let runner = Arc::new(GateBreakingRunner {
+        inner: MockRunner::never_completing(),
+        cancel_before_open,
+    });
+    // The gate shares the start lease's deadline; a short lease bounds how
+    // long the monitor waits for a confirmation that never comes.
+    let dispatcher = LaunchDispatcher::new(
+        context.pool.clone(),
+        Arc::new(PostgresPersistence::new(context.pool.clone())),
+        runner.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        observers,
+    )
+    .with_config(LaunchDispatcherConfig {
+        lease_duration: Duration::from_secs(2),
+        ..Default::default()
+    });
+    assert_eq!(
+        dispatcher
+            .dispatch_once()
+            .await
+            .expect("dispatch scan must succeed"),
+        1
+    );
+
+    let label = if cancel_before_open {
+        "closed before open"
+    } else {
+        "never confirmed"
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let (_, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+            let released = observer.released.lock().unwrap().clone();
+            if reason.is_some() && !released.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label}: the failed gate must terminalize the run"));
+
+    let (status, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_eq!(
+        (status.as_str(), reason.as_deref()),
+        ("failed", Some("start_gate_failed")),
+        "{label}"
+    );
+    let launch = repository
+        .get(&launch_id)
+        .await
+        .expect("launch read must succeed")
+        .expect("launch must exist");
+    assert_eq!(launch.state, LaunchState::Failed, "{label}");
+    assert_eq!(
+        observer.released.lock().unwrap().as_slice(),
+        [(fixture.instance_id.clone(), "start_gate_failed".to_string())],
+        "{label}: exactly one release, with the run's own reason"
+    );
+
+    // Past the queue timeout and the gate deadline, the sweeps that used to
+    // end this run as `launch_queue_timeout` find nothing to do.
+    tokio::time::sleep_until(enqueued_at + queue_timeout + Duration::from_millis(200)).await;
+    let expired = repository
+        .expire_due(16)
+        .await
+        .expect("expiry must succeed");
+    assert!(
+        expired.iter().all(|launch| launch.launch_id != launch_id),
+        "{label}: a failed launch must not expire again"
+    );
+    repository
+        .recover_expired_leases(16)
+        .await
+        .expect("lease recovery must succeed");
+    let (status, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_eq!(
+        (status.as_str(), reason.as_deref()),
+        ("failed", Some("start_gate_failed")),
+        "{label}: the terminal reason must survive later sweeps"
+    );
+    assert_eq!(observer.released.lock().unwrap().len(), 1, "{label}");
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_start_gate_the_runner_never_confirms_ends_start_gate_failed() {
+    a_failed_gate_through_the_dispatcher(false).await;
+}
+
+#[tokio::test]
+async fn a_start_gate_closed_before_open_ends_start_gate_failed() {
+    a_failed_gate_through_the_dispatcher(true).await;
+}
+
 #[tokio::test]
 async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     let context = TestContext::new().await.expect("test database must start");
@@ -1267,6 +1529,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let launch_id = Uuid::new_v4().to_string();
     let request = InitialLaunchRequest {
         run_label: Some(" Order_123:/?% ".into()),
+        parent: None,
         launch: EnqueueRequest::immediate(
             &launch_id,
             &instance_id,
@@ -1358,6 +1621,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
     let invalid_instance = Uuid::new_v4().to_string();
     let invalid = InitialLaunchRequest {
         run_label: None,
+        parent: None,
         launch: EnqueueRequest::immediate(
             Uuid::new_v4().to_string(),
             &invalid_instance,
@@ -1583,6 +1847,7 @@ async fn owned_mock_execution(
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2077,4 +2342,216 @@ async fn obsolete_wake_cleanup_preserves_explicit_pause() {
         assert!(root.sleep_until.is_none());
     }
     context.cleanup().await;
+}
+
+/// The latest of a pause and a resume wins: a pause applied while a resume
+/// generation is still queued discards that resume at the start gate without
+/// failing the root, and a resume after the pause launches.
+#[tokio::test]
+async fn a_pause_after_a_queued_resume_wins_and_a_later_resume_launches() {
+    use runtara_core::domain::{InstanceStatus, SignalType, WakeReason};
+    let context = TestContext::new().await.unwrap();
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    // Explicitly paused: suspended with no reason and no wake.
+    set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+
+    let resume_id = Uuid::new_v4().to_string();
+    assert!(matches!(
+        repository
+            .enqueue(request(
+                &fixture,
+                &resume_id,
+                LaunchKind::Resume,
+                Duration::from_secs(60)
+            ))
+            .await
+            .unwrap(),
+        EnqueueOutcome::Enqueued(_)
+    ));
+    let claim = repository
+        .claim_ready("resume-race", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    repository
+        .begin_start(&resume_id, "resume-race", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The pause lands while the resume waits at its start gate.
+    persistence
+        .insert_signal(&fixture.instance_id, SignalType::Pause, b"")
+        .await
+        .unwrap();
+    assert_eq!(
+        persistence
+            .pause_suspended_instances(Some(&fixture.instance_id), 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repository
+            .mark_running(&resume_id, "resume-race", claim.attempt_count)
+            .await
+            .unwrap()
+            .is_none(),
+        "the earlier resume is discarded"
+    );
+    let launch = repository.get(&resume_id).await.unwrap().unwrap();
+    assert_eq!(launch.state, LaunchState::Suspended);
+    let root = persistence
+        .get_instance(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.status, InstanceStatus::Suspended);
+    assert!(root.wake_reason.is_none() && root.error.is_none());
+
+    // A resume after the pause is the latest request and launches.
+    let later = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &later,
+            LaunchKind::Resume,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+    let claim = repository
+        .claim_ready("resume-race", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    repository
+        .begin_start(&later, "resume-race", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        repository
+            .mark_running(&later, "resume-race", claim.attempt_count)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let root = persistence
+        .get_instance(&fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.status, InstanceStatus::Running);
+    assert_eq!(root.wake_reason, Some(WakeReason::ManualResume));
+    context.cleanup().await;
+}
+
+/// The launch queue terminalizes runs with raw SQL (queue expiry, pre-start
+/// cancellation). A run parked on an instance wait over such a run is woken
+/// by that very commit, through the finish trigger.
+#[tokio::test]
+async fn launch_queue_terminal_writers_wake_instance_waiters() {
+    use runtara_core::domain::{InstanceStatus, WakeReason};
+    use runtara_core::lifecycle::{ParkReason, ParkRequest};
+    use runtara_core::persistence::ParkTargets;
+    use runtara_core::persistence::waits::{WaitMode, WaitSpec};
+    let context = TestContext::new().await.expect("test database must start");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+
+    async fn parked_waiter(persistence: &PostgresPersistence, target: &LaunchFixture) -> String {
+        let waiter = format!("{}-waiter", target.instance_id);
+        persistence
+            .register_instance(&waiter, &target.tenant_id)
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&waiter, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        persistence
+            .instance_waits()
+            .unwrap()
+            .register_or_evaluate(
+                &target.tenant_id,
+                &waiter,
+                "op",
+                &WaitSpec::new([target.instance_id.clone()], WaitMode::All, None),
+            )
+            .await
+            .unwrap();
+        persistence
+            .park_instance_on_targets(
+                &waiter,
+                ParkRequest {
+                    reason: ParkReason::Instances,
+                    deadline: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                },
+                ParkTargets {
+                    signal_ids: &[],
+                    wait_ids: &["op".to_string()],
+                },
+            )
+            .await
+            .unwrap();
+        waiter
+    }
+    async fn woken(persistence: &PostgresPersistence, waiter: &str) -> bool {
+        let row = persistence.get_instance(waiter).await.unwrap().unwrap();
+        row.wake_reason == Some(WakeReason::InstancesTerminal)
+            && row.sleep_until.is_some_and(|at| at <= chrono::Utc::now())
+    }
+
+    // Queue expiry.
+    let expiring = fixture(&context).await;
+    let waiter = parked_waiter(&persistence, &expiring).await;
+    repository
+        .enqueue(request(
+            &expiring,
+            Uuid::new_v4().to_string(),
+            LaunchKind::Start,
+            Duration::ZERO,
+        ))
+        .await
+        .unwrap();
+    assert!(!woken(&persistence, &waiter).await);
+    assert_eq!(repository.expire_due(16).await.unwrap().len(), 1);
+    assert_eq!(
+        instance_result(&context.pool, &expiring.instance_id)
+            .await
+            .0,
+        "failed"
+    );
+    assert!(
+        woken(&persistence, &waiter).await,
+        "expiry wakes the waiter"
+    );
+
+    // Cancellation before start.
+    let cancelled = fixture(&context).await;
+    let waiter = parked_waiter(&persistence, &cancelled).await;
+    let launch_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &cancelled,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository.cancel_before_start(&launch_id).await.unwrap(),
+        CancelOutcome::Cancelled(_)
+    ));
+    assert!(
+        woken(&persistence, &waiter).await,
+        "a pre-start cancel wakes the waiter"
+    );
 }

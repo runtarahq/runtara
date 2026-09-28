@@ -4,6 +4,7 @@
 
 import {
   ExecutionStatus,
+  SuspensionReason,
   TerminationType,
 } from '@/generated/RuntaraRuntimeApi';
 
@@ -26,6 +27,10 @@ export interface ExecutionHistoryItem {
   maxMemoryMb?: number | null;
   tags?: string[];
   hasPendingInput?: boolean;
+  /** Why a suspended run is not running; only `paused` needs a resume. */
+  suspensionReason?: SuspensionReason | null;
+  /** The run whose `control:start` step started this one. */
+  parentInstanceId?: string | null;
 }
 
 /**
@@ -34,6 +39,8 @@ export interface ExecutionHistoryItem {
 export interface ExecutionHistoryFilters {
   search?: string;
   runLabel?: string;
+  /** Only the children of this run (started by its `control:start` steps). */
+  parentInstanceId?: string;
   workflowId?: string;
   status?: string;
   createdFrom?: string;

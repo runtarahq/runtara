@@ -69,3 +69,38 @@ fn no_migration_set_numbers_two_migrations_the_same() {
         assert!(!seen.is_empty(), "{relative} must hold migrations");
     }
 }
+
+/// sqlx runs every migration inside a transaction, where
+/// `CREATE INDEX CONCURRENTLY` fails at deploy time. The control-agent
+/// migrations build their indexes transactionally for that reason; this
+/// keeps a later migration from reintroducing it in any set.
+#[test]
+fn no_migration_builds_an_index_concurrently() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the server crate sits under crates/");
+    for relative in [
+        "runtara-server/migrations",
+        "runtara-store-postgres/migrations/postgresql",
+        "runtara-environment/migrations",
+    ] {
+        for entry in std::fs::read_dir(crates.join(relative)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "sql") {
+                continue;
+            }
+            let sql = std::fs::read_to_string(&path).unwrap();
+            let code: String = sql
+                .lines()
+                .map(|line| line.split("--").next().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_ascii_uppercase();
+            assert!(
+                !code.contains("CONCURRENTLY"),
+                "{} builds an index concurrently inside a migration transaction",
+                path.display()
+            );
+        }
+    }
+}

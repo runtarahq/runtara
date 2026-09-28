@@ -120,7 +120,7 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
         "   ".to_owned(),
         "\u{200b}".to_owned(),
         "x\u{a0}y".to_owned(),
-        "x".repeat(251),
+        "x".repeat(1025),
         "".into(),
     ] {
         assert!(
@@ -132,6 +132,24 @@ async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
                 .is_err()
         );
     }
+    // The widened column and constraint accept, and filter on, the maximum length.
+    let longest = "x".repeat(1024);
+    sqlx::query("UPDATE instances SET run_label = $2 WHERE instance_id = $1")
+        .bind(&id)
+        .bind(&longest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let options = ListInstancesOptions {
+        tenant_id: Some(tenant.clone()),
+        run_label: Some(longest),
+        limit: 4,
+        ..Default::default()
+    };
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 1);
+    let listed = list_instances(&pool, &options).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].instance_id, id);
 }
 
 // ============================================================================

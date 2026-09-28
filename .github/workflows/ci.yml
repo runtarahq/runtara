@@ -588,6 +588,25 @@ jobs:
       - name: Validate WIT package
         run: wasm-tools component wit crates/runtara-agent-wit/wit > /dev/null
 
+      # The suspension, instance-wait, operation-scope and control packages.
+      # The last two `use` runtara:agent and runtara:agent-suspension, so each
+      # is parsed in a scratch dir with those packages as deps (nothing is
+      # committed).
+      - name: Validate suspension, wait, operation and control WIT packages
+        run: |
+          set -euo pipefail
+          wasm-tools component wit crates/runtara-agent-suspension/wit > /dev/null
+          wasm-tools component wit crates/runtara-workflow-wit/wit/wait > /dev/null
+          scratch="$(mktemp -d)"
+          for pkg in operation control; do
+            mkdir -p "$scratch/$pkg/deps"
+            cp crates/runtara-workflow-wit/wit/$pkg/*.wit "$scratch/$pkg/"
+            cp crates/runtara-agent-suspension/wit/runtara-agent-suspension.wit "$scratch/$pkg/deps/"
+          done
+          cp crates/runtara-agent-wit/wit/runtara-agent.wit "$scratch/control/deps/"
+          wasm-tools component wit "$scratch/operation" > /dev/null
+          wasm-tools component wit "$scratch/control" > /dev/null
+
   # Build every runtara-agent-* crate as a WASM component, emit each agent's
   # macro-derived meta.json sidecar, and run the dispatcher integration tests
   # (including the full-bundle drift detector that calls every declared
@@ -606,6 +625,17 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      # control_component admits children through the execution outbox and
+      # launches them through the trigger stream, which lives in Valkey.
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -670,6 +700,22 @@ jobs:
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE outbound_server_test;'
           cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test outbound_http real_http_component_uses_stored_credentials_without_internal_listener -- --exact
 
+      - name: Run a composed control agent and WaitForInstances against the native services
+        env:
+          TEST_RUNTARA_DATABASE_URL: postgres://postgres@localhost:5432/control_component_test
+          TEST_RUNTARA_SERVER_DATABASE_URL: postgres://postgres@localhost:5432/control_component_server_test
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/agent-components
+          VALKEY_HOST: localhost
+          VALKEY_PORT: "6379"
+        # Compiles a workflow calling control:get, checks the composed control
+        # copy is the installed bytes verbatim, and runs it through the
+        # environment runner and the host control executor. The start test
+        # admits a child through NativeControl and launches it for real.
+        run: |
+          psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_test;'
+          psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_server_test;'
+          cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test control_component --test wait_for_instances
+
       - name: Qualify emitted Agent deadlines before relaxing E128
         env:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
@@ -699,7 +745,7 @@ jobs:
             --features direct-wasm-integration-tests \
             --test direct_wasm_execute
 
-      - name: Run composed runner DSL, cancellation and persistence integration tests
+      - name: Run composed runner DSL, cancellation, persistence, agent suspension and WaitForInstances integration tests
         env:
           TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
@@ -711,7 +757,7 @@ jobs:
         # thirty seconds into the future and race them for its own. The suite is
         # thirteen tests of a few seconds each, so serializing costs almost
         # nothing and removes the whole class.
-        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs -- --test-threads=1
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs --test agent_suspension_runner_test --test wait_for_instances_runner_test -- --test-threads=1
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

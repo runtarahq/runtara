@@ -34,16 +34,18 @@ pub mod support;
 
 #[cfg(feature = "compiler")]
 pub use compile::{
-    AgentIsolationDecision, AgentIsolationReason, AgentIsolationReport,
-    DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ABI_VERSION,
-    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
-    DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
-    DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
-    DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
-    DirectIsolationMetadata, compile_direct_workflow, compile_direct_workflow_composed,
+    AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, AgentIsolationDecision,
+    AgentIsolationReason, AgentIsolationReport, CONTROL_AGENT_IMPORTS, DIRECT_WORKFLOW_ABI_SECTION,
+    DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME,
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
+    DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata, DirectArtifactMetadata,
+    DirectChildWorkflowDependencyMetadata, DirectCompilationInput, DirectCompilationResult,
+    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    STAGED_WORKFLOW_AGENT_DENIED_PREFIXES, bundled_builtin_pin, bundled_trusted_pin,
+    check_agent_component_imports, compile_direct_workflow, compile_direct_workflow_composed,
     compile_direct_workflow_composed_configured, compile_direct_workflow_composed_with_binding,
     compile_direct_workflow_with_abi, compose_direct_workflow,
-    compose_direct_workflow_with_extra_dirs,
+    compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale, trusted_artifact_pins,
 };
 // Builders for old packages exist only in the existing integration-test surface.
 #[cfg(all(

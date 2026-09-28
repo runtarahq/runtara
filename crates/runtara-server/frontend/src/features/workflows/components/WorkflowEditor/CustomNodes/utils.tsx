@@ -153,6 +153,7 @@ export function composeExecutionGraph(
     >;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
+    stateSchema?: Record<string, unknown>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
     durable?: boolean | null;
@@ -180,6 +181,9 @@ export function composeExecutionGraph(
   }
   if (options?.outputSchema) {
     executionGraph.outputSchema = options.outputSchema;
+  }
+  if (options?.stateSchema && Object.keys(options.stateSchema).length > 0) {
+    executionGraph.stateSchema = options.stateSchema;
   }
   if (options?.executionTimeoutSeconds !== undefined) {
     executionGraph.executionTimeoutSeconds = options.executionTimeoutSeconds;
@@ -1591,6 +1595,69 @@ function cleanNodeData(steps: Record<string, any>) {
         }
       }
     }
+
+    // WaitForInstances step: instanceIds, mode and timeoutMs are top-level
+    // fields (deny_unknown_fields, no inputMapping). Cleared form fields
+    // delete their key so loaded step data cannot resurrect them on save.
+    // An absent mode means `all`; an absent timeoutMs means no deadline.
+    if (restData.stepType === 'WaitForInstances') {
+      delete cleaned[id].inputMapping;
+      delete cleaned[id].durable;
+
+      if (Array.isArray(inputMapping)) {
+        const idsItem = inputMapping.find(
+          (item: any) => item.type === 'instanceIds'
+        );
+        delete cleaned[id].instanceIds;
+        if (
+          idsItem &&
+          idsItem.value !== undefined &&
+          idsItem.value !== null &&
+          idsItem.value !== ''
+        ) {
+          // Template renders to a string, which is never a valid id list.
+          if (idsItem.valueType !== 'template') {
+            const [, idsValue] = processMappingEntry({
+              type: 'instanceIds',
+              value: idsItem.value,
+              typeHint: idsItem.typeHint || 'array',
+              valueType: idsItem.valueType || 'reference',
+              defaultValue: idsItem.defaultValue,
+            }) as [string, unknown];
+            cleaned[id].instanceIds = idsValue;
+          }
+        }
+
+        const modeItem = inputMapping.find((item: any) => item.type === 'mode');
+        delete cleaned[id].mode;
+        if (modeItem?.value === 'all' || modeItem?.value === 'any') {
+          cleaned[id].mode = modeItem.value;
+        }
+
+        // timeoutMs must resolve to a positive integer: only immediate
+        // (numeric) and reference modes are representable.
+        const timeoutItem = inputMapping.find(
+          (item: any) => item.type === 'timeoutMs'
+        );
+        delete cleaned[id].timeoutMs;
+        if (timeoutItem?.value !== undefined && timeoutItem.value !== '') {
+          if (timeoutItem.valueType === 'reference') {
+            cleaned[id].timeoutMs = {
+              valueType: 'reference',
+              value: timeoutItem.value,
+            };
+          } else if (timeoutItem.valueType !== 'template') {
+            const timeoutNumber = Number(timeoutItem.value);
+            if (Number.isFinite(timeoutNumber)) {
+              cleaned[id].timeoutMs = {
+                valueType: 'immediate',
+                value: timeoutNumber,
+              };
+            }
+          }
+        }
+      }
+    }
   }
 
   return cleaned;
@@ -2376,6 +2443,47 @@ function normalizeNodesAndEdges(
               }
 
               return { inputMapping: waitInputMapping };
+            })()
+          : {}),
+        // For WaitForInstances steps, parse top-level fields into inputMapping
+        ...((step.stepType as string) === 'WaitForInstances'
+          ? (() => {
+              const waitStep = data as any;
+              const ids = waitStep.instanceIds;
+              const idsValueType = ids?.valueType || 'reference';
+              const idsEntry: Record<string, unknown> = {
+                type: 'instanceIds',
+                value:
+                  idsValueType === 'composite'
+                    ? convertCompositeToUIFormat(ids.value)
+                    : idsValueType === 'immediate' &&
+                        ids?.value !== undefined &&
+                        typeof ids.value !== 'string'
+                      ? JSON.stringify(ids.value)
+                      : (ids?.value ?? ''),
+                valueType: idsValueType,
+                typeHint: ids?.type || 'array',
+              };
+              if (ids?.default !== undefined) {
+                idsEntry.defaultValue = ids.default;
+              }
+              return {
+                inputMapping: [
+                  idsEntry,
+                  {
+                    type: 'mode',
+                    value: waitStep.mode ?? '',
+                    valueType: 'immediate',
+                    typeHint: 'string',
+                  },
+                  {
+                    type: 'timeoutMs',
+                    value: waitStep.timeoutMs?.value ?? '',
+                    valueType: waitStep.timeoutMs?.valueType || 'immediate',
+                    typeHint: 'number',
+                  },
+                ],
+              };
             })()
           : {}),
         // For Log steps, parse top-level fields into inputMapping

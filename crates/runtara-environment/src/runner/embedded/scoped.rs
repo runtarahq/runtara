@@ -218,6 +218,7 @@ fn failed(started: Instant, reason: String) -> InvokeRunResult {
         exit: InvokeExit::Trapped { reason },
         memory_peak_bytes: 0,
         duration: started.elapsed(),
+        instance_waits: Vec::new(),
     }
 }
 

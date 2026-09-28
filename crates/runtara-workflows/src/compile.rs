@@ -186,6 +186,10 @@ pub struct NativeCompilationResult {
     pub default_variables: Value,
     /// Compiler path that produced the artifact.
     pub compiler_mode: WorkflowCompilerMode,
+    /// Approved trusted built-in versions the artifact pins (its top-level
+    /// `runtara:trusted-artifacts/*` imports), sorted. Readiness requires every
+    /// one to be installed, so a trusted-agent upgrade recompiles the workflow.
+    pub trusted_pins: Vec<String>,
 }
 
 /// Compile a workflow through the production direct WebAssembly emitter into a
@@ -243,6 +247,11 @@ pub fn compile_workflow_direct(
     )
     .map_err(direct_compile_error_to_io)?;
     let package_size = direct_artifact_package_size(&direct_result.build_dir);
+    let trusted_pins =
+        crate::direct_wasm::trusted_artifact_pins(&std::fs::read(&direct_result.wasm_path)?)
+            .map_err(direct_compile_error_to_io)?
+            .into_iter()
+            .collect();
 
     Ok(NativeCompilationResult {
         binary_path: direct_result.wasm_path,
@@ -253,6 +262,7 @@ pub fn compile_workflow_direct(
         child_dependencies,
         default_variables,
         compiler_mode: WorkflowCompilerMode::DirectWasm,
+        trusted_pins,
     })
 }
 
@@ -307,6 +317,8 @@ fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
         }
         DirectCompileError::Io(err) => err,
         DirectCompileError::Component(err) => io::Error::other(err),
+        // Kept typed: the server downcasts it to record the stale pins.
+        err @ DirectCompileError::StaleTrustedDependency { .. } => io::Error::other(err),
     }
 }
 

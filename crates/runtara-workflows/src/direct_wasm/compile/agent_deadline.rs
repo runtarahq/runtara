@@ -36,7 +36,7 @@ pub(super) fn enter(
             true,
         );
         push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_now_ms));
+        super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
         return_if_retptr_error(body, indices);
         push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
         body.instruction(&Instruction::LocalSet(REMAINING));
@@ -118,16 +118,23 @@ pub(super) fn clamp_wait(
 /// Construct the ordinary WIT error-info result after cleanup. Explicit false
 /// retryability keeps cancellation from restarting a step through defaults.
 pub(super) fn error(body: &mut Function, static_data: &DirectCoreStaticData) {
+    error_info(
+        body,
+        static_data.agent_timeout_error.offset,
+        super::super::static_data::AGENT_TIMEOUT_FIELDS,
+    );
+}
+
+/// Write a non-retryable `err(error-info)` into the retptr area whose four
+/// strings lie back to back at `segment` (as `fields.concat()`).
+pub(super) fn error_info(body: &mut Function, segment: i32, fields: [&str; 4]) {
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::I32Const(80));
     body.instruction(&Instruction::MemoryFill(0));
     store(body, 0, 1);
-    let mut ptr = static_data.agent_timeout_error.offset;
-    for (offset, text) in [8, 16, 24, 32]
-        .into_iter()
-        .zip(super::super::static_data::AGENT_TIMEOUT_FIELDS)
-    {
+    let mut ptr = segment;
+    for (offset, text) in [8, 16, 24, 32].into_iter().zip(fields) {
         store(body, offset, ptr);
         store(body, offset + 4, text.len() as i32);
         ptr += text.len() as i32;

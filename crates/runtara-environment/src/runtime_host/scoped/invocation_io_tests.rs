@@ -482,6 +482,7 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -510,16 +511,21 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
         None,
         None,
     );
+    // Settlement publishes Core's terminal status first and releases the
+    // registration afterwards: the retained exit intent must stay recoverable
+    // until the lifecycle write has committed. Wait for the whole settlement
+    // (both effects) rather than racing the registry release.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while fx.status().await != InstanceStatus::Failed {
+        while fx.status().await != InstanceStatus::Failed
+            || registry.get(&fx.id).await.unwrap().is_some()
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("production monitor must settle the failed execution");
+    .expect("production monitor must settle the failed execution and release its registration");
     let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
     assert_eq!(root.termination_reason.as_deref(), Some("crashed"));
-    assert!(registry.get(&fx.id).await.unwrap().is_none());
     let retained = inputs
         .get_input(&lease.tenant_id, &fx.id, &request_id("child/wait"))
         .await

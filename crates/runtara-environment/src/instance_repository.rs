@@ -44,6 +44,8 @@ use crate::error::{Error, Result};
 pub struct InstanceDetail {
     /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    pub parent_instance_id: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Lifecycle status.
@@ -80,6 +82,8 @@ pub struct InstanceDetail {
     pub cpu_usage_usec: Option<u64>,
     /// Why the instance stopped.
     pub termination_reason: Option<String>,
+    /// Pending wake of a suspended instance.
+    pub wake_reason: Option<String>,
     /// Guest exit code.
     pub exit_code: Option<i32>,
 }
@@ -89,6 +93,8 @@ pub struct InstanceDetail {
 pub struct InstanceListItem {
     /// Optional immutable label supplied when the execution starts.
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    pub parent_instance_id: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Owning tenant.
@@ -107,6 +113,10 @@ pub struct InstanceListItem {
     pub finished_at: Option<DateTime<Utc>>,
     /// Whether a failure message is recorded.
     pub has_error: bool,
+    /// Why the instance stopped or parked.
+    pub termination_reason: Option<String>,
+    /// Pending wake of a suspended instance.
+    pub wake_reason: Option<String>,
 }
 
 /// What an instance was launched from, as `instance_images` recorded it.
@@ -133,6 +143,8 @@ pub struct ListInstancesOptions {
     pub search: Option<String>,
     /// Exact normalized execution label filter.
     pub run_label: Option<String>,
+    /// Only the children of this run (`control:start`).
+    pub parent_instance_id: Option<String>,
     /// Workflow IDs whose names match search, resolved in the server database.
     pub search_workflow_ids: Vec<String>,
     /// Filter by tenant ID.
@@ -182,6 +194,10 @@ impl InstanceRepository {
         Self { pool }
     }
 
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// What the instance was launched from, or `None` if it has no binding.
     ///
     /// One row, one query: `instance_images.instance_id` is that table's
@@ -222,6 +238,24 @@ impl InstanceRepository {
             .fetch_all(&self.pool).await?)
     }
 
+    /// Live children of `parent` in `tenant` that hold an open managed input,
+    /// for `list-pending-signals` over the caller's children. Like
+    /// [`Self::input_candidate_ids_for_image_name_prefix`], managed input
+    /// discovery still applies the authoritative filter after this.
+    pub async fn input_candidate_ids_for_parent(
+        &self,
+        tenant: &str,
+        parent: &str,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT i.instance_id FROM instances i WHERE i.tenant_id=$1 AND i.parent_instance_id=$2 AND i.status NOT IN ('completed','failed','cancelled') AND EXISTS (SELECT 1 FROM instance_input_requests r WHERE r.instance_id=i.instance_id AND r.state='open') ORDER BY i.instance_id COLLATE \"C\"",
+        )
+        .bind(tenant)
+        .bind(parent)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Everything the server reports about one instance. `None` if there is no
     /// such row.
     pub async fn detail(&self, instance_id: &str) -> Result<Option<InstanceDetail>> {
@@ -233,6 +267,7 @@ impl InstanceRepository {
             status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
             instance_id: inst.instance_id,
             run_label: inst.run_label,
+            parent_instance_id: inst.parent_instance_id,
             tenant_id: inst.tenant_id,
             image_id: inst.image_id,
             image_name: inst.image_name,
@@ -249,6 +284,7 @@ impl InstanceRepository {
             memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
             cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
             termination_reason: inst.termination_reason,
+            wake_reason: inst.wake_reason,
             exit_code: inst.exit_code,
         }))
     }
@@ -268,6 +304,7 @@ impl InstanceRepository {
                         status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
                         instance_id: inst.instance_id,
                         run_label: inst.run_label,
+                        parent_instance_id: inst.parent_instance_id,
                         tenant_id: inst.tenant_id,
                         image_id: inst.image_id,
                         image_name: inst.image_name,
@@ -275,6 +312,8 @@ impl InstanceRepository {
                         started_at: inst.started_at,
                         finished_at: inst.finished_at,
                         has_error: inst.error.is_some(),
+                        termination_reason: inst.termination_reason,
+                        wake_reason: inst.wake_reason,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,

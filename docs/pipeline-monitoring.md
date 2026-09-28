@@ -45,7 +45,7 @@ and add unit or `_total` suffixes. Counts are process-local and reset on restart
 | --- | --- | --- |
 | `runtara.admission.requests` | Counter | `outcome`: `accepted`, `rejected` (entitlement denial), `duplicate`, `error`. One result per completed source-admission call, including early idempotency returns. Cancelled calls that never return are not counted. |
 | `runtara.admission.duration` | Histogram / seconds | Same `outcome`; elapsed source-admission call time. |
-| `runtara.trigger.events.total` | Counter | `trigger_type` from the finite trigger-source vocabulary. Counts processing attempts; redelivery can count again. |
+| `runtara.trigger.events.total` | Counter | `trigger_type` from the finite trigger-source vocabulary (`http_api`, `http_event`, `cron`, `email`, `application`, `replay`, `recovery`, and `control` for children admitted by a workflow's `control:start` step). Counts processing attempts; redelivery can count again. |
 | `runtara.trigger.events.failed` | Counter | Same `trigger_type`; failed attempts and exhausted retry policy retain existing semantics. |
 | `runtara.trigger.processing.duration` | Histogram / seconds | `trigger_type`, `status`: `success`, `deduplicated`, `permanent_failure`, `not_runnable`, `retry_later`, `handoff_in_progress`. |
 | `runtara.launch.transitions` | Counter | `state`: stored launch state; `reason`: fixed operation vocabulary below. Only applied, committed changes count. |
@@ -67,6 +67,24 @@ state transition. Lease renewals and idempotent replays record no transition.
 New pipeline duration buckets, in seconds:
 `0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 3600, +Inf`.
 Existing trigger-duration bucket configuration is unchanged.
+
+## Children started by `control:start`
+
+A child admitted by `control:start` enters the same durable intake as every
+other source: an `execution_requests` row (with its `parent_instance_id`,
+`run_label`, `parent_close_policy` and start fingerprint), an admission
+reservation and an outbox row, relayed through the trigger stream with
+`trigger_type` `control`. It counts against `maxConcurrentExecutions` like
+any run, and control-started children together hold at most
+`max(1, floor(0.8 x limit))` reservations, so outside triggers keep headroom;
+past that `start` answers a retryable capacity error. A parked run gives its
+slot back. `admission.requests` does not count these starts; watch
+`trigger.events.total{trigger_type="control"}` for their launch attempts.
+
+A child whose workflow is not compiled yet is admitted and requeued until
+its request deadline (`EXECUTION_OUTBOX_DEADLINE_SECS`, default 300 s). If it
+never compiles in time it expires with `terminal_reason`
+`launch_deadline_not_compiled` instead of `execution_outbox_deadline_exceeded`.
 
 ## Deployment and interpretation
 

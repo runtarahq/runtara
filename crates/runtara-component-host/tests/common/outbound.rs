@@ -47,6 +47,29 @@ impl PublicHttp {
     }
 }
 
+/// Pay this process's one-time first-network-flow cost before any timed section.
+///
+/// On developer Macs a network content filter can hold a process's first
+/// socket flow, loopback included, while it evaluates the executable. That
+/// evaluation enumerates the executable's directory, so a test binary in a
+/// large `target/debug/deps` (split-debuginfo `.rcgu.o` files accumulate there)
+/// sees its first `connect` stall for seconds; the same binary elsewhere
+/// connects in milliseconds. This is outside Runtara code, and later flows
+/// from the process are fast. Timed fixtures call this during setup so the
+/// stall cannot be charged to a deadline under test. It does no work after the
+/// first call and never fails a test: a refused probe proves nothing either way.
+pub fn warm_up_process_network() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
+            return;
+        };
+        if let Ok(address) = listener.local_addr() {
+            let _ = std::net::TcpStream::connect(address);
+        }
+    });
+}
+
 /// Recover typed call metadata for fixture assertions, adding the raw wire body.
 /// This value is never sent as the HTTP request body.
 pub fn captured_request(headers: &str, body: &[u8]) -> serde_json::Value {
@@ -103,18 +126,14 @@ pub struct FixtureContext {
 impl FixtureContext {
     pub fn public() -> Self {
         Self {
-            context: CallContext::for_test("fixture-tenant", ""),
+            context: CallContext::for_test("fixture-tenant"),
             upstream: None,
         }
     }
-    pub fn with_upstream(
-        tenant: impl Into<String>,
-        upstream: impl Into<String>,
-        core: impl Into<String>,
-    ) -> Self {
+    pub fn with_upstream(tenant: impl Into<String>, upstream: impl Into<String>) -> Self {
         let upstream = upstream.into();
         Self {
-            context: CallContext::for_test(tenant, core),
+            context: CallContext::for_test(tenant),
             upstream: (!upstream.is_empty()).then_some(upstream),
         }
     }

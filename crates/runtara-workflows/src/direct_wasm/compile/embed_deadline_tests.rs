@@ -241,8 +241,12 @@ async fn run_scoped(operation: Operation, durable: bool, scope: Scope) -> anyhow
         u64::MAX
     } else if operation == Operation::Cancel {
         5_000
+    } else if matches!(scope, Scope::Parent(_)) {
+        // An owning parent's short budget must reach the provider, and it
+        // starts first, so this one exceeds it by a whole short budget.
+        2 * PENDING_BUDGET_MS
     } else {
-        400
+        PENDING_BUDGET_MS
     };
     let compiled = compiled(dir.path(), &url, budget, durable, 3, pending, scope)?;
     let mut result = invoke(&compiled, host.clone()).await?;
@@ -307,7 +311,7 @@ async fn run_scoped(operation: Operation, durable: bool, scope: Scope) -> anyhow
             }
         }
     }
-    tokio::time::timeout(Duration::from_secs(2), server).await???;
+    tokio::time::timeout(FIXTURE_WATCHDOG, server).await???;
     if pending {
         assert!(
             !host
@@ -446,8 +450,8 @@ async fn embed_deadline_owns_nested_and_parallel_child_cleanup() -> anyhow::Resu
         for scope in [
             Scope::Nested,
             Scope::Parallel,
-            Scope::Parent(200),
-            Scope::Parent(2000),
+            Scope::Parent(PENDING_BUDGET_MS),
+            Scope::Parent(60_000),
         ] {
             run_scoped(Operation::Headers, durable, scope).await?;
         }

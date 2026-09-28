@@ -1027,6 +1027,66 @@ mod tests {
     }
 
     #[test]
+    fn surfaces_state_schema_warnings_from_backend_validator() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "finish": { "stepType": "Finish", "id": "finish" }
+                },
+                "entryPoint": "finish",
+                "stateSchema": {
+                    "amount": { "type": "number", "label": "Amount", "format": "currency" },
+                    "stage": { "type": "string", "label": "Stage", "required": true }
+                }
+            }"#,
+        );
+
+        assert!(response.success);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+        assert_eq!(
+            response
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("[W081]"))
+                .count(),
+            1,
+            "{:?}",
+            response.warnings
+        );
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("[W081]") && warning.contains("'stage'")),
+            "{:?}",
+            response.warnings
+        );
+    }
+
+    #[test]
+    fn validates_state_schema_fields_with_shared_validator() {
+        let response = validate_schema_fields_json_impl(
+            "State schema",
+            r#"[
+                {"name":"stage","type":"string"},
+                {"name":"stage","type":"string"}
+            ]"#,
+        );
+
+        assert!(!response.valid);
+        assert_eq!(response.schema_errors.len(), 1);
+        assert_eq!(response.schema_errors[0].code, "E008");
+        assert!(
+            response.schema_errors[0]
+                .message
+                .starts_with("[E008] State schema field name 'stage'"),
+            "{}",
+            response.schema_errors[0].message
+        );
+    }
+
+    #[test]
     fn rejects_finish_output_without_name_from_backend_validator() {
         let response = validate_execution_graph_json_impl(
             r#"{
@@ -1157,6 +1217,59 @@ mod tests {
             "{:?}",
             response.errors
         );
+    }
+
+    /// The browser catalog keeps `suspends`, so the single-graph
+    /// operation-scoped rules run in the editor exactly as on save.
+    #[test]
+    fn runs_operation_scoped_rules_against_the_pushed_catalog() {
+        let _guard = CATALOG_TEST_LOCK.lock().unwrap();
+        let catalog = r#"[{
+            "id": "control", "name": "Control", "description": "Coordinate runs",
+            "hasSideEffects": true, "supportsConnections": false, "integrationIds": [],
+            "capabilities": [
+                {"id": "get", "name": "Get", "inputType": "GetInput", "inputs": [],
+                 "output": {"type": "object"}, "hasSideEffects": false,
+                 "isIdempotent": true, "rateLimited": false}
+            ]
+        }, {
+            "id": "waiter", "name": "Waiter", "description": "Long-polls",
+            "hasSideEffects": false, "supportsConnections": false, "integrationIds": [],
+            "capabilities": [
+                {"id": "pause", "name": "Pause", "inputType": "PauseInput", "inputs": [],
+                 "output": {"type": "object"}, "hasSideEffects": false,
+                 "isIdempotent": true, "rateLimited": false, "suspends": true}
+            ]
+        }]"#;
+        let init_response: Value = serde_json::from_str(&init_agent_catalog(catalog)).unwrap();
+        assert_eq!(init_response["success"], true);
+        let pause: Value = serde_json::from_str(&get_capability_schema_json("waiter", "pause"))
+            .expect("capability JSON");
+        assert_eq!(pause["suspends"], true);
+
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "steps": {
+                    "pause": {"stepType": "Agent", "id": "pause", "agentId": "waiter",
+                        "capabilityId": "pause", "maxRetries": 0},
+                    "signal": {"stepType": "WaitForSignal", "id": "signal", "onWait": {
+                        "entryPoint": "get",
+                        "steps": {"get": {"stepType": "Agent", "id": "get",
+                            "agentId": "control", "capabilityId": "get"}}}}
+                },
+                "entryPoint": "pause",
+                "executionPlan": [{"fromStep": "pause", "toStep": "signal"}]
+            }"#,
+        );
+        assert!(response.success);
+        assert!(!response.valid);
+        for code in ["[E029]", "[E132]"] {
+            assert!(
+                response.errors.iter().any(|error| error.starts_with(code)),
+                "{code}: {:?}",
+                response.errors
+            );
+        }
     }
 
     #[test]

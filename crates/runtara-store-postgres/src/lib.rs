@@ -23,12 +23,18 @@ pub mod rows;
 /// PostgreSQL encodings of execution domain values.
 pub mod encoding;
 
+/// The launch fence between a parented launch and an external outcome.
+pub mod fence;
+
 mod backend;
+mod continuations;
+mod control_receipts;
 mod dialect;
 mod inputs;
 mod invocations;
 mod lifecycle;
 mod ops_common;
 mod vocabulary;
+mod waits;
 
 pub use backend::{PostgresPersistence, load_latest_checkpoint};

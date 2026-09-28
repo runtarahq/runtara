@@ -20,17 +20,10 @@ runtara-component-host = { path = "../runtara-component-host" }
 ```
 
 ```rust
-use runtara_component_host::{
-    ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest,
-};
-
-let env = DispatcherEnv {
-    core_http_url: String::new(),
-};
+use runtara_component_host::{ComponentDispatcherService, TestCapabilityRequest};
 
 let dispatcher = ComponentDispatcherService::from_dir(
     std::path::Path::new("./target/wasm32-wasip2/release"),
-    env,
 ).await?;
 
 let result = dispatcher.test_capability(TestCapabilityRequest {

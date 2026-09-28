@@ -15,7 +15,7 @@
 // including module.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.1.0";
+pub const DSL_VERSION: &str = "3.4.0";
 
 // ============================================================================
 // Root Types
@@ -123,6 +123,14 @@ pub struct ExecutionGraph {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_schema: HashMap<String, SchemaField>,
 
+    /// Schema declaring the typed state a run of this workflow exposes.
+    /// Keys are state field names, values define the field type, label and
+    /// display format. State starts empty and is written by steps, so
+    /// `required`, `default` and `visibleWhen` have no effect here. This is a
+    /// declaration only: it is not compiled into the workflow.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub state_schema: HashMap<String, SchemaField>,
+
     /// Visual annotations for UI (not used in compilation)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<Note>>,
@@ -182,6 +190,7 @@ impl Default for ExecutionGraph {
             variables: HashMap::new(),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            state_schema: HashMap::new(),
             notes: None,
             nodes: None,
             edges: None,
@@ -370,6 +379,9 @@ pub enum Step {
     /// Wait for an external signal before continuing
     WaitForSignal(WaitForSignalStep),
 
+    /// Park the run until direct child runs finish (durable)
+    WaitForInstances(WaitForInstancesStep),
+
     /// LLM-driven agent that selects and calls tools in a loop
     AiAgent(AiAgentStep),
 }
@@ -478,6 +490,8 @@ pub struct AgentStep {
     /// this step without its own deadline. Enclosing deadlines still apply.
     /// Cleanup can extend beyond the budget; uncooperative code may require
     /// emergency whole-workflow abort. External effects are not rolled back.
+    /// A step whose capability suspends must set it above zero (E029): it is
+    /// the step's hard deadline, parked time included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -488,6 +502,7 @@ pub struct AgentStep {
     /// Disable durability for this step when `Some(false)`. Skips checkpoint
     /// read/write around the capability call. Ignored when the enclosing
     /// workflow is already non-durable. Defaults to the workflow setting.
+    /// A step whose capability suspends must stay durable (E028).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }
@@ -1179,6 +1194,92 @@ pub struct WaitForSignalActionConfig {
     pub context: HashMap<String, MappingValue>,
 }
 
+/// Park the run, without holding a runner, until direct child runs of this
+/// run finish.
+///
+/// `mode: all` (the default) settles when every run in `instanceIds` has
+/// finished, `any` when the first has. The optional `timeoutMs` is a business
+/// deadline: when it passes, the step settles with resolution `deadline` and
+/// what finished so far. It never cancels a child and is not an error. The
+/// first registration's deadline stands on every replay.
+///
+/// The output is the settled wait:
+/// `{mode, resolution: satisfied | deadline | empty, finished: [{instanceId,
+/// status, finishedAtMs, output, outputBytes, outputOmitted, error,
+/// errorOmitted}], remaining: [ids], deadlineMs}`. An empty `instanceIds`
+/// settles at once with resolution `empty`. Finished runs' outputs are inlined
+/// up to 256 KiB each (errors 16 KiB, 3 MiB per wait); larger values are
+/// omitted and flagged.
+///
+/// The workflow must be durable. Targets must be direct children of the run
+/// (started by it with control `start`), at most 1000 distinct ones.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "WaitForInstances",
+///   "id": "waitApprovals",
+///   "instanceIds": { "valueType": "reference", "value": "steps.startAll.outputs" },
+///   "mode": "all",
+///   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
+/// }
+/// ```
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", schemars(title = "WaitForInstancesStep"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitForInstancesStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// The runs to wait for: an array of instance ids, each a direct child of
+    /// this run, at most 1000 distinct ones.
+    pub instance_ids: MappingValue,
+
+    /// `all` (default): settle when every run has finished. `any`: settle when
+    /// the first has.
+    #[serde(default)]
+    pub mode: WaitForInstancesMode,
+
+    /// Optional business deadline in milliseconds from the first time the
+    /// step runs. When it passes, the step settles with resolution `deadline`;
+    /// children keep running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<MappingValue>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
+}
+
+/// When a WaitForInstances step settles.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum WaitForInstancesMode {
+    /// Every run has finished.
+    #[default]
+    All,
+    /// The first run has finished.
+    Any,
+}
+
+impl WaitForInstancesMode {
+    /// The mode's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Any => "any",
+        }
+    }
+}
+
 /// LLM-driven agent that selects and calls tools in a loop.
 ///
 /// The AI Agent step uses an LLM to autonomously decide which tools to call.
@@ -1802,6 +1903,8 @@ pub struct SchemaField {
     ///
     /// For `string` type: `textarea`, `date`, `datetime`, `email`, `url`,
     /// `tel`, `color`, `password`, `markdown`.
+    /// For `number` and `integer` types: `currency` (display as a currency
+    /// amount).
     /// Unknown formats fall back to the default input for the type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
@@ -2108,7 +2211,8 @@ pub struct SplitConfig {
     ///
     /// When > 1 and the Split body is an eligible single-Agent subgraph (no
     /// breakpoints, no split-level retries, not a workflow-agent
-    /// child), iterations run as CONCURRENT windows: agent calls are launched
+    /// child, no operation-scoped (suspending or control) step), iterations
+    /// run as CONCURRENT windows: agent calls are launched
     /// as component-model-async subtasks and their I/O overlaps. Ineligible
     /// shapes keep the strictly sequential execution (advisory W073).
     /// Results, error routing, and `dontStopOnFailed` semantics are identical

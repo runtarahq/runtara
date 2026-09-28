@@ -107,20 +107,27 @@ def main():
     assert exact_date["totalElements"] == 1 and exact_date["content"][0]["id"] == first, exact_date
     pending = api(f"/workflows/{workflow}/instances/{first}/pending-input")["pendingInputs"]
     assert pending, "WaitForSignal must publish its exact checkpoint address"
-    api(f"/signals/{first}", {"checkpointId": pending[0]["signalId"], "payload": {"approved": True}})
+    api(f"/signals/{first}", {"requestId": pending[0]["requestId"], "operationId": str(uuid.uuid4()), "payload": {"approved": True}})
     completed = await_status(workflow, first, "completed", label)
     exact_completion = query(workflow, label, completedFrom=completed["completedAt"], completedTo=completed["completedAt"])
     assert exact_completion["totalElements"] == 1 and exact_completion["content"][0]["id"] == first, exact_completion
     api(f"/workflows/instances/{second}/stop", {})
     await_status(workflow, second, "cancelled", label)
     assert query(workflow, label, status="completed,cancelled")["totalElements"] == 2
-    for invalid in ["", " ", "bad\nlabel", "é", "x" * 251]:
+    for invalid in ["", " ", "bad\nlabel", "é", "x" * 1025]:
         request(f"/workflows/{workflow}/execute", {"inputs": {"data": {}}, "runLabel": invalid}, expected=400)
         request("/executions?" + urllib.parse.urlencode({"runLabel": invalid}), expected=400)
     plain = create_workflow()
     plain_id = execute(plain)
     await_status(plain, plain_id, "completed", None)
     assert query(plain, label)["totalElements"] == 0
+    # The longest label spans the printable alphabet and round-trips exactly.
+    longest = "".join(chr(32 + i % 95) for i in range(1024))
+    longest_id = execute(plain, longest)
+    await_status(plain, longest_id, "completed", longest)
+    longest_page = query(plain, longest)
+    assert longest_page["totalElements"] == 1 and longest_page["content"][0]["id"] == longest_id, longest_page
+    assert api(f"/workflows/{plain}/instances/{longest_id}")["instance"]["runLabel"] == longest
     sync_path = f"/events/http-sync/{plain}?" + urllib.parse.urlencode({"runLabel": label})
     sync = request(sync_path, {"rawInput": "kept separate from execution metadata"})
     assert sync["success"], sync
@@ -131,7 +138,7 @@ def main():
     invalid_graph = {"entryPoint": "finish", "steps": {"finish": {"id": "finish", "stepType": "Finish", "runLabel": {"valueType": "immediate", "value": "retired"}}}}
     response = request(f"/workflows/{plain}/update", {"executionGraph": invalid_graph}, expected=400)
     assert not response.get("success", False)
-    print("PASS: exact start labels, waiting/resume/completion/cancellation, duplicate labels, idempotency conflicts, pagination/date bounds, invalid labels, unlabeled/synchronous starts, retired Finish field")
+    print("PASS: exact start labels, waiting/resume/completion/cancellation, duplicate labels, idempotency conflicts, pagination/date bounds, invalid labels, 1024-byte labels, unlabeled/synchronous starts, retired Finish field")
 
 
 if __name__ == "__main__":

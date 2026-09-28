@@ -280,6 +280,154 @@ fn compiles_deeply_nested_child_workflows_to_composed_wasm() {
     );
 }
 
+/// A parent calling the published workflow-agent `reserved-code`.
+fn workflow_agent_parent(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("parent.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "name": "Parent Of Workflow-Agent",
+            "durable": false,
+            "steps": {
+                "call": {"stepType": "Agent", "id": "call", "agentId": "reserved-code",
+                    "capabilityId": "run", "maxRetries": 0, "inputMapping": {}},
+                "finish": {"stepType": "Finish", "id": "finish"}
+            },
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+/// Stage the `reserved-code` fixture component with a certified workflow-agent
+/// sidecar in `dir`, the way the server publishes a workflow-agent.
+fn stage_workflow_agent(dir: &std::path::Path) {
+    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        "reserved-code",
+        "Reserved Code",
+        "",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
+    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+    std::fs::write(
+        dir.join("runtara_agent_reserved_code.meta.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("runtara_agent_reserved_code.wasm"),
+        wat::parse_str(include_str!(
+            "../src/direct_wasm/compile/reserved-code-agent.wat"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn extra_components_dir_adds_published_agents_to_the_catalog() {
+    let components = tempfile::tempdir().expect("tempdir");
+    let staged = tempfile::tempdir().expect("tempdir");
+    stage_workflow_agent(staged.path());
+    let parent = workflow_agent_parent(staged.path());
+    let validate = |extra: &[&str]| {
+        let mut args = vec![
+            "--workflow",
+            parent.to_str().unwrap(),
+            "--components-dir",
+            components.path().to_str().unwrap(),
+            "--validate",
+        ];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+
+    let without = validate(&[]);
+    assert!(
+        !without.status.success(),
+        "an unknown agent must fail validation, stdout: {}",
+        stdout_of(&without)
+    );
+
+    let with = validate(&["--extra-components-dir", staged.path().to_str().unwrap()]);
+    assert!(
+        with.status.success(),
+        "the staged workflow-agent must be in the catalog, stderr: {}",
+        stderr_of(&with)
+    );
+
+    let missing = validate(&["--extra-components-dir", "/nonexistent/runtara-agents"]);
+    assert!(!missing.status.success());
+    assert!(
+        stderr_of(&missing).contains("Extra components directory does not exist"),
+        "stderr: {}",
+        stderr_of(&missing)
+    );
+}
+
+/// A published workflow-agent composes only from an `--extra-components-dir`:
+/// the same files in `--components-dir` are refused with an error that says
+/// how to fix it on the CLI.
+#[cfg(feature = "direct-wasm-integration-tests")]
+#[test]
+fn a_workflow_agent_composes_from_extra_components_dir_not_components_dir() {
+    let bundle = shared_components_dir();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let components = temp.path().join("components");
+    std::fs::create_dir(&components).unwrap();
+    for entry in std::fs::read_dir(&bundle).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::hard_link(entry.path(), components.join(entry.file_name())).unwrap();
+        }
+    }
+    let staged = temp.path().join("workflow-agents");
+    std::fs::create_dir(&staged).unwrap();
+    stage_workflow_agent(&staged);
+    let parent = workflow_agent_parent(temp.path());
+    let compile = |components_dir: &Path, extra: &[&str]| {
+        let build_dir = temp.path().join("builds");
+        let mut args = vec![
+            "--workflow",
+            parent.to_str().unwrap(),
+            "--components-dir",
+            components_dir.to_str().unwrap(),
+            "--build-dir",
+            build_dir.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+
+    let staged_arg = staged.to_str().unwrap();
+    let output = compile(&components, &["--extra-components-dir", staged_arg]);
+    assert!(
+        output.status.success(),
+        "compile failed.\nstdout: {}\nstderr: {}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+
+    stage_workflow_agent(&components);
+    let output = compile(&components, &[]);
+    assert!(
+        !output.status.success(),
+        "a workflow-agent in the components dir must not compose"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("reserved-code") && stderr.contains("--extra-components-dir"),
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn analyze_reports_supported_for_nested_embed() {
     let components = tempfile::tempdir().expect("tempdir");

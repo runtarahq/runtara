@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use runtara_environment::handlers::{
-    self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
-    SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
+    self, EnvironmentHandlerState, ResumeInstanceRequest, SendSignalOutcome, StartInstanceRequest,
+    StartRejection, StopInstanceRequest,
 };
 use runtara_environment::image_registry::{Image, ImageFilter, ImageRegistry};
 use runtara_environment::instance_repository::{self, InstanceRepository};
@@ -183,6 +183,63 @@ impl EnvironmentClient {
         .await
     }
 
+    /// Replay a trusted adapter's original caller intent after current authorization.
+    pub(crate) async fn replay_contextual_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        Option<runtara_core::persistence::inputs::InputReceipt>,
+    > {
+        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
+            runtara_core::persistence::inputs::InputError::Storage(
+                "managed inputs unavailable".into(),
+            )
+        })?;
+        inputs
+            .replay_input(
+                tenant,
+                instance,
+                request,
+                operation,
+                runtara_core::persistence::inputs::InputReplayIdentity::Context(context.as_bytes()),
+            )
+            .await
+    }
+
+    /// Commit trusted retry context with the validated effective response.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn submit_contextual_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &serde_json::Value,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
+            runtara_core::persistence::inputs::InputError::Storage(
+                "managed inputs unavailable".into(),
+            )
+        })?;
+        runtara_core::persistence::inputs::submit_input_with_context(
+            inputs,
+            tenant,
+            instance,
+            request,
+            operation,
+            payload,
+            Some(context),
+        )
+        .await
+    }
+
     /// Wrap the running environment's shared handler state.
     pub fn new(state: Arc<EnvironmentHandlerState>) -> Self {
         Self { state }
@@ -216,9 +273,16 @@ impl EnvironmentClient {
             return Err(EnvironmentError::InstanceNotFound(instance_id.to_string()));
         };
 
+        let suspension_reason = crate::types::SuspensionReason::from_stored(
+            inst.status == runtara_core::domain::InstanceStatus::Suspended,
+            inst.termination_reason.as_deref(),
+            inst.wake_reason.as_deref(),
+        );
         Ok(InstanceInfo {
+            suspension_reason,
             instance_id: inst.instance_id,
             run_label: inst.run_label,
+            parent_instance_id: inst.parent_instance_id,
             image_id: inst.image_id.unwrap_or_default(),
             image_name: inst.image_name.unwrap_or_default(),
             tenant_id: inst.tenant_id,
@@ -240,6 +304,114 @@ impl EnvironmentClient {
                 .and_then(|s| TerminationReason::from_str(&s)),
             exit_code: inst.exit_code,
         })
+    }
+
+    /// Control's narrow read of one run of `tenant`; payloads over their
+    /// caps are left out. `None` for a missing or foreign run.
+    pub async fn control_instance(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Option<runtara_environment::control_reads::ControlInstance>> {
+        Ok(self
+            .instances()
+            .control_instance(tenant, instance_id, output_cap, error_cap)
+            .await?)
+    }
+
+    /// Control's payload-free page of runs, plus the unpaged total.
+    pub async fn control_instances(
+        &self,
+        options: &instance_repository::ListInstancesOptions,
+    ) -> Result<(
+        Vec<runtara_environment::control_reads::ControlInstance>,
+        i64,
+    )> {
+        Ok(self.instances().control_instances(options).await?)
+    }
+
+    /// A run's lineage in `tenant`, itself first ([`control_lineage`]).
+    ///
+    /// [`control_lineage`]: runtara_environment::instance_repository::InstanceRepository::control_lineage
+    pub async fn control_lineage(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        Ok(self
+            .instances()
+            .control_lineage(tenant, instance_id)
+            .await?)
+    }
+
+    /// One page of a parent's launched, admitted and never-launched
+    /// children.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn control_children(
+        &self,
+        tenant: &str,
+        parent: &str,
+        options: &instance_repository::ListInstancesOptions,
+        include_launched: bool,
+        admitted: &[runtara_environment::control_reads::AdmittedChild],
+        outcomes: &runtara_environment::control_reads::ChildOutcomes,
+        order: runtara_environment::control_reads::ChildOrder,
+    ) -> Result<(Vec<runtara_environment::control_reads::ControlChild>, i64)> {
+        Ok(self
+            .instances()
+            .control_children(
+                tenant,
+                parent,
+                options,
+                include_launched,
+                admitted,
+                outcomes,
+                order,
+            )
+            .await?)
+    }
+
+    /// Publish a never-launched child's outcome under the launch fence.
+    pub async fn publish_external_outcome(
+        &self,
+        outcome: &runtara_core::persistence::ExternalOutcome,
+    ) -> Result<runtara_core::persistence::PublishOutcome> {
+        Ok(self
+            .state
+            .persistence
+            .publish_external_outcome(outcome)
+            .await
+            .map_err(runtara_environment::error::Error::Core)?)
+    }
+
+    /// A never-launched child's published outcome, if any.
+    pub async fn get_external_outcome(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::ExternalOutcomeRecord>> {
+        Ok(self
+            .state
+            .persistence
+            .get_external_outcome(tenant, instance_id)
+            .await
+            .map_err(runtara_environment::error::Error::Core)?)
+    }
+
+    /// Live children of `parent` with open managed inputs.
+    pub async fn parent_input_instances(
+        &self,
+        tenant: &str,
+        parent: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
+        self.instances()
+            .input_candidate_ids_for_parent(tenant, parent)
+            .await
+            .map_err(|error| {
+                runtara_core::persistence::inputs::InputError::Storage(error.to_string())
+            })
     }
 
     /// Count a tenant's instances in the given statuses.
@@ -276,6 +448,7 @@ impl EnvironmentClient {
                 .map(|inst| InstanceSummary {
                     instance_id: inst.instance_id,
                     run_label: inst.run_label,
+                    parent_instance_id: inst.parent_instance_id,
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
@@ -284,6 +457,11 @@ impl EnvironmentClient {
                     started_at: inst.started_at,
                     finished_at: inst.finished_at,
                     has_error: inst.has_error,
+                    suspension_reason: crate::types::SuspensionReason::from_stored(
+                        inst.status == runtara_core::domain::InstanceStatus::Suspended,
+                        inst.termination_reason.as_deref(),
+                        inst.wake_reason.as_deref(),
+                    ),
                 })
                 .collect(),
             total_count: result.total_count as u32,
@@ -302,6 +480,7 @@ impl EnvironmentClient {
             &self.state,
             StartInstanceRequest {
                 run_label: options.run_label,
+                parent: options.parent,
                 image_id: options.image_id,
                 tenant_id: options.tenant_id,
                 instance_id: options.instance_id,
@@ -363,17 +542,84 @@ impl EnvironmentClient {
     /// Resume a suspended instance.
     #[instrument(skip(self), fields(instance_id = %instance_id))]
     pub async fn resume_instance(&self, instance_id: &str) -> Result<()> {
-        info!("Resuming instance");
+        match self.resume_instance_with(instance_id, false).await? {
+            None => Ok(()),
+            Some((_, error)) => failed_unless(false, "RESUME_FAILED", Some(error)),
+        }
+    }
+
+    /// Resume a suspended instance; with `require_paused`, only an explicitly
+    /// paused one. `Some((rejection, message))` when it was refused.
+    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    pub async fn resume_instance_with(
+        &self,
+        instance_id: &str,
+        require_paused: bool,
+    ) -> Result<Option<(Option<handlers::ResumeRejection>, String)>> {
+        info!(require_paused, "Resuming instance");
 
         let resp = handlers::handle_resume_instance(
             &self.state,
             ResumeInstanceRequest {
                 instance_id: instance_id.to_string(),
+                require_paused,
             },
         )
         .await?;
+        Ok((!resp.success).then(|| {
+            (
+                resp.rejection,
+                resp.error.unwrap_or_else(|| "Unknown error".to_string()),
+            )
+        }))
+    }
 
-        failed_unless(resp.success, "RESUME_FAILED", resp.error)
+    /// Pause an instance; a parked one pauses at once (decision D4).
+    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    pub async fn pause_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<handlers::PauseInstanceOutcome> {
+        info!("Pausing instance");
+        Ok(handlers::handle_pause_instance(&self.state, instance_id).await?)
+    }
+
+    /// Receipts of control mutations, when the runtime store provides them.
+    pub fn control_receipts(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::control_receipts::ControlReceipts> {
+        self.state.persistence.control_receipts()
+    }
+
+    /// Durable instance waits, when the runtime store provides them.
+    pub fn instance_waits(&self) -> Option<&dyn runtara_core::persistence::waits::InstanceWaits> {
+        self.state.persistence.instance_waits()
+    }
+
+    /// The narrow status read that authorizes a wait's targets.
+    pub async fn wait_target_statuses(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+    ) -> Result<Vec<runtara_environment::control_reads::WaitTargetStatus>> {
+        Ok(self
+            .instances()
+            .wait_target_statuses(tenant, instance_ids)
+            .await?)
+    }
+
+    /// Control's capped read of several runs of `tenant`.
+    pub async fn control_instances_by_id(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Vec<runtara_environment::control_reads::ControlInstance>> {
+        Ok(self
+            .instances()
+            .control_instances_by_id(tenant, instance_ids, output_cap, error_cap)
+            .await?)
     }
 
     // =========================================================================
@@ -408,26 +654,6 @@ impl EnvironmentClient {
             SendSignalOutcome::UnknownSignalType { signal_type } => Err(
                 EnvironmentError::InvalidInput(format!("Unknown signal type: {}", signal_type)),
             ),
-        }
-    }
-
-    /// Send a custom (workflow-defined) signal addressed to one checkpoint.
-    #[instrument(skip(self, payload), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id))]
-    pub async fn send_custom_signal(
-        &self,
-        instance_id: &str,
-        checkpoint_id: &str,
-        payload: Option<&[u8]>,
-    ) -> Result<String> {
-        info!("Sending custom signal to instance");
-
-        match handlers::handle_send_custom_signal(&self.state, instance_id, checkpoint_id, payload)
-            .await?
-        {
-            SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
-            SendCustomSignalOutcome::InstanceNotFound => {
-                Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
-            }
         }
     }
 
@@ -907,6 +1133,7 @@ fn list_instances_options(
     instance_repository::ListInstancesOptions {
         search: options.search.clone(),
         run_label: options.run_label.clone(),
+        parent_instance_id: options.parent_instance_id.clone(),
         search_workflow_ids: options.search_workflow_ids.clone(),
         tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {
@@ -992,55 +1219,6 @@ mod tests {
     use runtara_core::domain::EventType;
     use runtara_core::persistence::{EventRecord, Persistence, memory::InMemoryPersistence};
     use runtara_environment::runner::MockRunner;
-
-    /// A signal payload must reach the store byte for byte.
-    ///
-    /// This path used to run the bytes through `String::from_utf8_lossy` and
-    /// back, because the handler took `Option<&str>`. Every caller happens to
-    /// pass `serde_json::to_vec`, so it was lossless in practice — but any byte
-    /// sequence that is not valid UTF-8 was silently rewritten to U+FFFD on the
-    /// way through, and nothing in the types said so.
-    #[tokio::test]
-    async fn a_signal_payload_is_stored_byte_for_byte() {
-        let persistence = Arc::new(InMemoryPersistence::new());
-        persistence
-            .register_instance("signal-bytes", "tenant-1")
-            .await
-            .unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://localhost:1/unused")
-            .unwrap();
-        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
-            pool,
-            persistence.clone(),
-            Arc::new(MockRunner::new()),
-            std::env::temp_dir(),
-        )));
-
-        // Lone continuation bytes and an interior NUL: not valid UTF-8, so
-        // `from_utf8_lossy` would substitute replacement characters here.
-        let payload: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x01, 0x80, b'{'];
-        assert!(
-            std::str::from_utf8(&payload).is_err(),
-            "the fixture must be invalid UTF-8 or it proves nothing"
-        );
-
-        client
-            .send_custom_signal("signal-bytes", "cp-1", Some(&payload))
-            .await
-            .expect("send custom signal");
-
-        let stored = persistence
-            .get_custom_signal("signal-bytes", "cp-1")
-            .await
-            .expect("read back")
-            .expect("a sent signal is retained");
-        assert_eq!(
-            stored.payload.as_deref(),
-            Some(payload.as_slice()),
-            "the payload must arrive as it was sent, not as lossy UTF-8"
-        );
-    }
 
     #[tokio::test]
     async fn event_filters_keep_wire_names_and_unknown_names_match_nothing() {

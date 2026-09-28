@@ -6,15 +6,40 @@ import { ExecutionHistoryItem } from '../types';
 import { cn, formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
-import {
-  StatusPill,
-  executionStatusPill,
-  statusToneClasses,
-} from '@/shared/components/console';
+import { statusToneClasses } from '@/shared/components/console';
 import { isActiveStatus } from '@/shared/utils/status-display';
 import { ReplayButton } from '@/features/workflows/components/ReplayButton';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
 import { StopButton } from '@/features/workflows/components/StopButton';
+import { canResume } from '@/features/workflows/utils/suspension';
+import { ParentRunLink, RunStatusPill } from './RunLinks';
+import {
+  responsiveColumnClass,
+  type InvocationColumnId,
+} from '../utils/column-layout';
+
+/** Column meta that hides a lower-priority column on narrower viewports. */
+const responsiveMeta = (columnId: InvocationColumnId) => {
+  const className = responsiveColumnClass(columnId);
+  return { headerClassName: className, cellClassName: className };
+};
+
+/**
+ * Date over time on two lines, so the Started/Completed columns stay narrow.
+ * The full timestamp is the hover text.
+ */
+const dateTimeCell = (value: string) => {
+  return (
+    <div className="flex flex-col" title={formatDate(value)}>
+      <span className="text-sm text-foreground">
+        {formatDate(value, 'dd MMM, yyyy')}
+      </span>
+      <span className="text-xs text-muted-foreground">
+        {formatDate(value, 'p')}
+      </span>
+    </div>
+  );
+};
 
 // Helper to format duration. A negative value is meaningless (it comes from a
 // stale suspend `finished_at` predating a resumed run's `started_at`); render
@@ -39,20 +64,6 @@ const getDurationColorClass = (seconds: number | null | undefined): string => {
   return 'text-destructive';
 };
 
-// Status badge — delegates to the shared console StatusPill with a consistent width
-const StatusBadge = ({ status }: { status: string }) => {
-  const { tone, label, spin, pulse } = executionStatusPill(status);
-  return (
-    <StatusPill
-      tone={tone}
-      label={label}
-      spin={spin}
-      pulse={pulse}
-      className="min-w-[90px]"
-    />
-  );
-};
-
 export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
   {
     id: 'workflowId',
@@ -71,7 +82,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               to={`/workflows/${workflowId}`}
               className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary"
             >
-              <span className="max-w-80 truncate" title={workflowName}>
+              <span className="max-w-60 truncate" title={workflowName}>
                 {workflowName}
               </span>
               <ExternalLink className="size-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
@@ -82,7 +93,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             </span>
           )}
           {row.original.runLabel && row.original.workflowName && (
-            <span className="text-xs text-muted-foreground">
+            <span
+              className="max-w-60 truncate text-xs text-muted-foreground"
+              title={row.original.workflowName}
+            >
               {row.original.workflowName}
             </span>
           )}
@@ -99,15 +113,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     enableSorting: true,
     cell: ({ row }) => {
       const createdAt: string = row.getValue('createdAt');
-      return (
-        <span className="text-sm text-foreground">{formatDate(createdAt)}</span>
-      );
+      return dateTimeCell(createdAt);
     },
   },
   {
     accessorKey: 'completedAt',
     header: 'Completed',
     enableSorting: true,
+    meta: responsiveMeta('completedAt'),
     cell: ({ row }) => {
       const completedAt = row.original.completedAt;
       // A non-terminal row (running/suspended/…) has no real completion time;
@@ -116,11 +129,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       if (!completedAt || isActiveStatus(row.original.status)) {
         return <span className="text-sm text-muted-foreground">-</span>;
       }
-      return (
-        <span className="text-sm text-foreground">
-          {formatDate(completedAt)}
-        </span>
-      );
+      return dateTimeCell(completedAt);
     },
   },
   {
@@ -132,7 +141,11 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       const hasPendingInput = row.original.hasPendingInput;
       return (
         <div className="flex items-center gap-1.5">
-          <StatusBadge status={status} />
+          <RunStatusPill
+            status={status}
+            suspensionReason={row.original.suspensionReason}
+            className="min-w-[90px]"
+          />
           {hasPendingInput && (
             <WithTooltip label="Continue chat">
               <Link
@@ -152,9 +165,20 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     },
   },
   {
+    id: 'parentInstanceId',
+    accessorKey: 'parentInstanceId',
+    header: 'Parent',
+    enableSorting: false,
+    meta: responsiveMeta('parentInstanceId'),
+    cell: ({ row }) => (
+      <ParentRunLink parentInstanceId={row.original.parentInstanceId} compact />
+    ),
+  },
+  {
     accessorKey: 'executionDurationSeconds',
     header: 'Duration',
     enableSorting: false,
+    meta: responsiveMeta('executionDurationSeconds'),
     cell: ({ row }) => {
       const duration = row.original.executionDurationSeconds;
       const colorClass = getDurationColorClass(duration);
@@ -173,6 +197,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     accessorKey: 'version',
     header: 'Version',
     enableSorting: false,
+    meta: responsiveMeta('version'),
     cell: ({ row }) => {
       const version = row.original.version;
       return version !== undefined ? (
@@ -195,17 +220,23 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       if (!instanceId) return null;
 
       const shouldShowStop = isActiveStatus(status);
+      // Only a paused run needs a resume; a waiting run wakes on its own and a
+      // finished run answers NotResumable.
+      const shouldShowResume = canResume(row.original);
+      const debugLabel = shouldShowResume
+        ? 'Open in editor — resume debugging'
+        : 'Open in editor';
 
       return (
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
           {status === 'suspended' && (
             <Link to={`/workflows/${workflowId}?attachInstance=${instanceId}`}>
-              <WithTooltip label="Open in editor — resume debugging">
+              <WithTooltip label={debugLabel}>
                 <Button
                   variant="secondary"
                   size="icon"
                   className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
-                  aria-label="Open in editor — resume debugging"
+                  aria-label={debugLabel}
                 >
                   <Bug className="size-4" />
                 </Button>
@@ -238,6 +269,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               </Button>
             </WithTooltip>
           </Link>
+          {shouldShowResume && (
+            <ResumeButton
+              instanceId={instanceId}
+              variant="secondary"
+              size="icon"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
+            />
+          )}
           {shouldShowStop ? (
             <StopButton
               instanceId={instanceId}
@@ -246,22 +285,12 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
             />
           ) : (
-            <>
-              {(status === 'failed' || status === 'cancelled') && (
-                <ResumeButton
-                  instanceId={instanceId}
-                  variant="secondary"
-                  size="icon"
-                  className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
-                />
-              )}
-              <ReplayButton
-                instanceId={instanceId}
-                variant="secondary"
-                size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-success/10 hover:text-success"
-              />
-            </>
+            <ReplayButton
+              instanceId={instanceId}
+              variant="secondary"
+              size="icon"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-success/10 hover:text-success"
+            />
           )}
         </div>
       );

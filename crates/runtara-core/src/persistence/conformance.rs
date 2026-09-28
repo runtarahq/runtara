@@ -1198,9 +1198,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let cutoff = Utc::now() + Duration::seconds(60);
     let sweep_limit = 100_000;
     let terminal = backend
-        .get_terminal_instances_older_than(cutoff, sweep_limit)
+        .get_terminal_instances_older_than(cutoff, None, sweep_limit)
         .await
-        .expect("get_terminal_instances_older_than failed");
+        .expect("get_terminal_instances_older_than failed")
+        .eligible;
     assert!(
         terminal.iter().any(|id| id == &instance_id),
         "completed instance must appear in terminal sweep before cutoff \
@@ -1483,6 +1484,252 @@ pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
     );
 }
 
+/// Decision D4: a pending pause of a parked instance applies at once. The run
+/// stays suspended with no suspension reason and no wake, so a waiting timer
+/// cannot relaunch it; a running guest keeps its command.
+pub async fn run_parked_pause_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus as Status, SignalType as Kind};
+    let id = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "pause-contract")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, Status::Running, None)
+        .await
+        .unwrap();
+    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
+    assert!(
+        backend
+            .pause_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a running guest pauses at its next checkpoint"
+    );
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_some());
+    // The guest parks on a timer before it read the pause.
+    backend
+        .update_instance_status(&id, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend
+        .schedule_wake(
+            &id,
+            Utc::now() + Duration::hours(1),
+            crate::domain::WakeReason::Timer,
+        )
+        .await
+        .unwrap();
+    let paused = backend
+        .pause_suspended_instances(Some(&id), 1)
+        .await
+        .unwrap();
+    assert_eq!(paused.len(), 1);
+    assert_eq!(
+        (paused[0].instance_id.as_str(), paused[0].tenant_id.as_str()),
+        (id.as_str(), "pause-contract")
+    );
+    let instance = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(instance.status, Status::Suspended);
+    assert!(instance.sleep_until.is_none(), "no wake relaunches it");
+    assert!(instance.termination_reason.is_none() && instance.wake_reason.is_none());
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+    assert!(
+        backend
+            .pause_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an applied pause is not applied twice"
+    );
+
+    // A pending cancel is never consumed as a pause.
+    let cancelled = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&cancelled, "pause-contract")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&cancelled, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&cancelled, Kind::Cancel, b"")
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .pause_suspended_instances(Some(&cancelled), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Recovery finds a parked pause the request path did not apply.
+    let recovered = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&recovered, "pause-recovery")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&recovered, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&recovered, Kind::Pause, b"")
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .pause_suspended_instances(None, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let swept = backend.pause_suspended_instances(None, 1000).await.unwrap();
+    assert!(
+        swept
+            .iter()
+            .any(|instance| instance.instance_id == recovered)
+    );
+    assert!(
+        !swept
+            .iter()
+            .any(|instance| instance.instance_id == cancelled)
+    );
+    backend
+        .delete_instances_batch(&[id, cancelled, recovered])
+        .await
+        .unwrap();
+}
+
+/// Intent-first, success-only control receipts keyed by caller and
+/// operation, deleted with their caller.
+pub async fn run_control_receipt_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::control_receipts::{BeginReceipt, ControlIntent, ControlReceiptState};
+    let receipts = backend
+        .control_receipts()
+        .expect("a durable backend provides control receipts");
+    let caller = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&caller, "receipts")
+        .await
+        .unwrap();
+    let operation = "a".repeat(64);
+    let intent = ControlIntent {
+        command: "cancel".into(),
+        target_instance_id: "child-1".into(),
+        fingerprint: "v1:first".into(),
+        detail: serde_json::json!({"graceMs": 5000}),
+    };
+    assert!(
+        receipts
+            .receipt_by_operation(&caller, &operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let BeginReceipt::Started(started) =
+        receipts.begin(&caller, &operation, &intent).await.unwrap()
+    else {
+        panic!("the first begin records the intent");
+    };
+    assert_eq!(started.state, ControlReceiptState::Pending);
+    assert_eq!(started.intent, intent);
+    assert!(started.result.is_none() && started.completed_at.is_none());
+
+    // A crash between intent and outcome: the replay finds the pending
+    // intent as recorded, even when it now asks for something else.
+    let changed = ControlIntent {
+        fingerprint: "v1:second".into(),
+        ..intent.clone()
+    };
+    let BeginReceipt::Existing(existing) =
+        receipts.begin(&caller, &operation, &changed).await.unwrap()
+    else {
+        panic!("a second begin returns the existing receipt");
+    };
+    assert_eq!(existing.intent.fingerprint, "v1:first");
+    assert_eq!(existing.state, ControlReceiptState::Pending);
+
+    // Failure discards the pending intent, so a retry starts afresh.
+    assert!(receipts.discard(&caller, &operation).await.unwrap());
+    assert!(!receipts.discard(&caller, &operation).await.unwrap());
+    assert!(matches!(
+        receipts.begin(&caller, &operation, &changed).await.unwrap(),
+        BeginReceipt::Started(receipt) if receipt.intent.fingerprint == "v1:second"
+    ));
+
+    // Success is final: the first result wins and discard keeps it.
+    let result = serde_json::json!({"outcome": "requested"});
+    let completed = receipts
+        .complete(&caller, &operation, &result)
+        .await
+        .unwrap();
+    assert_eq!(completed.state, ControlReceiptState::Completed);
+    assert_eq!(completed.result.as_ref(), Some(&result));
+    assert!(completed.completed_at.is_some());
+    let again = receipts
+        .complete(
+            &caller,
+            &operation,
+            &serde_json::json!({"outcome": "applied"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.result.as_ref(), Some(&result));
+    assert!(!receipts.discard(&caller, &operation).await.unwrap());
+    assert!(matches!(
+        receipts.begin(&caller, &operation, &intent).await.unwrap(),
+        BeginReceipt::Existing(receipt) if receipt.state == ControlReceiptState::Completed
+    ));
+
+    // Receipts are per caller.
+    let other = Uuid::new_v4().to_string();
+    backend.register_instance(&other, "receipts").await.unwrap();
+    assert!(
+        receipts
+            .receipt_by_operation(&other, &operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        receipts
+            .complete(&other, &operation, &result)
+            .await
+            .is_err()
+    );
+    // A missing caller and malformed keys are refused.
+    assert!(
+        receipts
+            .begin(&Uuid::new_v4().to_string(), &operation, &intent)
+            .await
+            .is_err()
+    );
+    assert!(receipts.begin(&caller, "", &intent).await.is_err());
+    assert!(
+        receipts
+            .begin(&caller, &"x".repeat(129), &intent)
+            .await
+            .is_err()
+    );
+
+    // They go with their caller.
+    backend
+        .delete_instances_batch(std::slice::from_ref(&caller))
+        .await
+        .unwrap();
+    assert!(
+        receipts
+            .receipt_by_operation(&caller, &operation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    backend.delete_instances_batch(&[other]).await.unwrap();
+}
+
 /// Observable lifecycle matrix shared by every backend. Expected values are
 /// specified independently of the pure policy implementation.
 pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
@@ -1602,7 +1849,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
             }
             backend.delete_instances_batch(&[id]).await.unwrap();
         }
-        for reason in [ParkReason::Timer, ParkReason::Signal] {
+        for reason in [ParkReason::Timer, ParkReason::Signal, ParkReason::Instances] {
             for with_deadline in [false, true] {
                 let id = Uuid::new_v4().to_string();
                 backend
@@ -1633,10 +1880,10 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                     assert_eq!(after.status, S::Suspended);
                     assert_eq!(
                         after.termination_reason.as_deref(),
-                        Some(if reason == ParkReason::Timer {
-                            "sleeping"
-                        } else {
-                            "waiting_signal"
+                        Some(match reason {
+                            ParkReason::Timer => "sleeping",
+                            ParkReason::Signal => "waiting_signal",
+                            ParkReason::Instances => "waiting_instances",
                         })
                     );
                     assert_eq!(
@@ -1686,6 +1933,7 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
         WakeReason::CustomSignal,
         WakeReason::ManualResume,
         WakeReason::Recovery,
+        WakeReason::InstancesTerminal,
     ] {
         let id = uuid::Uuid::new_v4().to_string();
         backend
@@ -2234,6 +2482,134 @@ pub async fn run_batch_claim_never_strands_sequence<P: Persistence + 'static>(
         .expect("delete_instances_batch failed (batch lease cleanup)");
 }
 
+/// Parent links: a child of a same-tenant parent persists its link through
+/// every read and the lifecycle; a foreign, missing or self parent writes
+/// nothing; a lost claim leaves the existing row untouched.
+pub async fn run_parent_link_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::ParentLink;
+    let tenant = format!("parent-conformance-{}", Uuid::new_v4());
+    let parent = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&parent, &tenant, None, None)
+            .await
+            .unwrap()
+    );
+    // Whole milliseconds survive every backend's timestamp precision.
+    let admitted_at = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("a current timestamp");
+    let link = |parent: &str, policy: &str| ParentLink {
+        parent_instance_id: parent.into(),
+        parent_close_policy: policy.into(),
+        admitted_at,
+    };
+
+    let child = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_child_instance(
+                &child,
+                &tenant,
+                Some(b"input"),
+                Some("child-1"),
+                &link(&parent, "cancel"),
+            )
+            .await
+            .unwrap()
+    );
+    let expected = Some(link(&parent, "cancel"));
+    let row = backend.get_instance(&child).await.unwrap().unwrap();
+    assert_eq!(row.parent, expected);
+    assert_eq!(row.run_label.as_deref(), Some("child-1"));
+    assert_eq!(row.input.as_deref(), Some(b"input".as_slice()));
+    assert_eq!(row.status, CoreInstanceStatus::Pending);
+    assert_eq!(
+        backend
+            .get_instance_meta(&child)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent,
+        expected
+    );
+    // A top-level run has no link.
+    assert_eq!(
+        backend.get_instance(&parent).await.unwrap().unwrap().parent,
+        None
+    );
+
+    // A replay loses the claim and changes nothing.
+    assert!(
+        !backend
+            .try_register_child_instance(
+                &child,
+                &tenant,
+                None,
+                None,
+                &link(&parent, "leave_running"),
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.get_instance(&child).await.unwrap().unwrap().parent,
+        expected
+    );
+
+    // The link survives the lifecycle.
+    backend
+        .update_instance_status(&child, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
+    backend
+        .complete_instance(CompleteInstanceParams::new(
+            &child,
+            CoreInstanceStatus::Completed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.get_instance(&child).await.unwrap().unwrap().parent,
+        expected
+    );
+
+    // A parent of another tenant, a missing parent, the child itself and an
+    // unknown policy are refused, and nothing is written.
+    let foreign = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&foreign, "another-tenant", None, None)
+            .await
+            .unwrap()
+    );
+    for (id, link) in [
+        (Uuid::new_v4().to_string(), link(&foreign, "cancel")),
+        (Uuid::new_v4().to_string(), link("no-such-parent", "cancel")),
+        (Uuid::new_v4().to_string(), link(&parent, "abandon")),
+        (Uuid::new_v4().to_string(), link("", "cancel")),
+    ] {
+        let refused = backend
+            .try_register_child_instance(&id, &tenant, None, None, &link)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::error::CoreError::ValidationError { .. })
+            ),
+            "{link:?} must be refused, got {refused:?}"
+        );
+        assert!(backend.get_instance(&id).await.unwrap().is_none());
+    }
+    let own = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_child_instance(&own, &tenant, None, None, &link(&own, "cancel"))
+            .await
+            .is_err()
+    );
+    assert!(backend.get_instance(&own).await.unwrap().is_none());
+}
+
 /// Start references are exact, non-unique, and immutable throughout the lifecycle.
 async fn run_start_label_sequence<P: Persistence>(backend: &P) {
     let label = " Order_123:/?% ";
@@ -2327,7 +2703,7 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
             Some(label)
         );
     }
-    for label in ["", " ", "bad\nlabel", &"x".repeat(251)] {
+    for label in ["", " ", "bad\nlabel", &"x".repeat(1025)] {
         let id = Uuid::new_v4().to_string();
         assert!(
             backend
@@ -2337,7 +2713,703 @@ async fn run_start_label_sequence<P: Persistence>(backend: &P) {
         );
         assert!(backend.get_instance(&id).await.unwrap().is_none());
     }
+    // The maximum length spans the whole printable alphabet and round-trips exactly.
+    let longest: String = (0..1024u32)
+        .map(|i| char::from(b' ' + (i % 95) as u8))
+        .collect();
+    let id = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&id, tenant, None, Some(&longest))
+            .await
+            .unwrap()
+    );
+    backend
+        .update_instance_status(&id, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
+    backend
+        .complete_instance(CompleteInstanceParams::new(
+            &id,
+            CoreInstanceStatus::Completed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().run_label,
+        Some(longest)
+    );
 }
 
 /// Authoritative managed-input lifecycle and acceptance conformance.
 pub mod inputs;
+
+/// Durable instance-wait conformance: resolution, replay, deadline,
+/// lifecycle, park and reconciler rotation.
+pub mod waits;
+
+/// Agent continuation conformance: attempt matching, size cap, running
+/// fence, idempotent delete, cascade and isolation.
+pub mod continuations;
+
+/// Paired-record rule: one record per (correlation, scope), from the first
+/// start to the first end after it (S,S,E; S,E,S,E; E,S,E).
+pub mod paired;
+
+/// External outcomes are fenced against launches: the first publication
+/// wins, a published outcome refuses the child's launch, and an existing
+/// instance row refuses the publication.
+pub async fn run_external_outcome_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::{ExternalOutcome, ExternalOutcomeKind, ParentLink, PublishOutcome};
+    let tenant = format!("outcome-conformance-{}", Uuid::new_v4());
+    let parent = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance_with_label(&parent, &tenant, None, None)
+            .await
+            .unwrap()
+    );
+    let admitted_at = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("a current timestamp");
+    let outcome = |id: &str, kind| ExternalOutcome {
+        instance_id: id.into(),
+        tenant_id: tenant.clone(),
+        parent_instance_id: parent.clone(),
+        outcome: kind,
+        reason: Some("execution_outbox_deadline_exceeded".into()),
+        admitted_at,
+        workflow_id: Some("wf".into()),
+        workflow_version: Some(3),
+        run_label: Some("label".into()),
+    };
+    let link = ParentLink {
+        parent_instance_id: parent.clone(),
+        parent_close_policy: "cancel".into(),
+        admitted_at,
+    };
+
+    // Publish, then launch: the launch is refused and writes nothing.
+    let unlaunched = Uuid::new_v4().to_string();
+    assert_eq!(
+        backend
+            .publish_external_outcome(&outcome(&unlaunched, ExternalOutcomeKind::NotStarted))
+            .await
+            .unwrap(),
+        PublishOutcome::Published
+    );
+    assert_eq!(
+        backend
+            .publish_external_outcome(&outcome(&unlaunched, ExternalOutcomeKind::Cancelled))
+            .await
+            .unwrap(),
+        PublishOutcome::AlreadyPublished,
+        "the first outcome stands"
+    );
+    let stored = backend
+        .get_external_outcome(&tenant, &unlaunched)
+        .await
+        .unwrap()
+        .expect("the published outcome");
+    assert_eq!(
+        stored.outcome,
+        outcome(&unlaunched, ExternalOutcomeKind::NotStarted)
+    );
+    assert!(
+        backend
+            .get_external_outcome("another-tenant", &unlaunched)
+            .await
+            .unwrap()
+            .is_none(),
+        "outcomes are tenant-scoped"
+    );
+    let refused = backend
+        .try_register_child_instance(&unlaunched, &tenant, None, None, &link)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(crate::error::CoreError::InvalidInstanceState { .. })
+        ),
+        "a launch after a published outcome is fenced, got {refused:?}"
+    );
+    assert!(backend.get_instance(&unlaunched).await.unwrap().is_none());
+
+    // Launch, then publish: the launch wins and nothing is published.
+    let launched = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_child_instance(&launched, &tenant, None, None, &link)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend
+            .publish_external_outcome(&outcome(&launched, ExternalOutcomeKind::NotStarted))
+            .await
+            .unwrap(),
+        PublishOutcome::Launched
+    );
+    assert!(
+        backend
+            .get_external_outcome(&tenant, &launched)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A malformed outcome is refused.
+    let mut oversized = outcome(&Uuid::new_v4().to_string(), ExternalOutcomeKind::Cancelled);
+    oversized.reason = Some("x".repeat(crate::persistence::MAX_EXTERNAL_OUTCOME_REASON_BYTES + 1));
+    assert!(matches!(
+        backend.publish_external_outcome(&oversized).await,
+        Err(crate::error::CoreError::ValidationError { .. })
+    ));
+    let mut orphan = outcome(&Uuid::new_v4().to_string(), ExternalOutcomeKind::Cancelled);
+    orphan.parent_instance_id = orphan.instance_id.clone();
+    assert!(backend.publish_external_outcome(&orphan).await.is_err());
+
+    backend
+        .delete_instances_batch(&[parent, launched])
+        .await
+        .unwrap();
+}
+
+/// Retention pins a finished child until its parent is terminal, one level
+/// deep, aged from the later of the two finishes; a missing parent counts as
+/// terminal; a pass pages with a cursor and reads each row once; external
+/// outcomes follow the same pin by `published_at`.
+///
+/// Every timestamp comes from the store's own clock (read back from rows),
+/// and each pass starts after a sentinel finished first, so rows other tests
+/// left in a shared database do not change what this sees.
+pub async fn run_retention_pin_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::{ExternalOutcome, ExternalOutcomeKind, ParentLink, RetentionCursor};
+    use std::collections::BTreeSet;
+    let tenant_name = format!("retention-pin-{}", Uuid::new_v4());
+    let tenant = tenant_name.as_str();
+    let pause = || tokio::time::sleep(std::time::Duration::from_millis(15));
+    let top = |id: String| async move {
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, None, None)
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let child = |id: String, parent: String| async move {
+        let link = ParentLink {
+            parent_instance_id: parent,
+            parent_close_policy: "cancel".into(),
+            admitted_at: Utc::now(),
+        };
+        assert!(
+            backend
+                .try_register_child_instance(&id, tenant, None, None, &link)
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let finish = |id: String| async move {
+        backend
+            .complete_instance(CompleteInstanceParams::new(
+                &id,
+                CoreInstanceStatus::Completed,
+            ))
+            .await
+            .unwrap();
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .expect("a terminal run has finished_at")
+    };
+    // One whole pass from `start`, in pages of `limit`.
+    let sweep = |cutoff: chrono::DateTime<Utc>, start: RetentionCursor, limit: i64| async move {
+        let mut eligible = Vec::new();
+        let mut pinned = 0u64;
+        let mut pages = 0usize;
+        let mut after = Some(start);
+        loop {
+            let page = backend
+                .get_terminal_instances_older_than(cutoff, after.as_ref(), limit)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(page.eligible.len() as i64 <= limit);
+            eligible.extend(page.eligible);
+            pinned += page.pinned;
+            match page.next {
+                Some(next) => {
+                    assert!(
+                        after.as_ref().is_none_or(|prev| (
+                            next.finished_at,
+                            next.instance_id.as_bytes()
+                        ) > (
+                            prev.finished_at,
+                            prev.instance_id.as_bytes()
+                        )),
+                        "the cursor must advance"
+                    );
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        let unique: BTreeSet<_> = eligible.iter().cloned().collect();
+        assert_eq!(unique.len(), eligible.len(), "a pass reads each row once");
+        (unique, pinned, pages)
+    };
+
+    let sentinel = top(Uuid::new_v4().to_string()).await;
+    let start = RetentionCursor {
+        finished_at: finish(sentinel.clone()).await,
+        instance_id: sentinel.clone(),
+    };
+    pause().await;
+
+    // grandparent (running) -> pinned child (finished) -> grandchild (finished)
+    let grandparent = top(Uuid::new_v4().to_string()).await;
+    backend
+        .update_instance_status(&grandparent, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let pinned_child = child(Uuid::new_v4().to_string(), grandparent.clone()).await;
+    let grandchild = child(Uuid::new_v4().to_string(), pinned_child.clone()).await;
+    finish(grandchild.clone()).await;
+    finish(pinned_child.clone()).await;
+    // A child whose parent is gone.
+    let doomed = top(Uuid::new_v4().to_string()).await;
+    let orphan = child(Uuid::new_v4().to_string(), doomed.clone()).await;
+    finish(orphan.clone()).await;
+    finish(doomed.clone()).await;
+    assert_eq!(
+        backend
+            .delete_instances_batch(std::slice::from_ref(&doomed))
+            .await
+            .unwrap(),
+        1
+    );
+    // A child that finished before its parent: aged from the parent's finish.
+    let late_parent = top(Uuid::new_v4().to_string()).await;
+    let early_child = child(Uuid::new_v4().to_string(), late_parent.clone()).await;
+    finish(early_child.clone()).await;
+    pause().await;
+    let late_finish = finish(late_parent.clone()).await;
+    let plain = top(Uuid::new_v4().to_string()).await;
+    let last = finish(plain.clone()).await;
+
+    // External outcomes: one pinned by the running grandparent, one whose
+    // parent is gone.
+    let outcome = |id: &str, parent: &str| ExternalOutcome {
+        instance_id: id.into(),
+        tenant_id: tenant.to_owned(),
+        parent_instance_id: parent.into(),
+        outcome: ExternalOutcomeKind::NotStarted,
+        reason: None,
+        admitted_at: Utc::now(),
+        workflow_id: None,
+        workflow_version: None,
+        run_label: None,
+    };
+    let pinned_outcome = Uuid::new_v4().to_string();
+    let orphan_outcome = Uuid::new_v4().to_string();
+    backend
+        .publish_external_outcome(&outcome(&pinned_outcome, &grandparent))
+        .await
+        .unwrap();
+    backend
+        .publish_external_outcome(&outcome(&orphan_outcome, &doomed))
+        .await
+        .unwrap();
+
+    let future = last + Duration::seconds(5);
+    let (eligible, pinned, pages) = sweep(future, start.clone(), 2).await;
+    assert!(pages > 2, "a limit of 2 pages the pass");
+    assert!(
+        !eligible.contains(&pinned_child),
+        "a child of a running parent is pinned"
+    );
+    assert!(pinned >= 1);
+    for id in [&grandchild, &orphan, &early_child, &late_parent, &plain] {
+        assert!(eligible.contains(id), "{id} should be eligible");
+    }
+    assert!(
+        !eligible.contains(&sentinel),
+        "the pass starts after its cursor"
+    );
+
+    // Past the child's retention but not its parent's: still pinned.
+    let (eligible, _, _) = sweep(late_finish, start.clone(), 100).await;
+    assert!(
+        !eligible.contains(&early_child),
+        "the child's age counts from its parent's later finish"
+    );
+    assert!(eligible.contains(&grandchild), "pinning is one level deep");
+    assert!(!eligible.contains(&pinned_child));
+
+    // Outcome cleanup follows the same pin.
+    let deleted_before = backend
+        .delete_external_outcomes_older_than(future, 10_000)
+        .await
+        .unwrap();
+    assert!(deleted_before >= 1);
+    assert!(
+        backend
+            .get_external_outcome(tenant, &orphan_outcome)
+            .await
+            .unwrap()
+            .is_none(),
+        "an outcome whose parent is gone ages out"
+    );
+    assert!(
+        backend
+            .get_external_outcome(tenant, &pinned_outcome)
+            .await
+            .unwrap()
+            .is_some(),
+        "an outcome of a running parent is pinned"
+    );
+
+    // The parent ends: its child and outcome are released.
+    let released = finish(grandparent.clone()).await;
+    let later = released + Duration::seconds(5);
+    let (eligible, _, _) = sweep(later, start.clone(), 100).await;
+    assert!(eligible.contains(&pinned_child));
+    backend
+        .delete_external_outcomes_older_than(later, 10_000)
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .get_external_outcome(tenant, &pinned_outcome)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    backend
+        .delete_instances_batch(&[
+            sentinel,
+            grandparent,
+            pinned_child,
+            grandchild,
+            orphan,
+            late_parent,
+            early_child,
+            plain,
+        ])
+        .await
+        .unwrap();
+}
+
+/// Pruning strips a pinned terminal child that retention would already have
+/// deleted, had its parent not been live, and leaves everything `get` and
+/// `wait` read: only old pinned rows are pruned (not a fresh child, a running
+/// child, or a child of a finished parent), the outcome, parent link, run
+/// label and accepted input receipt survive, and a rerun changes nothing.
+pub async fn run_prune_pinned_sequence<P: Persistence>(backend: &P) {
+    use crate::persistence::inputs::{
+        InputAuthority, InputError, InputRequestSpec, InputState, ValidatedInputResponse,
+    };
+    use crate::persistence::waits::{WaitMode, WaitSpec};
+    use crate::persistence::{ParentLink, RetentionCursor};
+    use serde_json::json;
+
+    let tenant_name = format!("prune-{}", Uuid::new_v4());
+    let tenant = tenant_name.as_str();
+    let pause = || tokio::time::sleep(std::time::Duration::from_millis(15));
+    let running = |id: String| async move {
+        backend
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        id
+    };
+    let top = |id: String| async move {
+        assert!(
+            backend
+                .try_register_instance_with_label(&id, tenant, None, None)
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let child = |id: String, parent: String| async move {
+        let link = ParentLink {
+            parent_instance_id: parent,
+            parent_close_policy: "cancel".into(),
+            admitted_at: Utc::now(),
+        };
+        assert!(
+            backend
+                .try_register_child_instance(
+                    &id,
+                    tenant,
+                    Some(b"{\"bulky\":\"input\"}"),
+                    Some("child label"),
+                    &link
+                )
+                .await
+                .unwrap()
+        );
+        id
+    };
+    let finish = |id: String| async move {
+        backend
+            .complete_instance(
+                CompleteInstanceParams::new(&id, CoreInstanceStatus::Completed)
+                    .with_output(b"{\"answer\":42}")
+                    .with_stderr("noisy stderr"),
+            )
+            .await
+            .unwrap();
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .expect("a terminal run has finished_at")
+    };
+    // One whole pass from `start`, in pages of `limit`.
+    let prune = |cutoff: chrono::DateTime<Utc>, start: RetentionCursor, limit: i64| async move {
+        let mut pruned = 0u64;
+        let mut pages = 0usize;
+        let mut after = Some(start);
+        loop {
+            let page = backend
+                .prune_pinned_terminal(cutoff, after.as_ref(), limit)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(page.pruned as i64 <= limit);
+            pruned += page.pruned;
+            match page.next {
+                Some(next) => {
+                    assert!(
+                        after.as_ref().is_none_or(|prev| (
+                            next.finished_at,
+                            next.instance_id.as_bytes()
+                        ) > (
+                            prev.finished_at,
+                            prev.instance_id.as_bytes()
+                        )),
+                        "the cursor must advance"
+                    );
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        (pruned, pages)
+    };
+
+    let sentinel = top(Uuid::new_v4().to_string()).await;
+    let start = RetentionCursor {
+        finished_at: finish(sentinel.clone()).await,
+        instance_id: sentinel.clone(),
+    };
+    pause().await;
+
+    let parent = running(top(Uuid::new_v4().to_string()).await).await;
+    let ended_parent = top(Uuid::new_v4().to_string()).await;
+
+    // The old pinned child, with something in every table a prune clears.
+    let old = running(child(Uuid::new_v4().to_string(), parent.clone()).await).await;
+    backend
+        .save_checkpoint(&old, "cp-1", b"checkpoint state")
+        .await
+        .unwrap();
+    backend
+        .put_custom_signal(&old, "raw-address", b"raw payload")
+        .await
+        .unwrap();
+    let inputs = backend.input_requests().expect("managed inputs required");
+    let root = InputAuthority::Root {
+        tenant_id: tenant.into(),
+        instance_id: old.clone(),
+    };
+    let spec = |n: u32| InputRequestSpec {
+        signal_id: format!("{old}/wait/iteration/{n}"),
+        response_schema: Some(json!({"answer": {"type": "string", "required": true}})),
+        metadata: json!({"step_id": "ask"}),
+        deadline: None,
+    };
+    let (answered, abandoned) = (spec(1), spec(2));
+    inputs.register_input(&root, &answered).await.unwrap();
+    inputs.register_input(&root, &abandoned).await.unwrap();
+    let response =
+        ValidatedInputResponse::new(&answered, "operation-1", &json!({"answer": "yes"})).unwrap();
+    let receipt = inputs.accept_input(tenant, &old, &response).await.unwrap();
+    let fences = backend
+        .invocation_fences()
+        .expect("invocation fences required");
+    let lease = fences
+        .claim_invocation_lease(tenant, &old, "launch-one", None)
+        .await
+        .unwrap();
+    fences
+        .begin_invocation_attempt(&lease, "agent/path", "start-1")
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&old, crate::domain::SignalType::Pause, b"")
+        .await
+        .unwrap();
+    let old_finished = finish(old.clone()).await;
+
+    // A child of a finished parent (retention's), and a running child.
+    let released = child(Uuid::new_v4().to_string(), ended_parent.clone()).await;
+    finish(released.clone()).await;
+    finish(ended_parent.clone()).await;
+    let busy = running(child(Uuid::new_v4().to_string(), parent.clone()).await).await;
+    pause().await;
+    // Pinned, but not yet past retention by its own finish.
+    let fresh = child(Uuid::new_v4().to_string(), parent.clone()).await;
+    let fresh_finished = finish(fresh.clone()).await;
+    let cutoff = fresh_finished - Duration::milliseconds(5);
+    assert!(old_finished < cutoff);
+
+    // The parent waits on the old child; the wait resolved at once.
+    let waits = backend.instance_waits().expect("instance waits required");
+    let wait_spec = WaitSpec::new([old.clone()], WaitMode::All, None);
+    let before_wait = waits
+        .register_or_evaluate(tenant, &parent, "op-prune", &wait_spec)
+        .await
+        .unwrap();
+    assert!(before_wait.resolution().is_some());
+    let before = backend.get_instance(&old).await.unwrap().unwrap();
+    assert!(before.input.is_some());
+
+    let (pruned, pages) = prune(cutoff, start.clone(), 1).await;
+    assert!(pruned >= 1, "the old pinned child is pruned");
+    assert!(pages >= 2, "a limit of 1 pages the pass");
+
+    // What the prune removed.
+    assert_eq!(
+        backend
+            .count_checkpoints(&old, None, None, None)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        backend
+            .load_checkpoint(&old, "cp-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        backend
+            .get_custom_signal(&old, "raw-address")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(backend.get_pending_signal(&old).await.unwrap().is_none());
+    assert_eq!(
+        inputs
+            .get_input(tenant, &old, &abandoned.request_id())
+            .await,
+        Err(InputError::NotFound),
+        "a closed input request is pruned"
+    );
+    assert!(
+        fences
+            .get_invocation_lease(tenant, &old)
+            .await
+            .unwrap()
+            .is_none(),
+        "the invocation lease is pruned"
+    );
+
+    // What `get`, `wait` and a replayed `send-signal` still read.
+    let after = backend.get_instance(&old).await.unwrap().unwrap();
+    assert!(after.input.is_none(), "the input is cleared");
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.output, before.output);
+    assert_eq!(after.error, before.error);
+    assert_eq!(after.termination_reason, before.termination_reason);
+    assert_eq!(after.finished_at, before.finished_at);
+    assert_eq!(after.parent, before.parent);
+    assert_eq!(after.run_label, before.run_label);
+    assert_eq!(after.tenant_id, before.tenant_id);
+    assert_eq!(
+        waits.poll_wait(tenant, &parent, "op-prune").await.unwrap(),
+        before_wait,
+        "the wait reads the same result"
+    );
+    assert!(matches!(
+        inputs
+            .get_input(tenant, &old, &answered.request_id())
+            .await
+            .unwrap()
+            .state,
+        InputState::Accepted { .. }
+    ));
+    assert_eq!(
+        inputs
+            .replay_input(
+                tenant,
+                &old,
+                &answered.request_id(),
+                "operation-1",
+                response.replay_identity()
+            )
+            .await
+            .unwrap(),
+        Some(receipt),
+        "the accepted receipt survives"
+    );
+
+    // Only old pinned rows.
+    for (id, why) in [
+        (&fresh, "a child not yet past its own retention"),
+        (&released, "a child of a finished parent (retention's)"),
+        (&busy, "a running child"),
+    ] {
+        assert!(
+            backend
+                .get_instance(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .input
+                .is_some(),
+            "{why} is not pruned"
+        );
+    }
+
+    // A rerun is a no-op: the page holding the old child prunes nothing.
+    let page = backend
+        .prune_pinned_terminal(
+            cutoff,
+            Some(&RetentionCursor {
+                finished_at: old_finished,
+                instance_id: String::new(),
+            }),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.pruned, 0, "a pruned child has nothing left to prune");
+    assert!(
+        page.next
+            .as_ref()
+            .is_some_and(|next| next.instance_id == old),
+        "the rerun reads the old child again"
+    );
+    let again = backend.get_instance(&old).await.unwrap().unwrap();
+    assert_eq!(again.output, before.output);
+    assert_eq!(again.status, before.status);
+
+    backend
+        .delete_instances_batch(&[sentinel, parent, ended_parent, old, released, busy, fresh])
+        .await
+        .unwrap();
+}

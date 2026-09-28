@@ -1,4 +1,4 @@
-use crate::runtime_types::{ListStepSummariesOptions, StepSortOrder, StepStatus};
+use crate::runtime_types::{InstanceStatus, ListStepSummariesOptions, StepSortOrder, StepStatus};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -23,7 +23,9 @@ pub struct StepSummariesQuery {
     pub offset: Option<u32>,
     /// Sort order: "asc" (oldest first) or "desc" (newest first, default)
     pub sort_order: Option<String>,
-    /// Filter by status: "running", "completed", or "failed"
+    /// Filter by status: "running", "suspended", "completed", or "failed".
+    /// An unfinished step reads "suspended" while its instance is suspended
+    /// and takes the instance's status once the instance is terminal.
     pub status: Option<String>,
     /// Filter by step type (e.g., "Http", "Transform", "Agent")
     pub step_type: Option<String>,
@@ -73,7 +75,9 @@ pub struct StepSummaryResponse {
     pub step_name: Option<String>,
     /// Step type (e.g., "Http", "Transform", "Agent")
     pub step_type: String,
-    /// Step execution status
+    /// Step execution status: "running", "suspended" (unfinished while its
+    /// instance is suspended), "completed", "failed", or the terminal status
+    /// of its instance for a step that never finished
     pub status: String,
     /// When the step started
     pub started_at: DateTime<Utc>,
@@ -129,16 +133,42 @@ fn error_from_output_envelope(outputs: Option<&Value>) -> Option<Value> {
     )
 }
 
+/// The label an unfinished step takes from its instance: the terminal status
+/// once the instance has ended, `suspended` while it is suspended, else
+/// `running`.
+fn unfinished_step_label(instance_status: Option<InstanceStatus>) -> &'static str {
+    match instance_status {
+        Some(InstanceStatus::Failed) => "failed",
+        Some(InstanceStatus::Cancelled) => "cancelled",
+        Some(InstanceStatus::Completed) => "completed",
+        Some(InstanceStatus::Suspended) => "suspended",
+        _ => "running",
+    }
+}
+
+/// The store filter a requested status maps to, and whether it can match at
+/// all: `running` and `suspended` both select unfinished steps, which match
+/// only when their label under the current instance status is the one asked
+/// for. `None` for an unknown status (no filter).
+fn status_filter(requested: &str, unfinished_label: &str) -> Option<(StepStatus, bool)> {
+    match requested.to_lowercase().as_str() {
+        label @ ("running" | "suspended") => Some((StepStatus::Running, label == unfinished_label)),
+        "completed" => Some((StepStatus::Completed, true)),
+        "failed" => Some((StepStatus::Failed, true)),
+        _ => None,
+    }
+}
+
 fn step_status_and_error(
     status: StepStatus,
-    terminal_state: Option<&str>,
+    unfinished_label: &str,
     outputs: Option<&Value>,
     error: Option<Value>,
 ) -> (String, Option<Value>) {
     let output_error = error_from_output_envelope(outputs);
     let error = error.or(output_error);
     let status = match status {
-        StepStatus::Running => terminal_state.unwrap_or("running").to_string(),
+        StepStatus::Running => unfinished_label.to_string(),
         StepStatus::Completed if error.is_some() => "failed".to_string(),
         StepStatus::Completed => "completed".to_string(),
         StepStatus::Failed => "failed".to_string(),
@@ -220,17 +250,28 @@ pub async fn get_step_summaries(
         options = options.with_sort_order(sort_order);
     }
 
-    // Parse status filter
-    if let Some(status_str) = &query.status {
-        let status = match status_str.to_lowercase().as_str() {
-            "running" => Some(StepStatus::Running),
-            "completed" => Some(StepStatus::Completed),
-            "failed" => Some(StepStatus::Failed),
-            _ => None,
-        };
-        if let Some(s) = status {
-            options = options.with_status(s);
+    // The instance status decides how unfinished steps read: suspended while
+    // the instance is suspended, its terminal status once it has ended.
+    let instance_status = match client.get_instance_info(&instance_id).await {
+        Ok(info) => Some(info.status),
+        Err(e) => {
+            tracing::warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to get instance info for step status override"
+            );
+            None
         }
+    };
+    let unfinished_label = unfinished_step_label(instance_status);
+
+    // Parse status filter
+    let mut filter_matches = true;
+    if let Some(status_str) = &query.status
+        && let Some((status, matches)) = status_filter(status_str, unfinished_label)
+    {
+        options = options.with_status(status);
+        filter_matches = matches;
     }
 
     if let Some(step_type) = &query.step_type {
@@ -265,34 +306,12 @@ pub async fn get_step_summaries(
         .list_step_summaries(&instance_id, Some(options))
         .await
     {
-        Ok(result) => {
-            // Fetch instance info to check if instance is in terminal state
-            let instance_terminal_state = match client.get_instance_info(&instance_id).await {
-                Ok(info) => {
-                    use crate::runtime_types::InstanceStatus;
-                    match info.status {
-                        InstanceStatus::Failed => Some("failed"),
-                        InstanceStatus::Cancelled => Some("cancelled"),
-                        InstanceStatus::Completed => Some("completed"),
-                        _ => None,
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to get instance info for step status override"
-                    );
-                    None
-                }
-            };
-
-            if let Some(terminal_state) = instance_terminal_state {
-                tracing::debug!(
-                    instance_id = %instance_id,
-                    instance_status = terminal_state,
-                    "Instance is terminal, non-terminal steps will inherit this state"
-                );
+        Ok(mut result) => {
+            // A running/suspended filter that the instance status rules out
+            // selects nothing.
+            if !filter_matches {
+                result.steps.clear();
+                result.total_count = 0;
             }
 
             // Convert SDK StepSummary to response format
@@ -300,10 +319,11 @@ pub async fn get_step_summaries(
                 .steps
                 .into_iter()
                 .map(|step| {
-                    // If instance is terminal but step is not, step inherits instance state
+                    // An unfinished step reads as its instance: suspended, or
+                    // the terminal status once the instance has ended.
                     let (status, error) = step_status_and_error(
                         step.status,
-                        instance_terminal_state,
+                        unfinished_label,
                         step.outputs.as_ref(),
                         step.error,
                     );
@@ -380,7 +400,7 @@ mod tests {
         });
 
         let (status, error) =
-            step_status_and_error(StepStatus::Completed, None, Some(&outputs), None);
+            step_status_and_error(StepStatus::Completed, "running", Some(&outputs), None);
 
         assert_eq!(status, "failed");
         assert_eq!(error, Some(json!({"message": "Capability failed"})));
@@ -391,9 +411,61 @@ mod tests {
         let outputs = json!({"ok": true});
 
         let (status, error) =
-            step_status_and_error(StepStatus::Completed, None, Some(&outputs), None);
+            step_status_and_error(StepStatus::Completed, "running", Some(&outputs), None);
 
         assert_eq!(status, "completed");
         assert_eq!(error, None);
+    }
+
+    #[test]
+    fn an_unfinished_step_reads_as_its_instance() {
+        for (instance, label) in [
+            (None, "running"),
+            (Some(InstanceStatus::Running), "running"),
+            (Some(InstanceStatus::Pending), "running"),
+            (Some(InstanceStatus::Suspended), "suspended"),
+            (Some(InstanceStatus::Completed), "completed"),
+            (Some(InstanceStatus::Failed), "failed"),
+            (Some(InstanceStatus::Cancelled), "cancelled"),
+        ] {
+            let unfinished = unfinished_step_label(instance);
+            assert_eq!(unfinished, label, "{instance:?}");
+            let (status, _) = step_status_and_error(StepStatus::Running, unfinished, None, None);
+            assert_eq!(status, label);
+            // A finished step keeps its own status whatever the instance is.
+            let (status, _) = step_status_and_error(StepStatus::Completed, unfinished, None, None);
+            assert_eq!(status, "completed");
+        }
+    }
+
+    #[test]
+    fn running_and_suspended_filters_match_only_the_current_label() {
+        let suspended = unfinished_step_label(Some(InstanceStatus::Suspended));
+        let running = unfinished_step_label(Some(InstanceStatus::Running));
+        assert_eq!(
+            status_filter("suspended", suspended),
+            Some((StepStatus::Running, true))
+        );
+        assert_eq!(
+            status_filter("SUSPENDED", running),
+            Some((StepStatus::Running, false))
+        );
+        assert_eq!(
+            status_filter("running", running),
+            Some((StepStatus::Running, true))
+        );
+        assert_eq!(
+            status_filter("running", suspended),
+            Some((StepStatus::Running, false))
+        );
+        assert_eq!(
+            status_filter("completed", suspended),
+            Some((StepStatus::Completed, true))
+        );
+        assert_eq!(
+            status_filter("failed", running),
+            Some((StepStatus::Failed, true))
+        );
+        assert_eq!(status_filter("bogus", running), None);
     }
 }

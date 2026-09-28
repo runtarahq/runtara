@@ -1,0 +1,23 @@
+[package]
+name = "runtara-agent-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Control agent — coordinate child runs from a workflow — as a WebAssembly component"
+keywords = ["wasm", "component", "agent", "control"]
+categories = ["wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen = "0.58"
+serde = { workspace = true }
+serde_json = { workspace = true }
+runtara-control-contract = { path = "../../runtara-control-contract" }
+# Capability metadata stays beside the code; `runtara-agent-bundle-emit`
+# serializes `agent_info()` to the sidecar meta.json.
+runtara-agent-macro = { path = "../../runtara-agent-macro" }
+runtara-dsl = { path = "../../runtara-dsl", default-features = false }

@@ -11,8 +11,10 @@
 
 use runtara_server::api::repositories::workflows::{
     CompilationStatus, CompilationSuccessRecord, RegisteredImageRecord, WorkflowRepository,
-    compiler_build_id, workflow_definition_checksum,
+    compiler_build_id, set_installed_trusted_pins, uninstalled_trusted_pins,
+    workflow_definition_checksum,
 };
+use runtara_server::api::services::compilation::{ServiceError, reject_uninstalled_trusted_pins};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::path::Path;
@@ -29,6 +31,11 @@ macro_rules! skip_if_no_db {
 }
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// The installed trusted set is process-wide. Tests that change it hold this
+/// so they cannot see each other's set; every other fixture records no pins,
+/// which any installed set satisfies.
+static INSTALLED_PINS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn get_test_pool() -> PgPool {
     let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
@@ -58,6 +65,13 @@ fn stepless_definition() -> Value {
 /// Insert a workflow plus one version of its definition, returning the ids.
 async fn seed_workflow(pool: &PgPool, definition: &Value) -> (String, String) {
     let tenant = format!("t-{}", Uuid::new_v4());
+    let workflow_id = seed_workflow_for(pool, &tenant, definition).await;
+    (tenant, workflow_id)
+}
+
+/// [`seed_workflow`] in an existing tenant, returning the workflow id.
+async fn seed_workflow_for(pool: &PgPool, tenant: &str, definition: &Value) -> String {
+    let tenant = tenant.to_owned();
     let workflow_id = Uuid::new_v4().to_string();
 
     sqlx::query(
@@ -94,7 +108,7 @@ async fn seed_workflow(pool: &PgPool, definition: &Value) -> (String, String) {
     .await
     .expect("seeding a workflow definition must succeed");
 
-    (tenant, workflow_id)
+    workflow_id
 }
 
 /// Record a failed compilation, stamped with `checksum` as its source and the
@@ -162,8 +176,10 @@ async fn record_ready(
     sqlx::query(
         "INSERT INTO workflow_compilations
             (tenant_id, workflow_id, version, compilation_status, translated_path,
-             registered_image_id, source_checksum, track_events, template_major, lowering_mode)
-         VALUES ($1, $2, 1, 'success', '/tmp/ready-artifact', 'ready-image', $3, $4, $5, $6)",
+             registered_image_id, source_checksum, track_events, template_major, lowering_mode,
+             trusted_pins)
+         VALUES ($1, $2, 1, 'success', '/tmp/ready-artifact', 'ready-image', $3, $4, $5, $6,
+                 '{}'::text[])",
     )
     .bind(tenant)
     .bind(workflow_id)
@@ -463,6 +479,602 @@ async fn failure_without_a_recorded_build_is_retryable_and_cleared() {
     );
 }
 
+/// Every public readiness reader, for version 1: the launch status, both cache
+/// lookups and the version list's `compiled` flag.
+async fn readiness(
+    repo: &WorkflowRepository,
+    tenant: &str,
+    workflow_id: &str,
+) -> (CompilationStatus, Option<String>, Option<String>, bool) {
+    let status = repo
+        .ensure_compilation_ready(tenant, workflow_id, Some(1))
+        .await
+        .map(|(_, status)| status)
+        .expect("readiness check must succeed");
+    let fresh = repo
+        .get_fresh_registered_image_id(tenant, workflow_id, 1)
+        .await
+        .expect("fresh-image lookup must succeed");
+    let fresh_for_compiler = repo
+        .get_fresh_registered_image_id_for_compiler(tenant, workflow_id, 1, "direct-wasm", false)
+        .await
+        .expect("compiler cache lookup must succeed");
+    let compiled = repo
+        .list_versions(tenant, workflow_id)
+        .await
+        .expect("version list lookup must succeed")[0]
+        .compiled;
+    (status, fresh, fresh_for_compiler, compiled)
+}
+
+/// Record a compiled and registered artifact pinning `pin`, as the compile
+/// path does.
+async fn record_pinned_artifact(
+    repo: &WorkflowRepository,
+    tenant: &str,
+    workflow_id: &str,
+    definition: &Value,
+    pin: &str,
+    image_id: &str,
+) {
+    let checksum = workflow_definition_checksum(definition);
+    let pins = [pin.to_owned()];
+    assert!(
+        repo.record_compilation_success(CompilationSuccessRecord {
+            tenant_id: tenant,
+            workflow_id,
+            version: 1,
+            build_dir: Path::new("/tmp/pinned-artifact"),
+            binary_size: 1,
+            package_size: 1,
+            binary_checksum: image_id,
+            definition,
+            source_checksum: &checksum,
+            compiler_mode: "direct-wasm",
+            track_events: false,
+            trusted_pins: &pins,
+        })
+        .await
+        .expect("recording the pinned artifact must succeed")
+    );
+    assert!(
+        repo.record_registered_image_id(RegisteredImageRecord {
+            tenant_id: tenant,
+            workflow_id,
+            version: 1,
+            image_id,
+            definition,
+            source_checksum: &checksum,
+            compiler_mode: Some("direct-wasm"),
+            track_events: false,
+            trusted_pins: &pins,
+        })
+        .await
+        .expect("attaching the pinned image must succeed")
+    );
+}
+
+async fn record_rebuild_failure(
+    repo: &WorkflowRepository,
+    tenant: &str,
+    workflow_id: &str,
+    definition: &Value,
+    checksum: &str,
+) -> bool {
+    repo.record_compilation_failure(
+        tenant,
+        workflow_id,
+        1,
+        definition,
+        checksum,
+        false,
+        "rebuild against the upgraded built-in failed",
+    )
+    .await
+    .expect("failure recording must succeed")
+}
+
+/// Status, registered image and recorded pins of version 1's compilation.
+async fn recorded_row(
+    pool: &PgPool,
+    tenant: &str,
+    workflow_id: &str,
+) -> (String, Option<String>, Option<Vec<String>>) {
+    sqlx::query_as(
+        "SELECT compilation_status, registered_image_id, trusted_pins
+         FROM workflow_compilations
+         WHERE tenant_id = $1 AND workflow_id = $2 AND version = 1",
+    )
+    .bind(tenant)
+    .bind(workflow_id)
+    .fetch_one(pool)
+    .await
+    .expect("compilation row must exist")
+}
+
+/// Readiness requires every trusted built-in version an artifact pins to be
+/// installed. After an operator upgrades S3 or Azure presigning, the old
+/// artifact's pin no longer matches, so the workflow recompiles against the
+/// installed version instead of launching an artifact whose trusted calls
+/// cannot run.
+///
+/// Tests that change the installed set serialize on [`INSTALLED_PINS`].
+#[tokio::test]
+async fn ready_artifact_pinning_an_uninstalled_trusted_version_recompiles() {
+    skip_if_no_db!();
+    let _installed = INSTALLED_PINS.lock().await;
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let repo = WorkflowRepository::new(pool.clone());
+    let unique = Uuid::new_v4().simple().to_string();
+    let old_pin = format!("runtara:trusted-artifacts/s3-storage-h{unique}-hold@0.1.0");
+    let new_pin = format!("runtara:trusted-artifacts/s3-storage-h{unique}-hnew@0.1.0");
+    set_installed_trusted_pins([old_pin.clone()]);
+
+    // The compile path records the artifact's pins with its success.
+    let checksum = workflow_definition_checksum(&definition);
+    record_pinned_artifact(
+        &repo,
+        &tenant,
+        &workflow_id,
+        &definition,
+        &old_pin,
+        "pinned-image",
+    )
+    .await;
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        (
+            "success".to_owned(),
+            Some("pinned-image".to_owned()),
+            Some(vec![old_pin.clone()])
+        )
+    );
+
+    let (status, fresh, fresh_for_compiler, compiled) =
+        readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(status, CompilationStatus::Ready { .. }),
+        "an artifact whose pins are all installed is ready, got {status:?}"
+    );
+    assert_eq!(fresh.as_deref(), Some("pinned-image"));
+    assert_eq!(fresh_for_compiler.as_deref(), Some("pinned-image"));
+    assert!(compiled);
+
+    // A late failure cannot replace a success whose (non-empty) pins are all
+    // installed.
+    assert!(
+        !record_rebuild_failure(&repo, &tenant, &workflow_id, &definition, &checksum).await,
+        "a failure must not mask a ready pinned artifact"
+    );
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        (
+            "success".to_owned(),
+            Some("pinned-image".to_owned()),
+            Some(vec![old_pin.clone()])
+        )
+    );
+
+    // The operator upgrades the trusted built-in.
+    set_installed_trusted_pins([new_pin.clone()]);
+    let (status, fresh, fresh_for_compiler, compiled) =
+        readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(status, CompilationStatus::NotReady),
+        "an artifact pinning an uninstalled trusted version must recompile, got {status:?}"
+    );
+    assert_eq!(fresh, None, "the cache must not serve the stale artifact");
+    assert_eq!(
+        fresh_for_compiler, None,
+        "a compile must not reuse it either"
+    );
+    assert!(
+        !compiled,
+        "the version list must not advertise it as compiled"
+    );
+
+    // The rebuild against the upgraded built-in overwrites the recorded pins
+    // and makes the workflow ready again.
+    record_pinned_artifact(
+        &repo,
+        &tenant,
+        &workflow_id,
+        &definition,
+        &new_pin,
+        "rebuilt-image",
+    )
+    .await;
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        (
+            "success".to_owned(),
+            Some("rebuilt-image".to_owned()),
+            Some(vec![new_pin.clone()])
+        )
+    );
+    let (status, fresh, fresh_for_compiler, compiled) =
+        readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(status, CompilationStatus::Ready { ref registered_image_id, .. } if registered_image_id == "rebuilt-image"),
+        "the rebuilt artifact is ready, got {status:?}"
+    );
+    assert_eq!(fresh.as_deref(), Some("rebuilt-image"));
+    assert_eq!(fresh_for_compiler.as_deref(), Some("rebuilt-image"));
+    assert!(compiled);
+
+    // A row written before pins were recorded cannot attest to them, and a
+    // failed rebuild replaces it so the failure is recorded and terminal.
+    sqlx::query(
+        "UPDATE workflow_compilations SET trusted_pins = NULL
+         WHERE tenant_id = $1 AND workflow_id = $2 AND version = 1",
+    )
+    .bind(&tenant)
+    .bind(&workflow_id)
+    .execute(&pool)
+    .await
+    .expect("clearing recorded pins must succeed");
+    let (status, fresh, _, _) = readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(status, CompilationStatus::NotReady),
+        "a legacy row with unknown pins must recompile once, got {status:?}"
+    );
+    assert_eq!(fresh, None);
+    assert!(
+        record_rebuild_failure(&repo, &tenant, &workflow_id, &definition, &checksum).await,
+        "a legacy success with unknown pins must not mask the rebuild failure"
+    );
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        ("failed".to_owned(), None, None)
+    );
+    let (status, _, _, _) = readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(status, CompilationStatus::Failed { terminal: true, .. }),
+        "the recorded rebuild failure is terminal, got {status:?}"
+    );
+
+    // Likewise a failed rebuild replaces a success pinning an uninstalled
+    // version, rather than leaving it to recompile forever.
+    record_pinned_artifact(
+        &repo,
+        &tenant,
+        &workflow_id,
+        &definition,
+        &old_pin,
+        "pinned-image",
+    )
+    .await;
+    assert!(
+        record_rebuild_failure(&repo, &tenant, &workflow_id, &definition, &checksum).await,
+        "a stale-pin success must not mask the rebuild failure"
+    );
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        ("failed".to_owned(), None, None),
+        "failed rows record no pins"
+    );
+    set_installed_trusted_pins([]);
+}
+
+/// A fresh compile that still pins an uninstalled trusted version (a bundle
+/// on disk that differs from the one loaded at boot) is recorded as a failure
+/// carrying its pins, not as a success that readiness would reject and every
+/// launch would recompile. That failure is terminal while any pin stays
+/// uninstalled, and retries once all are, e.g. after a restart onto that
+/// bundle.
+#[tokio::test]
+async fn stale_pin_compile_failure_is_terminal_until_its_pins_are_installed() {
+    skip_if_no_db!();
+    let _installed = INSTALLED_PINS.lock().await;
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let repo = WorkflowRepository::new(pool.clone());
+    let checksum = workflow_definition_checksum(&definition);
+    let unique = Uuid::new_v4().simple().to_string();
+    // Well-formed pins, so the diagnostic can name the agent.
+    let pin = |metadata: char| {
+        runtara_dsl::agent_meta::trusted_artifact_import(
+            "s3-storage",
+            &format!("{unique}{unique}"),
+            &metadata.to_string().repeat(64),
+        )
+    };
+    let (booted_pin, disk_pin) = (pin('a'), pin('b'));
+    set_installed_trusted_pins([booted_pin.clone()]);
+
+    // What the compile path checks before recording anything.
+    let compiled_pins = vec![disk_pin.clone()];
+    assert_eq!(uninstalled_trusted_pins(&compiled_pins), compiled_pins);
+    assert!(uninstalled_trusted_pins(std::slice::from_ref(&booted_pin)).is_empty());
+
+    // The error the compile path returns, recorded as the worker records it.
+    let Err(ServiceError::TrustedDependencyUnavailable {
+        message,
+        trusted_pins,
+    }) = reject_uninstalled_trusted_pins(&compiled_pins)
+    else {
+        panic!("a fresh artifact pinning an uninstalled version must be refused");
+    };
+    assert_eq!(trusted_pins, compiled_pins);
+    let recorded_error = ServiceError::TrustedDependencyUnavailable {
+        message,
+        trusted_pins: trusted_pins.clone(),
+    }
+    .to_string();
+    assert!(
+        repo.record_compilation_failure_with_trusted_pins(
+            &tenant,
+            &workflow_id,
+            1,
+            &definition,
+            &checksum,
+            false,
+            &recorded_error,
+            Some(&trusted_pins),
+        )
+        .await
+        .expect("recording the stale-pin failure must succeed")
+    );
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        ("failed".to_owned(), None, Some(compiled_pins.clone()))
+    );
+    for attempt in 0..2 {
+        let (status, fresh, _, compiled) = readiness(&repo, &tenant, &workflow_id).await;
+        assert!(
+            matches!(
+                status,
+                CompilationStatus::Failed { terminal: true, authoring: false, ref error }
+                    if error == &recorded_error && error.contains("`s3-storage`")
+            ),
+            "attempt {attempt}: a stale-pin failure must be terminal, not NotReady, got {status:?}"
+        );
+        assert_eq!(fresh, None);
+        assert!(!compiled);
+    }
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await.0,
+        "failed",
+        "reading a terminal failure must keep it"
+    );
+
+    // The server restarts onto the bundle the compiler read: the failure is
+    // no longer authoritative and the next launch recompiles.
+    set_installed_trusted_pins([disk_pin.clone()]);
+    let (status, _, _, _) = readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(
+            status,
+            CompilationStatus::Failed {
+                terminal: false,
+                ..
+            }
+        ),
+        "a stale-pin failure whose pins are now installed must retry, got {status:?}"
+    );
+    let (status, _, _, _) = readiness(&repo, &tenant, &workflow_id).await;
+    assert!(
+        matches!(status, CompilationStatus::NotReady),
+        "the retried failure was cleared, got {status:?}"
+    );
+
+    // An ordinary failure records no pins and stays terminal whatever is
+    // installed.
+    assert!(record_rebuild_failure(&repo, &tenant, &workflow_id, &definition, &checksum).await);
+    assert_eq!(
+        recorded_row(&pool, &tenant, &workflow_id).await,
+        ("failed".to_owned(), None, None)
+    );
+    for installed in [vec![], vec![booted_pin.clone()], vec![disk_pin.clone()]] {
+        set_installed_trusted_pins(installed);
+        let (status, _, _, _) = readiness(&repo, &tenant, &workflow_id).await;
+        assert!(
+            matches!(status, CompilationStatus::Failed { terminal: true, .. }),
+            "{status:?}"
+        );
+    }
+    set_installed_trusted_pins([]);
+}
+
+/// Record version 1's failure as depending on the uninstalled `pins`, as the
+/// worker records a `TrustedDependencyUnavailable` compile.
+async fn record_stale_dependency(
+    repo: &WorkflowRepository,
+    tenant: &str,
+    workflow_id: &str,
+    definition: &Value,
+    pins: &[String],
+    error: &str,
+) -> bool {
+    repo.record_compilation_failure_with_trusted_pins(
+        tenant,
+        workflow_id,
+        1,
+        definition,
+        &workflow_definition_checksum(definition),
+        false,
+        error,
+        Some(pins),
+    )
+    .await
+    .expect("recording the stale-dependency failure must succeed")
+}
+
+/// A parent refused because a published workflow-agent it composes pins a
+/// trusted version this server no longer runs records that stale pin. No
+/// restart installs it, so the failure is terminal until the workflow-agent
+/// is republished, which releases it for one retry on the next launch. A
+/// retry that fails again is terminal again; unrelated failures and other
+/// tenants are untouched.
+#[tokio::test]
+async fn stale_workflow_agent_failure_is_released_by_a_republish() {
+    skip_if_no_db!();
+    let _installed = INSTALLED_PINS.lock().await;
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let checksum = workflow_definition_checksum(&definition);
+    let repo = WorkflowRepository::new(pool.clone());
+    let unique = Uuid::new_v4().simple().to_string();
+    let installed = format!("runtara:trusted-artifacts/s3-storage-h{unique}-hnew@0.1.0");
+    let stale = vec![format!(
+        "runtara:trusted-artifacts/s3-storage-h{unique}-hold@0.1.0"
+    )];
+    set_installed_trusted_pins([installed.clone()]);
+    let stale_error = "Compilation error: Compilation failed: published workflow-agent `wrapper` was built against a version of trusted built-in `s3-storage` that is not in the installed component bundle; republish it";
+
+    let (tenant, parent) = seed_workflow(&pool, &definition).await;
+    assert!(
+        record_stale_dependency(&repo, &tenant, &parent, &definition, &stale, stale_error).await
+    );
+    for attempt in 0..2 {
+        let (status, _, _, compiled) = readiness(&repo, &tenant, &parent).await;
+        assert!(
+            matches!(status, CompilationStatus::Failed { terminal: true, authoring: false, ref error } if error == stale_error),
+            "attempt {attempt}: terminal until a republish, got {status:?}"
+        );
+        assert!(!compiled);
+    }
+
+    // An ordinary failure beside it, and a stale failure in another tenant.
+    let ordinary = seed_workflow_for(&pool, &tenant, &definition).await;
+    assert!(record_rebuild_failure(&repo, &tenant, &ordinary, &definition, &checksum).await);
+    let (other_tenant, other_parent) = seed_workflow(&pool, &definition).await;
+    assert!(
+        record_stale_dependency(
+            &repo,
+            &other_tenant,
+            &other_parent,
+            &definition,
+            &stale,
+            stale_error
+        )
+        .await
+    );
+
+    // The republish releases exactly the stale-dependency failure.
+    assert_eq!(
+        repo.release_stale_trusted_dependency_failures(&tenant)
+            .await
+            .expect("releasing must succeed"),
+        1
+    );
+    let (status, _, _, _) = readiness(&repo, &tenant, &parent).await;
+    assert!(
+        matches!(
+            status,
+            CompilationStatus::Failed {
+                terminal: false,
+                ..
+            }
+        ),
+        "a released failure retries once, got {status:?}"
+    );
+    let (status, _, _, _) = readiness(&repo, &tenant, &parent).await;
+    assert!(
+        matches!(status, CompilationStatus::NotReady),
+        "the retried failure was cleared for the recompile, got {status:?}"
+    );
+    let status = repo
+        .ensure_compilation_ready(&tenant, &ordinary, Some(1))
+        .await
+        .unwrap()
+        .1;
+    assert!(
+        matches!(status, CompilationStatus::Failed { terminal: true, .. }),
+        "an unrelated failure stays terminal, got {status:?}"
+    );
+    let status = repo
+        .ensure_compilation_ready(&other_tenant, &other_parent, Some(1))
+        .await
+        .unwrap()
+        .1;
+    assert!(
+        matches!(status, CompilationStatus::Failed { terminal: true, .. }),
+        "another tenant's failure stays terminal, got {status:?}"
+    );
+
+    // Still composing a stale workflow-agent: the retry fails and is
+    // terminal again until the next republish.
+    assert!(
+        record_stale_dependency(&repo, &tenant, &parent, &definition, &stale, stale_error).await
+    );
+    let (status, _, _, _) = readiness(&repo, &tenant, &parent).await;
+    assert!(
+        matches!(status, CompilationStatus::Failed { terminal: true, .. }),
+        "{status:?}"
+    );
+    // A failure whose pins are all installed needs no release.
+    set_installed_trusted_pins([installed, stale[0].clone()]);
+    assert_eq!(
+        repo.release_stale_trusted_dependency_failures(&tenant)
+            .await
+            .unwrap(),
+        0
+    );
+    set_installed_trusted_pins([]);
+}
+
+/// The compile-status endpoint reports a raw `success` whose trusted pins are
+/// no longer installed as a failure naming the upgrade, so a polling client
+/// stops and retries rather than launching an artifact that cannot run, and
+/// reports it as a success again once its pins are installed.
+#[tokio::test]
+async fn compilation_progress_reports_an_upgraded_trusted_pin_as_failed() {
+    use axum::extract::{Path as AxumPath, State};
+    use runtara_server::api::handlers::workflows::compilation_progress_handler;
+    use runtara_server::middleware::tenant_auth::OrgId;
+    skip_if_no_db!();
+    let _installed = INSTALLED_PINS.lock().await;
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let repo = WorkflowRepository::new(pool.clone());
+    let unique = Uuid::new_v4().simple().to_string();
+    let pin = format!("runtara:trusted-artifacts/s3-storage-h{unique}-hold@0.1.0");
+    let upgraded = format!("runtara:trusted-artifacts/s3-storage-h{unique}-hnew@0.1.0");
+    set_installed_trusted_pins([pin.clone()]);
+    record_pinned_artifact(
+        &repo,
+        &tenant,
+        &workflow_id,
+        &definition,
+        &pin,
+        "pinned-image",
+    )
+    .await;
+    let progress = || {
+        let (tenant, pool, workflow_id) = (tenant.clone(), pool.clone(), workflow_id.clone());
+        async move {
+            let (status, body) = compilation_progress_handler(
+                OrgId(tenant),
+                State(pool),
+                AxumPath((workflow_id, "1".to_owned())),
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{:?}", body.0);
+            body.0
+        }
+    };
+    let body = progress().await;
+    assert_eq!(body["status"], "success", "{body}");
+    assert_eq!(body["imageId"], "pinned-image", "{body}");
+
+    set_installed_trusted_pins([upgraded]);
+    let body = progress().await;
+    assert_eq!(body["status"], "failed", "{body}");
+    let message = body["errorMessage"].as_str().unwrap_or_default();
+    assert!(message.contains("trusted built-in"), "{body}");
+    assert!(message.contains("retry compilation"), "{body}");
+    assert!(body["imageId"].is_null(), "{body}");
+
+    set_installed_trusted_pins([pin]);
+    assert_eq!(progress().await["status"], "success");
+    set_installed_trusted_pins([]);
+}
+
 #[tokio::test]
 async fn recording_a_rebuilt_artifact_clears_the_previous_image_until_registration() {
     skip_if_no_db!();
@@ -494,6 +1106,7 @@ async fn recording_a_rebuilt_artifact_clears_the_previous_image_until_registrati
         source_checksum: &source_checksum,
         compiler_mode: "direct-wasm",
         track_events: false,
+        trusted_pins: &[],
     })
     .await
     .expect("recording the rebuilt artifact must succeed");
@@ -565,6 +1178,7 @@ async fn superseded_completion_cannot_replace_a_newer_ready_artifact() {
             source_checksum: &old_checksum,
             compiler_mode: "direct-wasm",
             track_events: false,
+            trusted_pins: &[],
         })
         .await
         .expect("stale success check must succeed");
@@ -583,6 +1197,7 @@ async fn superseded_completion_cannot_replace_a_newer_ready_artifact() {
             source_checksum: &old_checksum,
             compiler_mode: Some("direct-wasm"),
             track_events: false,
+            trusted_pins: &[],
         })
         .await
         .expect("stale image attachment check must succeed");
@@ -721,6 +1336,7 @@ async fn failed_registration_replaces_an_unregistered_current_success() {
             source_checksum: &checksum,
             compiler_mode: "direct-wasm",
             track_events: false,
+            trusted_pins: &[],
         })
         .await
         .expect("current success must be recorded")
@@ -1036,4 +1652,123 @@ async fn a_workflow_awaiting_its_first_compilation_is_still_retryable() {
         matches!(status, CompilationStatus::NotReady),
         "an uncompiled workflow must report NotReady, got {status:?}"
     );
+}
+
+/// The synchronous compile (no Valkey, so no queue worker) of a workflow whose
+/// fresh artifact pins a trusted version this server does not run returns
+/// `TrustedDependencyUnavailable` carrying the artifact's pins, and records
+/// no success. Like every compile failure on that path it records no failure
+/// either: without Valkey nothing recompiles on launch, so there is no loop
+/// for a terminal record to stop, and the workflow simply stays uncompiled.
+#[cfg(feature = "component-integration-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn synchronous_compile_refuses_an_artifact_pinning_an_uninstalled_trusted_version() {
+    use runtara_server::api::services::compilation::{
+        CompilationService, DirectCompilationSettings,
+    };
+    use std::sync::Arc;
+    skip_if_no_db!();
+    let _installed = INSTALLED_PINS.lock().await;
+    let pool = get_test_pool().await;
+    let components = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-wasip2/release")
+        });
+    let bundle = tempfile::tempdir().expect("bundle dir");
+    for suffix in ["wasm", "meta.json"] {
+        let file = format!("runtara_agent_s3_storage.{suffix}");
+        std::fs::copy(components.join(&file), bundle.path().join(&file))
+            .expect("the s3-storage component must be built");
+    }
+    let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
+        .await
+        .expect("dispatcher over the s3-storage component");
+    let s3_pin = runtara_workflows::direct_wasm::bundled_trusted_pin(&components, "s3-storage")
+        .expect("the bundle ships s3-storage");
+    assert_eq!(
+        dispatcher
+            .trusted_executor()
+            .artifact_pins()
+            .collect::<Vec<_>>(),
+        vec![s3_pin.as_str()]
+    );
+
+    let definition = json!({
+        "name": "presign",
+        "steps": {
+            "sign": {"id":"sign", "stepType":"Agent", "agentId":"s3-storage", "capabilityId":"storage-generate-presigned-url", "maxRetries":0,
+                "inputMapping": {
+                    "bucket":{"valueType":"immediate","value":"uploads"},
+                    "key":{"valueType":"immediate","value":"report.csv"},
+                    "operation":{"valueType":"immediate","value":"download"},
+                    "_connection":{"valueType":"immediate","value":{"connection_id":"s3-connection"}}
+                }},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{"url":{"valueType":"reference","value":"steps.sign.outputs.url"}}}
+        },
+        "entryPoint": "sign",
+        "executionPlan": [{"fromStep":"sign","toStep":"finish"}],
+        "variables": {}, "inputSchema": {}, "outputSchema": {}
+    });
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    // The direct compiler writes under DATA_DIR (default `.data` here).
+    let output_dir = {
+        let data = std::path::PathBuf::from(
+            std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_owned()),
+        );
+        let data = if data.is_absolute() {
+            data
+        } else {
+            std::env::current_dir().unwrap().join(data)
+        };
+        data.join("workflow-builds-direct").join(&tenant)
+    };
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = RemoveOnDrop(output_dir);
+
+    // The server loaded a different s3-storage version than the compiler reads.
+    let unique = Uuid::new_v4().simple().to_string();
+    set_installed_trusted_pins([format!(
+        "runtara:trusted-artifacts/s3-storage-h{unique}-hboot@0.1.0"
+    )]);
+    let service = CompilationService::new(Arc::new(WorkflowRepository::new(pool.clone())), None)
+        .with_agent_catalog(dispatcher.catalog())
+        .with_direct_compilation(DirectCompilationSettings {
+            components_dir: Some(components.clone()),
+            extra_component_dirs: vec![],
+        });
+    let result = service
+        .compile_workflow(&tenant, &workflow_id, 1, true)
+        .await;
+    set_installed_trusted_pins([]);
+    match result {
+        Err(ServiceError::TrustedDependencyUnavailable {
+            message,
+            trusted_pins,
+        }) => {
+            assert_eq!(trusted_pins, vec![s3_pin]);
+            assert!(message.contains("does not run"), "{message}");
+            assert!(message.contains("`s3-storage`"), "{message}");
+        }
+        other => panic!("expected TrustedDependencyUnavailable, got {other:?}"),
+    }
+    assert_eq!(
+        compilation_row_count(&pool, &tenant, &workflow_id).await,
+        0,
+        "neither a success nor a failure is recorded on the synchronous path"
+    );
+    let repo = WorkflowRepository::new(pool.clone());
+    assert!(matches!(
+        repo.ensure_compilation_ready(&tenant, &workflow_id, Some(1))
+            .await
+            .unwrap()
+            .1,
+        CompilationStatus::NotReady
+    ));
 }

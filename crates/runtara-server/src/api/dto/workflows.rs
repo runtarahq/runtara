@@ -651,6 +651,28 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            ValidationError::SuspendingCapabilityNotDurable { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("durable".to_string()),
+                None,
+            ),
+            ValidationError::SuspendingCapabilityMissingTimeout { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("timeout".to_string()),
+                None,
+            ),
+            ValidationError::SuspendingCapabilityUnsupportedContext { step_id, .. }
+            | ValidationError::ControlCapabilityUnsupportedContext { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
+            ValidationError::InvalidWaitForInstancesConfig { step_id, field, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some(field.clone()),
+                None,
+            ),
         };
 
         Self {
@@ -788,6 +810,10 @@ pub struct WorkflowDto {
     pub input_schema: Value,
     #[serde(rename = "outputSchema")]
     pub output_schema: Value,
+    /// Typed state a run of this version exposes (`executionGraph.stateSchema`).
+    /// A declaration only; `{}` when the version declares none.
+    #[serde(rename = "stateSchema", default = "empty_schema")]
+    pub state_schema: Value,
     /// Default variable values (can be overridden at execution time)
     #[serde(default)]
     pub variables: Value,
@@ -892,6 +918,14 @@ pub struct WorkflowInstanceDto {
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The execution whose `control:start` step started this one; absent for
+    /// executions started any other way.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
     /// Runtime finish timestamp used by completion-date filters. May also be
     /// present for a suspended attempt; absent until the runtime records it.
     #[serde(
@@ -905,6 +939,15 @@ pub struct WorkflowInstanceDto {
     pub updated: String,
     /// Current execution status
     pub status: ExecutionStatus,
+    /// Why a `suspended` execution is not running; absent otherwise. Only a
+    /// `paused` run needs a resume: the others wake on their own (a signal,
+    /// the runs they wait on, a timer, or recovery).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "suspensionReason"
+    )]
+    pub suspension_reason: Option<crate::types::SuspensionReason>,
     /// Reason for termination (set for all terminal states including successful completion)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "terminationType")]
@@ -1156,7 +1199,7 @@ pub struct CompileWorkflowResponse {
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct RunLabelQuery {
-    /// Exact immutable reference: 1–250 printable ASCII bytes, not all spaces.
+    /// Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces.
     #[serde(default, rename = "runLabel")]
     pub run_label: Option<String>,
 }
@@ -1376,8 +1419,47 @@ pub struct VersionSchemasResponse {
     pub input_schema: Value,
     /// Output schema definition from the execution graph
     pub output_schema: Value,
+    /// State schema definition from the execution graph: the typed state a
+    /// run exposes. `{}` when the version declares none.
+    pub state_schema: Value,
     /// Variables defined in the execution graph
     pub variables: Value,
+}
+
+impl VersionSchemasResponse {
+    /// Extract the schemas and variables from a stored version definition
+    /// (the execution graph JSON). A missing input or output schema is
+    /// `null`, a missing state schema `{}`, and missing variables `[]`.
+    pub fn from_definition(execution_graph: &Value) -> Self {
+        Self {
+            input_schema: execution_graph
+                .get("inputSchema")
+                .cloned()
+                .unwrap_or(Value::Null),
+            output_schema: execution_graph
+                .get("outputSchema")
+                .cloned()
+                .unwrap_or(Value::Null),
+            state_schema: state_schema_from_definition(execution_graph),
+            variables: execution_graph
+                .get("variables")
+                .cloned()
+                .unwrap_or(Value::Array(vec![])),
+        }
+    }
+}
+
+/// The `stateSchema` of a stored version definition, or `{}` when absent.
+pub fn state_schema_from_definition(execution_graph: &Value) -> Value {
+    execution_graph
+        .get("stateSchema")
+        .filter(|schema| !schema.is_null())
+        .cloned()
+        .unwrap_or_else(empty_schema)
+}
+
+fn empty_schema() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 // ============================================================================
@@ -1460,6 +1542,80 @@ mod tests {
     use runtara_workflows::validation::ValidationError;
     use serde_json::json;
 
+    fn owner_state_schema() -> Value {
+        json!({
+            "order":    { "type": "string", "label": "Order" },
+            "customer": { "type": "string", "label": "Customer" },
+            "amount":   { "type": "number", "label": "Amount", "format": "currency" },
+            "stage":    {
+                "type": "string",
+                "label": "Stage",
+                "enum": ["received", "credit_check", "approval", "fulfilment", "delivered"]
+            },
+            "dueAt":    { "type": "string", "format": "datetime", "label": "Due" }
+        })
+    }
+
+    #[test]
+    fn version_schemas_carry_the_state_schema() {
+        let definition = json!({
+            "name": "Orders",
+            "steps": {},
+            "entryPoint": "finish",
+            "inputSchema": { "order": { "type": "string", "required": true } },
+            "outputSchema": { "ok": { "type": "boolean" } },
+            "stateSchema": owner_state_schema(),
+            "variables": { "region": { "type": "string", "value": "eu" } }
+        });
+
+        let schemas = VersionSchemasResponse::from_definition(&definition);
+        assert_eq!(schemas.state_schema, owner_state_schema());
+        assert_eq!(schemas.input_schema, definition["inputSchema"]);
+        assert_eq!(schemas.output_schema, definition["outputSchema"]);
+        assert_eq!(schemas.variables, definition["variables"]);
+
+        let wire = serde_json::to_value(&schemas).unwrap();
+        assert_eq!(wire["stateSchema"]["amount"]["format"], "currency");
+        assert_eq!(wire["stateSchema"]["dueAt"]["label"], "Due");
+    }
+
+    #[test]
+    fn version_schemas_default_a_missing_state_schema_to_empty() {
+        let schemas = VersionSchemasResponse::from_definition(&json!({ "steps": {} }));
+        assert_eq!(schemas.state_schema, json!({}));
+        assert_eq!(schemas.input_schema, Value::Null);
+        assert_eq!(schemas.output_schema, Value::Null);
+        assert_eq!(schemas.variables, json!([]));
+        assert_eq!(
+            state_schema_from_definition(&json!({ "stateSchema": null })),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn workflow_dto_serializes_state_schema_and_defaults_when_absent() {
+        let mut wire = json!({
+            "id": "wf", "created": "c", "updated": "u",
+            "name": "Orders", "description": "",
+            "executionGraph": { "stateSchema": owner_state_schema() },
+            "inputSchema": {}, "outputSchema": {},
+            "stateSchema": owner_state_schema(),
+            "currentVersionNumber": 1, "lastVersionNumber": 1
+        });
+        let dto: WorkflowDto = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(dto.state_schema, owner_state_schema());
+        let out = serde_json::to_value(&dto).unwrap();
+        assert_eq!(out["stateSchema"], owner_state_schema());
+
+        wire.as_object_mut().unwrap().remove("stateSchema");
+        let dto: WorkflowDto = serde_json::from_value(wire).unwrap();
+        assert_eq!(dto.state_schema, json!({}));
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap()["stateSchema"],
+            json!({})
+        );
+    }
+
     #[test]
     fn step_id_mismatch_maps_to_the_authored_key_and_id_field() {
         let dto = ValidationErrorDto::from_runtara_error(&ValidationError::StepIdMismatch {
@@ -1486,6 +1642,60 @@ mod tests {
         assert_eq!(dto.field_name.as_deref(), Some("maxRetries"));
         assert!(dto.message.contains("4294967294"));
         assert!(dto.message.contains("4294967295"));
+    }
+
+    #[test]
+    fn operation_scoped_errors_map_to_their_step_and_field() {
+        let cases = [
+            (
+                ValidationError::SuspendingCapabilityNotDurable {
+                    step_id: "pause".into(),
+                    capability: "waiter:pause".into(),
+                    child_workflow_id: None,
+                },
+                "E028",
+                Some("durable"),
+            ),
+            (
+                ValidationError::SuspendingCapabilityMissingTimeout {
+                    step_id: "pause".into(),
+                    capability: "waiter:pause".into(),
+                },
+                "E029",
+                Some("timeout"),
+            ),
+            (
+                ValidationError::SuspendingCapabilityUnsupportedContext {
+                    step_id: "pause".into(),
+                    capability: "waiter:pause".into(),
+                    context: "on-wait".into(),
+                    child_workflow_id: None,
+                },
+                "E131",
+                None,
+            ),
+            (
+                ValidationError::ControlCapabilityUnsupportedContext {
+                    step_id: "pause".into(),
+                    capability: "control:get".into(),
+                    context: "ai-agent-tool".into(),
+                    child_workflow_id: Some("child".into()),
+                },
+                "E132",
+                None,
+            ),
+        ];
+        for (error, code, field) in cases {
+            let dto = ValidationErrorDto::from_runtara_error(&error);
+            assert_eq!(dto.code, code);
+            assert_eq!(dto.step_id.as_deref(), Some("pause"));
+            assert_eq!(dto.field_name.as_deref(), field);
+            assert!(
+                dto.message.starts_with(&format!("[{code}]")),
+                "{}",
+                dto.message
+            );
+        }
     }
 
     #[test]

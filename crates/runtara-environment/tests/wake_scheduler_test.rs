@@ -896,3 +896,296 @@ async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline()
     }
     cleanup_image(&pool, &image).await;
 }
+
+/// Decision D3's cascade: every unfinished `cancel` child of an ended or
+/// missing parent is asked to stop once, with the parent-close reason; a
+/// `leave_running` child and a child of a suspended parent are left alone;
+/// a pass after a crash (a fresh scheduler) stops nobody twice; nothing runs
+/// while draining.
+#[tokio::test]
+async fn parent_close_cascade_stops_cancel_children_once_after_a_crash() {
+    use runtara_core::persistence::ParentLink;
+    use runtara_environment::handlers::EnvironmentHandlerState;
+    let (pool, _context) = get_test_pool().await;
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool.clone()));
+    let tenant = format!("parent-close-{}", Uuid::new_v4());
+    let id = |name: &str| format!("{tenant}-{name}");
+    let scheduler = || {
+        let data_dir = std::env::temp_dir();
+        let state = Arc::new(EnvironmentHandlerState::new(
+            pool.clone(),
+            persistence.clone(),
+            Arc::new(MockRunner::new()) as Arc<dyn Runner>,
+            data_dir,
+        ));
+        WakeScheduler::new(
+            pool.clone(),
+            persistence.clone(),
+            WakeSchedulerConfig::default(),
+        )
+        .with_parent_close(state)
+    };
+    let child = |name: &str, parent: &str, policy: &str| {
+        let persistence = persistence.clone();
+        let (child, parent, policy, tenant) =
+            (id(name), id(parent), policy.to_owned(), tenant.clone());
+        async move {
+            assert!(
+                persistence
+                    .try_register_child_instance(
+                        &child,
+                        &tenant,
+                        None,
+                        None,
+                        &ParentLink {
+                            parent_instance_id: parent,
+                            parent_close_policy: policy,
+                            admitted_at: Utc::now(),
+                        },
+                    )
+                    .await
+                    .unwrap()
+            );
+            persistence
+                .update_instance_status(&child, InstanceStatus::Running, Some(Utc::now()))
+                .await
+                .unwrap();
+        }
+    };
+    let cancel_signal = |name: &str| {
+        let pool = pool.clone();
+        let instance = id(name);
+        async move {
+            sqlx::query_as::<_, (Option<Vec<u8>>, chrono::DateTime<Utc>)>(
+                "SELECT payload, created_at FROM pending_signals \
+                 WHERE instance_id = $1 AND signal_type = 'cancel'",
+            )
+            .bind(instance)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .map(|(payload, at)| (String::from_utf8(payload.unwrap_or_default()).unwrap(), at))
+        }
+    };
+
+    for parent in ["ended", "gone", "parked"] {
+        persistence
+            .register_instance(&id(parent), &tenant)
+            .await
+            .unwrap();
+    }
+    child("kept-alive", "ended", "leave_running").await;
+    child("cancelled", "ended", "cancel").await;
+    child("orphan", "gone", "cancel").await;
+    child("parked-child", "parked", "cancel").await;
+    persistence
+        .complete_instance(CompleteInstanceParams::new(
+            &id("ended"),
+            InstanceStatus::Completed,
+        ))
+        .await
+        .unwrap();
+    persistence
+        .update_instance_status(&id("parked"), InstanceStatus::Suspended, None)
+        .await
+        .unwrap();
+    persistence
+        .delete_instances_batch(&[id("gone")])
+        .await
+        .unwrap();
+
+    // Draining: nothing is touched.
+    let draining = scheduler();
+    let drain = DrainController::new();
+    drain.set();
+    let draining = draining.with_drain(drain);
+    assert_eq!(draining.run_parent_close_pass().await.unwrap().selected, 0);
+    assert!(cancel_signal("cancelled").await.is_none());
+
+    let first = scheduler().run_parent_close_pass().await.unwrap();
+    assert!(first.selected >= 2, "{first:?}");
+    let (reason, stopped_at) = cancel_signal("cancelled")
+        .await
+        .expect("the child is asked to stop");
+    assert_eq!(
+        reason,
+        format!("parent {} terminated (completed)", id("ended"))
+    );
+    let (orphan_reason, orphan_at) = cancel_signal("orphan")
+        .await
+        .expect("a missing parent counts as ended");
+    assert_eq!(
+        orphan_reason,
+        format!("parent {} terminated (missing)", id("gone"))
+    );
+    assert!(
+        cancel_signal("kept-alive").await.is_none(),
+        "leave_running survives"
+    );
+    assert!(
+        cancel_signal("parked-child").await.is_none(),
+        "a suspended parent has not ended"
+    );
+
+    // A fresh scheduler, as after a crash: the pending cancels are skipped.
+    let again = scheduler().run_parent_close_pass().await.unwrap();
+    let (_, still_at) = cancel_signal("cancelled").await.unwrap();
+    assert_eq!(still_at, stopped_at, "the child is not stopped twice");
+    let (_, orphan_still_at) = cancel_signal("orphan").await.unwrap();
+    assert_eq!(orphan_still_at, orphan_at, "{again:?}");
+
+    // The parked parent ends: now its child is cancelled too.
+    persistence
+        .complete_instance(CompleteInstanceParams::new(
+            &id("parked"),
+            InstanceStatus::Failed,
+        ))
+        .await
+        .unwrap();
+    scheduler().run_parent_close_pass().await.unwrap();
+    let (reason, _) = cancel_signal("parked-child")
+        .await
+        .expect("cascaded after its parent failed");
+    assert_eq!(
+        reason,
+        format!("parent {} terminated (failed)", id("parked"))
+    );
+
+    for name in [
+        "ended",
+        "parked",
+        "kept-alive",
+        "cancelled",
+        "orphan",
+        "parked-child",
+    ] {
+        cleanup(&pool, &id(name)).await;
+    }
+}
+
+/// A run parked on an instance wait whose target finished while the waiter's
+/// row was held (so the finish could only leave a nudge) and whose holder
+/// then crashed is woken by the next scheduler, exactly once: a restarted
+/// scheduler polling on finds nothing more to wake.
+#[tokio::test]
+async fn a_wake_lost_before_its_stamp_is_recovered_once_after_a_crash() {
+    use runtara_core::lifecycle::{ParkReason, ParkRequest};
+    use runtara_core::persistence::waits::{WaitMode, WaitSpec};
+    use runtara_core::persistence::{ParentLink, ParkTargets};
+    let (pool, _context) = get_test_pool().await;
+    let tenant = format!("wait-crash-{}", Uuid::new_v4());
+    let image = create_test_image(&pool, &tenant).await;
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let waiter = format!("{tenant}-waiter");
+    let child = format!("{tenant}-child");
+    create_test_instance(&pool, &waiter, &tenant, &image).await;
+    update_test_instance_status(&pool, &waiter, "running", Some("before-wait")).await;
+    persistence
+        .try_register_child_instance(
+            &child,
+            &tenant,
+            None,
+            None,
+            &ParentLink {
+                parent_instance_id: waiter.clone(),
+                parent_close_policy: "cancel".into(),
+                admitted_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    update_test_instance_status(&pool, &child, "running", None).await;
+    let waits = persistence.instance_waits().unwrap();
+    waits
+        .register_or_evaluate(
+            &tenant,
+            &waiter,
+            "op",
+            &WaitSpec::new([child.clone()], WaitMode::All, None),
+        )
+        .await
+        .unwrap();
+    persistence
+        .park_instance_on_targets(
+            &waiter,
+            ParkRequest {
+                reason: ParkReason::Instances,
+                deadline: Some(Utc::now() + chrono::Duration::hours(1)),
+            },
+            ParkTargets {
+                signal_ids: &[],
+                wait_ids: &["op".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+
+    // The child finishes while another transaction holds the waiter; that
+    // transaction then dies (a crash before the stamp).
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM instances WHERE instance_id = $1 FOR UPDATE")
+        .bind(&waiter)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    update_test_instance_status(&pool, &child, "completed", None).await;
+    holder.rollback().await.unwrap();
+    let parked = persistence.get_instance(&waiter).await.unwrap().unwrap();
+    assert!(
+        parked.sleep_until.is_some_and(|at| at > Utc::now()),
+        "no wake was stamped"
+    );
+
+    let launches = || {
+        let pool = pool.clone();
+        let waiter = waiter.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM instance_launches WHERE instance_id = $1 AND kind = 'wake'",
+            )
+            .bind(&waiter)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for restart in 0..2 {
+        let scheduler = WakeScheduler::new(
+            pool.clone(),
+            persistence.clone(),
+            WakeSchedulerConfig {
+                poll_interval: Duration::from_millis(50),
+                batch_size: 10,
+                ..Default::default()
+            },
+        );
+        let shutdown = scheduler.shutdown_handle();
+        let task = tokio::spawn(scheduler.run());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && launches().await == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Keep polling past the full pass (every 12th poll).
+        tokio::time::sleep(Duration::from_millis(50 * 30)).await;
+        shutdown.notify_one();
+        task.await.unwrap();
+        assert_eq!(
+            launches().await,
+            1,
+            "restart {restart}: the waiter is woken exactly once"
+        );
+    }
+    let woken = persistence.get_instance(&waiter).await.unwrap().unwrap();
+    assert_eq!(
+        woken.wake_reason,
+        Some(runtara_core::domain::WakeReason::InstancesTerminal)
+    );
+    sqlx::query("DELETE FROM instance_launches WHERE instance_id = $1")
+        .bind(&waiter)
+        .execute(&pool)
+        .await
+        .unwrap();
+    cleanup(&pool, &child).await;
+    cleanup(&pool, &waiter).await;
+    cleanup_image(&pool, &image).await;
+}

@@ -1,12 +1,47 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Canonical WIT contracts for direct-emitted workflow components.
+//!
+//! # ABI rule
+//!
+//! A parked run wakes on the artifact it was built from, possibly after the
+//! host, the control agent or a trusted agent was upgraded. So:
+//!
+//! - **Every shipped host version stays linked.** The host runs lifecycle
+//!   0.1.0 and 0.2.0 exports and binds runtime 0.3.0 and 0.4.0,
+//!   connection-resolver 0.1.0 and 0.2.0, and `runtara:control`,
+//!   `runtara:workflow-operation` and `runtara:agent-suspension` 0.1.0,
+//!   beside whatever is current. Built-in (`runtara:builtin-artifacts/…`)
+//!   and trusted (`runtara:trusted-artifacts/…`) pins keep linking as empty
+//!   instance imports: a pin the host has since revoked or no longer ships
+//!   fails at the call, never at load. Only a control pin that was never
+//!   approved is refused at load.
+//! - **Approved rows are only revoked.** `approved_builtin_artifacts` rows are
+//!   never deleted or rewritten, so an artifact pinning an older approved
+//!   control version still loads after an upgrade. The same history records
+//!   every installed trusted (S3, Azure) version: a run parked on an older,
+//!   still approved trusted pin that is woken or resumed calls the installed
+//!   bytes; a start under it, or any launch under a revoked or never
+//!   approved pin, fails with `TRUSTED_VERSION_REQUIRED` before any
+//!   credential lookup.
+//! - **Released WIT is never edited, only versioned.** Wasmtime lifts records,
+//!   variants and enums exactly, so adding a case or field in place breaks
+//!   every artifact built against the old shape. A change is a new package
+//!   version, linked beside the old one.
+//!
+//! `runtara-component-host`'s `workflow/frozen_abi_tests.rs` holds guests
+//! compiled against the released 0.1.0 control, operation and suspension
+//! WIT; they must keep linking.
 
 #[cfg(feature = "isolation-package")]
 pub mod isolation_package;
 
 pub const OUTBOUND_HTTP_INTERFACE_NAME: &str = "runtara:outbound-http/client@0.1.0";
 pub const OUTBOUND_HTTP_WIT: &str = include_str!("../wit/outbound-http/runtara-outbound-http.wit");
+
+/// Host timers (`sleep`, `abort-after`) that workflows and ordinary agents
+/// import. The component host links this name; the agent allowlist admits it.
+pub const HOST_IO_TIMERS_INTERFACE_NAME: &str = "runtara:host-io/timers@0.1.0";
 
 /// Native database operations available to ordinary WASM agents.
 pub const DATABASE_INTERFACE_NAME: &str = "runtara:database/sql@0.1.0";
@@ -71,6 +106,53 @@ pub const ABI_WIT: &str = include_str!("../wit/lifecycle/deps/abi/runtara-abi.wi
 
 /// WIT text for `runtara:workflow-lifecycle@0.2.0`.
 pub const LIFECYCLE_WIT: &str = include_str!("../wit/lifecycle/runtara-workflow-lifecycle.wit");
+
+/// WIT package of the compiler-emitted operation scope.
+pub const OPERATION_PACKAGE: &str = "runtara:workflow-operation@0.1.0";
+
+/// Component import name of the operation scope. Only compiled workflow logic
+/// imports it; no agent may.
+pub const OPERATION_SCOPE_INTERFACE_NAME: &str = "runtara:workflow-operation/scope@0.1.0";
+
+/// WIT text for `runtara:workflow-operation@0.1.0`. It `use`s
+/// `runtara:agent-suspension@0.1.0`, which must be in the resolve first.
+pub const OPERATION_WIT: &str = include_str!("../wit/operation/runtara-workflow-operation.wit");
+
+/// WIT package of the durable instance waits of a WaitForInstances step.
+pub const WAIT_PACKAGE: &str = "runtara:workflow-wait@0.1.0";
+
+/// Interface-name prefix of the instance waits. Only compiled workflow logic
+/// imports it; no agent may.
+pub const WAIT_INTERFACE_PREFIX: &str = "runtara:workflow-wait/";
+
+/// Component import name of the instance waits.
+pub const WAIT_INSTANCES_INTERFACE_NAME: &str = "runtara:workflow-wait/instances@0.1.0";
+
+/// WIT text for `runtara:workflow-wait@0.1.0`. It has no dependencies.
+pub const WAIT_WIT: &str = include_str!("../wit/wait/runtara-workflow-wait.wit");
+
+/// WIT package of the control service.
+pub const CONTROL_PACKAGE: &str = "runtara:control@0.1.0";
+
+/// Interface-name prefix of every control interface. Only the canonical
+/// `control` agent may import one.
+pub const CONTROL_INTERFACE_PREFIX: &str = "runtara:control/";
+
+/// Control types, imported by the control agent.
+pub const CONTROL_TYPES_INTERFACE_NAME: &str = "runtara:control/types@0.1.0";
+
+/// Host control operations: real only in control executor stores.
+pub const CONTROL_API_INTERFACE_NAME: &str = "runtara:control/api@0.1.0";
+
+/// What the composed control copy forwards to.
+pub const CONTROL_EXECUTOR_INTERFACE_NAME: &str = "runtara:control/executor@0.1.0";
+
+/// Exported by the control agent, called only by the host executor.
+pub const CONTROL_EXECUTION_INTERFACE_NAME: &str = "runtara:control/execution@0.1.0";
+
+/// WIT text for `runtara:control@0.1.0`. It `use`s `runtara:agent@0.4.0`,
+/// which must be in the resolve first.
+pub const CONTROL_WIT: &str = include_str!("../wit/control/runtara-control.wit");
 
 #[cfg(test)]
 mod tests {
@@ -449,6 +531,420 @@ mod outbound_http_tests {
                 "timeout-ms",
                 "max-response-bytes"
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use wit_parser::{FunctionKind, Resolve, TypeDefKind};
+
+    fn resolve() -> Resolve {
+        let mut resolve = Resolve::default();
+        resolve
+            .push_str("agent.wit", runtara_agent_wit::RUNTARA_AGENT_WIT)
+            .unwrap();
+        resolve
+            .push_str("agent-suspension.wit", runtara_agent_suspension::WIT)
+            .unwrap();
+        resolve
+    }
+
+    #[test]
+    fn operation_scope_is_sync_and_takes_no_identity_from_agents() {
+        let mut resolve = resolve();
+        let id = resolve
+            .push_str("operation.wit", super::OPERATION_WIT)
+            .unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), super::OPERATION_PACKAGE);
+        let scope = &resolve.interfaces[package.interfaces["scope"]];
+        assert_eq!(
+            scope
+                .functions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["enter", "suspend", "exit", "release"]
+        );
+        assert!(
+            scope
+                .functions
+                .values()
+                .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
+            "the scope is compiler-called and synchronous"
+        );
+        assert_eq!(
+            super::OPERATION_SCOPE_INTERFACE_NAME,
+            format!(
+                "runtara:workflow-operation/scope@{}",
+                package.name.version.as_ref().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn instance_waits_are_sync_json_calls_keyed_by_the_step() {
+        let mut resolve = Resolve::default();
+        let id = resolve.push_str("wait.wit", super::WAIT_WIT).unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), super::WAIT_PACKAGE);
+        let instances = &resolve.interfaces[package.interfaces["instances"]];
+        assert_eq!(
+            instances
+                .functions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["register", "poll", "release"]
+        );
+        assert!(
+            instances
+                .functions
+                .values()
+                .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
+            "the waits are compiler-called and synchronous"
+        );
+        let params = |name: &str| {
+            instances.functions[name]
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(params("register"), ["key", "request"]);
+        assert_eq!(params("poll"), ["key"]);
+        assert_eq!(params("release"), ["key"]);
+        assert!(instances.functions["release"].result.is_none());
+        assert_eq!(
+            super::WAIT_INSTANCES_INTERFACE_NAME,
+            format!(
+                "{}instances@{}",
+                super::WAIT_INTERFACE_PREFIX,
+                package.name.version.as_ref().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn control_forwarding_is_a_plain_call_and_takes_no_identity() {
+        let mut resolve = resolve();
+        let id = resolve.push_str("control.wit", super::CONTROL_WIT).unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), super::CONTROL_PACKAGE);
+        let params = |interface: &str| -> Vec<String> {
+            resolve.interfaces[package.interfaces[interface]].functions["invoke"]
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect()
+        };
+        assert_eq!(params("executor"), ["capability-id", "input"]);
+        assert_eq!(params("execution"), ["capability-id", "input"]);
+        for interface in ["executor", "execution"] {
+            let invoke = &resolve.interfaces[package.interfaces[interface]].functions["invoke"];
+            let Some(wit_parser::Type::Id(result)) = invoke.result else {
+                panic!("{interface}.invoke returns a result");
+            };
+            let TypeDefKind::Result(result) = &resolve.types[result].kind else {
+                panic!("{interface}.invoke returns a result");
+            };
+            assert!(
+                matches!(result.ok, Some(wit_parser::Type::Id(list))
+                    if matches!(resolve.types[list].kind,
+                        TypeDefKind::List(wit_parser::Type::U8))),
+                "{interface}.invoke answers the capability's JSON output"
+            );
+        }
+        let api = &resolve.interfaces[package.interfaces["api"]];
+        for function in api.functions.values() {
+            assert!(matches!(function.kind, FunctionKind::AsyncFreestanding));
+            assert!(
+                function
+                    .params
+                    .iter()
+                    .all(|param| !["tenant", "parent", "operation", "caller"]
+                        .iter()
+                        .any(|forbidden| param.name.contains(forbidden))),
+                "identity never rides api arguments: {}",
+                function.name
+            );
+        }
+        for (world, name) in [
+            ("control-client", super::CONTROL_EXECUTOR_INTERFACE_NAME),
+            ("control-agent-host", super::CONTROL_API_INTERFACE_NAME),
+        ] {
+            let world = &resolve.worlds[package.worlds[world]];
+            assert!(
+                world
+                    .imports
+                    .keys()
+                    .any(|key| resolve.name_world_key(key) == name)
+            );
+        }
+        for name in [
+            super::CONTROL_TYPES_INTERFACE_NAME,
+            super::CONTROL_API_INTERFACE_NAME,
+            super::CONTROL_EXECUTOR_INTERFACE_NAME,
+            super::CONTROL_EXECUTION_INTERFACE_NAME,
+        ] {
+            assert!(name.starts_with(super::CONTROL_INTERFACE_PREFIX));
+        }
+    }
+
+    fn enum_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {
+        let TypeDefKind::Enum(cases) = &resolve.types[types.types[name]].kind else {
+            panic!("{name} must be an enum");
+        };
+        cases.cases.iter().map(|case| case.name.clone()).collect()
+    }
+
+    fn variant_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {
+        let TypeDefKind::Variant(cases) = &resolve.types[types.types[name]].kind else {
+            panic!("{name} must be a variant");
+        };
+        cases.cases.iter().map(|case| case.name.clone()).collect()
+    }
+
+    fn record_fields(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {
+        let TypeDefKind::Record(record) = &resolve.types[types.types[name]].kind else {
+            panic!("{name} must be a record");
+        };
+        record
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect()
+    }
+
+    /// 0.1.0 is frozen: wasmtime lifts exactly, so every function, case and
+    /// field is pinned here, and a change needs a new package version.
+    #[test]
+    fn the_control_api_is_complete_and_frozen() {
+        let mut resolve = resolve();
+        let id = resolve.push_str("control.wit", super::CONTROL_WIT).unwrap();
+        let package = &resolve.packages[id];
+        let api = &resolve.interfaces[package.interfaces["api"]];
+        let signatures: Vec<(String, Vec<String>)> = api
+            .functions
+            .values()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.params.iter().map(|p| p.name.clone()).collect(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, Vec<String>)> = [
+            ("start", "request"),
+            ("get", "instance-id"),
+            ("query", "request"),
+            ("list-pending-signals", "request"),
+            ("send-signal", "request"),
+            ("cancel", "request"),
+            ("pause", "instance-id"),
+            ("resume", "instance-id"),
+        ]
+        .iter()
+        .map(|(name, param)| (name.to_string(), vec![param.to_string()]))
+        .collect();
+        assert_eq!(signatures, expected);
+        assert!(
+            api.functions
+                .values()
+                .all(|function| matches!(function.kind, FunctionKind::AsyncFreestanding))
+        );
+
+        let types = &resolve.interfaces[package.interfaces["types"]];
+        let codes: Vec<String> = runtara_control_contract::ErrorCode::ALL
+            .iter()
+            .map(|code| code.wit_name().to_string())
+            .collect();
+        assert_eq!(codes.len(), 18);
+        assert_eq!(
+            enum_cases(&resolve, types, "error-code"),
+            codes,
+            "runtara-control-contract mirrors the WIT error codes in order"
+        );
+        assert_eq!(
+            enum_cases(&resolve, types, "parent-close-policy"),
+            runtara_control_contract::ParentClosePolicy::ALL
+                .map(|policy| policy.wit_name().to_string())
+        );
+        for (name, cases) in [
+            (
+                "instance-status",
+                &[
+                    "queued",
+                    "pending",
+                    "running",
+                    "suspended",
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "not-started",
+                ][..],
+            ),
+            (
+                "suspension-reason",
+                &[
+                    "paused",
+                    "waiting-signal",
+                    "waiting-instances",
+                    "sleeping",
+                    "shutdown",
+                ],
+            ),
+            ("sort-field", &["created-at", "finished-at"]),
+            ("sort-order", &["ascending", "descending"]),
+            (
+                "command-outcome",
+                &["requested", "applied", "unchanged", "already-terminal"],
+            ),
+        ] {
+            assert_eq!(enum_cases(&resolve, types, name), cases, "{name}");
+        }
+        for (name, cases) in [
+            ("parent-filter", &["caller", "instance"][..]),
+            ("signal-scope", &["instance", "workflow", "children"]),
+        ] {
+            assert_eq!(variant_cases(&resolve, types, name), cases, "{name}");
+        }
+        for (name, fields) in [
+            ("control-error", &["code", "message", "retry-after-ms"][..]),
+            (
+                "terminal-result",
+                &[
+                    "output",
+                    "output-bytes",
+                    "output-omitted",
+                    "error",
+                    "error-omitted",
+                ],
+            ),
+            (
+                "start-request",
+                &[
+                    "workflow-id",
+                    "version",
+                    "input",
+                    "run-label",
+                    "parent-close-policy",
+                ],
+            ),
+            (
+                "start-result",
+                &[
+                    "instance-id",
+                    "workflow-id",
+                    "version",
+                    "run-label",
+                    "replayed",
+                ],
+            ),
+            (
+                "send-signal-request",
+                &[
+                    "instance-id",
+                    "signal-id",
+                    "action-key",
+                    "request-id",
+                    "payload",
+                ],
+            ),
+            ("cancel-request", &["instance-id", "reason", "grace-ms"]),
+            ("command-result", &["instance-id", "outcome", "replayed"]),
+        ] {
+            assert_eq!(record_fields(&resolve, types, name), fields, "{name}");
+        }
+    }
+
+    /// The canonical layout of the suspension types equals the constants the
+    /// emitter reads and the host mirrors (`runtara_agent_suspension::layout`).
+    #[test]
+    fn suspension_layout_constants_match_the_wit_size_align() {
+        use runtara_agent_suspension::layout;
+        use wit_parser::{Int, SizeAlign, Type};
+
+        let mut resolve = resolve();
+        // `result<outcome, error-info>` as a suspendable agent's `invoke`
+        // returns it.
+        let id = resolve
+            .push_str(
+                "probe.wit",
+                "package runtara:layout-probe;\n\
+                 interface suspendable {\n\
+                 use runtara:agent/types@0.4.0.{error-info};\n\
+                 use runtara:agent-suspension/types@0.1.0.{outcome};\n\
+                 invoke: func(capability-id: string, input: list<u8>) -> result<outcome, error-info>;\n\
+                 }\n",
+            )
+            .unwrap();
+        let mut sizes = SizeAlign::default();
+        sizes.fill(&resolve);
+        let bytes = |size: wit_parser::ArchitectureSize| size.size_wasm32() as u32;
+        let alignment = |ty: &Type| match sizes.align(ty) {
+            wit_parser::Alignment::Bytes(bytes) => bytes.get() as u32,
+            wit_parser::Alignment::Pointer => 4,
+        };
+        let suspension_package = resolve
+            .packages
+            .iter()
+            .find(|(_, package)| package.name.to_string() == runtara_agent_suspension::PACKAGE)
+            .map(|(id, _)| id)
+            .unwrap();
+        let types = &resolve.interfaces[resolve.packages[suspension_package].interfaces["types"]];
+        let ty = |name: &str| Type::Id(types.types[name]);
+        let payload_offset = |name: &str| {
+            let TypeDefKind::Variant(variant) = &resolve.types[types.types[name]].kind else {
+                panic!("{name} must be a variant");
+            };
+            bytes(sizes.payload_offset(
+                variant.tag(),
+                variant.cases.iter().map(|case| case.ty.as_ref()),
+            ))
+        };
+
+        assert_eq!(bytes(sizes.size(&ty("wake"))), layout::WAKE_SIZE);
+        assert_eq!(alignment(&ty("wake")), layout::WAKE_ALIGN);
+        assert_eq!(payload_offset("wake"), layout::WAKE_PAYLOAD_OFFSET);
+
+        assert_eq!(
+            bytes(sizes.size(&ty("suspension"))),
+            layout::SUSPENSION_SIZE
+        );
+        assert_eq!(alignment(&ty("suspension")), layout::SUSPENSION_ALIGN);
+        let TypeDefKind::Record(suspension) = &resolve.types[types.types["suspension"]].kind else {
+            panic!("suspension must be a record");
+        };
+        let offsets: Vec<u32> = sizes
+            .field_offsets(suspension.fields.iter().map(|field| &field.ty))
+            .into_iter()
+            .map(|(offset, _)| bytes(offset))
+            .collect();
+        assert_eq!(
+            offsets,
+            [
+                layout::SUSPENSION_WAKES_OFFSET,
+                layout::SUSPENSION_STATE_OFFSET
+            ]
+        );
+
+        assert_eq!(bytes(sizes.size(&ty("outcome"))), layout::OUTCOME_SIZE);
+        assert_eq!(alignment(&ty("outcome")), layout::OUTCOME_ALIGN);
+        assert_eq!(payload_offset("outcome"), layout::OUTCOME_PAYLOAD_OFFSET);
+
+        let package = &resolve.packages[id];
+        let suspendable = &resolve.interfaces[package.interfaces["suspendable"]];
+        let Some(Type::Id(result)) = suspendable.functions["invoke"].result else {
+            panic!("suspendable.invoke returns a result");
+        };
+        let TypeDefKind::Result(result) = &resolve.types[result].kind else {
+            panic!("suspendable.invoke returns a result");
+        };
+        assert_eq!(
+            bytes(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),
+            layout::INVOKE_RESULT_PAYLOAD_OFFSET
         );
     }
 }

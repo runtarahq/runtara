@@ -67,13 +67,6 @@ pub struct TestError {
     pub retryable: bool,
 }
 
-/// Runtime address retained for legacy core HTTP consumers.
-/// Per-tenant fields go into `TestCapabilityRequest`.
-#[derive(Debug, Clone)]
-pub struct DispatcherEnv {
-    pub core_http_url: String,
-}
-
 /// Default wall-clock budget for a single `test_capability` invocation. The
 /// operator-test surface is interactive; a capability that hasn't produced a
 /// result in this long is wedged, not slow. Override with
@@ -99,12 +92,13 @@ pub struct ComponentDispatcherService {
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     engine: Arc<Engine>,
     trusted: Arc<crate::trusted::TrustedExecutor>,
+    /// Host executor over this bundle's control agent bytes, when present.
+    control: Option<Arc<crate::control_executor::ControlExecutor>>,
     agents: HashMap<String, Arc<LoadedAgent>>,
     /// Snapshot of every loaded agent's metadata. Shared (`Arc`) so the
     /// server-side `AgentsService` + workflow validation paths can hold the
     /// same data without copying.
     catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
-    env: DispatcherEnv,
     /// Per-call wall-clock budget for `test_capability`.
     test_timeout: Duration,
     /// Per-call guest linear-memory cap for `test_capability`, in bytes.
@@ -141,7 +135,7 @@ impl ComponentDispatcherService {
     /// A missing `.meta.json` is a hard error — the `.wasm` is unusable to the
     /// server without metadata. Mismatched ids (filename stem vs.
     /// `meta.id`) are also rejected so registration can't silently misroute.
-    pub async fn from_dir(component_dir: &Path, env: DispatcherEnv) -> Result<Self> {
+    pub async fn from_dir(component_dir: &Path) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())?;
         // Drive the epoch clock for this engine so the per-call deadlines set in
         // `test_capability` can actually fire — without a ticker the epoch never
@@ -150,6 +144,7 @@ impl ComponentDispatcherService {
         let linker = build_linker(&engine)?;
 
         let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
+        let mut control = None;
         let mut agents = HashMap::new();
         let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
 
@@ -207,6 +202,14 @@ impl ComponentDispatcherService {
 
             let bytes = std::fs::read(&path)?;
             trusted.register(&info, &bytes, &meta_bytes)?;
+            if agent_id == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
+                // The very bytes loaded here are the ones hashed and run.
+                control = Some(Arc::new(crate::control_executor::ControlExecutor::new(
+                    Arc::clone(&engine),
+                    &bytes,
+                    &meta_bytes,
+                )?));
+            }
             let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 
             agent_info.insert(agent_id.clone(), info);
@@ -228,13 +231,13 @@ impl ComponentDispatcherService {
 
         Ok(Self {
             trusted: Arc::new(trusted),
+            control,
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             engine,
             agents,
             catalog,
-            env,
             test_timeout: parse_timeout(std::env::var("RUNTARA_TEST_CAPABILITY_TIMEOUT_SECS").ok()),
             memory_max_bytes: parse_memory_max(
                 std::env::var("RUNTARA_TEST_CAPABILITY_MEMORY_MAX_BYTES").ok(),
@@ -253,6 +256,12 @@ impl ComponentDispatcherService {
     /// Executor backed only by this operator-installed built-in bundle.
     pub fn trusted_executor(&self) -> Arc<crate::trusted::TrustedExecutor> {
         Arc::clone(&self.trusted)
+    }
+
+    /// Host executor over this bundle's control agent, when it ships one.
+    /// The embedding installs its approved history and control service.
+    pub fn control_executor(&self) -> Option<Arc<crate::control_executor::ControlExecutor>> {
+        self.control.clone()
     }
 
     /// All loaded agent ids.
@@ -306,10 +315,11 @@ impl ComponentDispatcherService {
         }
         let input_bytes = serde_json::to_vec(&input_value)?;
 
-        let ctx = Arc::new(CallContext::for_test(
-            &req.tenant_id,
-            &self.env.core_http_url,
-        ));
+        if canonical_agent_id(&req.agent_id) == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
+            return self.test_control(&req, input_bytes).await;
+        }
+
+        let ctx = Arc::new(CallContext::for_test(&req.tenant_id));
         // Capture the same active deadline that protects the component call.
         // The outbound service uses it as an absolute upper bound, so a guest cannot start
         // a fresh 120-second HTTP timeout immediately before this interactive
@@ -403,6 +413,62 @@ impl ComponentDispatcherService {
                     retryable: e.retryable,
                 }),
                 execution_time_ms: elapsed_ms,
+            },
+        })
+    }
+}
+
+impl ComponentDispatcherService {
+    /// A test invocation of a control capability runs on the host control
+    /// executor, never on the plain agent instance (whose `api` is `denied`).
+    /// It has the tenant but no calling instance or operation, so reads work
+    /// tenant-wide while identity calls and caller-relative filters answer
+    /// `requires-instance`.
+    async fn test_control(
+        &self,
+        req: &TestCapabilityRequest,
+        input: Vec<u8>,
+    ) -> Result<TestResult> {
+        let started = Instant::now();
+        let result = match &self.control {
+            Some(executor) => {
+                executor
+                    .invoke(
+                        crate::control_host::ControlAuthority {
+                            tenant: req.tenant_id.clone(),
+                            caller: None,
+                            operation: None,
+                        },
+                        &req.capability_id,
+                        input,
+                        tokio::time::Instant::now() + self.test_timeout,
+                    )
+                    .await
+            }
+            None => Err(crate::control_host::denied_error_info(
+                "this bundle has no control agent",
+            )),
+        };
+        let execution_time_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let error = |e: ErrorInfo| TestError {
+            code: e.code,
+            message: e.message,
+            category: e.category,
+            severity: e.severity,
+            retryable: e.retryable,
+        };
+        Ok(match result {
+            Ok(output) => TestResult {
+                success: true,
+                output: serde_json::from_slice(&output).ok(),
+                error: None,
+                execution_time_ms,
+            },
+            Err(e) => TestResult {
+                success: false,
+                output: None,
+                error: Some(error(e)),
+                execution_time_ms,
             },
         })
     }
@@ -556,7 +622,7 @@ mod tests {
     }
 
     fn test_ctx() -> Arc<CallContext> {
-        Arc::new(CallContext::for_test("tenant-test", "http://localhost:4"))
+        Arc::new(CallContext::for_test("tenant-test"))
     }
 
     /// Instantiate a minimal WAT component that exports a no-arg `run` func and

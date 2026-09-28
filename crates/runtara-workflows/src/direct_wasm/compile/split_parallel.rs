@@ -149,7 +149,14 @@ pub(super) fn parallel_agent_body<'a>(
     // shape stops the workflow from starting at all, and an Agent's maxRetries
     // defaults to 3, so the overwhelming majority of authored Splits carry a
     // retry policy they never opted into.
-    if *breakpoint || *agent_retries > 0 || static_data.agent_is_workflow_agent(*agent_id) {
+    // An operation-scoped (suspending or control) call anywhere in the body
+    // keeps one identity per operation only if items run one at a time, so
+    // the body serializes (advisory W075).
+    if *breakpoint
+        || *agent_retries > 0
+        || static_data.agent_is_workflow_agent(*agent_id)
+        || crate::direct_wasm::plan::plan_contains_operation_scoped(nested_plan)
+    {
         return None;
     }
     // Any continuation after the Agent is fine: the launch pass only fronts
@@ -298,6 +305,11 @@ fn collect_parallel_agent_components(
             ..
         }
         | P::AiAgentLoop {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::WaitForInstances {
             next_plan,
             error_plan,
             ..
@@ -649,8 +661,7 @@ pub(super) fn emit_parallel_split_items(
         .map(|member| {
             let component_id = pool_member_component_id(parallel.agent_component_id, member);
             indices
-                .agent_invokes_async
-                .get(&component_id)
+                .agent_invoke_async(&component_id)
                 .expect("parallel split bodies have matching async pool imports")
         })
         .collect();

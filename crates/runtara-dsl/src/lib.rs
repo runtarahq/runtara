@@ -44,6 +44,9 @@ pub mod paths;
 // Agent capability metadata types for runtime introspection
 pub mod agent_meta;
 
+// Where operation-scoped (suspending or control) Agent steps may appear.
+pub mod step_context_rules;
+
 // Per-step-type output shapes (what each step writes into `steps.<id>`).
 // Surfaced in the authoring schema and consulted by reference validation.
 // Not gated behind `json-schema`: the WASM validator needs the preflight lookup.
@@ -880,7 +883,70 @@ mod tests {
 
     #[test]
     fn test_dsl_version() {
-        assert_eq!(DSL_VERSION, "3.1.0");
+        assert_eq!(DSL_VERSION, "3.4.0");
+    }
+
+    #[test]
+    fn test_state_schema_round_trips() {
+        let json = serde_json::json!({
+            "entryPoint": "finish",
+            "steps": {},
+            "stateSchema": {
+                "order":    { "type": "string", "label": "Order" },
+                "customer": { "type": "string", "label": "Customer" },
+                "amount":   { "type": "number", "label": "Amount", "format": "currency" },
+                "stage":    {
+                    "type": "string",
+                    "label": "Stage",
+                    "enum": ["received", "credit_check", "approval", "fulfilment", "delivered"]
+                },
+                "dueAt":    { "type": "string", "format": "datetime", "label": "Due" }
+            }
+        });
+
+        let graph = parse_execution_graph(&json).expect("graph with stateSchema parses");
+        assert_eq!(graph.state_schema.len(), 5);
+        let amount = &graph.state_schema["amount"];
+        assert_eq!(amount.field_type, SchemaFieldType::Number);
+        assert_eq!(amount.format.as_deref(), Some("currency"));
+        assert_eq!(amount.label.as_deref(), Some("Amount"));
+        assert!(!amount.required);
+        assert_eq!(
+            graph.state_schema["stage"]
+                .enum_values
+                .as_ref()
+                .map(Vec::len),
+            Some(5)
+        );
+
+        let reserialized = serde_json::to_value(&graph).unwrap();
+        let state = &reserialized["stateSchema"];
+        for (name, label) in [
+            ("order", "Order"),
+            ("customer", "Customer"),
+            ("amount", "Amount"),
+            ("stage", "Stage"),
+            ("dueAt", "Due"),
+        ] {
+            assert_eq!(state[name]["label"], label, "{name}");
+            assert_eq!(state[name]["type"], json["stateSchema"][name]["type"]);
+        }
+        assert_eq!(state["amount"]["format"], "currency");
+        assert_eq!(state["dueAt"]["format"], "datetime");
+        assert_eq!(state["stage"]["enum"], json["stateSchema"]["stage"]["enum"]);
+
+        let reparsed = parse_execution_graph(&reserialized).unwrap();
+        assert_eq!(serde_json::to_value(&reparsed).unwrap(), reserialized);
+    }
+
+    #[test]
+    fn test_state_schema_absent_by_default_and_omitted_when_empty() {
+        let graph = parse_execution_graph(&serde_json::json!({ "entryPoint": "s", "steps": {} }))
+            .expect("parse");
+        assert!(graph.state_schema.is_empty());
+        let re = serde_json::to_value(&graph).unwrap();
+        assert!(re.get("stateSchema").is_none());
+        assert!(ExecutionGraph::default().state_schema.is_empty());
     }
 
     // ========================================================================

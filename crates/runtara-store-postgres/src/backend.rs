@@ -24,6 +24,9 @@ use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink
 pub struct PostgresPersistence {
     pub(crate) pool: PgPool,
     metrics_sink: Option<Arc<dyn InstanceMetricsSink>>,
+    /// Polls of `reconcile_wait_wakes`, which runs its full pass on one in
+    /// every `FULL_RECONCILE_EVERY`.
+    pub(crate) wait_polls: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PostgresPersistence {
@@ -35,6 +38,7 @@ impl PostgresPersistence {
         Self {
             pool,
             metrics_sink: None,
+            wait_polls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -435,6 +439,77 @@ async fn put_custom_signal(
 // op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
 // (crate::ops_common::ops::{instances, sleep}).
 
+impl PostgresPersistence {
+    /// Apply a parked-command policy (`cancel_parked`, `pause_parked`) to
+    /// suspended instances holding that pending command, in one transaction.
+    async fn apply_parked(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+        signal_type: &str,
+        decide: fn(
+            runtara_core::domain::InstanceStatus,
+            Option<runtara_core::lifecycle::Command<'_>>,
+        ) -> runtara_core::lifecycle::Decision,
+    ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
+        use runtara_core::lifecycle::Decision;
+        let mut tx = self.pool.begin().await.db()?;
+        // Candidate predicates narrow the indexed scan; core policy is evaluated
+        // against locked instances and commands before any writes are applied.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT i.instance_id, i.tenant_id, i.status::text
+            FROM instances i JOIN pending_signals s USING (instance_id)
+            WHERE i.status = 'suspended' AND s.signal_type::text = $3
+              AND s.acknowledged_at IS NULL AND ($1::text IS NULL OR i.instance_id = $1)
+            ORDER BY i.instance_id LIMIT $2 FOR UPDATE OF i SKIP LOCKED
+        "#,
+        )
+        .bind(instance_id)
+        .bind(limit.max(0))
+        .bind(signal_type)
+        .fetch_all(&mut *tx)
+        .await
+        .db()?;
+        let ids: Vec<_> = rows.iter().map(|r| r.0.clone()).collect();
+        let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
+        let commands: std::collections::HashMap<_, _> = commands
+            .iter()
+            .map(|c| (c.instance_id.as_str(), c.command()))
+            .collect();
+        let mut groups: Vec<(runtara_core::lifecycle::Transition, Vec<String>)> = Vec::new();
+        let mut cancelled = Vec::new();
+        for (id, tenant_id, status) in rows {
+            let status = crate::encoding::status_from_str(&status).db()?;
+            if let Decision::Applied(effects) = decide(status, commands.get(id.as_str()).copied()) {
+                if let Some((_, ids)) = groups.iter_mut().find(|(effect, _)| *effect == effects) {
+                    ids.push(id.clone());
+                } else {
+                    groups.push((effects, vec![id.clone()]));
+                }
+                cancelled.push(runtara_core::persistence::CancelledInstance {
+                    instance_id: id,
+                    tenant_id,
+                });
+            }
+        }
+        for (effects, ids) in &groups {
+            crate::lifecycle::apply_transition(&mut tx, ids, *effects).await?;
+        }
+        tx.commit().await.db()?;
+        for (effects, ids) in groups {
+            if effects.report_completion
+                && let Some(sink) = &self.metrics_sink
+            {
+                for id in ids {
+                    report_completion(sink.as_ref(), &self.pool, &id).await;
+                }
+            }
+        }
+        Ok(cancelled)
+    }
+}
+
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
     fn input_requests(&self) -> Option<&dyn runtara_core::persistence::inputs::InputRequests> {
@@ -444,6 +519,22 @@ impl Persistence for PostgresPersistence {
     fn invocation_fences(
         &self,
     ) -> Option<&dyn runtara_core::persistence::invocations::InvocationFences> {
+        Some(self)
+    }
+
+    fn control_receipts(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::control_receipts::ControlReceipts> {
+        Some(self)
+    }
+
+    fn instance_waits(&self) -> Option<&dyn runtara_core::persistence::waits::InstanceWaits> {
+        Some(self)
+    }
+
+    fn agent_continuations(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::continuations::AgentContinuations> {
         Some(self)
     }
 
@@ -459,6 +550,105 @@ impl Persistence for PostgresPersistence {
         run_label: Option<&str>,
     ) -> Result<bool, CoreError> {
         Self::op_try_register_instance(&self.pool, instance_id, tenant_id, input, run_label).await
+    }
+
+    async fn try_register_child_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+        parent: &runtara_core::persistence::ParentLink,
+    ) -> Result<bool, CoreError> {
+        parent.validate(instance_id)?;
+        let run_label =
+            runtara_dsl::run_label::normalize_run_label(run_label).map_err(|message| {
+                CoreError::ValidationError {
+                    field: "runLabel".into(),
+                    message,
+                }
+            })?;
+        let persistence = |e: sqlx::Error| CoreError::PersistenceError {
+            operation: "try_register_child_instance".into(),
+            details: e.to_string(),
+        };
+        // The parent check and the insert are one statement: a child is
+        // written only while a run of its own tenant holds the parent id. The
+        // launch fence goes first, so a child whose outcome is already
+        // published is never written.
+        let mut tx = self.pool.begin().await.map_err(persistence)?;
+        crate::fence::take_launch_fence(&mut tx, instance_id)
+            .await
+            .map_err(persistence)?;
+        let inserted: Option<String> = sqlx::query_scalar(
+            r#"
+            INSERT INTO instances
+                (instance_id, tenant_id, definition_version, status, created_at, input,
+                 run_label, parent_instance_id, parent_close_policy, admitted_at)
+            SELECT $1, $2, 1, 'pending', NOW(), $3, $4, $5, $6, $7
+            WHERE EXISTS (
+                SELECT 1 FROM instances AS p WHERE p.instance_id = $5 AND p.tenant_id = $2
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM instance_external_outcomes AS o WHERE o.instance_id = $1
+            )
+            ON CONFLICT (instance_id) DO NOTHING
+            RETURNING instance_id
+            "#,
+        )
+        .bind(instance_id)
+        .bind(tenant_id)
+        .bind(input)
+        .bind(run_label.as_deref())
+        .bind(&parent.parent_instance_id)
+        .bind(&parent.parent_close_policy)
+        .bind(parent.admitted_at)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(persistence)?;
+        if inserted.is_some() {
+            tx.commit().await.map_err(persistence)?;
+            return Ok(true);
+        }
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instances WHERE instance_id = $1)")
+                .bind(instance_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(persistence)?;
+        let fenced = crate::fence::published_outcome(&mut tx, instance_id)
+            .await
+            .map_err(persistence)?;
+        tx.commit().await.map_err(persistence)?;
+        if taken {
+            return Ok(false);
+        }
+        if let Some(outcome) = fenced {
+            return Err(CoreError::InvalidInstanceState {
+                instance_id: instance_id.into(),
+                expected: "unlaunched child without a published outcome".into(),
+                actual: outcome.as_str().into(),
+            });
+        }
+        Err(CoreError::ValidationError {
+            field: "parentInstanceId".into(),
+            message: "the parent is not a run of this tenant".into(),
+        })
+    }
+
+    async fn publish_external_outcome(
+        &self,
+        outcome: &runtara_core::persistence::ExternalOutcome,
+    ) -> Result<runtara_core::persistence::PublishOutcome, CoreError> {
+        crate::fence::publish(&self.pool, outcome).await
+    }
+
+    async fn get_external_outcome(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::ExternalOutcomeRecord>, CoreError> {
+        crate::fence::get(&self.pool, tenant_id, instance_id).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
@@ -652,24 +842,53 @@ impl Persistence for PostgresPersistence {
         request: runtara_core::lifecycle::ParkRequest,
         signals: &[String],
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+        self.park_instance_on_targets(
+            instance_id,
+            request,
+            runtara_core::persistence::ParkTargets {
+                signal_ids: signals,
+                wait_ids: &[],
+            },
+        )
+        .await
+    }
+
+    async fn park_instance_on_targets(
+        &self,
+        instance_id: &str,
+        request: runtara_core::lifecycle::ParkRequest,
+        targets: runtara_core::persistence::ParkTargets<'_>,
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
         let decision = runtara_core::lifecycle::park(status, request);
         if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
             crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
-            if request.reason == runtara_core::lifecycle::ParkReason::Signal && !signals.is_empty()
-            {
+            let signals = request.reason == runtara_core::lifecycle::ParkReason::Signal
+                && !targets.signal_ids.is_empty();
+            if signals || !targets.wait_ids.is_empty() {
                 sqlx::query(
-                    "INSERT INTO instance_input_parks (instance_id, signal_ids) VALUES ($1,$2)",
+                    "INSERT INTO instance_input_parks (instance_id, signal_ids, wait_ids) VALUES ($1,$2,$3)",
                 )
                 .bind(instance_id)
-                .bind(signals)
+                .bind(targets.signal_ids)
+                .bind(targets.wait_ids)
                 .execute(&mut *tx)
                 .await
                 .db()?;
+            }
+            if signals {
                 crate::inputs::schedule_accepted(&mut tx, instance_id, true)
                     .await
                     .db()?;
+            }
+            if !targets.wait_ids.is_empty() {
+                crate::waits::park_on(&mut tx, instance_id, targets.wait_ids)
+                    .await
+                    .map_err(|error| CoreError::PersistenceError {
+                        operation: "park_instance_on_targets".into(),
+                        details: error.to_string(),
+                    })?;
             }
         }
         tx.commit().await.db()?;
@@ -681,62 +900,27 @@ impl Persistence for PostgresPersistence {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
-        use runtara_core::lifecycle::{self, Decision};
-        let mut tx = self.pool.begin().await.db()?;
-        // Candidate predicates narrow the indexed scan; core policy is evaluated
-        // against locked instances and commands before any writes are applied.
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            r#"
-            SELECT i.instance_id, i.tenant_id, i.status::text
-            FROM instances i JOIN pending_signals s USING (instance_id)
-            WHERE i.status = 'suspended' AND s.signal_type = 'cancel'
-              AND s.acknowledged_at IS NULL AND ($1::text IS NULL OR i.instance_id = $1)
-            ORDER BY i.instance_id LIMIT $2 FOR UPDATE OF i SKIP LOCKED
-        "#,
+        self.apply_parked(
+            instance_id,
+            limit,
+            "cancel",
+            runtara_core::lifecycle::cancel_parked,
         )
-        .bind(instance_id)
-        .bind(limit.max(0))
-        .fetch_all(&mut *tx)
         .await
-        .db()?;
-        let ids: Vec<_> = rows.iter().map(|r| r.0.clone()).collect();
-        let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
-        let commands: std::collections::HashMap<_, _> = commands
-            .iter()
-            .map(|c| (c.instance_id.as_str(), c.command()))
-            .collect();
-        let mut groups: Vec<(runtara_core::lifecycle::Transition, Vec<String>)> = Vec::new();
-        let mut cancelled = Vec::new();
-        for (id, tenant_id, status) in rows {
-            let status = crate::encoding::status_from_str(&status).db()?;
-            if let Decision::Applied(effects) =
-                lifecycle::cancel_parked(status, commands.get(id.as_str()).copied())
-            {
-                if let Some((_, ids)) = groups.iter_mut().find(|(effect, _)| *effect == effects) {
-                    ids.push(id.clone());
-                } else {
-                    groups.push((effects, vec![id.clone()]));
-                }
-                cancelled.push(runtara_core::persistence::CancelledInstance {
-                    instance_id: id,
-                    tenant_id,
-                });
-            }
-        }
-        for (effects, ids) in &groups {
-            crate::lifecycle::apply_transition(&mut tx, ids, *effects).await?;
-        }
-        tx.commit().await.db()?;
-        for (effects, ids) in groups {
-            if effects.report_completion
-                && let Some(sink) = &self.metrics_sink
-            {
-                for id in ids {
-                    report_completion(sink.as_ref(), &self.pool, &id).await;
-                }
-            }
-        }
-        Ok(cancelled)
+    }
+
+    async fn pause_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<runtara_core::persistence::PausedInstance>, CoreError> {
+        self.apply_parked(
+            instance_id,
+            limit,
+            "pause",
+            runtara_core::lifecycle::pause_parked,
+        )
+        .await
     }
 
     async fn put_custom_signal(
@@ -913,9 +1097,27 @@ impl Persistence for PostgresPersistence {
     async fn get_terminal_instances_older_than(
         &self,
         older_than: DateTime<Utc>,
+        after: Option<&runtara_core::persistence::RetentionCursor>,
         limit: i64,
-    ) -> Result<Vec<String>, CoreError> {
-        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
+    ) -> Result<runtara_core::persistence::RetentionPage, CoreError> {
+        Self::op_get_terminal_instances_older_than(&self.pool, older_than, after, limit).await
+    }
+
+    async fn prune_pinned_terminal(
+        &self,
+        older_than: DateTime<Utc>,
+        after: Option<&runtara_core::persistence::RetentionCursor>,
+        limit: i64,
+    ) -> Result<runtara_core::persistence::PrunePage, CoreError> {
+        Self::op_prune_pinned_terminal(&self.pool, older_than, after, limit).await
+    }
+
+    async fn delete_external_outcomes_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<u64, CoreError> {
+        crate::fence::delete_older_than(&self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {

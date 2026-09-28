@@ -10,10 +10,10 @@ use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::handlers::{
-    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
-    StartInstanceRequest, StartRejection, StopInstanceRequest, TenantMetricsOptions,
-    handle_get_tenant_metrics, handle_resume_instance, handle_start_instance, handle_stop_instance,
-    spawn_container_monitor,
+    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, PauseInstanceOutcome,
+    ResumeInstanceRequest, ResumeRejection, StartInstanceRequest, StartRejection,
+    StopInstanceRequest, TenantMetricsOptions, handle_get_tenant_metrics, handle_pause_instance,
+    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
 use runtara_environment::instance_repository::{InstanceRepository, ListInstancesOptions};
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
@@ -212,6 +212,7 @@ async fn test_start_instance_success() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -272,6 +273,7 @@ async fn test_start_instance_with_custom_id() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(custom_instance_id.clone()),
@@ -321,6 +323,7 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     let instance_id = format!("idempotent-{}", Uuid::new_v4());
     let request = || StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -399,6 +402,7 @@ async fn test_start_instance_hands_runner_the_stored_input() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
             instance_id: Some(instance_id.clone()),
@@ -491,6 +495,7 @@ async fn test_resume_instance_does_not_prepersist_placeholder_input() {
         &state,
         ResumeInstanceRequest {
             instance_id: instance_id.clone(),
+            require_paused: false,
         },
     )
     .await
@@ -572,6 +577,7 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
     let instance_id = format!("vanishing-{}", Uuid::new_v4());
     let request = || StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -635,6 +641,7 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
             instance_id: Some(instance_id.clone()),
@@ -734,6 +741,7 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
 
     let request = || StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -821,6 +829,7 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
     let instance_id = format!("image-conflict-{}", Uuid::new_v4());
     let start = |image_id: String| StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id,
         tenant_id: "test-tenant".to_string(),
         instance_id: Some(instance_id.clone()),
@@ -858,6 +867,7 @@ async fn test_start_instance_empty_image_id() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: "".to_string(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -885,6 +895,7 @@ async fn test_start_instance_image_not_found() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: "nonexistent-image-id".to_string(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -926,6 +937,7 @@ async fn a_database_failure_is_not_reported_as_a_missing_image() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: "some-image-id".to_string(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -1000,6 +1012,7 @@ async fn running_stop_fixture(
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -1135,6 +1148,7 @@ async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image.clone(),
             tenant_id: "test-tenant".into(),
             instance_id: None,
@@ -1468,6 +1482,167 @@ async fn test_stop_instance_cancels_parked_execution_without_runner_handle() {
 }
 
 // ============================================================================
+// Pause Instance Tests (decision D4)
+// ============================================================================
+
+async fn registered(
+    pool: &PgPool,
+    status: CoreInstanceStatus,
+) -> (Arc<PostgresPersistence>, String) {
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let id = Uuid::new_v4().to_string();
+    persistence
+        .register_instance(&id, "test-tenant")
+        .await
+        .unwrap();
+    persistence
+        .update_instance_status(&id, status, Some(Utc::now()))
+        .await
+        .unwrap();
+    (persistence, id)
+}
+
+/// A run parked on a signal wait pauses at once: it stays suspended, loses
+/// its wake, and no pending command waits for a checkpoint it would reach
+/// only after the wait. A running run is asked; a paused run is unchanged; a
+/// finished one is not pausable.
+#[tokio::test]
+async fn pausing_a_waiting_run_pauses_it_immediately() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (persistence, waiting) = registered(&pool, CoreInstanceStatus::Suspended).await;
+    sqlx::query("UPDATE instances SET termination_reason = 'waiting_signal', sleep_until = NOW() + INTERVAL '1 hour', wake_reason = 'timer' WHERE instance_id = $1")
+        .bind(&waiting).execute(&pool).await.unwrap();
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner::new()),
+        temp_dir.path().to_path_buf(),
+    );
+
+    assert_eq!(
+        handle_pause_instance(&state, &waiting).await.unwrap(),
+        PauseInstanceOutcome::Applied
+    );
+    let instance = persistence.get_instance(&waiting).await.unwrap().unwrap();
+    assert_eq!(instance.status, CoreInstanceStatus::Suspended);
+    assert!(instance.sleep_until.is_none() && instance.wake_reason.is_none());
+    assert!(instance.termination_reason.is_none());
+    assert!(
+        persistence
+            .get_pending_signal(&waiting)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        handle_pause_instance(&state, &waiting).await.unwrap(),
+        PauseInstanceOutcome::Unchanged
+    );
+
+    let (_, running) = registered(&pool, CoreInstanceStatus::Running).await;
+    assert_eq!(
+        handle_pause_instance(&state, &running).await.unwrap(),
+        PauseInstanceOutcome::Requested
+    );
+    assert!(
+        persistence
+            .get_pending_signal(&running)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let (_, done) = registered(&pool, CoreInstanceStatus::Running).await;
+    persistence
+        .complete_instance(CompleteInstanceParams::new(
+            &done,
+            CoreInstanceStatus::Completed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        handle_pause_instance(&state, &done).await.unwrap(),
+        PauseInstanceOutcome::NotPausable {
+            status: "completed".into()
+        }
+    );
+    assert_eq!(
+        handle_pause_instance(&state, "no-such-run").await.unwrap(),
+        PauseInstanceOutcome::InstanceNotFound
+    );
+    for id in [&waiting, &running, &done] {
+        cleanup(&pool, Some(id), None).await;
+    }
+}
+
+/// Control `resume` (`require_paused`) relaunches only an explicitly paused
+/// run: a run parked on a timer or signal is never woken early by it.
+#[tokio::test]
+async fn a_paused_only_resume_refuses_a_waiting_run() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
+    let image_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO images (image_id, tenant_id, name, description, binary_path) VALUES ($1, 'test-tenant', $2, 'desc', $3)",
+    )
+    .bind(&image_id)
+    .bind(format!("test-image-{image_id}"))
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let instance_id = Uuid::new_v4().to_string();
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    update_test_instance_status(&pool, &instance_id, "suspended", None).await;
+    sqlx::query("UPDATE instances SET termination_reason = 'waiting_signal', sleep_until = NOW() + INTERVAL '1 hour', wake_reason = 'timer' WHERE instance_id = $1")
+        .bind(&instance_id).execute(&pool).await.unwrap();
+
+    let refused = handle_resume_instance(
+        &state,
+        ResumeInstanceRequest {
+            instance_id: instance_id.clone(),
+            require_paused: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!refused.success);
+    assert_eq!(refused.rejection, Some(ResumeRejection::NotPaused));
+    assert!(
+        LaunchRepository::new(pool.clone())
+            .get_active_for_instance(&instance_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing was queued"
+    );
+
+    assert_eq!(
+        handle_pause_instance(&state, &instance_id).await.unwrap(),
+        PauseInstanceOutcome::Applied
+    );
+    let resumed = handle_resume_instance(
+        &state,
+        ResumeInstanceRequest {
+            instance_id: instance_id.clone(),
+            require_paused: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resumed.success, "{:?}", resumed.error);
+    assert_eq!(
+        active_launch(&pool, &instance_id).await.kind,
+        LaunchKind::Resume
+    );
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+// ============================================================================
 // Resume Instance Tests
 // ============================================================================
 
@@ -1481,6 +1656,7 @@ async fn test_resume_instance_not_found() {
 
     let request = ResumeInstanceRequest {
         instance_id: "nonexistent-instance".to_string(),
+        require_paused: false,
     };
 
     let response = handle_resume_instance(&state, request).await.unwrap();
@@ -1520,6 +1696,7 @@ async fn test_resume_instance_wrong_status() {
 
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),
+        require_paused: false,
     };
 
     let response = handle_resume_instance(&state, request).await.unwrap();
@@ -1567,6 +1744,7 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
 
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),
+        require_paused: false,
     };
 
     let response = handle_resume_instance(&state, request).await.unwrap();
@@ -1616,6 +1794,7 @@ async fn test_resume_instance_success() {
 
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),
+        require_paused: false,
     };
 
     let response = handle_resume_instance(&state, request).await.unwrap();
@@ -1707,6 +1886,7 @@ async fn test_start_instance_tenant_isolation() {
     // Attempt to start an instance as tenant-B using tenant-A's image
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "tenant-B".to_string(), // Different tenant!
         instance_id: None,
@@ -1762,6 +1942,7 @@ async fn test_start_instance_same_tenant_allowed() {
     // Start an instance as tenant-A using tenant-A's image
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "tenant-A".to_string(), // Same tenant
         instance_id: None,
@@ -1819,6 +2000,7 @@ async fn test_start_instance_stores_env() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -1876,6 +2058,7 @@ async fn test_start_instance_empty_env() {
 
     let request = StartInstanceRequest {
         run_label: None,
+        parent: None,
         image_id: image_id.clone(),
         tenant_id: "test-tenant".to_string(),
         instance_id: None,
@@ -1969,6 +2152,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2081,6 +2265,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2178,6 +2363,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2388,6 +2574,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await
@@ -2527,6 +2714,7 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
         &state,
         StartInstanceRequest {
             run_label: None,
+            parent: None,
             image_id: image_id.clone(),
             tenant_id: "test-tenant".to_string(),
             instance_id: None,

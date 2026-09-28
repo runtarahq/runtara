@@ -14,6 +14,17 @@ enum Case {
     ReturnsDuringCancel,
 }
 
+/// Watchdog for one whole case: instantiation, both capability calls and the
+/// result exports. It only turns a hang into a failure; no assertion reads it.
+/// The deadline contract is asserted from the guest's own selection (`timed-out`,
+/// `ready-mask`, `cancel-resolution`) and from elapsed time measured from the
+/// `run` call. Keep it well below `Case::Complete`'s 60 s timer so a completion
+/// that failed to win still cannot pass by waiting for the timer. About ninety
+/// tests share this binary's CPUs, so a few-second guard is load, not signal.
+const CASE_GUARD: Duration = Duration::from_secs(30);
+/// Watchdog for the loopback server's teardown after a successful case.
+const SERVER_GUARD: Duration = Duration::from_secs(10);
+
 async fn run_deadline(case: Case) -> anyhow::Result<()> {
     run_deadline_with_parent(case, include_str!("deadline-parent.wat")).await
 }
@@ -111,7 +122,9 @@ async fn run_deadline_with_parent(case: Case, source: &str) -> anyhow::Result<()
             anyhow::Ok(())
         }
     });
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    // Setup, not the contract: keep the host's first-flow cost out of the guard.
+    crate::outbound_fixture::warm_up_process_network();
+    let result = tokio::time::timeout(CASE_GUARD, async {
         let mut linker = runtara_component_host::build_linker(&engine)?;
         if matches!(case, Case::ReturnsDuringCancel) {
             // Synthetic cancellation callback returns normally after dropping
@@ -166,7 +179,7 @@ async fn run_deadline_with_parent(case: Case, source: &str) -> anyhow::Result<()
             })?;
         let mut store = Store::new(
             &engine,
-            HostState::new(Arc::new(CallContext::for_test("fixture-tenant", "")))
+            HostState::new(Arc::new(CallContext::for_test("fixture-tenant")))
                 .with_outbound_http(Arc::new(crate::outbound_fixture::PublicHttp::default())),
         );
         let instance = linker.instantiate_async(&mut store, &component).await?;
@@ -229,7 +242,7 @@ async fn run_deadline_with_parent(case: Case, source: &str) -> anyhow::Result<()
         let _ = server.await;
         return result?;
     }
-    match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
+    match tokio::time::timeout(SERVER_GUARD, &mut server).await {
         Ok(result) => result?,
         Err(error) => {
             server.abort();

@@ -13,7 +13,7 @@
 //!
 
 use runtara_core::persistence::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, SignalRecord,
+    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ParentLink, SignalRecord,
 };
 use sqlx::{FromRow, Row, postgres::PgRow};
 
@@ -50,8 +50,24 @@ impl<'r> FromRow<'r, PgRow> for InstanceRow {
             exit_code: row.try_get("exit_code").unwrap_or_default(),
             recovery_attempts: row.try_get("recovery_attempts").unwrap_or_default(),
             recovery_marker: row.try_get("recovery_marker").unwrap_or_default(),
+            parent: parent_link(row)?,
         }))
     }
+}
+
+/// The parent link, when the projection selects it and the run has one.
+fn parent_link(row: &PgRow) -> Result<Option<ParentLink>, sqlx::Error> {
+    let Ok(parent_instance_id) = row.try_get::<Option<String>, _>("parent_instance_id") else {
+        return Ok(None);
+    };
+    let Some(parent_instance_id) = parent_instance_id else {
+        return Ok(None);
+    };
+    Ok(Some(ParentLink {
+        parent_instance_id,
+        parent_close_policy: row.try_get("parent_close_policy")?,
+        admitted_at: row.try_get("admitted_at")?,
+    }))
 }
 
 /// Decodes a [`CheckpointRecord`].

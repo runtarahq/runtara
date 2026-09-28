@@ -216,6 +216,7 @@ fn enable_step_breakpoint(graph: &mut ExecutionGraph, step_id: &str) {
         runtara_dsl::Step::GroupBy(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::Delay(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::WaitForSignal(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::WaitForInstances(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::AiAgent(step) => step.breakpoint = Some(true),
     }
 }
@@ -491,7 +492,8 @@ fn collect_run_plan_ids(
                 }
             }
         }
-        DirectRunPlan::Delay { next_plan, .. } => {
+        DirectRunPlan::Delay { next_plan, .. }
+        | DirectRunPlan::WaitForInstances { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
         DirectRunPlan::WaitForSignal {
@@ -803,6 +805,7 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::EmbedWorkflow { breakpoint, .. }
         | DirectRunPlan::Delay { breakpoint, .. }
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
+        | DirectRunPlan::WaitForInstances { breakpoint, .. }
         | DirectRunPlan::Log { breakpoint, .. }
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::AiAgent { breakpoint, .. }
@@ -2174,6 +2177,8 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
             &Default::default(),
             false,
             &Default::default(),
+            &Default::default(),
+            false,
             true,
             core_config.static_data.needs_monotonic_clock(),
         )
@@ -2230,6 +2235,8 @@ fn direct_core_emits_value_store_retain_for_loops() {
             &Default::default(),
             false,
             &Default::default(),
+            &Default::default(),
+            false,
             true,
             core_config.static_data.needs_monotonic_clock(),
         )
@@ -11130,6 +11137,14 @@ fn abi_is_part_of_the_lowering_tag() {
     assert!(tag.contains("retry-cooperation=v4"));
     assert!(tag.contains("structured-agent-errors=v1"));
     assert!(tag.contains("plain-child-errors=v1"));
+    assert!(
+        tag.contains("on-signal-remap=v1"),
+        "cached artifacts must pick up the stdlib that remaps a spoofed `__rt_on_signal__`: {tag}"
+    );
+    assert!(
+        tag.contains("wide-result-errors=v1"),
+        "cached artifacts must pick up the corrected error-string offsets of wide results: {tag}"
+    );
     assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"

@@ -131,6 +131,7 @@ mod tests {
                 is_idempotent: false,
                 rate_limited: true,
                 trusted: false,
+                suspends: false,
                 known_errors: vec![],
                 tags: vec![],
             }],

@@ -20,6 +20,7 @@
 //! | 2 | Step reference validation |
 //! | 2.5 | Execution order validation |
 //! | 3 | Agent/capability validation |
+//! | 3.1 | Operation-scoped step contexts (`runtara_dsl::step_context_rules`) |
 //! | 4 | Configuration warnings |
 //! | 5 | Child workflow validation (version format) |
 //! | 7.5 | Data and variable reference validation |
@@ -47,6 +48,11 @@
 //! | E022 | MissingRequiredInput | Required agent input missing |
 //! | E026 | AgentMissingConnection | Agent capability requires connectionId |
 //! | E027 | QueryOnlyConditionOperator | Operator only valid in object-model query conditions |
+//! | E028 | SuspendingCapabilityNotDurable | Suspending step (or its embed call site) is not durable |
+//! | E029 | SuspendingCapabilityMissingTimeout | Suspending step has no timeout, or timeout 0 |
+//! | E131 | SuspendingCapabilityUnsupportedContext | Suspending step in onError, onWait or an AiAgent tool/memory |
+//! | E132 | ControlCapabilityUnsupportedContext | Control step in onWait or an AiAgent tool/memory |
+//! | E133 | InvalidWaitForInstancesConfig | WaitForInstances literal instanceIds or timeoutMs out of range |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -83,6 +89,12 @@ use runtara_workflow_stdlib::reference_path::{
     PathDefect, array_index, is_array_index_token, reference_segments, tokenize_reference,
 };
 use std::collections::{HashMap, HashSet};
+
+#[path = "validation_operation_scoped.rs"]
+mod operation_scoped;
+
+#[path = "validation_state_schema.rs"]
+mod state_schema;
 
 // ============================================================================
 // Validation Result Types
@@ -452,6 +464,46 @@ pub enum ValidationError {
     AiAgentMcpEdgeEmptySuffix { step_id: String, label: String },
     /// AI Agent step has two `mcp.*` edges with the same toolset suffix.
     AiAgentMcpEdgeDuplicateSuffix { step_id: String, toolset: String },
+
+    // === Operation-Scoped Step Errors (runtara_dsl::step_context_rules) ===
+    /// A suspending capability runs on a non-durable step, or under a
+    /// non-durable EmbedWorkflow call site.
+    SuspendingCapabilityNotDurable {
+        /// The Agent step, or the EmbedWorkflow call site to make durable.
+        step_id: String,
+        /// `agent:capability` of the suspending call.
+        capability: String,
+        /// Set when `step_id` is an EmbedWorkflow call site whose workflow
+        /// (closure) holds the suspending call.
+        child_workflow_id: Option<String>,
+    },
+    /// A suspending capability runs on a step without a timeout (or timeout 0).
+    SuspendingCapabilityMissingTimeout { step_id: String, capability: String },
+    /// A suspending capability in a context v1 does not support.
+    SuspendingCapabilityUnsupportedContext {
+        step_id: String,
+        capability: String,
+        /// Key of the violated rule (`runtara_dsl::step_context_rules`).
+        context: String,
+        child_workflow_id: Option<String>,
+    },
+    /// A control-agent capability in a context v1 does not support.
+    ControlCapabilityUnsupportedContext {
+        step_id: String,
+        capability: String,
+        /// Key of the violated rule (`runtara_dsl::step_context_rules`).
+        context: String,
+        child_workflow_id: Option<String>,
+    },
+    /// A WaitForInstances step's literal `instanceIds` or `timeoutMs` can
+    /// never run: not an array of ids, empty, over the target cap, or a
+    /// timeout that is not a positive integer.
+    InvalidWaitForInstancesConfig {
+        step_id: String,
+        /// `instanceIds` or `timeoutMs`.
+        field: String,
+        message: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -522,6 +574,11 @@ impl ValidationError {
             Self::AiAgentMcpEdgeWrongAgentId { .. } => "E121",
             Self::AiAgentMcpEdgeEmptySuffix { .. } => "E122",
             Self::AiAgentMcpEdgeDuplicateSuffix { .. } => "E123",
+            Self::SuspendingCapabilityNotDurable { .. } => "E028",
+            Self::SuspendingCapabilityMissingTimeout { .. } => "E029",
+            Self::SuspendingCapabilityUnsupportedContext { .. } => "E131",
+            Self::ControlCapabilityUnsupportedContext { .. } => "E132",
+            Self::InvalidWaitForInstancesConfig { .. } => "E133",
         }
     }
 }
@@ -1186,8 +1243,115 @@ impl std::fmt::Display for ValidationError {
                     step_id, toolset
                 )
             }
+            ValidationError::SuspendingCapabilityNotDurable {
+                step_id,
+                capability,
+                child_workflow_id: None,
+            } => write!(
+                f,
+                "[E028] Step '{}' {} but is not durable. \
+                 A suspending step parks its run and replays to it, so it must be \
+                 durable: remove durable: false from the step and the workflow.",
+                step_id,
+                suspending_site(capability)
+            ),
+            ValidationError::SuspendingCapabilityNotDurable {
+                step_id,
+                capability,
+                child_workflow_id: Some(child),
+            } => write!(
+                f,
+                "[E028] EmbedWorkflow step '{}' is not durable, but workflow '{}' it \
+                 embeds {}. The call site of a suspending \
+                 step must be durable: remove durable: false from the step and the workflow.",
+                step_id,
+                child,
+                embedded_suspending_site(capability)
+            ),
+            ValidationError::SuspendingCapabilityMissingTimeout {
+                step_id,
+                capability,
+            } => write!(
+                f,
+                "[E029] Step '{}' calls suspending capability '{}' without a timeout. \
+                 Set timeout (milliseconds, > 0): it is the hard deadline of the step, \
+                 parked time included.",
+                step_id, capability
+            ),
+            ValidationError::SuspendingCapabilityUnsupportedContext {
+                step_id,
+                capability,
+                context,
+                child_workflow_id,
+            } => write!(
+                f,
+                "[E131] Step '{}'{} {} in an unsupported context ({}): {}",
+                step_id,
+                embedded_suffix(child_workflow_id.as_deref()),
+                suspending_site(capability),
+                context,
+                operation_rule_description(context)
+            ),
+            ValidationError::ControlCapabilityUnsupportedContext {
+                step_id,
+                capability,
+                context,
+                child_workflow_id,
+            } => write!(
+                f,
+                "[E132] Step '{}'{} calls control capability '{}' in an unsupported \
+                 context ({}): {}",
+                step_id,
+                embedded_suffix(child_workflow_id.as_deref()),
+                capability,
+                context,
+                operation_rule_description(context)
+            ),
+            ValidationError::InvalidWaitForInstancesConfig {
+                step_id,
+                field,
+                message,
+            } => write!(
+                f,
+                "[E133] WaitForInstances step '{}' has an invalid {}: {}",
+                step_id, field, message
+            ),
         }
     }
+}
+
+/// What a suspending site does, for diagnostics: a WaitForInstances step or
+/// a call to a suspending capability.
+fn suspending_site(capability: &str) -> String {
+    if capability == "WaitForInstances" {
+        "is a WaitForInstances step".to_string()
+    } else {
+        format!("calls suspending capability '{capability}'")
+    }
+}
+
+/// [`suspending_site`] for a workflow reached through an embed.
+fn embedded_suspending_site(capability: &str) -> String {
+    if capability == "WaitForInstances" {
+        "holds a WaitForInstances step".to_string()
+    } else {
+        format!("calls suspending capability '{capability}'")
+    }
+}
+
+/// ` (embedding workflow 'x')` for a diagnostic reported at an embed site.
+fn embedded_suffix(child_workflow_id: Option<&str>) -> String {
+    child_workflow_id
+        .map(|child| format!(" (embedding workflow '{child}')"))
+        .unwrap_or_default()
+}
+
+/// Description of the operation-scoped context rule with `key`.
+fn operation_rule_description(key: &str) -> &'static str {
+    runtara_dsl::step_context_rules::STEP_CONTEXT_RULES
+        .iter()
+        .find(|rule| rule.key == key)
+        .map_or("not supported in v1", |rule| rule.description)
 }
 
 impl std::error::Error for ValidationError {}
@@ -1293,6 +1457,78 @@ pub enum ValidationWarning {
     /// top-level While) makes the reference checkable — otherwise a typo
     /// silently resolves to null at runtime.
     UnverifiedDataReference { step_id: String, reference: String },
+    /// A control `start` inside a Split or While uses a literal `runLabel`.
+    /// Run labels are unique per parent, so the second iteration fails with
+    /// `label-conflict`.
+    ConstantRunLabelInLoop {
+        step_id: String,
+        loop_step_id: String,
+    },
+    /// An operation-scoped step sits in a parallel Split body or branch group,
+    /// which therefore runs serialized.
+    SerializedOperationScopedStep {
+        /// The operation-scoped step, or the EmbedWorkflow call site holding one.
+        step_id: String,
+        /// Rule key: `parallel-split` or `parallel-branch-group`.
+        context: String,
+        /// The Split, or the step whose edges fan out.
+        owner_step_id: String,
+    },
+    /// An operation-scoped step sits in a region an enclosing Split or
+    /// EmbedWorkflow retries: a retry replays the operation's first outcome.
+    OperationScopedStepUnderEnclosingRetry {
+        /// The operation-scoped step, or the EmbedWorkflow call site holding one.
+        step_id: String,
+        /// The retrying Split or EmbedWorkflow.
+        retry_step_id: String,
+        child_workflow_id: Option<String>,
+    },
+    /// A control `start` whose `workflowId` is not a literal.
+    DynamicControlStartTarget { step_id: String },
+    /// A suspending step's timeout is at most the deadline margin, so it times
+    /// out instead of parking.
+    WaitTimeoutBelowDeadlineMargin {
+        step_id: String,
+        timeout_ms: u64,
+        margin_ms: u64,
+    },
+    /// A `stateSchema` field sets `required`, `default` or `visibleWhen`.
+    /// State starts empty and is written by steps, so these settings have
+    /// no effect.
+    IneffectiveStateSchemaSetting {
+        field_name: String,
+        /// The ineffective settings, in DSL spelling.
+        settings: Vec<String>,
+    },
+}
+
+impl ValidationWarning {
+    /// Stable machine-readable code — the `[WXXX]` prefix of the
+    /// [`Display`](std::fmt::Display) message.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownInputField { .. } => "W020",
+            Self::HighRetryCount { .. } => "W030",
+            Self::LongRetryDelay { .. } => "W031",
+            Self::SplitParallelismIgnored { .. } => "W073",
+            Self::HighMaxIterations { .. } => "W033",
+            Self::LongTimeout { .. } => "W034",
+            Self::SelfReference { .. } => "W050",
+            Self::DanglingStep { .. } => "W003",
+            Self::DuplicateEdgeToTarget { .. } => "W040",
+            Self::OnWaitIgnoredForAiAgentTool { .. } => "W072",
+            Self::PartiallyUnverifiedReference { .. } => "W051",
+            Self::TemplateReferenceIssue { .. } => "W052",
+            Self::BareErrorReference { .. } => "W053",
+            Self::UnverifiedDataReference { .. } => "W080",
+            Self::ConstantRunLabelInLoop { .. } => "W074",
+            Self::SerializedOperationScopedStep { .. } => "W075",
+            Self::OperationScopedStepUnderEnclosingRetry { .. } => "W076",
+            Self::DynamicControlStartTarget { .. } => "W077",
+            Self::WaitTimeoutBelowDeadlineMargin { .. } => "W078",
+            Self::IneffectiveStateSchemaSetting { .. } => "W081",
+        }
+    }
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -1355,7 +1591,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint and not a workflow-agent child, on a Split with no retries; enclosing and Split timeouts retain the concurrent window, while other shapes run sequentially.",
+                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint, not a workflow-agent child and no operation-scoped (suspending or control) step, on a Split with no retries; enclosing and Split timeouts retain the concurrent window, while other shapes run sequentially.",
                     step_id, parallelism
                 )
             }
@@ -1466,6 +1702,65 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, reference
                 )
             }
+            ValidationWarning::ConstantRunLabelInLoop {
+                step_id,
+                loop_step_id,
+            } => write!(
+                f,
+                "[W074] Step '{}' starts a child with a literal runLabel inside loop '{}'. Run labels are unique per parent, so the second iteration fails with label-conflict; build the label from the iteration (for example with a template).",
+                step_id, loop_step_id
+            ),
+            ValidationWarning::SerializedOperationScopedStep {
+                step_id,
+                context,
+                owner_step_id,
+            } => write!(
+                f,
+                "[W075] Step '{}' is operation-scoped (suspending or control), so {} '{}' runs it serialized, never concurrently: {}",
+                step_id,
+                if context == "parallel-split" {
+                    "parallel Split"
+                } else {
+                    "the branch group fanning out of"
+                },
+                owner_step_id,
+                operation_rule_description(context)
+            ),
+            ValidationWarning::OperationScopedStepUnderEnclosingRetry {
+                step_id,
+                retry_step_id,
+                child_workflow_id,
+            } => write!(
+                f,
+                "[W076] Step '{}'{} is operation-scoped (suspending or control) and '{}' retries the region around it: a retry replays the operation's first outcome instead of repeating it. Set maxRetries: 0 on '{}' or retry the step itself.",
+                step_id,
+                embedded_suffix(child_workflow_id.as_deref()),
+                retry_step_id,
+                retry_step_id
+            ),
+            ValidationWarning::DynamicControlStartTarget { step_id } => write!(
+                f,
+                "[W077] Step '{}' starts a workflow whose workflowId is not a literal; the target is only checked when the step runs (not-found or not-runnable then).",
+                step_id
+            ),
+            ValidationWarning::WaitTimeoutBelowDeadlineMargin {
+                step_id,
+                timeout_ms,
+                margin_ms,
+            } => write!(
+                f,
+                "[W078] Step '{}' calls a suspending capability with timeout={}ms, at most the {}ms deadline margin: it times out instead of parking. Raise the timeout.",
+                step_id, timeout_ms, margin_ms
+            ),
+            ValidationWarning::IneffectiveStateSchemaSetting {
+                field_name,
+                settings,
+            } => write!(
+                f,
+                "[W081] State schema field '{}' sets {}, which has no effect: state starts empty and is written by steps. Remove the setting.",
+                field_name,
+                settings.join(", ")
+            ),
         }
     }
 }
@@ -1526,8 +1821,15 @@ pub fn validate_workflow(
     // Phase 3: Agent/capability validation
     validate_agents(graph, catalog, &mut result);
 
+    // Phase 3.1: Where operation-scoped (suspending or control) steps may
+    // appear (E028, E029, E131, E132, W074-W078)
+    operation_scoped::validate_suspending_steps(graph, catalog, &mut result);
+
     // Phase 4: Configuration warnings
     validate_configuration(graph, &mut result);
+
+    // Phase 4.1: stateSchema settings that have no effect for state (W081)
+    state_schema::validate_state_schema(graph, &mut result);
 
     // Phase 5: Child workflow validation
     validate_child_workflows(graph, &mut result);
@@ -1694,6 +1996,11 @@ impl ClosureValidationReport {
 ///   the flattened child list by embed step id, so two `EmbedWorkflow`
 ///   steps with the same id anywhere in the closure cannot compile
 ///   (`embed-workflow-duplicate-child`).
+/// - **Operation-scoped calls through embeds**: each EmbedWorkflow call site
+///   is judged against the suspending or control calls anywhere in the
+///   workflow it embeds — a non-durable call site (E028), an embed used as an
+///   AiAgent tool or inside `onWait` (E131/E132) or an onError region (E131),
+///   a parallel window (W075) and retries around it, its own included (W076).
 ///
 /// This is the validation entry behind both the server's save gate and
 /// `runtara-compile`; the callers only differ in how they resolve `children`.
@@ -1717,6 +2024,12 @@ pub fn validate_workflow_closure(
 
     let mut root_result = validate_workflow(root, catalog);
     report_missing_child_references(root, &children_map, &mut root_result);
+    operation_scoped::validate_operation_scoped_embed_sites(
+        root,
+        &children_map,
+        catalog,
+        &mut root_result,
+    );
     validate_closure_cycles(root_workflow_id, root, &children_map, &mut root_result);
     if !root_result
         .errors
@@ -1736,6 +2049,12 @@ pub fn validate_workflow_closure(
         }
         let mut result = validate_workflow(&child.execution_graph, catalog);
         report_missing_child_references(&child.execution_graph, &children_map, &mut result);
+        operation_scoped::validate_operation_scoped_embed_sites(
+            &child.execution_graph,
+            &children_map,
+            catalog,
+            &mut result,
+        );
         validate_embed_workflow_inputs(&child.execution_graph, &children_map, &mut result);
         validate_embed_workflow_outputs(&child.execution_graph, &children_map, &mut result);
         unique_child_graphs.push(&child.execution_graph);
@@ -2836,7 +3155,11 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(&action.context);
             }
         }
-        Step::Conditional(_) | Step::Switch(_) | Step::Delay(_) | Step::AiAgent(_) => {}
+        Step::Conditional(_)
+        | Step::Switch(_)
+        | Step::Delay(_)
+        | Step::WaitForInstances(_)
+        | Step::AiAgent(_) => {}
     }
 
     mappings
@@ -2889,6 +3212,12 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
             extract_references_from_mapping_value(&delay_step.duration_ms, &mut refs);
         }
         Step::WaitForSignal(wait_step) => {
+            if let Some(timeout) = &wait_step.timeout_ms {
+                extract_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
+        Step::WaitForInstances(wait_step) => {
+            extract_references_from_mapping_value(&wait_step.instance_ids, &mut refs);
             if let Some(timeout) = &wait_step.timeout_ms {
                 extract_references_from_mapping_value(timeout, &mut refs);
             }
@@ -4064,6 +4393,76 @@ const MAX_RETRY_DELAY_MS: u64 = 3_600_000; // 1 hour
 const MAX_ITERATIONS_RECOMMENDED: u32 = 10_000;
 const MAX_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 
+/// Most distinct runs one WaitForInstances step may wait on.
+pub const MAX_WAIT_FOR_INSTANCES_TARGETS: usize = 1000;
+
+/// E133: literal `instanceIds` must be a non-empty array of non-empty string
+/// ids with at most [`MAX_WAIT_FOR_INSTANCES_TARGETS`] distinct ones, and a
+/// literal `timeoutMs` a positive integer. References are checked when the
+/// step runs.
+fn validate_wait_for_instances_config(
+    step_id: &str,
+    wait: &runtara_dsl::WaitForInstancesStep,
+    result: &mut ValidationResult,
+) {
+    let mut invalid = |field: &str, message: String| {
+        result
+            .errors
+            .push(ValidationError::InvalidWaitForInstancesConfig {
+                step_id: step_id.to_string(),
+                field: field.to_string(),
+                message,
+            });
+    };
+    if let MappingValue::Immediate(immediate) = &wait.instance_ids {
+        match immediate.value.as_array() {
+            None => invalid(
+                "instanceIds",
+                "must be an array of instance ids".to_string(),
+            ),
+            Some(ids) if ids.is_empty() => invalid(
+                "instanceIds",
+                "names no runs; a wait needs at least one".to_string(),
+            ),
+            Some(ids) => {
+                let mut distinct = HashSet::new();
+                for id in ids {
+                    match id.as_str() {
+                        Some(id) if !id.trim().is_empty() => {
+                            distinct.insert(id);
+                        }
+                        _ => {
+                            invalid(
+                                "instanceIds",
+                                "must hold only non-empty string ids".to_string(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                if distinct.len() > MAX_WAIT_FOR_INSTANCES_TARGETS {
+                    invalid(
+                        "instanceIds",
+                        format!(
+                            "names {} distinct runs; a wait names at most {}",
+                            distinct.len(),
+                            MAX_WAIT_FOR_INSTANCES_TARGETS
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(MappingValue::Immediate(immediate)) = &wait.timeout_ms
+        && !immediate.value.as_u64().is_some_and(|ms| ms > 0)
+    {
+        invalid(
+            "timeoutMs",
+            "must be a positive integer number of milliseconds".to_string(),
+        );
+    }
+}
+
 fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Some(max_retries) = crate::retry_budget::step_max_retries(step)
@@ -4075,6 +4474,9 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
             });
         }
         match step {
+            Step::WaitForInstances(wait) => {
+                validate_wait_for_instances_config(step_id, wait, result);
+            }
             Step::AiAgent(ai_step) => {
                 // Retry hygiene applies to LLM calls too (each retry re-bills).
                 if let Some(config) = ai_step.config.as_ref() {
@@ -4321,6 +4723,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::GroupBy(s) => s.name.as_ref(),
             Step::Delay(s) => s.name.as_ref(),
             Step::WaitForSignal(s) => s.name.as_ref(),
+            Step::WaitForInstances(s) => s.name.as_ref(),
             Step::AiAgent(s) => s.name.as_ref(),
         };
 
@@ -4847,6 +5250,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::WaitForInstances(_) => "WaitForInstances",
         Step::AiAgent(_) => "AiAgent",
     }
 }
@@ -5819,6 +6223,12 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_input_mapping(&action.context, &mut refs);
             }
         }
+        Step::WaitForInstances(wait_step) => {
+            extract_references_from_mapping_value(&wait_step.instance_ids, &mut refs);
+            if let Some(ref timeout) = wait_step.timeout_ms {
+                extract_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
         Step::Error(error_step) => {
             if let Some(ref context) = error_step.context {
                 extract_references_from_input_mapping(context, &mut refs);
@@ -5953,6 +6363,15 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
                     &mut refs,
                 );
                 extract_template_static_references_from_input_mapping(&action.context, &mut refs);
+            }
+        }
+        Step::WaitForInstances(wait_step) => {
+            extract_template_static_references_from_mapping_value(
+                &wait_step.instance_ids,
+                &mut refs,
+            );
+            if let Some(ref timeout) = wait_step.timeout_ms {
+                extract_template_static_references_from_mapping_value(timeout, &mut refs);
             }
         }
         Step::Error(error_step) => {

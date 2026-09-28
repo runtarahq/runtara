@@ -122,7 +122,7 @@ async fn cloud_cancel(
     });
     let output = run_cancellation_fixture(
         bytes,
-        FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+        FixtureContext::with_upstream("fixture-tenant", upstream),
         started,
         cleaned,
         server,
@@ -202,7 +202,7 @@ async fn object_storage_preserves_delete_statuses_and_download_head_fallback() -
                     Duration::from_secs(10),
                     invoke_named_agent(
                         agent,
-                        FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+                        FixtureContext::with_upstream("fixture-tenant", upstream),
                         capability,
                         serde_json::to_vec(&input(agent))?,
                     ),

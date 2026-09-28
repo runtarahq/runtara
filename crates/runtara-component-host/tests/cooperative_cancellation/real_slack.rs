@@ -100,7 +100,7 @@ async fn cancellation(
         Duration::from_secs(15),
         cancel_and_reuse(
             bytes,
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             started,
             cleaned,
         ),
@@ -213,7 +213,7 @@ async fn slack_async_dispatch_preserves_retry_and_slack_error_contracts() -> any
             Duration::from_secs(10),
             invoke_named_agent(
                 "slack",
-                FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+                FixtureContext::with_upstream("fixture-tenant", upstream),
                 "add-reaction",
                 input,
             ),

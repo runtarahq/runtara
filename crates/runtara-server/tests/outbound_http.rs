@@ -332,7 +332,7 @@ async fn real_http_component_uses_stored_credentials_without_internal_listener()
         routing::post,
     };
     use runtara_component_host::{
-        ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
+        ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     allow_local_egress_for_this_test_binary();
@@ -410,13 +410,7 @@ async fn real_http_component_uses_stored_credentials_without_internal_listener()
         let name = format!("runtara_agent_http.{extension}");
         std::fs::copy(components.join(&name), bundle.path().join(name))?;
     }
-    let dispatcher = ComponentDispatcherService::from_dir(
-        bundle.path(),
-        DispatcherEnv {
-            core_http_url: String::new(),
-        },
-    )
-    .await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     dispatcher.set_outbound_http(outbound.clone())?;
     let request = |tenant_id: String| TestCapabilityRequest {
         tenant_id,

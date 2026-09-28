@@ -120,12 +120,24 @@ pub enum TerminationReason {
     Cancelled,
     /// Execution ended without a cooperative cancellation cleanup receipt.
     Aborted,
-    /// Paused by pause signal.
+    /// Paused by pause signal. Never written; decode-only.
     Paused,
     /// Suspended for durable sleep.
     Sleeping,
     /// Instance was running but not tracked by any Environment (e.g., after restart).
     Orphaned,
+    /// Suspended while parked on a signal (`WaitForSignal`).
+    WaitingSignal,
+    /// Suspended while parked on durable instance waits (`WaitForInstances`).
+    WaitingInstances,
+    /// Suspended after acknowledging a shutdown request.
+    ShutdownRequested,
+    /// Suspended by an environment restart, to be recovered.
+    EnvironmentRestart,
+    /// Stayed queued past its launch-queue deadline and never started.
+    LaunchQueueTimeout,
+    /// The runner never durably crossed the start gate, so no guest code ran.
+    StartGateFailed,
 }
 
 impl TerminationReason {
@@ -146,6 +158,12 @@ impl TerminationReason {
             "paused" => Some(Self::Paused),
             "sleeping" => Some(Self::Sleeping),
             "orphaned" => Some(Self::Orphaned),
+            "waiting_signal" => Some(Self::WaitingSignal),
+            "waiting_instances" => Some(Self::WaitingInstances),
+            "shutdown_requested" => Some(Self::ShutdownRequested),
+            "environment_restart" => Some(Self::EnvironmentRestart),
+            "launch_queue_timeout" => Some(Self::LaunchQueueTimeout),
+            "start_gate_failed" => Some(Self::StartGateFailed),
             _ => None,
         }
     }
@@ -163,6 +181,12 @@ impl TerminationReason {
             Self::Paused => "paused",
             Self::Sleeping => "sleeping",
             Self::Orphaned => "orphaned",
+            Self::WaitingSignal => "waiting_signal",
+            Self::WaitingInstances => "waiting_instances",
+            Self::ShutdownRequested => "shutdown_requested",
+            Self::EnvironmentRestart => "environment_restart",
+            Self::LaunchQueueTimeout => "launch_queue_timeout",
+            Self::StartGateFailed => "start_gate_failed",
         }
     }
 }
@@ -186,6 +210,13 @@ pub struct InstanceInfo {
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
     // Identity
     /// Instance ID.
     pub instance_id: String,
@@ -238,6 +269,9 @@ pub struct InstanceInfo {
     // Termination tracking (available for terminal states)
     /// How the instance terminated.
     pub termination_reason: Option<TerminationReason>,
+    /// Why a suspended instance is not running.
+    #[serde(default)]
+    pub suspension_reason: Option<crate::types::SuspensionReason>,
     /// Process exit code (if available).
     pub exit_code: Option<i32>,
 }
@@ -248,6 +282,13 @@ pub struct InstanceSummary {
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
     /// Instance ID.
     pub instance_id: String,
     /// Tenant ID.
@@ -271,6 +312,9 @@ pub struct InstanceSummary {
     pub finished_at: Option<DateTime<Utc>>,
     /// Whether the instance has an error.
     pub has_error: bool,
+    /// Why a suspended instance is not running.
+    #[serde(default)]
+    pub suspension_reason: Option<crate::types::SuspensionReason>,
 }
 
 /// Result of listing instances.
@@ -288,6 +332,10 @@ pub struct StartInstanceOptions {
     /// Immutable optional execution reference, validated at start.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
+    /// The run that started this one through `control:start`, with its
+    /// parent-close policy and admission time.
+    #[serde(skip)]
+    pub parent: Option<runtara_core::persistence::ParentLink>,
 
     /// Image ID to launch.
     pub image_id: String,
@@ -434,6 +482,9 @@ pub struct ListInstancesOptions {
     pub search: Option<String>,
     /// Exact execution label filter (no normalization).
     pub run_label: Option<String>,
+    /// Only the children of this run (`control:start`).
+    #[serde(default)]
+    pub parent_instance_id: Option<String>,
     /// Workflow IDs whose names match search, resolved in the server database.
     #[serde(default)]
     pub search_workflow_ids: Vec<String>,
@@ -1435,6 +1486,65 @@ mod tests {
     use serde_json::json;
 
     // ========================================================================
+    // TerminationReason tests
+    // ========================================================================
+
+    /// Every `termination_reason` label the database enum can hold decodes,
+    /// and each variant encodes back to its label (by name and through serde).
+    /// A label the server cannot decode reads as `None`, hiding why a run ended.
+    #[test]
+    fn termination_reason_labels_round_trip() {
+        let labels = [
+            "completed",
+            "application_error",
+            "crashed",
+            "timeout",
+            "heartbeat_timeout",
+            "cancelled",
+            "aborted",
+            "paused",
+            "sleeping",
+            "orphaned",
+            "waiting_signal",
+            "waiting_instances",
+            "shutdown_requested",
+            "environment_restart",
+            "launch_queue_timeout",
+            "start_gate_failed",
+        ];
+        for label in labels {
+            let reason = TerminationReason::from_str(label)
+                .unwrap_or_else(|| panic!("`{label}` must decode"));
+            // Exhaustive: a new variant must join the label list above.
+            match reason {
+                TerminationReason::Completed
+                | TerminationReason::ApplicationError
+                | TerminationReason::Crashed
+                | TerminationReason::Timeout
+                | TerminationReason::HeartbeatTimeout
+                | TerminationReason::Cancelled
+                | TerminationReason::Aborted
+                | TerminationReason::Paused
+                | TerminationReason::Sleeping
+                | TerminationReason::Orphaned
+                | TerminationReason::WaitingSignal
+                | TerminationReason::WaitingInstances
+                | TerminationReason::ShutdownRequested
+                | TerminationReason::EnvironmentRestart
+                | TerminationReason::LaunchQueueTimeout
+                | TerminationReason::StartGateFailed => {}
+            }
+            assert_eq!(reason.as_str(), label);
+            assert_eq!(serde_json::to_value(reason).unwrap(), json!(label));
+            assert_eq!(
+                serde_json::from_value::<TerminationReason>(json!(label)).unwrap(),
+                reason
+            );
+        }
+        assert_eq!(TerminationReason::from_str("not_a_reason"), None);
+    }
+
+    // ========================================================================
     // InstanceStatus tests
     // ========================================================================
 
@@ -1916,6 +2026,7 @@ mod tests {
     fn test_instance_info_with_metrics() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -1934,6 +2045,7 @@ mod tests {
             memory_peak_bytes: Some(536_870_912), // 512 MB
             cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
             termination_reason: Some(TerminationReason::Completed),
+            suspension_reason: None,
             exit_code: Some(0),
         };
 
@@ -1947,6 +2059,7 @@ mod tests {
     fn test_instance_info_without_metrics() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -1965,6 +2078,7 @@ mod tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: None, // Running, no termination yet
+            suspension_reason: None,
             exit_code: None,
         };
 
@@ -1978,6 +2092,7 @@ mod tests {
     fn test_instance_info_serde_with_metrics() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "workflow".to_string(),
@@ -1996,6 +2111,7 @@ mod tests {
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
             cpu_usage_usec: Some(5_000_000),        // 5 seconds
             termination_reason: Some(TerminationReason::Completed),
+            suspension_reason: None,
             exit_code: Some(0),
         };
 
@@ -2016,6 +2132,7 @@ mod tests {
     fn test_instance_info_with_stderr() {
         let info = InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-123".to_string(),
             image_id: "img-456".to_string(),
             image_name: "my-workflow:v1".to_string(),
@@ -2034,6 +2151,7 @@ mod tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: Some(TerminationReason::ApplicationError),
+            suspension_reason: None,
             exit_code: Some(1),
         };
 

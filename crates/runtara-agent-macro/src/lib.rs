@@ -173,6 +173,11 @@ struct CapabilityArgs {
     /// Run in a fresh restricted instance with host-authorized credentials.
     #[darling(default)]
     trusted: bool,
+    /// May answer with a typed suspension. The function takes an immutable
+    /// `&runtara_agent_suspension::SuspendContext` and returns
+    /// `Result<runtara_agent_suspension::Suspendable<O>, E>`.
+    #[darling(default)]
+    suspends: bool,
 
     // === Error introspection attributes ===
     /// Known errors this capability can return.
@@ -311,6 +316,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Derive capability_id from function name if not provided (snake_case -> kebab-case)
     let capability_id = args.id.unwrap_or_else(|| fn_name_str.replace('_', "-"));
     let capability_id_ident = format_ident!("__CAPABILITY_ID_{}", fn_name_str.to_uppercase());
+    let suspends_ident = format_ident!("__CAPABILITY_SUSPENDS_{}", fn_name_str.to_uppercase());
 
     // Extract input type from first parameter
     let input_type = input_fn
@@ -327,8 +333,14 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         })
         .unwrap_or_else(|| "Unknown".to_string());
 
-    // Extract output type from Result<T, String>
+    // Extract output type from Result<T, String>; a suspending capability's
+    // declared output is the `O` of its `Suspendable<O>`.
     let output_type = extract_result_ok_type(&input_fn.sig.output);
+    let output_type = if args.suspends {
+        unwrap_suspendable_type(&output_type)
+    } else {
+        output_type
+    };
 
     let display_name = args.display_name;
     let description = args.description;
@@ -336,7 +348,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let idempotent = args.idempotent.unwrap_or(!side_effects);
     let rate_limited = args.rate_limited;
     let trusted = args.trusted;
-    if let Err(error) = validate_capability_signature(&input_fn.sig, trusted) {
+    let suspends = args.suspends;
+    if let Err(error) = validate_capability_signature(&input_fn.sig, trusted, suspends) {
         return error.to_compile_error().into();
     }
     let module = args.module;
@@ -451,7 +464,63 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let executor_wrapper = if trusted {
+    let executor_wrapper = if suspends {
+        let suspend_fn_ident = format_ident!("__suspend_{}", fn_name);
+        // The plain `capabilities.invoke` path cannot park, so it refuses; only
+        // `suspendable.invoke` (through `agent_component!`) reaches the body.
+        quote! {
+            #[doc(hidden)]
+            pub(crate) async fn #invoke_fn_ident(_input: serde_json::Value) -> Result<serde_json::Value, String> {
+                Err(serde_json::json!({
+                    "code": runtara_agent_suspension::SUSPENSION_UNSUPPORTED,
+                    "message": format!("{} suspends and can only run as a durable workflow step", #capability_id),
+                    "category": "permanent",
+                    "severity": "error"
+                }).to_string())
+            }
+
+            #[doc(hidden)]
+            pub(crate) async fn #suspend_fn_ident(
+                input: serde_json::Value,
+                context: &runtara_agent_suspension::SuspendContext,
+            ) -> Result<runtara_agent_suspension::Suspendable<serde_json::Value>, String> {
+                let __to_json_error = |code: &str, msg: String| -> String {
+                    serde_json::json!({
+                        "code": code,
+                        "message": msg,
+                        "category": "permanent",
+                        "severity": "error"
+                    }).to_string()
+                };
+                let coerced_input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
+                let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
+                    .map_err(|e| __to_json_error("INPUT_DESERIALIZATION_ERROR",
+                        format!("Invalid input for {}: {}", #capability_id, e)))?;
+                let result = #fn_name(typed_input, context)#await_result.map_err(|e| {
+                    let s: String = e.into();
+                    if s.starts_with('{') { s } else {
+                        __to_json_error("CAPABILITY_ERROR", s)
+                    }
+                })?;
+                Ok(match result {
+                    runtara_agent_suspension::Suspendable::Completed(output) => {
+                        runtara_agent_suspension::Suspendable::Completed(
+                            serde_json::to_value(output).map_err(|e| __to_json_error(
+                                "OUTPUT_SERIALIZATION_ERROR",
+                                format!("Failed to serialize result for {}: {}", #capability_id, e),
+                            ))?,
+                        )
+                    }
+                    runtara_agent_suspension::Suspendable::Suspended { wakes, state } => {
+                        runtara_agent_suspension::validate_suspension(&wakes, &state).map_err(|message| {
+                            __to_json_error(runtara_agent_suspension::AGENT_INVALID_SUSPENSION, message)
+                        })?;
+                        runtara_agent_suspension::Suspendable::Suspended { wakes, state }
+                    }
+                })
+            }
+        }
+    } else if trusted {
         let trusted_executor = format_ident!("__trusted_executor_{}", fn_name);
         // Only this separate wrapper accepts host credentials. The ordinary
         // executor forwards public input and an opaque ID across the host ABI.
@@ -544,6 +613,9 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[doc(hidden)]
         pub const #capability_id_ident: &str = #capability_id;
 
+        #[doc(hidden)]
+        pub const #suspends_ident: bool = #suspends;
+
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         pub static #meta_ident: runtara_dsl::agent_meta::CapabilityMeta = runtara_dsl::agent_meta::CapabilityMeta {
@@ -558,6 +630,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             is_idempotent: #idempotent,
             rate_limited: #rate_limited,
             trusted: #trusted,
+            suspends: #suspends,
             known_errors: #known_errors_token,
             tags: #tags_token,
         };
@@ -1877,21 +1950,57 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn validate_capability_signature(signature: &syn::Signature, trusted: bool) -> syn::Result<()> {
-    let valid_count = signature.inputs.len() == if trusted { 2 } else { 1 };
-    let valid_context = !trusted || signature.inputs.last().is_some_and(|arg| {
-        matches!(arg, syn::FnArg::Typed(arg) if matches!(arg.ty.as_ref(),
-            syn::Type::Reference(reference) if reference.mutability.is_none()
-                && matches!(reference.elem.as_ref(), syn::Type::Path(path)
-                    if path.path.segments.last().is_some_and(|segment| segment.ident == "TrustedContext"))))
-    });
-    if !valid_count || !valid_context {
+fn validate_capability_signature(
+    signature: &syn::Signature,
+    trusted: bool,
+    suspends: bool,
+) -> syn::Result<()> {
+    if trusted && suspends {
         return Err(syn::Error::new_spanned(
             signature,
-            "capabilities take one input; trusted capabilities also take an immutable &TrustedContext",
+            "a trusted capability cannot suspend: trusted execution runs in a fresh store \
+             that cannot park",
+        ));
+    }
+    let context = match (trusted, suspends) {
+        (true, _) => Some("TrustedContext"),
+        (_, true) => Some("SuspendContext"),
+        _ => None,
+    };
+    let valid_count = signature.inputs.len() == if context.is_some() { 2 } else { 1 };
+    let valid_context = context.is_none_or(|context| {
+        signature.inputs.last().is_some_and(|arg| {
+            matches!(arg, syn::FnArg::Typed(arg) if matches!(arg.ty.as_ref(),
+                syn::Type::Reference(reference) if reference.mutability.is_none()
+                    && matches!(reference.elem.as_ref(), syn::Type::Path(path)
+                        if path.path.segments.last().is_some_and(|segment| segment.ident == context))))
+        })
+    });
+    let valid_output = !suspends
+        || unwrap_suspendable_type(&extract_result_ok_type(&signature.output))
+            != extract_result_ok_type(&signature.output);
+    if !valid_count || !valid_context || !valid_output {
+        return Err(syn::Error::new_spanned(
+            signature,
+            "capabilities take one input; trusted capabilities also take an immutable \
+             &TrustedContext; suspending capabilities also take an immutable &SuspendContext \
+             and return Result<Suspendable<O>, E>",
         ));
     }
     Ok(())
+}
+
+/// The `O` of a `Suspendable<O>` type string, or the string unchanged.
+fn unwrap_suspendable_type(ty: &str) -> String {
+    let trimmed = ty.trim();
+    let inner = trimmed
+        .split_once("Suspendable<")
+        .filter(|(prefix, _)| prefix.is_empty() || prefix.ends_with("::"))
+        .and_then(|(_, rest)| rest.strip_suffix('>'));
+    match inner {
+        Some(inner) => inner.trim().to_string(),
+        None => trimmed.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1908,8 +2017,9 @@ mod tests {
             ) -> Result<Output, Error> {
             }
         );
-        assert!(validate_capability_signature(&valid.sig, true).is_ok());
-        assert!(validate_capability_signature(&valid.sig, false).is_err());
+        assert!(validate_capability_signature(&valid.sig, true, false).is_ok());
+        assert!(validate_capability_signature(&valid.sig, false, false).is_err());
+        assert!(validate_capability_signature(&valid.sig, true, true).is_err());
         for function in [
             parse_quote!(
                 fn sign(input: Input) {}
@@ -1925,7 +2035,53 @@ mod tests {
             ),
         ] {
             let function: syn::ItemFn = function;
-            assert!(validate_capability_signature(&function.sig, true).is_err());
+            assert!(validate_capability_signature(&function.sig, true, false).is_err());
+        }
+    }
+
+    #[test]
+    fn suspending_signatures_take_a_context_and_return_suspendable() {
+        let valid: syn::ItemFn = parse_quote!(
+            async fn wait(
+                input: Input,
+                context: &runtara_agent_suspension::SuspendContext,
+            ) -> Result<runtara_agent_suspension::Suspendable<Output>, String> {
+            }
+        );
+        assert!(validate_capability_signature(&valid.sig, false, true).is_ok());
+        assert!(validate_capability_signature(&valid.sig, false, false).is_err());
+        assert_eq!(
+            unwrap_suspendable_type(&extract_result_ok_type(&valid.sig.output)),
+            "Output"
+        );
+        for function in [
+            parse_quote!(
+                fn wait(input: Input, context: &SuspendContext) -> Result<Output, String> {}
+            ),
+            parse_quote!(
+                fn wait(input: Input) -> Result<Suspendable<Output>, String> {}
+            ),
+            parse_quote!(
+                fn wait(
+                    input: Input,
+                    context: &mut SuspendContext,
+                ) -> Result<Suspendable<Output>, String> {
+                }
+            ),
+            parse_quote!(
+                fn wait(
+                    input: Input,
+                    context: &TrustedContext,
+                ) -> Result<Suspendable<Output>, String> {
+                }
+            ),
+        ] {
+            let function: syn::ItemFn = function;
+            assert!(
+                validate_capability_signature(&function.sig, false, true).is_err(),
+                "{}",
+                quote!(#function)
+            );
         }
     }
 

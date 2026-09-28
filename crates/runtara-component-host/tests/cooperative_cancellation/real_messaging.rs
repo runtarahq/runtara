@@ -98,7 +98,7 @@ async fn cancellation(agent: &'static str, blocked: usize, partial: bool) -> any
     });
     let output = run_cancellation_fixture(
         bytes,
-        FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+        FixtureContext::with_upstream("fixture-tenant", upstream),
         started,
         cleaned,
         server,
@@ -147,7 +147,7 @@ async fn messaging_async_exports_preserve_error_classification() -> anyhow::Resu
                 Duration::from_secs(10),
                 invoke_named_agent(
                     agent,
-                    FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+                    FixtureContext::with_upstream("fixture-tenant", upstream),
                     capability,
                     serde_json::to_vec(&input(agent, true))?,
                 ),

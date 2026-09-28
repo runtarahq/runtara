@@ -130,6 +130,16 @@ pub(super) enum DirectRunPlan {
         /// WAIT_TIMEOUT error dispatches here instead of failing the workflow.
         error_plan: Option<DirectErrorRoutePlan>,
     },
+    /// Park on a durable wait for direct child runs; the settled wait is the
+    /// step's output. Always operation-scoped and suspending.
+    WaitForInstances {
+        step_id: String,
+        breakpoint: bool,
+        next_plan: Box<DirectRunPlan>,
+        /// A failed registration or read (not a deadline, which settles the
+        /// wait) dispatches here instead of failing the workflow.
+        error_plan: Option<DirectErrorRoutePlan>,
+    },
     Log {
         step_id: String,
         log_id: u32,
@@ -143,6 +153,9 @@ pub(super) enum DirectRunPlan {
         input_mapping_id: u32,
         durable_checkpoint: bool,
         breakpoint: bool,
+        /// Operation-scoped (suspending or control) call: never launched in a
+        /// parallel window (see [`plan_contains_operation_scoped`]).
+        operation_scoped: bool,
         max_retries: u32,
         retry_delay_ms: u64,
         rate_limit_budget_ms: u64,
@@ -456,8 +469,8 @@ pub(super) fn direct_run_plan(
 
     match entry.step_type.as_str() {
         "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "While" | "Delay"
-        | "EmbedWorkflow" | "WaitForSignal" | "Log" | "Agent" | "AiAgent" | "Error"
-        | "Conditional" => step_run_plan(
+        | "EmbedWorkflow" | "WaitForSignal" | "WaitForInstances" | "Log" | "Agent" | "AiAgent"
+        | "Error" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.child_workflows,
             &manifest.graph.entry_point,
@@ -865,6 +878,28 @@ fn step_run_plan_inner(
                 },
             })
         }
+        "WaitForInstances" => {
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+                region_root,
+                orders,
+            )?;
+            Ok(DirectRunPlan::WaitForInstances {
+                step_id: step_id.to_string(),
+                breakpoint: step_breakpoint_enabled(graph, step),
+                next_plan: Box::new(next_plan),
+                error_plan: if include_on_error {
+                    on_error_plan(graph, child_workflows, step_id, stack, orders)?
+                } else {
+                    None
+                },
+            })
+        }
         "Log" => {
             let log_id = log_id(graph, step_id)?;
             let next_plan = normal_flow_plan(
@@ -914,6 +949,7 @@ fn step_run_plan_inner(
                 input_mapping_id: agent.input_mapping_id,
                 durable_checkpoint,
                 breakpoint: step_breakpoint_enabled(graph, step),
+                operation_scoped: agent.operation_scoped,
                 max_retries,
                 retry_delay_ms,
                 rate_limit_budget_ms,
@@ -1983,6 +2019,9 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
             }
             | DirectRunPlan::Delay {
                 step_id, next_plan, ..
+            }
+            | DirectRunPlan::WaitForInstances {
+                step_id, next_plan, ..
             } => {
                 // Collect only the loop's OWN step_id; its tool-target steps (Wait /
                 // Embed) are reached via tool edges, off the normal-flow graph
@@ -2071,6 +2110,140 @@ pub(super) fn ai_tool_suspends(tool: &DirectAiToolPlan) -> bool {
     }
 }
 
+/// Whether `plan` holds an operation-scoped (suspending or control) Agent call
+/// anywhere: continuations, arms, loop bodies, error routes and embedded
+/// children. Such a region never runs in a parallel window, so a Split body or
+/// branch group holding one runs sequentially. AiAgent tools and memory never
+/// hold one: `agent_suspend::check_sites` refuses them before planning.
+pub(super) fn plan_contains_operation_scoped(plan: &DirectRunPlan) -> bool {
+    use DirectRunPlan as P;
+    let error_route = |error_plan: &Option<DirectErrorRoutePlan>| {
+        error_plan.as_ref().is_some_and(|route| {
+            route
+                .branches
+                .iter()
+                .any(|branch| plan_contains_operation_scoped(&branch.plan))
+                || route
+                    .default_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_contains_operation_scoped(plan))
+        })
+    };
+    let merge = |merge_plan: &Option<Box<DirectRunPlan>>| {
+        merge_plan
+            .as_ref()
+            .is_some_and(|plan| plan_contains_operation_scoped(plan))
+    };
+    match plan {
+        P::Agent {
+            operation_scoped,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            *operation_scoped
+                || plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+        }
+        P::AiAgent {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::AiAgentLoop {
+            next_plan,
+            error_plan,
+            ..
+        } => plan_contains_operation_scoped(next_plan) || error_route(error_plan),
+        P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
+        P::Filter { next_plan, .. }
+        | P::SwitchValue { next_plan, .. }
+        | P::GroupBy { next_plan, .. }
+        | P::Log { next_plan, .. } => plan_contains_operation_scoped(next_plan),
+        P::Delay { next_plan, .. } => plan_contains_operation_scoped(next_plan),
+        // Its wait is keyed by the step's own identity.
+        P::WaitForInstances { .. } => true,
+        P::WaitForSignal {
+            next_plan,
+            error_plan,
+            on_wait_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+                || on_wait_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan_contains_operation_scoped(plan))
+        }
+        P::Conditional {
+            true_plan,
+            false_plan,
+            merge_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(true_plan)
+                || plan_contains_operation_scoped(false_plan)
+                || merge(merge_plan)
+        }
+        P::SwitchRoute {
+            branches,
+            default_plan,
+            merge_plan,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|branch| plan_contains_operation_scoped(&branch.plan))
+                || plan_contains_operation_scoped(default_plan)
+                || merge(merge_plan)
+        }
+        P::EdgeRoute {
+            branches,
+            default_plan,
+            merge_plan,
+        } => {
+            branches
+                .iter()
+                .any(|branch| plan_contains_operation_scoped(&branch.plan))
+                || plan_contains_operation_scoped(default_plan)
+                || merge(merge_plan)
+        }
+        P::While {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::Split {
+            nested_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(nested_plan)
+                || plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+        }
+        P::EmbedWorkflow {
+            child_plan,
+            next_plan,
+            error_plan,
+            ..
+        } => {
+            plan_contains_operation_scoped(child_plan)
+                || plan_contains_operation_scoped(next_plan)
+                || error_route(error_plan)
+        }
+        P::ParallelBranches {
+            branches,
+            merge_plan,
+        } => {
+            branches.iter().any(plan_contains_operation_scoped)
+                || plan_contains_operation_scoped(merge_plan)
+        }
+    }
+}
+
 /// Whether THIS node carries a breakpoint (a debug-mode pause point). A breakpoint
 /// is only emitted for a durable graph (`step_breakpoint_enabled` gates on
 /// `graph.durable`), so a breakpointed node in the plan implies durability. It is
@@ -2090,6 +2263,7 @@ pub(super) fn node_has_breakpoint(node: &DirectRunPlan) -> bool {
         | P::EmbedWorkflow { breakpoint, .. }
         | P::Delay { breakpoint, .. }
         | P::WaitForSignal { breakpoint, .. }
+        | P::WaitForInstances { breakpoint, .. }
         | P::Log { breakpoint, .. }
         | P::Agent { breakpoint, .. }
         | P::AiAgent { breakpoint, .. }
@@ -2111,7 +2285,7 @@ pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
     }
     let err = error_route_suspends;
     match plan {
-        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::WaitForSignal { .. } | P::WaitForInstances { .. } | P::Delay { .. } => true,
         P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
         P::Agent {
             next_plan,
@@ -2224,7 +2398,7 @@ pub(super) fn node_body_suspends(node: &DirectRunPlan) -> bool {
         return true;
     }
     match node {
-        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::WaitForSignal { .. } | P::WaitForInstances { .. } | P::Delay { .. } => true,
         P::Conditional {
             true_plan,
             false_plan,
@@ -2378,6 +2552,19 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                     .is_some_and(|p| plan_contains_suspension(p))
                     || error_route_suspends(error_plan)
                 {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            DirectRunPlan::WaitForInstances {
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if error_route_suspends(error_plan) {
                     return false;
                 }
                 if matches!(**next_plan, DirectRunPlan::Join) {
@@ -3233,6 +3420,18 @@ mod tests {
                     collect_error_plan(step_id, error_plan, out);
                 }
             }
+            DirectRunPlan::WaitForInstances {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("WaitForInstances:{step_id}"));
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
             DirectRunPlan::WaitForSignal {
                 step_id,
                 on_wait_plan,
@@ -3829,6 +4028,8 @@ mod tests {
             durable: true,
             rate_limited,
             is_workflow_agent: false,
+            suspends: false,
+            operation_scoped: false,
             input_mapping_id: 0,
             required_inputs: vec![],
             max_retries,

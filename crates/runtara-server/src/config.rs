@@ -57,9 +57,8 @@ pub struct Config {
     pub runtime_pool: RuntimePoolConfig,
     /// How long each stage of the shutdown drain waits.
     pub shutdown_grace: ShutdownGrace,
-    /// Guard rails for workflow-facing raw SQL (query-sql / execute-sql
-    /// capabilities). The runtime/MCP SQL routes are unguarded for now —
-    /// retrofit is tracked separately.
+    /// Guard rails for caller-supplied raw SQL: the workflow query-sql /
+    /// execute-sql capabilities and the runtime/MCP `object-model/sql/*` routes.
     pub raw_sql_guardrails: runtara_object_store::SqlGuardrails,
     /// Connection-pool tuning for per-connection object-model PostgreSQL pools
     /// (the cross-cloud path to customer databases) and the default pool.
@@ -716,7 +715,8 @@ pub fn object_model_soft_delete() -> bool {
     get().object_model_soft_delete
 }
 
-/// Guard rails for workflow-facing raw SQL (query-sql / execute-sql).
+/// Guard rails for caller-supplied raw SQL (workflow capabilities and the
+/// runtime/MCP SQL routes).
 pub fn raw_sql_guardrails() -> runtara_object_store::SqlGuardrails {
     get().raw_sql_guardrails
 }

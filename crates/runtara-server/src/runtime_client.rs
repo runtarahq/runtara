@@ -28,6 +28,11 @@ use tracing::{debug, info, warn};
 
 use crate::observability::trace_context;
 
+/// Default cooperative grace before a stop is forced.
+pub const DEFAULT_STOP_GRACE_SECONDS: u32 = 5;
+/// Longest grace a stop accepts.
+pub const MAX_STOP_GRACE_SECONDS: u32 = 3600;
+
 /// Errors that can occur when interacting with the runtime
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -201,6 +206,31 @@ fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
     }
 }
 
+/// Operation ids with this prefix are control's own; no public submission
+/// path (signals, report actions, sessions, channels) may use them.
+pub const CONTROL_OPERATION_PREFIX: &str = "control:";
+
+/// Whether a caller-supplied operation id falls in control's reserved space.
+pub fn is_reserved_operation_id(operation: &str) -> bool {
+    operation.starts_with(CONTROL_OPERATION_PREFIX)
+}
+
+fn refuse_reserved_operation(
+    operation: &str,
+) -> runtara_core::persistence::inputs::InputResult<()> {
+    if is_reserved_operation_id(operation) {
+        return Err(runtara_core::persistence::inputs::InputError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn control_operation_only(operation: &str) -> runtara_core::persistence::inputs::InputResult<()> {
+    if !is_reserved_operation_id(operation) {
+        return Err(runtara_core::persistence::inputs::InputError::InvalidRequest);
+    }
+    Ok(())
+}
+
 impl RuntimeClient {
     /// Complete tenant/workflow association set for managed request pagination.
     pub async fn workflow_input_instances(
@@ -237,6 +267,109 @@ impl RuntimeClient {
             .await
     }
 
+    /// Control's narrow, capped read of one run of `tenant`.
+    pub async fn control_instance(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Option<runtara_environment::control_reads::ControlInstance>, RuntimeError> {
+        self.client
+            .control_instance(tenant, instance_id, output_cap, error_cap)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Control's payload-free page of runs, plus the unpaged total.
+    pub async fn control_instances(
+        &self,
+        options: &runtara_environment::instance_repository::ListInstancesOptions,
+    ) -> Result<
+        (
+            Vec<runtara_environment::control_reads::ControlInstance>,
+            i64,
+        ),
+        RuntimeError,
+    > {
+        self.client
+            .control_instances(options)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// A run's lineage in `tenant`, itself first, then its ancestors.
+    pub async fn control_lineage(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Vec<(String, Option<String>)>, RuntimeError> {
+        self.client
+            .control_lineage(tenant, instance_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// One page of a parent's launched, admitted and never-launched
+    /// children, plus the total.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn control_children(
+        &self,
+        tenant: &str,
+        parent: &str,
+        options: &runtara_environment::instance_repository::ListInstancesOptions,
+        include_launched: bool,
+        admitted: &[runtara_environment::control_reads::AdmittedChild],
+        outcomes: &runtara_environment::control_reads::ChildOutcomes,
+        order: runtara_environment::control_reads::ChildOrder,
+    ) -> Result<(Vec<runtara_environment::control_reads::ControlChild>, i64), RuntimeError> {
+        self.client
+            .control_children(
+                tenant,
+                parent,
+                options,
+                include_launched,
+                admitted,
+                outcomes,
+                order,
+            )
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Publish a never-launched child's outcome, fenced against its launch
+    /// (the instance row wins).
+    pub async fn publish_external_outcome(
+        &self,
+        outcome: &runtara_core::persistence::ExternalOutcome,
+    ) -> Result<runtara_core::persistence::PublishOutcome, RuntimeError> {
+        self.client
+            .publish_external_outcome(outcome)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// A never-launched child's published outcome, if any.
+    pub async fn get_external_outcome(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::ExternalOutcomeRecord>, RuntimeError> {
+        self.client
+            .get_external_outcome(tenant, instance_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Live children of `parent` with open managed inputs.
+    pub async fn parent_input_instances(
+        &self,
+        tenant: &str,
+        parent: &str,
+    ) -> runtara_core::persistence::inputs::InputResult<Vec<String>> {
+        self.client.parent_input_instances(tenant, parent).await
+    }
+
     /// Retained request lookup for submission and receipt replay.
     pub async fn get_input_request(
         &self,
@@ -252,6 +385,7 @@ impl RuntimeClient {
     }
 
     /// Submit through the same validated acceptance path for all transports.
+    /// The `control:` operation prefix is reserved for control's own answers.
     pub async fn submit_input_response(
         &self,
         tenant: &str,
@@ -262,8 +396,48 @@ impl RuntimeClient {
     ) -> runtara_core::persistence::inputs::InputResult<
         runtara_core::persistence::inputs::InputReceipt,
     > {
+        refuse_reserved_operation(operation)?;
         self.client
             .submit_input_response(tenant, instance, request, operation, payload)
+            .await
+    }
+
+    /// Control's `send-signal`: replay of its own `control:` operation.
+    pub(crate) async fn replay_control_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        Option<runtara_core::persistence::inputs::InputReceipt>,
+    > {
+        control_operation_only(operation)?;
+        self.client
+            .replay_contextual_input_response(tenant, instance, request, operation, context)
+            .await
+    }
+
+    /// Control's `send-signal`: validated acceptance under its own
+    /// `control:` operation and `InputAcceptanceContext("control", …)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn submit_control_input_response(
+        &self,
+        tenant: &str,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &serde_json::Value,
+        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        control_operation_only(operation)?;
+        self.client
+            .submit_contextual_input_response(
+                tenant, instance, request, operation, payload, context,
+            )
             .await
     }
 
@@ -309,6 +483,7 @@ impl RuntimeClient {
         workflow_id: &str,
         instance_id: Option<String>,
         run_label: Option<String>,
+        parent: Option<runtara_core::persistence::ParentLink>,
         input: Option<Value>,
         timeout: Option<ExecutionTimeoutSeconds>,
         debug: bool,
@@ -318,6 +493,7 @@ impl RuntimeClient {
 
         let mut options = StartInstanceOptions::new(image_id, tenant_id);
         options.run_label = run_label;
+        options.parent = parent;
 
         // Store instance_id for later use in env vars
         let actual_instance_id = if let Some(ref id) = instance_id {
@@ -560,18 +736,139 @@ impl RuntimeClient {
 
     /// Request cooperative cancellation with the default whole-run abort grace.
     pub async fn stop_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        let sdk = &self.client;
+        self.stop_instance_with(
+            instance_id,
+            DEFAULT_STOP_GRACE_SECONDS,
+            "Stopped by runtara-server",
+        )
+        .await
+    }
 
+    /// Request cooperative cancellation, forcing the stop after `grace_seconds`
+    /// (0-3600). `reason` travels with the cancel command.
+    pub async fn stop_instance_with(
+        &self,
+        instance_id: &str,
+        grace_seconds: u32,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        if grace_seconds > MAX_STOP_GRACE_SECONDS {
+            return Err(RuntimeError::SdkError(format!(
+                "the stop grace period is at most {MAX_STOP_GRACE_SECONDS} seconds"
+            )));
+        }
         let options = crate::runtime_types::StopInstanceOptions::new(instance_id)
-            .with_grace_period(5)
-            .with_reason("Stopped by runtara-server");
+            .with_grace_period(grace_seconds)
+            .with_reason(reason);
 
-        sdk.stop_instance(options)
+        self.client
+            .stop_instance(options)
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
 
-        info!(instance_id = %instance_id, "Requested workflow cancellation with abort grace");
+        info!(instance_id = %instance_id, grace_seconds, "Requested workflow cancellation with abort grace");
         Ok(())
+    }
+
+    /// Pause an instance and report what the pause did (decision D4: a parked
+    /// run pauses at once).
+    pub async fn pause_instance_outcome(
+        &self,
+        instance_id: &str,
+    ) -> Result<runtara_environment::handlers::PauseInstanceOutcome, RuntimeError> {
+        self.client
+            .pause_instance(instance_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Resume a suspended instance; with `require_paused`, only an explicitly
+    /// paused one. `Some((rejection, message))` when refused.
+    pub async fn resume_instance_with(
+        &self,
+        instance_id: &str,
+        require_paused: bool,
+    ) -> Result<
+        Option<(
+            Option<runtara_environment::handlers::ResumeRejection>,
+            String,
+        )>,
+        RuntimeError,
+    > {
+        self.client
+            .resume_instance_with(instance_id, require_paused)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Receipts of control mutations, when the runtime store provides them.
+    pub fn control_receipts(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::control_receipts::ControlReceipts> {
+        self.client.control_receipts()
+    }
+
+    fn waits(
+        &self,
+    ) -> runtara_core::persistence::waits::WaitResult<
+        &dyn runtara_core::persistence::waits::InstanceWaits,
+    > {
+        self.client.instance_waits().ok_or_else(|| {
+            runtara_core::persistence::waits::WaitError::Storage(
+                "the runtime store has no instance waits".into(),
+            )
+        })
+    }
+
+    /// Register (or read back) the wait of `waiter`'s operation `wait_id`.
+    pub async fn register_instance_wait(
+        &self,
+        tenant: &str,
+        waiter: &str,
+        wait_id: &str,
+        spec: &runtara_core::persistence::waits::WaitSpec,
+    ) -> runtara_core::persistence::waits::WaitResult<runtara_core::persistence::waits::WaitView>
+    {
+        self.waits()?
+            .register_or_evaluate(tenant, waiter, wait_id, spec)
+            .await
+    }
+
+    /// Evaluate a registered wait now.
+    pub async fn poll_instance_wait(
+        &self,
+        tenant: &str,
+        waiter: &str,
+        wait_id: &str,
+    ) -> runtara_core::persistence::waits::WaitResult<runtara_core::persistence::waits::WaitView>
+    {
+        self.waits()?.poll_wait(tenant, waiter, wait_id).await
+    }
+
+    /// The narrow status read that authorizes a wait's targets.
+    pub async fn wait_target_statuses(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+    ) -> Result<Vec<runtara_environment::control_reads::WaitTargetStatus>, RuntimeError> {
+        self.client
+            .wait_target_statuses(tenant, instance_ids)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    /// Control's capped read of several runs of `tenant`.
+    pub async fn control_instances_by_id(
+        &self,
+        tenant: &str,
+        instance_ids: &[String],
+        output_cap: usize,
+        error_cap: usize,
+    ) -> Result<Vec<runtara_environment::control_reads::ControlInstance>, RuntimeError> {
+        self.client
+            .control_instances_by_id(tenant, instance_ids, output_cap, error_cap)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
     /// Count a tenant's instances in the given statuses.
@@ -687,28 +984,6 @@ impl RuntimeClient {
 
         info!(instance_id = %instance_id, "Resumed workflow instance");
         Ok(())
-    }
-
-    /// Send a custom signal to a workflow instance.
-    ///
-    /// Used for human-in-the-loop interactions where an AI Agent step is waiting
-    /// for external input via WaitForSignal. The checkpoint address must match
-    /// what the workflow polls. Returns the new retained value's signal ID.
-    pub async fn send_custom_signal(
-        &self,
-        instance_id: &str,
-        checkpoint_id: &str,
-        payload: Option<&[u8]>,
-    ) -> Result<String, RuntimeError> {
-        let sdk = &self.client;
-
-        let signal_id = sdk
-            .send_custom_signal(instance_id, checkpoint_id, payload)
-            .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
-
-        info!(instance_id = %instance_id, signal_id = %signal_id, "Sent custom signal to workflow instance");
-        Ok(signal_id)
     }
 
     /// Get image info by image ID
@@ -937,6 +1212,7 @@ mod classify_observed_status_tests {
         let created = Utc::now();
         InstanceInfo {
             run_label: None,
+            parent_instance_id: None,
             instance_id: "inst-1".to_string(),
             image_id: "img-1".to_string(),
             image_name: "wf:1".to_string(),
@@ -955,6 +1231,7 @@ mod classify_observed_status_tests {
             memory_peak_bytes: None,
             cpu_usage_usec: None,
             termination_reason: None,
+            suspension_reason: None,
             exit_code: None,
         }
     }
@@ -1018,6 +1295,23 @@ mod classify_observed_status_tests {
                 classify_observed_status(timed_out),
                 Some(TerminalOutcome::TimedOut(_))
             ));
+        }
+    }
+
+    /// A failed start gate (and a launch-queue timeout) is a platform failure
+    /// to launch, not a run that outlived its deadline: it maps to `Failed`.
+    #[test]
+    fn a_failed_start_gate_is_a_failure_not_a_timeout() {
+        for reason in [
+            TerminationReason::StartGateFailed,
+            TerminationReason::LaunchQueueTimeout,
+        ] {
+            let mut failed = info(InstanceStatus::Failed);
+            failed.termination_reason = Some(reason);
+            match classify_observed_status(failed) {
+                Some(TerminalOutcome::Failed(o)) => assert!(!o.success, "{reason:?}"),
+                other => panic!("{reason:?}: expected Failed, got {other:?}"),
+            }
         }
     }
 

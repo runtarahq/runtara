@@ -76,7 +76,7 @@ pub(super) fn emit_retry_park_until_deadline(
     body.instruction(&Instruction::LocalSet(DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL));
     clamp_deadline(body, deadline);
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     // The wake scheduler compares its database clock against a deadline minted
@@ -103,7 +103,7 @@ pub(super) fn emit_retry_park_until_deadline(
     // A crash after this save replays through the HIT branch above, rather than
     // minting a fresh relative delay and extending the wait.
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_now_ms));
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalGet(delay_ms_local));

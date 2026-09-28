@@ -103,7 +103,7 @@ Values are seeded from your environment at install time, so this works:
 
 ```bash
 export RUNTARA_SERVER_DATABASE_URL=postgres://runtara:secret@db/runtara_server
-export OBJECT_MODEL_DATABASE_URL=postgres://runtara:secret@db/runtara_objects
+export OBJECT_MODEL_DATABASE_URL=postgres://runtara_objects:secret@db/runtara_objects
 export RUNTARA_DATABASE_URL=postgres://runtara:secret@db/runtara
 export VALKEY_HOST=cache.internal
 export AUTH_PROVIDER=oidc OAUTH2_ISSUER=https://id.example.com/
@@ -131,6 +131,43 @@ modes it defaults `SERVER_HOST` to `127.0.0.1` — **the server refuses to start
 in those modes on a non-loopback address**, because authentication is happening
 somewhere other than in-process. See
 [deployment/auth-modes.md](deployment/auth-modes.md).
+
+### Object-model database role
+
+Raw SQL (`sql/execute`, MCP `execute_sql`) runs as the role in
+`OBJECT_MODEL_DATABASE_URL`, so that role is the permission boundary for
+caller-supplied SQL. Give it a dedicated non-superuser role that owns only the
+object-model database and cannot connect to the server or runtime databases.
+The read-only SQL routes (`sql/query`, `sql/query-one`, `sql/query-raw` and
+their MCP tools) also run in a `READ ONLY` transaction under the raw SQL
+statement timeout and row/byte caps. The server logs a warning at boot when the
+role is a superuser or the object-model database is the server's own database.
+
+The Docker Compose files and `bootstrap-install.sh` set this up for new
+installs as `runtara_objects`. For an existing install, run as a superuser,
+replacing `<password>` and the database names as needed:
+
+```sql
+CREATE ROLE runtara_objects LOGIN PASSWORD '<password>'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER DATABASE runtara_objects OWNER TO runtara_objects;
+REVOKE CONNECT, TEMPORARY ON DATABASE runtara_server, runtara FROM PUBLIC;
+
+\c runtara_objects
+ALTER SCHEMA public OWNER TO runtara_objects;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+DO $$ DECLARE t record; BEGIN
+  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I OWNER TO runtara_objects', t.tablename);
+  END LOOP;
+END $$;
+```
+
+The loop hands the existing object tables to the new role; do not use
+`REASSIGN OWNED`, which would also move the other databases the old role owns.
+Then set `OBJECT_MODEL_DATABASE_URL` to log in as `runtara_objects` and restart.
+The extensions the object model needs (`pg_trgm`, `vector`, `fuzzystrmatch`)
+must already exist in `runtara_objects`; a non-superuser cannot create them.
 
 ## Service management
 
@@ -163,7 +200,32 @@ beside the old one, stops the service, swaps the directories, and restarts —
 so an interrupted download leaves the running install untouched. Your config
 and data directories are not modified.
 
-Pin a version with `--version`, including downgrades.
+Pin a version with `--version`, including downgrades — except across a
+release whose migrations the older binary does not know (below).
+
+### Upgrading to the `control:start` release
+
+The first boot of this release migrates both databases before it serves:
+
+- **Runtime database** (`RUNTARA_DATABASE_URL`): `instances` gains the parent
+  link of child runs (`035`), its checks are validated (`036`), and
+  `idx_instances_parent_admitted` is built (`037`). The column add holds an
+  `ACCESS EXCLUSIVE` lock on `instances` for a moment and the index build a
+  `SHARE` lock (writes wait) for as long as it takes over the child rows,
+  which do not exist yet on an upgrade — expect well under a second.
+- **Server database** (`RUNTARA_SERVER_DATABASE_URL`): `execution_requests`
+  gains the parent, run-label, fingerprint and outcome columns of admitted
+  children (`20260927000100`), then its checks and child indexes, including
+  the unique per-parent run-label index (`20260927000101`).
+
+**Do not downgrade past this release.** An older binary refuses to start on a
+database whose `_sqlx_migrations` holds versions it does not know, and the
+migrations are forward-only. Restore a pre-upgrade backup instead if you must
+go back.
+
+A deployment whose concurrency limit (`MAX_CONCURRENT_EXECUTIONS`, or the
+tier's `maxConcurrentExecutions`) is 1 or less logs a boot warning: the
+parent holds the only slot, so `control:start` can never admit a child.
 
 ## Uninstall
 

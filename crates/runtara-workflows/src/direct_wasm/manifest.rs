@@ -66,6 +66,114 @@ impl DirectWorkflowManifest {
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, DirectManifestError> {
         serde_json::to_vec(self).map_err(DirectManifestError::Serialize)
     }
+
+    /// Agent ids the emitted code treats as workflow-agents anywhere in the
+    /// root graph, its nested graphs and its embedded children. Those invokes
+    /// re-raise the reserved park and suspend codes, so composition requires
+    /// each of these agents to resolve as a staged workflow-agent.
+    pub fn workflow_agent_ids(&self) -> std::collections::BTreeSet<String> {
+        fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
+            for agent in &graph.agents {
+                if agent.is_workflow_agent {
+                    ids.insert(agent.agent_id.clone());
+                }
+            }
+            for step in &graph.steps {
+                for nested in &step.nested_graphs {
+                    collect(&nested.graph, ids);
+                }
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        collect(&self.graph, &mut ids);
+        for child in &self.child_workflows {
+            collect(&child.graph, &mut ids);
+        }
+        ids
+    }
+
+    /// Every capability each agent is called with, anywhere in the root graph,
+    /// its nested graphs or its embedded children, mapped to whether the
+    /// compile treated the call as suspending. Composition checks it against
+    /// each agent's `.meta.json`.
+    pub fn agent_capability_sites(
+        &self,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>> {
+        type Sites = std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>;
+        fn collect(graph: &DirectGraphManifest, sites: &mut Sites) {
+            for agent in &graph.agents {
+                let suspends = sites
+                    .entry(agent.agent_id.clone())
+                    .or_default()
+                    .entry(agent.capability_id.clone())
+                    .or_default();
+                *suspends |= agent.suspends;
+            }
+            for step in &graph.steps {
+                for nested in &step.nested_graphs {
+                    collect(&nested.graph, sites);
+                }
+            }
+        }
+        let mut sites = Sites::new();
+        collect(&self.graph, &mut sites);
+        for child in &self.child_workflows {
+            collect(&child.graph, &mut sites);
+        }
+        sites
+    }
+
+    /// Whether an operation-scoped (suspending or control) call site exists
+    /// anywhere in the root graph, its nested graphs or its embedded children.
+    /// Only then does the workflow import `runtara:workflow-operation/scope`,
+    /// so every other artifact keeps its exact bytes.
+    pub fn has_operation_scoped_sites(&self) -> bool {
+        fn any(graph: &DirectGraphManifest) -> bool {
+            graph.agents.iter().any(|agent| agent.operation_scoped)
+                || graph
+                    .steps
+                    .iter()
+                    .any(|step| step.nested_graphs.iter().any(|nested| any(&nested.graph)))
+        }
+        any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
+    }
+
+    /// Whether a WaitForInstances step sits anywhere in the root graph, its
+    /// nested graphs or its embedded children. Only then does the workflow
+    /// import `runtara:workflow-wait/instances`.
+    pub fn has_wait_for_instances(&self) -> bool {
+        fn any(graph: &DirectGraphManifest) -> bool {
+            graph.steps.iter().any(|step| {
+                step.step_type == "WaitForInstances"
+                    || step.nested_graphs.iter().any(|nested| any(&nested.graph))
+            })
+        }
+        any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
+    }
+
+    /// Agent ids with a suspending call site anywhere in the root graph, its
+    /// nested graphs or its embedded children. Each is imported through both
+    /// `capabilities` and `suspendable`.
+    pub fn suspending_agent_ids(&self) -> std::collections::BTreeSet<String> {
+        fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
+            for agent in &graph.agents {
+                if agent.suspends {
+                    ids.insert(agent.agent_id.clone());
+                }
+            }
+            for step in &graph.steps {
+                for nested in &step.nested_graphs {
+                    collect(&nested.graph, ids);
+                }
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        collect(&self.graph, &mut ids);
+        for child in &self.child_workflows {
+            collect(&child.graph, &mut ids);
+        }
+        ids
+    }
 }
 
 /// Deterministic manifest for one execution graph.
@@ -421,6 +529,16 @@ pub struct DirectAgentManifest {
     /// manifests stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_workflow_agent: bool,
+    /// Whether the catalog declares the capability `suspends`: the site calls
+    /// the agent's `suspendable` interface inside an operation scope. Skipped
+    /// when false so existing manifests stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspends: bool,
+    /// Whether the call is operation-scoped (catalog: the capability suspends
+    /// or belongs to the control agent). Such a site never shares a parallel
+    /// window. Skipped when false so existing manifests stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub operation_scoped: bool,
     /// Manifest-wide mapping id for Agent inputs.
     pub input_mapping_id: u32,
     /// Required capability inputs validated after runtime references resolve.
@@ -432,8 +550,9 @@ pub struct DirectAgentManifest {
     /// Base retry delay configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
-    /// Total Agent-step budget, retained for deadline lowering. The public
-    /// support gate still rejects it until the complete timeout contract passes.
+    /// Total Agent-step budget in milliseconds, lowered as a cooperative
+    /// deadline that covers preparation, retries and durable suspension (see
+    /// `compile/agent_deadline.rs`). The support gate accepts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
     /// Referenced Agent definition for a synthetic invocation's budget. Its
@@ -1003,6 +1122,12 @@ fn step_manifest(
                     &agent_id,
                     &step.capability_id,
                 ),
+                suspends: agent_catalog.is_some_and(|catalog| {
+                    catalog.capability_suspends(&agent_id, &step.capability_id)
+                }),
+                operation_scoped: agent_catalog.is_some_and(|catalog| {
+                    catalog.is_operation_scoped(&agent_id, &step.capability_id)
+                }),
                 input_mapping_id,
                 required_inputs: required_agent_inputs(
                     agent_catalog,
@@ -1151,6 +1276,8 @@ fn step_manifest(
                     capability_id,
                 ),
                 is_workflow_agent: false,
+                suspends: false,
+                operation_scoped: false,
                 input_mapping_id,
                 required_inputs: required_agent_inputs(agent_catalog, "ai-tools", capability_id),
                 // Retries are opt-in for AiAgent (default 0 — LLM calls
@@ -1204,6 +1331,14 @@ fn step_manifest(
                             },
                         rate_limited: false,
                         is_workflow_agent: false,
+                        // Classified like any call, so the compiler refuses an
+                        // operation-scoped memory provider instead of lowering it.
+                        suspends: agent_catalog.is_some_and(|catalog| {
+                            catalog.capability_suspends(&mem_agent, capability)
+                        }),
+                        operation_scoped: agent_catalog.is_some_and(|catalog| {
+                            catalog.is_operation_scoped(&mem_agent, capability)
+                        }),
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1245,6 +1380,8 @@ fn step_manifest(
                             "summarize-memory",
                         ),
                         is_workflow_agent: false,
+                        suspends: false,
+                        operation_scoped: false,
                         input_mapping_id: conversation_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1285,6 +1422,8 @@ fn step_manifest(
                             capability,
                         ),
                         is_workflow_agent: false,
+                        suspends: false,
+                        operation_scoped: false,
                         input_mapping_id,
                         required_inputs: Vec::new(),
                         max_retries: None,
@@ -1308,6 +1447,8 @@ fn step_manifest(
                 });
             }
         }
+        // The stdlib reads instanceIds, mode and timeoutMs from the step body.
+        Step::WaitForInstances(_) => {}
     }
 
     Ok(DirectStepManifest {
@@ -1599,6 +1740,7 @@ fn step_name(step: &Step) -> Option<&str> {
         Step::GroupBy(step) => step.name.as_deref(),
         Step::Delay(step) => step.name.as_deref(),
         Step::WaitForSignal(step) => step.name.as_deref(),
+        Step::WaitForInstances(step) => step.name.as_deref(),
         Step::AiAgent(step) => step.name.as_deref(),
     }
 }
@@ -1618,6 +1760,7 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::WaitForInstances(_) => "WaitForInstances",
         Step::AiAgent(_) => "AiAgent",
     }
 }
@@ -2397,6 +2540,103 @@ mod tests {
         assert!(!agent.is_workflow_agent);
         let json = serde_json::to_value(agent).expect("agent json");
         assert!(json.get("isWorkflowAgent").is_none());
+    }
+
+    /// `workflow_agent_ids` gates which agents composition must resolve as
+    /// staged workflow-agents, so it has to see a workflow-agent called from a
+    /// nested graph (a Split body) and from an embedded child as well as the
+    /// root, and must leave native agents out.
+    #[test]
+    fn workflow_agent_ids_walk_nested_graphs_and_child_workflows() {
+        use runtara_dsl::agent_meta::{AgentInfo, workflow_agent_info};
+        let workflow_agent = |id: &str| -> AgentInfo {
+            workflow_agent_info(
+                id,
+                id,
+                "",
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            )
+        };
+        let mut native = workflow_agent("native-flow");
+        for capability in &mut native.capabilities {
+            capability.tags.clear();
+        }
+        let catalog = AgentCatalog::from_agents(vec![
+            native,
+            workflow_agent("split-flow"),
+            workflow_agent("child-flow"),
+            workflow_agent("unused-flow"),
+        ]);
+        let agent_step = |id: &str, agent: &str| {
+            serde_json::json!({"id": id, "stepType": "Agent", "agentId": agent,
+                "capabilityId": "run", "inputMapping": {}})
+        };
+        let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "native",
+            "executionPlan": [
+                {"fromStep": "native", "toStep": "split"},
+                {"fromStep": "split", "toStep": "call_child"},
+                {"fromStep": "call_child", "toStep": "finish"}
+            ],
+            "steps": {
+                "native": agent_step("native", "native-flow"),
+                "split": {"id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "immediate", "value": [1, 2]}},
+                    "subgraph": {
+                        "entryPoint": "body",
+                        "executionPlan": [{"fromStep": "body", "toStep": "done"}],
+                        "steps": {
+                            "body": agent_step("body", "split-flow"),
+                            "done": {"id": "done", "stepType": "Finish"}
+                        }
+                    }},
+                "call_child": {"id": "call_child", "stepType": "EmbedWorkflow",
+                    "childWorkflowId": "child_workflow", "childVersion": "latest",
+                    "inputMapping": {}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .expect("parent parses");
+        let child: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+            "steps": {
+                "call": agent_step("call", "child-flow"),
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .expect("child parses");
+
+        let manifest = build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+            &parent,
+            &[DirectManifestChildWorkflowInput {
+                step_id: "call_child",
+                workflow_id: "child_workflow",
+                version_requested: "latest",
+                version_resolved: 1,
+                execution_graph: &child,
+            }],
+            Some(&catalog),
+        )
+        .expect("manifest builds");
+
+        // Neither workflow-agent sits at the root: the root graph only calls
+        // the native agent.
+        assert!(
+            manifest
+                .graph
+                .agents
+                .iter()
+                .all(|agent| !agent.is_workflow_agent),
+            "the root graph calls only the native agent"
+        );
+        assert_eq!(
+            manifest.workflow_agent_ids(),
+            ["child-flow".to_string(), "split-flow".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ export interface StepSummariesFilters {
   limit?: number;
   offset?: number;
   sortOrder?: 'asc' | 'desc';
-  status?: 'running' | 'completed' | 'failed';
+  status?: 'running' | 'suspended' | 'completed' | 'failed';
   stepType?: string;
   scopeId?: string;
   parentScopeId?: string;
@@ -367,6 +367,7 @@ export async function getWorkflowWorkflow(
   // Schemas are now inside executionGraph (moved from workflow root)
   const inputSchemaFields = parseSchema(executionGraph.inputSchema);
   const outputSchemaFields = parseSchema(executionGraph.outputSchema);
+  const stateSchemaFields = parseSchema(executionGraph.stateSchema);
 
   // Extract executionTimeoutSeconds from executionGraph (moved from workflow root)
   const executionTimeoutSeconds = executionGraph.executionTimeoutSeconds;
@@ -394,6 +395,7 @@ export async function getWorkflowWorkflow(
       variables,
       inputSchemaFields,
       outputSchemaFields,
+      stateSchemaFields,
       executionTimeoutSeconds,
       rateLimitBudgetMs,
       durable,

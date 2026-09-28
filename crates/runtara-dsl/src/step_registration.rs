@@ -12,7 +12,8 @@
 use crate::agent_meta::StepTypeMeta;
 use crate::{
     AgentStep, AiAgentStep, ConditionalStep, DelayStep, EmbedWorkflowStep, ErrorStep, FilterStep,
-    FinishStep, GroupByStep, LogStep, SplitStep, SwitchStep, WaitForSignalStep, WhileStep,
+    FinishStep, GroupByStep, LogStep, SplitStep, SwitchStep, WaitForInstancesStep,
+    WaitForSignalStep, WhileStep,
 };
 
 // ========================================================================
@@ -65,6 +66,10 @@ fn schema_group_by_step() -> schemars::Schema {
 
 fn schema_wait_for_signal_step() -> schemars::Schema {
     schemars::schema_for!(WaitForSignalStep)
+}
+
+fn schema_wait_for_instances_step() -> schemars::Schema {
+    schemars::schema_for!(WaitForInstancesStep)
 }
 
 fn schema_ai_agent_step() -> schemars::Schema {
@@ -175,6 +180,14 @@ static WAIT_FOR_SIGNAL_STEP_META: StepTypeMeta = StepTypeMeta {
     schema_fn: schema_wait_for_signal_step,
 };
 
+static WAIT_FOR_INSTANCES_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "WaitForInstances",
+    display_name: "Wait for Instances",
+    description: "Park the run until direct child runs finish (all or any), or an optional deadline passes",
+    category: "control",
+    schema_fn: schema_wait_for_instances_step,
+};
+
 static AI_AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
     id: "AiAgent",
     display_name: "AI Agent",
@@ -204,6 +217,7 @@ pub(crate) static STEP_TYPES: &[&StepTypeMeta] = &[
     &FILTER_STEP_META,
     &GROUP_BY_STEP_META,
     &WAIT_FOR_SIGNAL_STEP_META,
+    &WAIT_FOR_INSTANCES_STEP_META,
     &AI_AGENT_STEP_META,
     &DELAY_STEP_META,
 ];

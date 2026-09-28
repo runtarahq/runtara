@@ -14,6 +14,24 @@ pub struct TriggerEvent {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
 
+    /// The run that started this one through `control:start`; `None` for
+    /// every other source.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentInstanceId"
+    )]
+    pub parent_instance_id: Option<String>,
+
+    /// What happens to a `control:start` child when its parent ends:
+    /// `cancel` or `leave_running`. Set exactly when `parent_instance_id` is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentClosePolicy"
+    )]
+    pub parent_close_policy: Option<String>,
+
     /// Durable source-request identity, set by the execution-outbox relay.
     ///
     /// It remains optional only so the worker can deserialize and terminally
@@ -115,6 +133,13 @@ pub enum TriggerSource {
         /// Number of checkpoints available for replay
         checkpoint_count: u64,
     },
+
+    /// A child admitted by a workflow's `control:start` step. The parent is
+    /// the event's `parent_instance_id`.
+    Control {
+        /// The calling step's operation (`op_hash`).
+        operation: String,
+    },
 }
 
 impl TriggerEvent {
@@ -132,6 +157,8 @@ impl TriggerEvent {
     ) -> Self {
         Self {
             run_label: None,
+            parent_instance_id: None,
+            parent_close_policy: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -162,6 +189,8 @@ impl TriggerEvent {
     ) -> Self {
         Self {
             run_label: None,
+            parent_instance_id: None,
+            parent_close_policy: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -228,6 +257,8 @@ impl TriggerEvent {
     ) -> Self {
         Self {
             run_label: None,
+            parent_instance_id: None,
+            parent_close_policy: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -255,6 +286,7 @@ impl TriggerEvent {
             TriggerSource::Application { trigger_id, .. } => Some(trigger_id),
             TriggerSource::Replay { .. } => None,
             TriggerSource::Recovery { .. } => None,
+            TriggerSource::Control { .. } => None,
         }
     }
 
@@ -268,12 +300,57 @@ impl TriggerEvent {
             TriggerSource::Application { .. } => "application",
             TriggerSource::Replay { .. } => "replay",
             TriggerSource::Recovery { .. } => "recovery",
+            TriggerSource::Control { .. } => "control",
         }
     }
 
     /// Check if this is a recovery trigger (execution record already exists)
     pub fn is_recovery(&self) -> bool {
         matches!(&self.trigger, TriggerSource::Recovery { .. })
+    }
+
+    /// Create the event of a child admitted by `control:start`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn control(
+        instance_id: String,
+        tenant_id: String,
+        workflow_id: String,
+        version: i32,
+        inputs: Value,
+        track_events: bool,
+        parent_instance_id: String,
+        parent_close_policy: String,
+        operation: String,
+        run_label: Option<String>,
+        admitted_at_ms: i64,
+    ) -> Self {
+        Self {
+            run_label,
+            parent_instance_id: Some(parent_instance_id),
+            parent_close_policy: Some(parent_close_policy),
+            request_id: None,
+            instance_id,
+            tenant_id,
+            workflow_id,
+            version: Some(version),
+            inputs,
+            trigger: TriggerSource::Control { operation },
+            requested_at: admitted_at_ms,
+            track_events,
+            debug: false,
+        }
+    }
+
+    /// The parent link a `control:start` child launches with: its parent,
+    /// policy and admission time (`requested_at`). `None` for other events.
+    pub fn parent_link(&self) -> Option<runtara_core::persistence::ParentLink> {
+        let parent_instance_id = self.parent_instance_id.clone()?;
+        Some(runtara_core::persistence::ParentLink {
+            parent_instance_id,
+            parent_close_policy: self.parent_close_policy.clone().unwrap_or_default(),
+            admitted_at: chrono::DateTime::from_timestamp_millis(self.requested_at)
+                .unwrap_or_else(chrono::Utc::now),
+        })
     }
 
     /// Create a recovery trigger event
@@ -288,6 +365,8 @@ impl TriggerEvent {
     ) -> Self {
         Self {
             run_label: None,
+            parent_instance_id: None,
+            parent_close_policy: None,
             request_id: None,
             instance_id,
             tenant_id,
@@ -315,6 +394,8 @@ impl TriggerEvent {
     ) -> Self {
         Self {
             run_label: None,
+            parent_instance_id: None,
+            parent_close_policy: None,
             request_id: None,
             instance_id,
             tenant_id,

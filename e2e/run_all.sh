@@ -70,6 +70,12 @@ run_test "Teams outbound send-message (mock Bot Connector)" "${SCRIPT_DIR}/test_
 run_test "Teams inbound webhook JWT + dedup (mock authority)" "${SCRIPT_DIR}/test_teams_inbound_webhook.sh"
 run_test "Channel session re-flush provenance guard" "${SCRIPT_DIR}/test_channel_reflush_provenance.sh"
 
+# Trusted built-in upgrade. Self-contained (own server + Valkey); needs docker,
+# jq and prebuilt components (scripts/build-agent-components.sh). Checks the
+# boot-time installed pin set, recorded pins, recompile-once readiness, the
+# terminal republish failure and the old run's call-time failure.
+run_test "Trusted built-in upgrade (pins, readiness, call-time failure)" "${SCRIPT_DIR}/test_trusted_pin_upgrade.sh"
+
 # Connection named endpoints. Also self-contained (own server + Valkey); needs
 # docker + python3 + jq. Nothing egresses — every case fail-closes at the proxy.
 run_test "Connection named endpoints (QuickBooks Online)" "${SCRIPT_DIR}/test_connection_named_endpoint.sh"

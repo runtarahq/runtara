@@ -18,6 +18,7 @@ import {
   ShoppingBag,
   Plug,
   Bot,
+  Network,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -40,6 +41,7 @@ const agentIconMap: Record<string, LucideIcon> = {
   hdm_llm: Brain,
   shopify: ShoppingBag,
   mcp: Plug,
+  control: Network,
 };
 
 export function getAgentIcon(agentId: string | null | undefined): LucideIcon {

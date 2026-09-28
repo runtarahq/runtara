@@ -1151,8 +1151,10 @@ impl LaunchDispatcher {
             }
         };
         if let Some(failed) = terminal {
+            // The same terminal write as the monitor's failed-gate path, which
+            // may win this race instead; both report the run's own reason.
             self.lifecycle_observers
-                .notify_released(&failed, "launch_failed");
+                .notify_released(&failed, "start_gate_failed");
         } else {
             debug!(
                 launch_id = %launch.launch_id,
@@ -1252,6 +1254,7 @@ impl LaunchDispatcher {
             // The queue is durable; even a first start reads its authoritative
             // committed envelope rather than retaining request memory.
             prepersisted_input: None,
+            launch_kind: launch.kind,
             start_gate: None,
         })
     }

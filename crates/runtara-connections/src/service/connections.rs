@@ -438,7 +438,7 @@ fn validate_url_field(
     })?;
     match parsed.scheme() {
         "https" => {}
-        "http" if connection_http_allowed(host) => {}
+        "http" if crate::net::connection_http_allowed(host) => {}
         _ => {
             return Err(ServiceError::ValidationError(format!(
                 "{field_display} must use https:// ({value})"
@@ -451,30 +451,13 @@ fn validate_url_field(
     // hatch for loopback test endpoints.
     if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
         && crate::net::is_private_ip(&ip)
-        && !connection_http_allowed(host)
+        && !crate::net::connection_http_allowed(host)
     {
         return Err(ServiceError::ValidationError(format!(
             "{field_display} host {host} is a private/internal address"
         )));
     }
     Ok(())
-}
-
-/// Hosts allowed to use an `http://` base URL (`RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`).
-/// Host-scoped so a single dev/socat sidecar can be allowed without disabling
-/// TLS enforcement globally. Empty = https-only (fail-closed default).
-fn connection_http_allowed(host: &str) -> bool {
-    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let list = HOSTS.get_or_init(|| {
-        std::env::var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    let h = host.to_ascii_lowercase();
-    list.iter().any(|entry| entry == &h)
 }
 
 /// Validate a Teams `authority_host` for the credential-exfiltration gate.

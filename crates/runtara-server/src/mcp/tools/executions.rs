@@ -34,6 +34,9 @@ pub struct ListExecutionsParams {
     /// all matches contribute to the filtered total before pagination. Use the
     /// normalized, possibly truncated label returned by list_executions/get_execution.
     pub run_label: Option<String>,
+    /// Only the children of this execution: the runs its control:start steps
+    /// started (each child reports its parent as parentInstanceId).
+    pub parent_instance_id: Option<String>,
     #[schemars(description = "Filter by workflow ID")]
     pub workflow_id: Option<String>,
     #[schemars(
@@ -83,7 +86,9 @@ pub struct GetStepSummariesParams {
     pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
-    #[schemars(description = "Filter by status (running, completed, failed)")]
+    #[schemars(
+        description = "Filter by status (running, suspended, completed, failed). An unfinished step reads suspended while its run is suspended."
+    )]
     pub status: Option<String>,
     #[schemars(description = "Max results (default 100)")]
     pub limit: Option<i64>,
@@ -105,7 +110,7 @@ pub struct StopExecutionParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowWaitParams {
-    /// Optional exact execution reference (1–250 printable ASCII bytes).
+    /// Optional exact execution reference (1–1024 printable ASCII bytes).
     pub run_label: Option<String>,
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -154,6 +159,9 @@ fn list_executions_query_string(params: &ListExecutionsParams) -> String {
     }
     if let Some(label) = &params.run_label {
         push_query_param(&mut query, "runLabel", label);
+    }
+    if let Some(parent) = &params.parent_instance_id {
+        push_query_param(&mut query, "parentInstanceId", parent);
     }
     if let Some(sid) = &params.workflow_id {
         push_query_param(&mut query, "workflowId", sid);
@@ -2221,6 +2229,7 @@ mod tests {
         let query = list_executions_query_string(&ListExecutionsParams {
             search: None,
             run_label: None,
+            parent_instance_id: Some("parent 1".to_string()),
             workflow_id: Some("workflow/needs encoding".to_string()),
             status: Some("running,queued".to_string()),
             page: Some(2),
@@ -2230,6 +2239,8 @@ mod tests {
         });
 
         assert!(query.contains("workflowId=workflow%2Fneeds%20encoding"));
+        assert!(query.contains("parentInstanceId=parent%201"));
+        assert!(!query.contains("parent_instance_id="));
         assert!(query.contains("status=running%2Cqueued"));
         assert!(query.contains("page=2"));
         assert!(query.contains("size=50"));

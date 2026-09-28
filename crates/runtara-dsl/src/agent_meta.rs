@@ -41,6 +41,9 @@ pub struct CapabilityMeta {
     pub rate_limited: bool,
     /// Requires isolated, credential-bearing execution by an approved built-in.
     pub trusted: bool,
+    /// May answer with a typed suspension instead of a result
+    /// (`runtara:agent-suspension`); invoked only through `suspendable.invoke`.
+    pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
     pub known_errors: &'static [KnownError],
@@ -302,6 +305,10 @@ pub struct CapabilityInfo {
     /// Host-enforced execution mode; never a workflow-controlled permission.
     #[serde(default)]
     pub trusted: bool,
+    /// May answer with a typed suspension instead of a result. Omitted when
+    /// false, so existing catalogs stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
     #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
@@ -1514,6 +1521,7 @@ pub fn capability_to_api_with_types(
         is_idempotent: cap.is_idempotent,
         rate_limited: cap.rate_limited,
         trusted: cap.trusted,
+        suspends: cap.suspends,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
     }
@@ -1805,6 +1813,19 @@ pub fn validate_agent_metadata_or_panic() {
 // ============================================================================
 // AgentCatalog — runtime-loaded snapshot of every agent's metadata.
 // ============================================================================
+
+/// Canonical id of the built-in control agent, the only agent that may import
+/// `runtara:control/*`. Reserved: no workflow-agent slug may fold onto it.
+pub const CONTROL_AGENT_ID: &str = "control";
+
+/// Whether a call to `capability` of `agent_id` is operation-scoped: the
+/// compiler wraps it in a `runtara:workflow-operation` scope, so the host
+/// derives a replay-safe identity from the call site. That holds for every
+/// suspending capability and for every capability of the control agent
+/// (reads included, since caller-relative filters need the scope too).
+pub fn is_operation_scoped(agent_id: &str, capability: &CapabilityInfo) -> bool {
+    capability.suspends || canonical_agent_id(agent_id) == CONTROL_AGENT_ID
+}
 
 /// Canonicalize an agent id to its kebab-case form.
 ///
@@ -2141,6 +2162,7 @@ pub fn workflow_agent_info(
             is_idempotent: false,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: Vec::new(),
             tags: vec![
                 capability_tags::WORKFLOW_AGENT.to_string(),
@@ -2295,6 +2317,20 @@ impl AgentCatalog {
             .capabilities
             .iter()
             .find(|c| c.id == capability_id)
+    }
+
+    /// True when the catalog declares the capability `suspends`. An unknown
+    /// agent or capability does not suspend.
+    pub fn capability_suspends(&self, agent_id: &str, capability_id: &str) -> bool {
+        self.capability(agent_id, capability_id)
+            .is_some_and(|capability| capability.suspends)
+    }
+
+    /// True when calls to the capability are operation-scoped (see
+    /// [`is_operation_scoped`]). An unknown agent or capability is not.
+    pub fn is_operation_scoped(&self, agent_id: &str, capability_id: &str) -> bool {
+        self.capability(agent_id, capability_id)
+            .is_some_and(|capability| is_operation_scoped(agent_id, capability))
     }
 
     /// Return the `integration_ids` of the agent matching `agent_id`
@@ -2590,6 +2626,7 @@ mod output_schema_tests {
             is_idempotent: true,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: &[],
             tags: &[],
         }
@@ -2664,6 +2701,7 @@ mod catalog_tests {
                 is_idempotent: true,
                 rate_limited: false,
                 trusted: false,
+                suspends: false,
                 known_errors: vec![],
                 tags: vec![],
             }],
@@ -2688,6 +2726,47 @@ mod catalog_tests {
                 .collect::<Vec<_>>(),
             vec!["b", "a"]
         );
+    }
+
+    #[test]
+    fn suspends_defaults_to_false_is_omitted_when_false_and_round_trips() {
+        let capability = sample_agent("crypto").capabilities.remove(0);
+        let json = serde_json::to_value(&capability).unwrap();
+        assert!(
+            json.get("suspends").is_none(),
+            "false stays off the wire, so existing catalogs are unchanged"
+        );
+        let parsed: CapabilityInfo = serde_json::from_value(json.clone()).unwrap();
+        assert!(!parsed.suspends, "a missing field defaults to false");
+
+        let mut suspending = capability;
+        suspending.suspends = true;
+        let json = serde_json::to_value(&suspending).unwrap();
+        assert_eq!(json["suspends"], true);
+        assert!(
+            serde_json::from_value::<CapabilityInfo>(json)
+                .unwrap()
+                .suspends
+        );
+    }
+
+    #[test]
+    fn operation_scoped_capabilities_suspend_or_belong_to_control() {
+        let mut waiting = sample_agent("waiter");
+        waiting.capabilities[0].suspends = true;
+        let cat = AgentCatalog::from_agents(vec![
+            sample_agent("crypto"),
+            sample_agent(CONTROL_AGENT_ID),
+            waiting,
+        ]);
+        assert!(!cat.is_operation_scoped("crypto", "hash"));
+        assert!(cat.is_operation_scoped("control", "hash"));
+        assert!(cat.is_operation_scoped("CONTROL", "hash"));
+        assert!(cat.is_operation_scoped("waiter", "hash"));
+        assert!(cat.capability_suspends("waiter", "hash"));
+        assert!(!cat.capability_suspends("control", "hash"));
+        assert!(!cat.is_operation_scoped("control", "missing"));
+        assert!(!cat.is_operation_scoped("missing", "hash"));
     }
 
     #[test]
@@ -3028,9 +3107,102 @@ pub fn trusted_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha25
     )
 }
 
+/// The component SHA-256 a [`trusted_artifact_import`] name binds, or `None`
+/// when `import` is not such a name.
+pub fn trusted_artifact_import_wasm_sha256(import: &str) -> Option<&str> {
+    parse_trusted_artifact_import(import).map(|(_, wasm)| wasm)
+}
+
+/// The canonical agent id a [`trusted_artifact_import`] name pins, or `None`
+/// when `import` is not such a name.
+pub fn trusted_artifact_import_agent_id(import: &str) -> Option<&str> {
+    parse_trusted_artifact_import(import).map(|(agent, _)| agent)
+}
+
+/// Prefix of every [`builtin_artifact_import`] name.
+pub const BUILTIN_ARTIFACTS_PREFIX: &str = "runtara:builtin-artifacts/";
+
+/// Content-bound import that pins the exact built-in bytes a workflow composed
+/// for a host-executed built-in (the control agent). The host runs a call only
+/// while this pin, and every composed copy it audited, is in its approved
+/// history.
+pub fn builtin_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
+    format!(
+        "{BUILTIN_ARTIFACTS_PREFIX}{}-h{wasm_sha256}-h{metadata_sha256}@0.1.0",
+        canonical_agent_id(agent_id)
+    )
+}
+
+/// `(agent id, component sha256)` of a [`builtin_artifact_import`] name, or
+/// `None` when `import` is not such a name.
+pub fn parse_builtin_artifact_import(import: &str) -> Option<(&str, &str)> {
+    parse_artifact_import(BUILTIN_ARTIFACTS_PREFIX, import)
+}
+
+fn parse_trusted_artifact_import(import: &str) -> Option<(&str, &str)> {
+    parse_artifact_import("runtara:trusted-artifacts/", import)
+}
+
+fn parse_artifact_import<'a>(prefix: &str, import: &'a str) -> Option<(&'a str, &'a str)> {
+    let (rest, metadata) = import
+        .strip_prefix(prefix)?
+        .strip_suffix("@0.1.0")?
+        .rsplit_once("-h")?;
+    let (agent, wasm) = rest.rsplit_once("-h")?;
+    let digest = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    (!agent.is_empty() && digest(wasm) && digest(metadata)).then_some((agent, wasm))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_artifact_import_names_round_trip_their_component_digest() {
+        let wasm = "a".repeat(64);
+        let import = trusted_artifact_import("s3_storage", &wasm, &"b".repeat(64));
+        assert_eq!(
+            trusted_artifact_import_wasm_sha256(&import),
+            Some(wasm.as_str())
+        );
+        // Agent ids may contain "-h"; the digests are taken from the right.
+        assert_eq!(
+            trusted_artifact_import_agent_id(&import),
+            Some("s3-storage")
+        );
+        let import = trusted_artifact_import("fetch-http", &wasm, &"c".repeat(64));
+        assert_eq!(
+            trusted_artifact_import_wasm_sha256(&import),
+            Some(wasm.as_str())
+        );
+        assert_eq!(
+            trusted_artifact_import_agent_id(&import),
+            Some("fetch-http")
+        );
+        for name in [
+            "runtara:trusted/executor@0.1.0",
+            "runtara:trusted-artifacts/s3-storage-hab-hcd@0.1.0",
+            &format!("runtara:trusted-artifacts/-h{wasm}-h{wasm}@0.1.0"),
+            &format!("runtara:trusted-artifacts/x-h{wasm}-h{wasm}@0.2.0"),
+        ] {
+            assert_eq!(trusted_artifact_import_wasm_sha256(name), None, "{name}");
+            assert_eq!(trusted_artifact_import_agent_id(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn builtin_artifact_imports_are_distinct_from_trusted_pins() {
+        let wasm = "a".repeat(64);
+        let import = builtin_artifact_import(CONTROL_AGENT_ID, &wasm, &"b".repeat(64));
+        assert!(import.starts_with("runtara:builtin-artifacts/control-h"));
+        assert_eq!(
+            parse_builtin_artifact_import(&import),
+            Some((CONTROL_AGENT_ID, wasm.as_str()))
+        );
+        assert_eq!(trusted_artifact_import_agent_id(&import), None);
+        let trusted = trusted_artifact_import(CONTROL_AGENT_ID, &wasm, &"b".repeat(64));
+        assert_eq!(parse_builtin_artifact_import(&trusted), None);
+    }
 
     #[test]
     fn test_builtin_agent_modules_count() {
@@ -3391,6 +3563,7 @@ mod tests {
             is_idempotent: false,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: vec![
                 KnownErrorInfo {
                     code: "NETWORK_ERROR".to_string(),
@@ -3443,6 +3616,7 @@ mod tests {
             is_idempotent: true,
             rate_limited: false,
             trusted: false,
+            suspends: false,
             known_errors: vec![],
             tags: vec![],
         };

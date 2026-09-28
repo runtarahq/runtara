@@ -73,6 +73,19 @@ fn compilation_was_superseded<T>(result: &Result<T, CompilationServiceError>) ->
     matches!(result, Err(CompilationServiceError::Superseded(_)))
 }
 
+/// The trusted pins a failure is recorded with: only a compile that depended
+/// on uninstalled trusted versions has any, so it retries once they are
+/// installed or a workflow-agent republish releases it. Every other failure
+/// records none.
+fn failure_trusted_pins(error: &CompilationServiceError) -> Option<&[String]> {
+    match error {
+        CompilationServiceError::TrustedDependencyUnavailable { trusted_pins, .. } => {
+            Some(trusted_pins)
+        }
+        _ => None,
+    }
+}
+
 /// Background worker that consumes compilation requests from the queue
 #[instrument(skip(pool, runtime_client, agent_catalog, config, shutdown, events))]
 pub async fn run(
@@ -310,7 +323,7 @@ pub async fn run(
                             // valid ready or terminal record with NULLs.
                             if !superseded && let Some(source) = &failure_provenance {
                                 match repository
-                                    .record_compilation_failure(
+                                    .record_compilation_failure_with_trusted_pins(
                                         &request.tenant_id,
                                         &request.workflow_id,
                                         request.version,
@@ -318,6 +331,7 @@ pub async fn run(
                                         &source.source_checksum,
                                         source.track_events,
                                         &e.to_string(),
+                                        failure_trusted_pins(&e),
                                     )
                                     .await
                                 {
@@ -496,6 +510,21 @@ mod tests {
         assert!(!compilation_was_superseded::<()>(&Err(
             CompilationServiceError::CompilationError("compiler failed".to_string(),)
         )));
+    }
+
+    #[test]
+    fn only_a_trusted_dependency_failure_records_pins() {
+        let pins = vec!["runtara:trusted-artifacts/x".to_string()];
+        let error = CompilationServiceError::TrustedDependencyUnavailable {
+            message: "stale".into(),
+            trusted_pins: pins.clone(),
+        };
+        assert_eq!(failure_trusted_pins(&error), Some(pins.as_slice()));
+        assert!(!compilation_was_superseded::<()>(&Err(error)));
+        assert_eq!(
+            failure_trusted_pins(&CompilationServiceError::CompilationError("x".into())),
+            None
+        );
     }
 
     #[test]

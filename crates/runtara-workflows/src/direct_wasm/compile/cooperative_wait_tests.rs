@@ -52,6 +52,8 @@ fn emitted_helper(context: Context, scope_alarm: bool) -> Vec<u8> {
         &Default::default(),
         false,
         &Default::default(),
+        &Default::default(),
+        false,
         true,
         scope_alarm,
     )

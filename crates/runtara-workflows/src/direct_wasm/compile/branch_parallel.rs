@@ -215,6 +215,7 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         | DirectRunPlan::AiAgent { next_plan, .. }
         | DirectRunPlan::AiAgentLoop { next_plan, .. }
         | DirectRunPlan::WaitForSignal { next_plan, .. }
+        | DirectRunPlan::WaitForInstances { next_plan, .. }
         | DirectRunPlan::Delay { next_plan, .. } => Some(next_plan),
         _ => None,
     }
@@ -470,6 +471,17 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint: *breakpoint,
             next_plan,
         },
+        DirectRunPlan::WaitForInstances {
+            step_id,
+            breakpoint,
+            error_plan,
+            ..
+        } => DirectRunPlan::WaitForInstances {
+            step_id: step_id.clone(),
+            breakpoint: *breakpoint,
+            next_plan,
+            error_plan: error_plan.clone(),
+        },
         other => other.clone(),
     }
 }
@@ -484,6 +496,15 @@ pub(super) fn concurrent_branch_pools(
     branches: &[DirectRunPlan],
 ) -> Option<BTreeMap<String, u32>> {
     if !static_data.parallel_enabled {
+        return None;
+    }
+    // An operation-scoped (suspending or control) call anywhere in a branch,
+    // composites included, never shares a concurrent window: the whole group
+    // serializes (advisory W075).
+    if branches
+        .iter()
+        .any(crate::direct_wasm::plan::plan_contains_operation_scoped)
+    {
         return None;
     }
     let chains: Vec<Vec<&DirectRunPlan>> = branches.iter().map(branch_chain).collect();
@@ -678,9 +699,11 @@ fn is_schedulable_branch(static_data: &DirectCoreStaticData, branch: &DirectRunP
             // (assemble-last), which handles the inline breakpoint-pause.
             !node_has_breakpoint(node)
                 && match node {
-                    DirectRunPlan::Agent { agent_id, .. } => {
-                        !static_data.agent_is_workflow_agent(*agent_id)
-                    }
+                    DirectRunPlan::Agent {
+                        agent_id,
+                        operation_scoped,
+                        ..
+                    } => !static_data.agent_is_workflow_agent(*agent_id) && !operation_scoped,
                     DirectRunPlan::Log { .. }
                     | DirectRunPlan::Filter { .. }
                     | DirectRunPlan::SwitchValue { .. }
@@ -1524,8 +1547,7 @@ fn emit_branch_launch(
     super::cooperative_wait::emit_window_deadline_boundary(body, indices, failure_target);
     let component_id = pool_member_component_id(branch.agent_component_id, pool_member);
     let invoke = indices
-        .agent_invokes_async
-        .get(&component_id)
+        .agent_invoke_async(&component_id)
         .expect("parallel branch agents have matching async pool imports");
     let capability_id = static_data
         .agent_capability_id(branch.agent_id)

@@ -20,23 +20,22 @@ use wasmtime_wasi_http::{
 use crate::host_io::HostIoContext;
 
 /// Per-call context. One of these is built before each component invocation.
-/// Carries authoritative identity and the optional legacy runtime address.
-/// Credentials belong to injected native services, never this context.
+/// Carries authoritative identity only. Credentials belong to injected native
+/// services, never this context, and guests get no runtime address: every
+/// runtime call is a host import.
 #[derive(Clone, Debug)]
 pub struct CallContext {
     pub tenant_id: String,
     pub instance_id: Option<String>,
-    pub core_http_url: String,
 }
 
 impl CallContext {
     /// Build a context for the test-dispatcher path (no instance id, no
     /// checkpoint id).
-    pub fn for_test(tenant_id: impl Into<String>, core_http_url: impl Into<String>) -> Self {
+    pub fn for_test(tenant_id: impl Into<String>) -> Self {
         Self {
             tenant_id: tenant_id.into(),
             instance_id: None,
-            core_http_url: core_http_url.into(),
         }
     }
 
@@ -47,7 +46,6 @@ impl CallContext {
         Self {
             tenant_id: String::new(),
             instance_id: None,
-            core_http_url: String::new(),
         }
     }
 }
@@ -140,6 +138,8 @@ pub struct HostState {
         Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
     pub(crate) restricted: bool,
     pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
+    /// The real control service; set only in control executor stores.
+    pub(crate) control_api: Option<crate::control_host::ControlApiCall>,
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
@@ -203,9 +203,6 @@ impl HostState {
         if !ctx.tenant_id.is_empty() {
             builder.env("RUNTARA_TENANT_ID", &ctx.tenant_id);
         }
-        if !ctx.core_http_url.is_empty() {
-            builder.env("RUNTARA_HTTP_URL", &ctx.core_http_url);
-        }
         if let Some(iid) = &ctx.instance_id {
             builder.env("RUNTARA_INSTANCE_ID", iid);
         }
@@ -216,6 +213,7 @@ impl HostState {
             database: Err("native database service is not configured".into()),
             connection_resolver: Err("native connection resolver is not configured".into()),
             trusted: None,
+            control_api: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -282,7 +280,7 @@ mod tests {
 
     #[test]
     fn host_state_retains_authoritative_call_context() {
-        let ctx = Arc::new(CallContext::for_test("tenant-1", "http://core.local:7004"));
+        let ctx = Arc::new(CallContext::for_test("tenant-1"));
         let state = HostState::new(Arc::clone(&ctx));
 
         // Native services must use the context supplied by the invocation host.
@@ -291,7 +289,7 @@ mod tests {
 
     #[test]
     fn host_state_starts_unterminated_with_default_table_cap() {
-        let ctx = Arc::new(CallContext::for_test("tenant-1", "http://core.local:7004"));
+        let ctx = Arc::new(CallContext::for_test("tenant-1"));
         let state = HostState::new(ctx);
 
         // A fresh state has not been interrupted; the epoch callback is the
@@ -335,7 +333,7 @@ mod tests {
 
     #[test]
     fn set_limits_overrides_defaults() {
-        let ctx = Arc::new(CallContext::for_test("tenant-1", "http://core.local:7004"));
+        let ctx = Arc::new(CallContext::for_test("tenant-1"));
         let mut state = HostState::new(ctx);
         assert_eq!(
             state.limiter.max_memory_bytes,

@@ -25,6 +25,8 @@ pub enum SuspensionReason {
     Sleeping,
     /// Execution awaits a durable custom signal.
     WaitingSignal,
+    /// Execution awaits other instances through durable instance waits.
+    WaitingInstances,
 }
 
 /// A requested wake time, resolved by the backend's transaction clock.
@@ -182,6 +184,31 @@ pub fn cancel_parked(status: InstanceStatus, stored: Option<Command<'_>>) -> Dec
     )
 }
 
+/// Apply a pending pause only while parked (decision D4: a waiting run pauses
+/// immediately). The run stays suspended with its suspension reason and wake
+/// cleared, which is what an explicit pause looks like. Running guests keep
+/// their command and pause at their next checkpoint; terminal instances are
+/// untouched.
+pub fn pause_parked(status: InstanceStatus, stored: Option<Command<'_>>) -> Decision {
+    let Some(command) = stored else {
+        return Decision::Rejected;
+    };
+    if status != InstanceStatus::Suspended
+        || command.kind != SignalType::Pause
+        || command.acknowledged
+    {
+        return Decision::Rejected;
+    }
+    acknowledge(
+        status,
+        Some(command),
+        Receipt {
+            id: command.id,
+            kind: command.kind,
+        },
+    )
+}
+
 /// Kind of durable guest suspension; component-specific wake decoding belongs
 /// to the host rather than this policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +217,9 @@ pub enum ParkReason {
     Timer,
     /// Waiting for a custom signal, optionally with a timeout.
     Signal,
+    /// Waiting for other instances (durable instance waits), optionally
+    /// with a timeout.
+    Instances,
 }
 
 /// A durable suspension requested by an exiting guest.
@@ -214,6 +244,7 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
         reason: Change::Set(match request.reason {
             ParkReason::Timer => SuspensionReason::Sleeping,
             ParkReason::Signal => SuspensionReason::WaitingSignal,
+            ParkReason::Instances => SuspensionReason::WaitingInstances,
         }),
         wake: request.deadline.map_or(Change::Keep, |deadline| {
             Change::Set(WakeDeadline::At(deadline))
@@ -378,6 +409,31 @@ mod tests {
     }
 
     #[test]
+    fn parked_pause_applies_only_to_a_pending_pause_of_a_suspended_instance() {
+        for status in STATUSES {
+            for kind in KINDS {
+                let decision = pause_parked(status, Some(command(kind, false)));
+                let applies = status == InstanceStatus::Suspended && kind == SignalType::Pause;
+                assert_eq!(matches!(decision, Decision::Applied(_)), applies);
+                if let Decision::Applied(effects) = decision {
+                    assert_eq!(effects.status, Some(InstanceStatus::Suspended));
+                    assert_eq!(
+                        (effects.reason, effects.wake, effects.wake_reason),
+                        (Change::Clear, Change::Clear, Change::Clear),
+                        "an explicit pause has no reason and no wake"
+                    );
+                    assert!(effects.acknowledge && !effects.report_completion);
+                }
+                assert_eq!(
+                    pause_parked(status, Some(command(kind, true))),
+                    Decision::Rejected
+                );
+            }
+            assert_eq!(pause_parked(status, None), Decision::Rejected);
+        }
+    }
+
+    #[test]
     fn parked_cancellation_does_not_consume_commands_for_active_or_terminal_instances() {
         for status in STATUSES {
             for kind in KINDS {
@@ -401,7 +457,7 @@ mod tests {
     fn parking_requires_running_and_preserves_unrelated_fields() {
         let deadline = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         for status in STATUSES {
-            for reason in [ParkReason::Timer, ParkReason::Signal] {
+            for reason in [ParkReason::Timer, ParkReason::Signal, ParkReason::Instances] {
                 for wake in [None, Some(deadline)] {
                     let decision = park(
                         status,
@@ -423,10 +479,10 @@ mod tests {
                     assert_eq!(effects.event, None);
                     assert_eq!(
                         effects.reason,
-                        Change::Set(if reason == ParkReason::Timer {
-                            SuspensionReason::Sleeping
-                        } else {
-                            SuspensionReason::WaitingSignal
+                        Change::Set(match reason {
+                            ParkReason::Timer => SuspensionReason::Sleeping,
+                            ParkReason::Signal => SuspensionReason::WaitingSignal,
+                            ParkReason::Instances => SuspensionReason::WaitingInstances,
                         })
                     );
                     assert_eq!(

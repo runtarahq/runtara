@@ -90,6 +90,18 @@ The startup log's `agents_allowlist_size` is a **count**, not a list — useful 
 
 > **Ordering trap.** Entitlement parsing runs *before* the components-directory check. With `RUNTARA_AGENT_COMPONENTS_DIR` unset, any `agents` list fails with a misleading `unknown agent module 'http'` instead of the real "components dir missing" error. Confirm that var first.
 
+### The control agent on every tier
+
+The built-in `control` agent (start, read, signal, pause, resume and cancel other runs; see [control-agent.md](../control-agent.md#as-built)) is enabled on **every** pricing tier, whatever `agents` says: an allowlist cannot remove it, and `starter`'s hard-coded list still gets it (decision D5). It is listed only when the bundle ships `runtara_agent_control.wasm`.
+
+Its children share `maxConcurrentExecutions` with every other trigger:
+
+- The effective limit is the same `min(MAX_CONCURRENT_EXECUTIONS, maxConcurrentExecutions)` as above. When neither is set, the default ceiling is twice the embedded runner's concurrency.
+- Only starting and running runs count. A parked run (a WaitForSignal, a durable Delay, a WaitForInstances step) gives its slot back, so a parent waiting on its children does not hold one.
+- Children started by `control:start` may hold at most `max(1, floor(0.8 × limit))` slots (limit 5 → 4, limit 10 → 8, limit 100 → 80), so webhooks, cron and API starts keep at least a fifth of the limit. Beyond that `start` fails with retryable `CONTROL_CAPACITY_RATE_LIMITED` (a 3-8 s retry hint); outside triggers are still admitted up to the full limit.
+- A limit of at most 1 can never admit a child: the calling run holds the only slot. `start` then fails permanently with `CONTROL_CAPACITY_UNSATISFIABLE`, and the server logs a `WARN` at boot naming `max_concurrent_executions`. Raise the limit to 2 or more for tenants that use control.
+- A limit above what the runner can execute leaves admitted children queued; they, and parents woken from a wait, can hit the launch-queue timeout (`launch_queue_timeout`) like any other run. Keep the limit near runner capacity for tenants that fan out.
+
 ## Worked example: disable Database for this tenant
 
 Goal: ship a server where the Database UI is hidden, the object-model REST routes return 403, and the object-model MCP tools refuse.

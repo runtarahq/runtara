@@ -391,7 +391,7 @@ function BasicNodeComponent({
 
   // Determine if this step can have error handlers based on its step type:
   // only the compiler-supported onError set (Agent, AiAgent, EmbedWorkflow,
-  // Split, While, WaitForSignal) offers the error handle.
+  // Split, While, WaitForSignal, WaitForInstances) offers the error handle.
   const canFail = canStepHaveErrorHandler(data.stepType);
 
   return (

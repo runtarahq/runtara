@@ -3,7 +3,7 @@
 //! bundle. Tenant catalogs and caller-provided component bytes are never used.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -51,7 +51,6 @@ struct TrustedAgent {
     integration_ids: Vec<String>,
     digest: String,
     pin: String,
-    wasm_digest: String,
 }
 
 /// Logs only routing identity and outcome, including early denial and dropped callers.
@@ -85,6 +84,41 @@ pub struct TrustedExecutor {
     agents: HashMap<String, TrustedAgent>,
     credentials: OnceLock<Arc<dyn TrustedCredentials>>,
     permits: Arc<Semaphore>,
+    /// Approved, non-revoked trusted pins of earlier installed versions
+    /// (`approved_builtin_artifacts`, loaded at boot). A parked run pinned to
+    /// one of them may keep calling its agent on wake or resume; see
+    /// [`TrustedExecutor::admits`].
+    history: RwLock<Arc<HashSet<String>>>,
+    /// Pins revoked in `approved_builtin_artifacts`. A revoked installed
+    /// version denies every call, like a revoked control digest; see
+    /// [`TrustedExecutor::admits`].
+    revoked: RwLock<Arc<HashSet<String>>>,
+}
+
+/// How the host launched the run that makes a trusted call.
+///
+/// Host authority only: the environment takes it from the durable launch
+/// queue row it is executing and hands it over through the run's
+/// [`crate::runtime_host::RuntimeHost`], which the guest cannot reach or
+/// replace. Anything that does not say otherwise is [`Self::Start`], the
+/// strictest kind, so a missing or unknown kind fails closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TrustedLaunch {
+    /// A first start (or a caller that cannot tell): only installed pins.
+    #[default]
+    Start,
+    /// The wake scheduler relaunched a parked run.
+    Wake,
+    /// A user resumed a parked or paused run.
+    Resume,
+}
+
+impl TrustedLaunch {
+    /// Whether this launch continues a run that parked before (wake or
+    /// resume), which is what may still carry a pin of an earlier version.
+    pub fn continues_parked_run(self) -> bool {
+        matches!(self, Self::Wake | Self::Resume)
+    }
 }
 
 #[derive(Clone)]
@@ -93,6 +127,8 @@ pub(crate) struct TrustedCall {
     pub tenant: String,
     pub deadline: tokio::time::Instant,
     pub pins: Option<Arc<HashSet<String>>>,
+    /// Host-supplied launch kind of the calling run.
+    pub launch: TrustedLaunch,
 }
 
 pub(crate) trait TrustedCaller {
@@ -106,6 +142,8 @@ impl TrustedExecutor {
             agents: HashMap::new(),
             credentials: OnceLock::new(),
             permits: Arc::new(Semaphore::new(16)),
+            history: RwLock::new(Arc::new(HashSet::new())),
+            revoked: RwLock::new(Arc::new(HashSet::new())),
         }
     }
 
@@ -175,25 +213,24 @@ impl TrustedExecutor {
                 integration_ids: info.integration_ids.clone(),
                 digest,
                 pin,
-                wasm_digest: format!("{:x}", Sha256::digest(wasm)),
             },
         );
         Ok(())
     }
 
-    pub(crate) fn pin_for_wasm(&self, digest: &str) -> Option<&str> {
-        self.agents
-            .values()
-            .find(|agent| agent.wasm_digest == digest)
-            .map(|agent| agent.pin.as_str())
+    /// Content-bound import names of every installed trusted built-in. The
+    /// server's compilation readiness requires an artifact's recorded pins to
+    /// be among these.
+    pub fn artifact_pins(&self) -> impl Iterator<Item = &str> + '_ {
+        self.agents.values().map(|agent| agent.pin.as_str())
     }
 
-    pub(crate) fn has_artifact_pin(&self, name: &str) -> bool {
-        self.agents.values().any(|agent| agent.pin == name)
-    }
-
-    /// Register content-bound imports. Old workflows fail linking after a
-    /// dependency changes, instead of silently running a newer privileged body.
+    /// Register content-bound imports for the installed versions. A pin for
+    /// any other version is an empty instance import, which Wasmtime links
+    /// without a definition, so an artifact compiled before an upgrade still
+    /// loads. Its trusted calls are checked per call by [`Self::admits`]:
+    /// on a start they fail with TRUSTED_VERSION_REQUIRED; on a wake or
+    /// resume an approved, non-revoked earlier pin runs the installed bytes.
     pub(crate) fn add_artifact_pins<T: Send + 'static>(
         &self,
         linker: &mut Linker<T>,
@@ -202,6 +239,111 @@ impl TrustedExecutor {
             linker.instance(&agent.pin)?;
         }
         Ok(())
+    }
+
+    /// Install the approved history: every approved, non-revoked trusted pin
+    /// (`runtara:trusted-artifacts/…`), current or earlier. Revoked pins are
+    /// simply absent. Replaces the previous history; set at boot, before any
+    /// wake or recovery.
+    pub fn set_approved_history(&self, pins: impl IntoIterator<Item = String>) {
+        let pins = Arc::new(pins.into_iter().collect());
+        *self
+            .history
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pins;
+    }
+
+    /// Install the revoked pins. A call whose agent's installed version is
+    /// revoked is refused on every launch. Set at boot with the history.
+    pub fn set_revoked_pins(&self, pins: impl IntoIterator<Item = String>) {
+        let pins = Arc::new(pins.into_iter().collect());
+        *self
+            .revoked
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pins;
+    }
+
+    /// The approved history currently in force.
+    pub fn approved_history(&self) -> Arc<HashSet<String>> {
+        Arc::clone(
+            &self
+                .history
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Whether a run whose artifact pins `pins`, launched as `launch`, may
+    /// call `agent`'s trusted capabilities (always the installed bytes).
+    ///
+    /// `None` pins (a direct agent-level call, not a workflow) are not
+    /// version-bound. Otherwise the artifact must pin the installed version
+    /// of `agent`, or (option B) the launch continues a parked run (wake or
+    /// resume, never a start) and the artifact pins an earlier version of
+    /// that same agent that is in the approved history and not revoked. A
+    /// start with an earlier pin is refused, so new runs recompile against
+    /// the installed version; a never-approved or revoked pin is refused on
+    /// every launch. Decided before any credential lookup.
+    pub fn admits(
+        &self,
+        pins: Option<&HashSet<String>>,
+        agent: &str,
+        launch: TrustedLaunch,
+    ) -> bool {
+        let agent_id = canonical_agent_id(agent);
+        let Some(target) = self.agents.get(&agent_id) else {
+            return pins.is_none();
+        };
+        // A revoked installed version is the operator's switch to stop the
+        // agent: no call runs its bytes, whatever the artifact pins.
+        if self
+            .revoked
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&target.pin)
+        {
+            return false;
+        }
+        let Some(pins) = pins else {
+            return true;
+        };
+        if pins.contains(&target.pin) {
+            return true;
+        }
+        if !launch.continues_parked_run() {
+            return false;
+        }
+        let history = self.approved_history();
+        pins.iter().any(|pin| {
+            runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin)
+                == Some(agent_id.as_str())
+                && history.contains(pin)
+        })
+    }
+
+    /// [`Self::invoke`] behind the per-call version check of [`Self::admits`]:
+    /// a refused call fails with `TRUSTED_VERSION_REQUIRED` before any
+    /// credential lookup.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn invoke_pinned(
+        &self,
+        pins: Option<&HashSet<String>>,
+        launch: TrustedLaunch,
+        tenant: &str,
+        agent: &str,
+        capability: &str,
+        connection: &str,
+        input: Vec<u8>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<u8>, String> {
+        if !self.admits(pins, agent, launch) {
+            return Err(error(
+                "TRUSTED_VERSION_REQUIRED",
+                "Workflow has no matching approved trusted dependency",
+            ));
+        }
+        self.invoke(tenant, agent, capability, connection, input, deadline)
+            .await
     }
 
     pub fn set_credentials(&self, credentials: Arc<dyn TrustedCredentials>) -> Result<()> {
@@ -406,29 +548,18 @@ pub(crate) fn add_to_linker<T: TrustedCaller + Send + 'static>(
             Box::pin(async move {
                 let result = match call {
                     Some(call) => {
-                        let pinned = call.pins.as_ref().is_none_or(|pins| {
-                            call.executor
-                                .agents
-                                .get(&canonical_agent_id(&agent))
-                                .is_some_and(|target| pins.contains(&target.pin))
-                        });
-                        if pinned {
-                            call.executor
-                                .invoke(
-                                    &call.tenant,
-                                    &agent,
-                                    &capability,
-                                    &connection,
-                                    input,
-                                    call.deadline,
-                                )
-                                .await
-                        } else {
-                            Err(error(
-                                "TRUSTED_VERSION_REQUIRED",
-                                "Workflow has no matching approved trusted dependency",
-                            ))
-                        }
+                        call.executor
+                            .invoke_pinned(
+                                call.pins.as_deref(),
+                                call.launch,
+                                &call.tenant,
+                                &agent,
+                                &capability,
+                                &connection,
+                                input,
+                                call.deadline,
+                            )
+                            .await
                     }
                     None => Err(error(
                         "TRUSTED_CAPABILITY_DENIED",
@@ -449,6 +580,7 @@ impl TrustedCaller for HostState {
             tenant: self.ctx.tenant_id.clone(),
             deadline: self.http_deadline?,
             pins: None,
+            launch: TrustedLaunch::Start,
         })
     }
 }
@@ -626,6 +758,133 @@ mod tests {
                 tokio::time::Instant::now() + timeout,
             )
             .await
+    }
+
+    async fn pinned_call(
+        executor: &TrustedExecutor,
+        pins: &[&str],
+        launch: TrustedLaunch,
+    ) -> Result<Vec<u8>, String> {
+        let pins: HashSet<String> = pins.iter().map(|pin| (*pin).to_owned()).collect();
+        executor
+            .invoke_pinned(
+                Some(&pins),
+                launch,
+                "tenant",
+                "crypto",
+                "hash",
+                "connection",
+                b"{}".to_vec(),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+    }
+
+    /// Trusted pins, option B: an earlier pin of the same agent that is in
+    /// the approved history runs the installed bytes, only when the launch
+    /// continues a parked run (wake or resume). A start under it, a revoked
+    /// (absent from the history) or never-approved pin, and another agent's
+    /// approved pin fail with TRUSTED_VERSION_REQUIRED before any credential
+    /// lookup. The installed pin works on every launch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn earlier_approved_pins_run_installed_bytes_only_on_wake_or_resume() {
+        use runtara_dsl::agent_meta::trusted_artifact_import;
+        let (executor, credentials) = executor(&fixture(counting_body(), 1, "", false));
+        let installed = executor.artifact_pins().next().unwrap().to_owned();
+        let pin = |agent: &str, seed: &str| {
+            trusted_artifact_import(agent, &seed.repeat(64), &"f".repeat(64))
+        };
+        let old = pin("crypto", "a");
+        let revoked = pin("crypto", "b");
+        let unapproved = pin("crypto", "c");
+        let other_agent = pin("s3-storage", "a");
+        // Boot loads the approved, non-revoked history: `revoked` was
+        // approved once and then revoked, so it is not in it.
+        executor.set_approved_history([installed.clone(), old.clone(), other_agent.clone()]);
+        assert_eq!(TrustedLaunch::default(), TrustedLaunch::Start);
+
+        let resolved = |expected: usize| {
+            assert_eq!(credentials.0.load(Ordering::SeqCst), expected);
+        };
+        let mut calls = 0;
+        for launch in [
+            TrustedLaunch::Start,
+            TrustedLaunch::Wake,
+            TrustedLaunch::Resume,
+        ] {
+            pinned_call(&executor, &[&installed], launch)
+                .await
+                .expect("the installed pin runs on every launch");
+            calls += 1;
+            resolved(calls);
+        }
+        for launch in [TrustedLaunch::Wake, TrustedLaunch::Resume] {
+            pinned_call(&executor, &[&old], launch)
+                .await
+                .expect("an approved earlier pin runs the installed bytes on wake or resume");
+            calls += 1;
+            resolved(calls);
+        }
+        for (pins, launch, why) in [
+            (
+                vec![&old],
+                TrustedLaunch::Start,
+                "a start under an earlier pin",
+            ),
+            (vec![&revoked], TrustedLaunch::Wake, "a revoked pin on wake"),
+            (
+                vec![&revoked],
+                TrustedLaunch::Resume,
+                "a revoked pin on resume",
+            ),
+            (
+                vec![&unapproved],
+                TrustedLaunch::Wake,
+                "a never-approved pin",
+            ),
+            (
+                vec![&unapproved],
+                TrustedLaunch::Start,
+                "a never-approved pin on start",
+            ),
+            (
+                vec![&other_agent],
+                TrustedLaunch::Wake,
+                "another agent's approved pin",
+            ),
+            (vec![], TrustedLaunch::Resume, "no pin at all"),
+        ] {
+            let pins: Vec<&str> = pins.into_iter().map(String::as_str).collect();
+            let error = pinned_call(&executor, &pins, launch).await.expect_err(why);
+            assert!(error.contains("TRUSTED_VERSION_REQUIRED"), "{why}: {error}");
+            resolved(calls);
+        }
+
+        // A later boot that no longer lists `old` (revoked since) refuses it.
+        executor.set_approved_history([installed.clone()]);
+        let error = pinned_call(&executor, &[&old], TrustedLaunch::Wake)
+            .await
+            .expect_err("revoked at the next boot");
+        assert!(error.contains("TRUSTED_VERSION_REQUIRED"), "{error}");
+        resolved(calls);
+        // Agent-level calls (no workflow pins) are not version-bound.
+        assert!(executor.admits(None, "crypto", TrustedLaunch::Start));
+
+        // Revoking the installed version stops every workflow call to it,
+        // on every launch, before any credential lookup.
+        executor.set_revoked_pins([installed.clone()]);
+        for launch in [
+            TrustedLaunch::Start,
+            TrustedLaunch::Wake,
+            TrustedLaunch::Resume,
+        ] {
+            let error = pinned_call(&executor, &[&installed], launch)
+                .await
+                .expect_err("a revoked installed version");
+            assert!(error.contains("TRUSTED_VERSION_REQUIRED"), "{error}");
+            resolved(calls);
+        }
+        assert!(!executor.admits(None, "crypto", TrustedLaunch::Start));
     }
 
     #[test]

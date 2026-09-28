@@ -12,8 +12,11 @@
 //! A single mutex covers the whole store, which is what makes the claim and
 //! guard operations atomic.
 
+mod continuations;
+mod control_receipts;
 mod inputs;
 mod invocations;
+mod waits;
 
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 use crate::lifecycle::{
@@ -48,6 +51,14 @@ struct Store {
     /// One pending signal per instance.
     signals: HashMap<String, SignalRecord>,
     custom_signals: HashMap<(String, String), CustomSignalRecord>,
+    control_receipts:
+        HashMap<(String, String), crate::persistence::control_receipts::ControlReceipt>,
+    /// Fenced outcomes of children that never launched, by instance id.
+    external_outcomes: HashMap<String, crate::persistence::ExternalOutcomeRecord>,
+    /// Instance waits by `(waiter, wait_id)`.
+    instance_waits: HashMap<(String, String), waits::MemWait>,
+    /// Agent continuations by `(instance_id, op_hash)`: `(attempt, state)`.
+    agent_continuations: HashMap<(String, String), (u32, Vec<u8>)>,
     /// Stands in for a sequence: the only monotonic id source a store without
     /// one has to invent.
     next_id: i64,
@@ -74,6 +85,7 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<(), CoreError> {
         let instance = self.instance_mut(instance_id)?;
+        let was_terminal = instance.status.is_terminal();
         if let Some(status) = effects.status {
             instance.status = status;
         }
@@ -93,6 +105,7 @@ impl Store {
                         SuspensionReason::Shutdown => "shutdown_requested",
                         SuspensionReason::Sleeping => "sleeping",
                         SuspensionReason::WaitingSignal => "waiting_signal",
+                        SuspensionReason::WaitingInstances => "waiting_instances",
                     }
                     .into(),
                 )
@@ -129,6 +142,9 @@ impl Store {
         self.revoke_inactive_execution(instance_id);
         if self.instances[instance_id].status.is_terminal() {
             inputs::close_root(self, instance_id, now);
+            if !was_terminal {
+                waits::target_finished(self, instance_id, now);
+            }
         }
         if effects.acknowledge {
             self.signals
@@ -152,12 +168,151 @@ impl Store {
 #[derive(Default)]
 pub struct InMemoryPersistence {
     store: Mutex<Store>,
+    /// Polls of `reconcile_wait_wakes`, which runs its full pass on one in
+    /// every `FULL_RECONCILE_EVERY`.
+    wait_polls: std::sync::atomic::AtomicU64,
 }
 
 impl InMemoryPersistence {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test hook: forget a parked waiter's wake as a crash before its stamp
+    /// would (back on its timer, no wake claim, no nudges).
+    #[cfg(test)]
+    fn lose_wait_wake(&self, waiter: &str) {
+        let mut store = self.store.lock().unwrap();
+        let root = store.instances.get_mut(waiter).unwrap();
+        root.sleep_until = Some(Utc::now() + chrono::Duration::hours(1));
+        root.wake_reason = Some(crate::domain::WakeReason::Timer);
+        if let Some(park) = store.input_parks.get_mut(waiter) {
+            park.wake_scheduled = false;
+        }
+        for ((owner, _), wait) in store.instance_waits.iter_mut() {
+            if owner == waiter {
+                wait.nudged.clear();
+            }
+        }
+    }
+}
+
+impl InMemoryPersistence {
+    /// Apply a parked-command policy (`cancel_parked`, `pause_parked`) to
+    /// suspended instances holding that pending command.
+    fn apply_parked(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+        decide: fn(CoreInstanceStatus, Option<crate::lifecycle::Command<'_>>) -> Decision,
+    ) -> Result<Vec<crate::persistence::CancelledInstance>, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut candidates: Vec<_> = store
+            .instances
+            .values()
+            .filter(|instance| instance_id.is_none_or(|id| id == instance.instance_id))
+            .filter_map(|instance| {
+                let Decision::Applied(effects) = decide(
+                    instance.status,
+                    store
+                        .signals
+                        .get(&instance.instance_id)
+                        .map(SignalRecord::command),
+                ) else {
+                    return None;
+                };
+                Some((
+                    instance.instance_id.clone(),
+                    instance.tenant_id.clone(),
+                    effects,
+                ))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.truncate(limit.max(0) as usize);
+        let now = Utc::now();
+        let mut cancelled = Vec::new();
+        for (id, tenant_id, effects) in candidates {
+            store.apply_transition(&id, effects, now)?;
+            cancelled.push(crate::persistence::CancelledInstance {
+                instance_id: id,
+                tenant_id,
+            });
+        }
+        Ok(cancelled)
+    }
+}
+
+/// A child is pinned while its parent exists and has not been terminal
+/// since before `older_than`.
+fn retention_pinned(store: &Store, instance: &InstanceRecord, older_than: DateTime<Utc>) -> bool {
+    instance
+        .parent
+        .as_ref()
+        .is_some_and(|link| !parent_released(store, &link.parent_instance_id, older_than))
+}
+
+/// Strip a pinned terminal child down to what `get` and `wait` read (see
+/// `Persistence::prune_pinned_terminal`). Returns whether anything changed.
+fn prune_instance(store: &mut Store, id: &str) -> bool {
+    use crate::persistence::inputs::InputState;
+    let mut changed = false;
+    let mut note = |before: usize, after: usize| changed |= before != after;
+    let n = store.checkpoints.len();
+    store.checkpoints.retain(|c| c.instance_id != id);
+    note(n, store.checkpoints.len());
+    let n = store.signals.len();
+    store.signals.remove(id);
+    note(n, store.signals.len());
+    let n = store.custom_signals.len();
+    store.custom_signals.retain(|(inst, _), _| inst != id);
+    note(n, store.custom_signals.len());
+    let n = store.input_requests.len();
+    store.input_requests.retain(|(inst, _), request| {
+        inst != id || !matches!(request.state, InputState::Closed { .. })
+    });
+    note(n, store.input_requests.len());
+    let n = store.input_parks.len();
+    store.input_parks.remove(id);
+    note(n, store.input_parks.len());
+    let n = store.invocation_leases.len();
+    store.invocation_leases.remove(id);
+    note(n, store.invocation_leases.len());
+    let n = store.invocation_attempts.len();
+    store
+        .invocation_attempts
+        .retain(|a| a.fence.lease.instance_id != id);
+    note(n, store.invocation_attempts.len());
+    // Postgres keeps the parent path on the attempt row, so it goes with it.
+    let n = store.invocation_parents.len();
+    store.invocation_parents.retain(|(inst, _), _| inst != id);
+    note(n, store.invocation_parents.len());
+    if let Some(instance) = store.instances.get_mut(id)
+        && instance.input.take().is_some()
+    {
+        changed = true;
+    }
+    changed
+}
+
+/// The parent no longer pins its children: it is gone, or terminal and
+/// finished before `older_than`.
+fn parent_released(store: &Store, parent_instance_id: &str, older_than: DateTime<Utc>) -> bool {
+    match store.instances.get(parent_instance_id) {
+        None => true,
+        Some(parent) => {
+            parent.status.is_terminal() && parent.finished_at.is_some_and(|t| t < older_than)
+        }
+    }
+}
+
+/// The error a launch gets once the child's outcome is published.
+fn launch_fenced(instance_id: &str, outcome: crate::persistence::ExternalOutcomeKind) -> CoreError {
+    CoreError::InvalidInstanceState {
+        instance_id: instance_id.into(),
+        expected: "unlaunched child without a published outcome".into(),
+        actual: outcome.as_str().into(),
     }
 }
 
@@ -178,7 +333,23 @@ impl Persistence for InMemoryPersistence {
         Some(self)
     }
 
+    fn instance_waits(&self) -> Option<&dyn crate::persistence::waits::InstanceWaits> {
+        Some(self)
+    }
+
     fn invocation_fences(&self) -> Option<&dyn crate::persistence::invocations::InvocationFences> {
+        Some(self)
+    }
+
+    fn control_receipts(
+        &self,
+    ) -> Option<&dyn crate::persistence::control_receipts::ControlReceipts> {
+        Some(self)
+    }
+
+    fn agent_continuations(
+        &self,
+    ) -> Option<&dyn crate::persistence::continuations::AgentContinuations> {
         Some(self)
     }
 
@@ -236,9 +407,114 @@ impl Persistence for InMemoryPersistence {
                 exit_code: None,
                 recovery_attempts: 0,
                 recovery_marker: None,
+                parent: None,
             },
         );
         Ok(true)
+    }
+
+    async fn try_register_child_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+        run_label: Option<&str>,
+        parent: &crate::persistence::ParentLink,
+    ) -> Result<bool, CoreError> {
+        parent.validate(instance_id)?;
+        let run_label =
+            runtara_dsl::run_label::normalize_run_label(run_label).map_err(|message| {
+                CoreError::ValidationError {
+                    field: "runLabel".into(),
+                    message,
+                }
+            })?;
+        // One lock: the launch fence against a published outcome, the parent
+        // check and the insert are a single step.
+        let mut store = self.store.lock().unwrap();
+        if store.instances.contains_key(instance_id) {
+            return Ok(false);
+        }
+        if let Some(published) = store.external_outcomes.get(instance_id) {
+            return Err(launch_fenced(instance_id, published.outcome.outcome));
+        }
+        if !store
+            .instances
+            .get(&parent.parent_instance_id)
+            .is_some_and(|row| row.tenant_id == tenant_id)
+        {
+            return Err(CoreError::ValidationError {
+                field: "parentInstanceId".into(),
+                message: "the parent is not a run of this tenant".into(),
+            });
+        }
+        store.instances.insert(
+            instance_id.to_string(),
+            InstanceRecord {
+                run_label,
+                instance_id: instance_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+                definition_version: 1,
+                status: CoreInstanceStatus::Pending,
+                checkpoint_id: None,
+                attempt: 1,
+                max_attempts: 3,
+                created_at: Utc::now(),
+                started_at: None,
+                finished_at: None,
+                input: input.map(ToOwned::to_owned),
+                output: None,
+                error: None,
+                sleep_until: None,
+                wake_reason: None,
+                termination_reason: None,
+                exit_code: None,
+                recovery_attempts: 0,
+                recovery_marker: None,
+                parent: Some(parent.clone()),
+            },
+        );
+        Ok(true)
+    }
+
+    async fn publish_external_outcome(
+        &self,
+        outcome: &crate::persistence::ExternalOutcome,
+    ) -> Result<crate::persistence::PublishOutcome, CoreError> {
+        use crate::persistence::PublishOutcome;
+        outcome.validate()?;
+        let mut store = self.store.lock().unwrap();
+        if store.instances.contains_key(&outcome.instance_id) {
+            return Ok(PublishOutcome::Launched);
+        }
+        if store.external_outcomes.contains_key(&outcome.instance_id) {
+            return Ok(PublishOutcome::AlreadyPublished);
+        }
+        let now = Utc::now();
+        store.external_outcomes.insert(
+            outcome.instance_id.clone(),
+            crate::persistence::ExternalOutcomeRecord {
+                outcome: outcome.clone(),
+                published_at: now,
+            },
+        );
+        waits::target_finished(&mut store, &outcome.instance_id, now);
+        Ok(PublishOutcome::Published)
+    }
+
+    async fn get_external_outcome(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<crate::persistence::ExternalOutcomeRecord>, CoreError> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .external_outcomes
+            .get(instance_id)
+            .filter(|record| record.outcome.tenant_id == tenant_id)
+            .cloned())
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
@@ -259,6 +535,7 @@ impl Persistence for InMemoryPersistence {
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         let inst = store.instance_mut(instance_id)?;
+        let was_terminal = inst.status.is_terminal();
         inst.status = status;
         if let Some(at) = started_at {
             inst.started_at = Some(at);
@@ -271,7 +548,11 @@ impl Persistence for InMemoryPersistence {
         }
         store.revoke_inactive_execution(instance_id);
         if status.is_terminal() {
-            inputs::close_root(&mut store, instance_id, Utc::now());
+            let now = Utc::now();
+            inputs::close_root(&mut store, instance_id, now);
+            if !was_terminal {
+                waits::target_finished(&mut store, instance_id, now);
+            }
         }
         Ok(())
     }
@@ -305,6 +586,7 @@ impl Persistence for InMemoryPersistence {
             return Ok(false);
         }
 
+        let was_terminal = inst.status.is_terminal();
         inst.status = params.status;
         // Replaced: a transition that carries no output or error clears the
         // previous one, so a failure cannot be read as still holding a stale
@@ -326,7 +608,11 @@ impl Persistence for InMemoryPersistence {
         }
         store.revoke_inactive_execution(params.instance_id);
         if params.status.is_terminal() {
-            inputs::close_root(&mut store, params.instance_id, Utc::now());
+            let now = Utc::now();
+            inputs::close_root(&mut store, params.instance_id, now);
+            if !was_terminal {
+                waits::target_finished(&mut store, params.instance_id, now);
+            }
         }
         Ok(true)
     }
@@ -523,20 +809,45 @@ impl Persistence for InMemoryPersistence {
         request: crate::lifecycle::ParkRequest,
         signals: &[String],
     ) -> Result<Decision, CoreError> {
+        self.park_instance_on_targets(
+            instance_id,
+            request,
+            crate::persistence::ParkTargets {
+                signal_ids: signals,
+                wait_ids: &[],
+            },
+        )
+        .await
+    }
+
+    async fn park_instance_on_targets(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+        targets: crate::persistence::ParkTargets<'_>,
+    ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
         let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
         if let Decision::Applied(effects) = decision {
             let now = Utc::now();
             store.apply_transition(instance_id, effects, now)?;
-            if request.reason == lifecycle::ParkReason::Signal && !signals.is_empty() {
+            let signals =
+                request.reason == lifecycle::ParkReason::Signal && !targets.signal_ids.is_empty();
+            if signals || !targets.wait_ids.is_empty() {
                 store.input_parks.insert(
                     instance_id.into(),
                     inputs::InputPark {
-                        signals: signals.to_vec(),
+                        signals: targets.signal_ids.to_vec(),
                         wake_scheduled: false,
+                        waits: targets.wait_ids.to_vec(),
                     },
                 );
+            }
+            if signals {
                 inputs::schedule_accepted(&mut store, instance_id, now, true);
+            }
+            if !targets.wait_ids.is_empty() {
+                waits::park_on(&mut store, instance_id, targets.wait_ids, now);
             }
         }
         Ok(decision)
@@ -547,40 +858,15 @@ impl Persistence for InMemoryPersistence {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::persistence::CancelledInstance>, CoreError> {
-        let mut store = self.store.lock().unwrap();
-        let mut candidates: Vec<_> = store
-            .instances
-            .values()
-            .filter(|instance| instance_id.is_none_or(|id| id == instance.instance_id))
-            .filter_map(|instance| {
-                let Decision::Applied(effects) = lifecycle::cancel_parked(
-                    instance.status,
-                    store
-                        .signals
-                        .get(&instance.instance_id)
-                        .map(SignalRecord::command),
-                ) else {
-                    return None;
-                };
-                Some((
-                    instance.instance_id.clone(),
-                    instance.tenant_id.clone(),
-                    effects,
-                ))
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        candidates.truncate(limit.max(0) as usize);
-        let now = Utc::now();
-        let mut cancelled = Vec::new();
-        for (id, tenant_id, effects) in candidates {
-            store.apply_transition(&id, effects, now)?;
-            cancelled.push(crate::persistence::CancelledInstance {
-                instance_id: id,
-                tenant_id,
-            });
-        }
-        Ok(cancelled)
+        self.apply_parked(instance_id, limit, lifecycle::cancel_parked)
+    }
+
+    async fn pause_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::persistence::PausedInstance>, CoreError> {
+        self.apply_parked(instance_id, limit, lifecycle::pause_parked)
     }
 
     async fn put_custom_signal(
@@ -845,29 +1131,132 @@ impl Persistence for InMemoryPersistence {
             .count() as i64)
     }
 
-    /// Terminal instances that finished before `older_than`, oldest first.
+    /// Terminal instances that finished before `older_than`, oldest first,
+    /// children pinned by their parent (see the trait).
     ///
-    /// The trait's default returns an empty list, which reads as "nothing to
+    /// The trait's default returns an empty page, which reads as "nothing to
     /// sweep" rather than "not implemented" -- a backend that takes it loses
     /// retention silently, so this implements it.
     async fn get_terminal_instances_older_than(
         &self,
         older_than: DateTime<Utc>,
+        after: Option<&crate::persistence::RetentionCursor>,
         limit: i64,
-    ) -> Result<Vec<String>, CoreError> {
+    ) -> Result<crate::persistence::RetentionPage, CoreError> {
         let store = self.store.lock().unwrap();
         let mut terminal: Vec<_> = store
             .instances
             .values()
             .filter(|i| i.status.is_terminal())
-            .filter(|i| i.finished_at.is_some_and(|t| t < older_than))
+            .filter_map(|i| {
+                i.finished_at
+                    .filter(|t| *t < older_than)
+                    .map(|finished| (finished, i))
+            })
+            .filter(|(finished, i)| {
+                after.is_none_or(|cursor| {
+                    (*finished, i.instance_id.as_bytes())
+                        > (cursor.finished_at, cursor.instance_id.as_bytes())
+                })
+            })
             .collect();
-        terminal.sort_by_key(|i| i.finished_at);
-        Ok(terminal
-            .into_iter()
-            .take(limit.max(0) as usize)
-            .map(|i| i.instance_id.clone())
-            .collect())
+        terminal.sort_by(|(a, x), (b, y)| {
+            (a, x.instance_id.as_bytes()).cmp(&(b, y.instance_id.as_bytes()))
+        });
+        terminal.truncate(limit.max(0) as usize);
+        let mut page = crate::persistence::RetentionPage::default();
+        for (_, instance) in &terminal {
+            if retention_pinned(&store, instance, older_than) {
+                page.pinned += 1;
+            } else {
+                page.eligible.push(instance.instance_id.clone());
+            }
+        }
+        if limit > 0 && terminal.len() as i64 == limit {
+            page.next =
+                terminal
+                    .last()
+                    .map(|(finished, instance)| crate::persistence::RetentionCursor {
+                        finished_at: *finished,
+                        instance_id: instance.instance_id.clone(),
+                    });
+        }
+        Ok(page)
+    }
+
+    /// Pinned terminal children of live parents, oldest first, pruned in
+    /// place (see the trait). One store lock per page stands in for the
+    /// transaction.
+    async fn prune_pinned_terminal(
+        &self,
+        older_than: DateTime<Utc>,
+        after: Option<&crate::persistence::RetentionCursor>,
+        limit: i64,
+    ) -> Result<crate::persistence::PrunePage, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut page: Vec<(DateTime<Utc>, String)> = store
+            .instances
+            .values()
+            .filter(|i| i.status.is_terminal())
+            .filter(|i| {
+                i.parent.as_ref().is_some_and(|link| {
+                    store
+                        .instances
+                        .get(&link.parent_instance_id)
+                        .is_some_and(|p| p.tenant_id == i.tenant_id && !p.status.is_terminal())
+                })
+            })
+            .filter_map(|i| {
+                i.finished_at
+                    .filter(|t| *t < older_than)
+                    .map(|finished| (finished, i.instance_id.clone()))
+            })
+            .filter(|(finished, id)| {
+                after.is_none_or(|cursor| {
+                    (*finished, id.as_bytes()) > (cursor.finished_at, cursor.instance_id.as_bytes())
+                })
+            })
+            .collect();
+        page.sort_by(|(a, x), (b, y)| (a, x.as_bytes()).cmp(&(b, y.as_bytes())));
+        page.truncate(limit.max(0) as usize);
+        let mut result = crate::persistence::PrunePage::default();
+        for (_, id) in &page {
+            if prune_instance(&mut store, id) {
+                result.pruned += 1;
+            }
+        }
+        if limit > 0 && page.len() as i64 == limit {
+            result.next = page
+                .last()
+                .map(|(finished, id)| crate::persistence::RetentionCursor {
+                    finished_at: *finished,
+                    instance_id: id.clone(),
+                });
+        }
+        Ok(result)
+    }
+
+    async fn delete_external_outcomes_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<u64, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut due: Vec<_> = store
+            .external_outcomes
+            .values()
+            .filter(|record| record.published_at < older_than)
+            .filter(|record| {
+                parent_released(&store, &record.outcome.parent_instance_id, older_than)
+            })
+            .map(|record| (record.published_at, record.outcome.instance_id.clone()))
+            .collect();
+        due.sort();
+        due.truncate(limit.max(0) as usize);
+        for (_, id) in &due {
+            store.external_outcomes.remove(id);
+        }
+        Ok(due.len() as u64)
     }
 
     /// Delete instances and everything hanging off them.
@@ -886,6 +1275,11 @@ impl Persistence for InMemoryPersistence {
             store.input_parks.remove(id);
             store.custom_signals.retain(|(inst, _), _| inst != id);
             store.input_requests.retain(|(inst, _), _| inst != id);
+            store.control_receipts.retain(|(caller, _), _| caller != id);
+            store.instance_waits.retain(|(waiter, _), _| waiter != id);
+            store
+                .agent_continuations
+                .retain(|(instance, _), _| instance != id);
             store.invocation_leases.remove(id);
             store
                 .invocation_parents
@@ -1059,6 +1453,11 @@ fn payload_str(event: &EventRecord, key: &str) -> Option<String> {
 /// A start and an end are the same record when their correlation values match
 /// *and* their scopes match, so the same step id inside two different loop
 /// iterations stays two records.
+///
+/// Each (correlation, scope) is one record, however often it was emitted: a
+/// resumed run replays its completed steps and re-enters a parked one, which
+/// emits their start (and end) again. The record opens at the first start and
+/// closes at the first end after it; later starts and ends are replays.
 fn pair_records(
     store: &Store,
     instance_id: &str,
@@ -1075,12 +1474,18 @@ fn pair_records(
     let ends = of_subtype(vocabulary.end_subtype());
 
     let mut records = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for start in of_subtype(vocabulary.start_subtype()) {
         let correlation_id = payload_str(start, vocabulary.correlation_key()).unwrap_or_default();
         let scope_id = payload_str(start, "scope_id");
+        if !seen.insert((correlation_id.clone(), scope_id.clone())) {
+            continue;
+        }
 
         let end = ends.iter().find(|e| {
-            payload_str(e, vocabulary.correlation_key()).unwrap_or_default() == correlation_id
+            e.id > start.id
+                && payload_str(e, vocabulary.correlation_key()).unwrap_or_default()
+                    == correlation_id
                 && payload_str(e, "scope_id") == scope_id
         });
 
@@ -1213,8 +1618,105 @@ mod tests {
         crate::persistence::conformance::run_conformance_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
+        crate::persistence::conformance::run_parked_pause_sequence(&backend).await;
+        crate::persistence::conformance::run_control_receipt_sequence(&backend).await;
+        crate::persistence::conformance::run_parent_link_sequence(&backend).await;
+        crate::persistence::conformance::run_external_outcome_sequence(&backend).await;
+        crate::persistence::conformance::run_retention_pin_sequence(&backend).await;
+        crate::persistence::conformance::run_prune_pinned_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
         crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    }
+
+    /// The paired-record rule, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_paired_record_rule() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::paired::run_all(&backend).await;
+    }
+
+    /// Agent continuations, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_agent_continuations_contract() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::continuations::run_all(&backend).await;
+    }
+
+    /// Durable instance waits, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_instance_wait_contract() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::waits::run_all(backend.as_ref()).await;
+        let hook = backend.clone();
+        let lose_wake = move |waiter: String| {
+            let backend = hook.clone();
+            Box::pin(async move { backend.lose_wait_wake(&waiter) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        };
+        crate::persistence::conformance::waits::reconciler_rotation(backend.as_ref(), &lose_wake)
+            .await;
+    }
+
+    /// Publishing a never-launched child's outcome and launching it race to
+    /// exactly one winner, and no id ends with both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_launch_fence_race_has_one_winner() {
+        use crate::persistence::{
+            ExternalOutcome, ExternalOutcomeKind, ParentLink, PublishOutcome,
+        };
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        backend.register_instance("parent", "tenant").await.unwrap();
+        let admitted_at = Utc::now();
+        for i in 0..500 {
+            let child = format!("child-{i}");
+            let publish = {
+                let (backend, child) = (backend.clone(), child.clone());
+                tokio::spawn(async move {
+                    backend
+                        .publish_external_outcome(&ExternalOutcome {
+                            instance_id: child,
+                            tenant_id: "tenant".into(),
+                            parent_instance_id: "parent".into(),
+                            outcome: ExternalOutcomeKind::NotStarted,
+                            reason: None,
+                            admitted_at,
+                            workflow_id: None,
+                            workflow_version: None,
+                            run_label: None,
+                        })
+                        .await
+                        .unwrap()
+                })
+            };
+            let launch = {
+                let (backend, child) = (backend.clone(), child.clone());
+                tokio::spawn(async move {
+                    backend
+                        .try_register_child_instance(
+                            &child,
+                            "tenant",
+                            None,
+                            None,
+                            &ParentLink {
+                                parent_instance_id: "parent".into(),
+                                parent_close_policy: "cancel".into(),
+                                admitted_at,
+                            },
+                        )
+                        .await
+                })
+            };
+            match (publish.await.unwrap(), launch.await.unwrap()) {
+                (PublishOutcome::Launched, Ok(true))
+                | (PublishOutcome::Published, Err(CoreError::InvalidInstanceState { .. })) => {}
+                other => panic!("iteration {i}: {other:?}"),
+            }
+            let store = backend.store.lock().unwrap();
+            assert!(
+                store.instances.contains_key(&child)
+                    != store.external_outcomes.contains_key(&child)
+            );
+        }
     }
 
     /// Parallel wakers racing for one instance must produce a single winner.

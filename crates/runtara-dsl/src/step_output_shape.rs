@@ -152,6 +152,30 @@ const GROUP_BY_FIELDS: &[ShapeField] = &[
     field("total_groups", "integer", "Number of distinct groups"),
 ];
 
+const WAIT_FOR_INSTANCES_FIELDS: &[ShapeField] = &[
+    field("mode", "string", "The wait mode: `all` or `any`"),
+    field(
+        "resolution",
+        "string",
+        "`satisfied` when the mode was met, `deadline` when the deadline passed first, `empty` for no runs",
+    ),
+    field(
+        "finished",
+        "array",
+        "Runs that finished, in finish order: {instanceId, status, finishedAtMs, output, outputBytes, outputOmitted, error, errorOmitted}",
+    ),
+    field(
+        "remaining",
+        "array",
+        "Ids of the runs that had not finished",
+    ),
+    field(
+        "deadlineMs",
+        "integer",
+        "The persisted deadline in milliseconds since the Unix epoch (null without timeoutMs)",
+    ),
+];
+
 /// Look up the output shape for a PascalCase step type id (matches
 /// `agent_meta::StepTypeMeta::id` and `Step` variant names). Returns `None` for
 /// an unknown step type.
@@ -205,6 +229,11 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
         "WaitForSignal" => StepOutputShape {
             summary: "`outputs` is the payload delivered when the awaited signal arrives (shape defined by the signal schema).",
             outputs: OutputsShape::Dynamic,
+            siblings: &[],
+        },
+        "WaitForInstances" => StepOutputShape {
+            summary: "`outputs` is the settled wait: `{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, finishedAtMs, output, outputBytes, outputOmitted, error, errorOmitted}], remaining: [ids], deadlineMs}`. Outputs over 256 KiB (errors over 16 KiB, or past 3 MiB per wait) are omitted and flagged.",
+            outputs: OutputsShape::Object(WAIT_FOR_INSTANCES_FIELDS),
             siblings: &[],
         },
         "Finish" => StepOutputShape {
@@ -297,6 +326,7 @@ mod tests {
         "Filter",
         "GroupBy",
         "WaitForSignal",
+        "WaitForInstances",
         "AiAgent",
         "Delay",
     ];

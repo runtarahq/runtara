@@ -23,9 +23,11 @@ import { FilterStepField } from './FilterStepField';
 import { GroupByStepField } from './GroupByStepField';
 import { AiAgentStepField } from './AiAgentStepField';
 import { WaitForSignalStepField } from './WaitForSignalStepField';
+import { WaitForInstancesStepField } from './WaitForInstancesStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
 import { DelayStepField } from './DelayStepField';
+import { SuspendingStepHint } from './SuspendingStepHint';
 import {
   Collapsible,
   CollapsibleContent,
@@ -195,6 +197,7 @@ function StepAdvancedFields() {
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
+      <SuspendingStepHint />
       <CollapsibleTrigger
         type="button"
         className="flex w-full items-center gap-1.5 py-1 text-left text-sm font-medium"
@@ -520,6 +523,12 @@ function InputMappingWrapper(config: Record<string, unknown>) {
 
   if (stepType === 'WaitForSignal') {
     return <WaitForSignalStepField {...config} name={config.name as string} />;
+  }
+
+  if (stepType === 'WaitForInstances') {
+    return (
+      <WaitForInstancesStepField {...config} name={config.name as string} />
+    );
   }
 
   if (stepType === 'Log') {

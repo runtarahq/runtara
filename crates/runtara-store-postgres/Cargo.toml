@@ -34,3 +34,8 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 name = "conformance"
 path = "tests/conformance.rs"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "instance_waits_race"
+path = "tests/instance_waits_race.rs"
+required-features = ["db-integration-tests"]

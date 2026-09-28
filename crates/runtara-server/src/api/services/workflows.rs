@@ -257,6 +257,7 @@ impl WorkflowService {
             }),
             input_schema: serde_json::json!({}),
             output_schema: serde_json::json!({}),
+            state_schema: serde_json::json!({}),
             variables: serde_json::json!({}),
             current_version_number: 1,
             last_version_number: 1,
@@ -347,7 +348,30 @@ impl WorkflowService {
         // real `runtara:agent-<id>` package at composition time; the legacy
         // "workflow-agent" placeholder stays reserved too.
         let canonical = canonical_agent_id(slug);
-        canonical == "workflow-agent" || self.agent_catalog.has_agent(&canonical)
+        canonical == "workflow-agent"
+            || crate::workflow_agents::folds_onto_reserved_agent(&canonical)
+            || self.agent_catalog.has_agent(&canonical)
+    }
+
+    /// Boot check: workflows whose slug folds onto a reserved built-in id
+    /// (`control`) predate the reservation. Each is logged; the catalog
+    /// overlay already excludes its published agent and `stage` refuses to
+    /// republish it, so the owner must pick a new slug. Returns how many.
+    pub async fn warn_reserved_slug_collisions(&self) -> Result<usize, ServiceError> {
+        let collisions = self
+            .repository
+            .list_slugs_folding_onto(&[runtara_dsl::agent_meta::CONTROL_AGENT_ID])
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+        for (tenant_id, workflow_id, slug) in &collisions {
+            tracing::warn!(
+                %tenant_id,
+                %workflow_id,
+                %slug,
+                "workflow slug collides with a reserved built-in agent id; its workflow-agent is excluded until the slug changes"
+            );
+        }
+        Ok(collisions.len())
     }
 
     async fn slug_taken_or_reserved(
@@ -1133,13 +1157,14 @@ impl WorkflowService {
 
     /// Get schemas and variables from a specific workflow version's execution graph
     ///
-    /// Returns (input_schema, output_schema, variables) extracted from the execution_graph
+    /// Returns the input, output and state schemas and the variables
+    /// extracted from the execution_graph
     pub async fn get_version_schemas(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<(Value, Value, Value), ServiceError> {
+    ) -> Result<VersionSchemasResponse, ServiceError> {
         let schemas = self
             .repository
             .get_version_schemas(tenant_id, workflow_id, version)

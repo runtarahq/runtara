@@ -56,3 +56,35 @@ it('forwards search, exact label, and pagination and retains labels and server t
   });
   expect(result).toMatchObject({ totalElements: 23, totalPages: 3, number: 2 });
 });
+
+it('forwards the parent filter and keeps parent and suspension reason', async () => {
+  list.mockResolvedValue({
+    data: {
+      data: {
+        content: [
+          {
+            id: 'child',
+            workflowId: 'workflow',
+            created: '2026-09-27',
+            status: 'suspended',
+            suspensionReason: 'waiting_signal',
+            parentInstanceId: 'parent',
+            usedVersion: 1,
+          },
+        ],
+        number: 0,
+        size: 10,
+        totalElements: 1,
+        totalPages: 1,
+      },
+    },
+  });
+  const result = await getAllExecutions('', {
+    queryKey: ['executions', { filters: { parentInstanceId: 'parent' } }],
+  });
+  expect(list.mock.lastCall![0]).toMatchObject({ parentInstanceId: 'parent' });
+  expect(result.content[0]).toMatchObject({
+    parentInstanceId: 'parent',
+    suspensionReason: 'waiting_signal',
+  });
+});

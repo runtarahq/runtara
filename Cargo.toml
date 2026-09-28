@@ -32,6 +32,10 @@ members = [
     # WASM Component Model migration
     "crates/runtara-agent-wit",
     "crates/runtara-agent-trusted",
+    # Typed agent suspension contract (runtara:agent-suspension)
+    "crates/runtara-agent-suspension",
+    # Control service contract: caps, codes, capacity share, start schema
+    "crates/runtara-control-contract",
     "crates/runtara-workflow-wit",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
@@ -60,6 +64,7 @@ members = [
     "crates/agents/runtara-agent-compression",
     "crates/agents/runtara-agent-mcp",
     "crates/agents/runtara-agent-xlsx",
+    "crates/agents/runtara-agent-control",
     # Build tool: emits per-agent meta.json siblings to each .wasm by walking
     # the macro-emitted statics in every agent crate. Run by
     # scripts/build-agent-components.sh after `cargo component build`.

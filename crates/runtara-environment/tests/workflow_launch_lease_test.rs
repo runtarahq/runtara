@@ -44,6 +44,7 @@ fn initial_request(
 ) -> InitialLaunchRequest {
     InitialLaunchRequest {
         run_label: None,
+        parent: None,
         launch: EnqueueRequest::immediate(
             launch_id,
             instance_id,

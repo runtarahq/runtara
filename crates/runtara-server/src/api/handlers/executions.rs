@@ -140,9 +140,22 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         return Err("Search must be at most 250 characters".into());
     }
     let run_label = runtara_dsl::run_label::normalize_run_label(query.run_label.as_deref())?;
+    let parent_instance_id = query
+        .parent_instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    if parent_instance_id
+        .as_ref()
+        .is_some_and(|id| id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err("parentInstanceId must be at most 256 bytes of printable text".into());
+    }
     Ok(ExecutionFilters {
         search,
         run_label,
+        parent_instance_id,
         workflow_id: query.workflow_id.clone(),
         statuses,
         created_from: query.created_from,
@@ -162,6 +175,7 @@ mod tests {
         ListAllExecutionsQuery {
             search: None,
             run_label: None,
+            parent_instance_id: None,
             page: None,
             size: None,
             workflow_id: None,
@@ -173,6 +187,23 @@ mod tests {
             sort_by: None,
             sort_order: None,
         }
+    }
+
+    #[test]
+    fn parse_filters_carries_a_trimmed_parent_filter() {
+        let mut query = query_with_status(None);
+        assert_eq!(parse_filters(&query).unwrap().parent_instance_id, None);
+        query.parent_instance_id = Some("  parent-1 ".into());
+        assert_eq!(
+            parse_filters(&query).unwrap().parent_instance_id.as_deref(),
+            Some("parent-1")
+        );
+        query.parent_instance_id = Some("   ".into());
+        assert_eq!(parse_filters(&query).unwrap().parent_instance_id, None);
+        query.parent_instance_id = Some("p".repeat(257));
+        assert!(parse_filters(&query).is_err());
+        query.parent_instance_id = Some("a\nb".into());
+        assert!(parse_filters(&query).is_err());
     }
 
     #[test]

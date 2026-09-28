@@ -390,7 +390,7 @@ fn compile_nested_agents_with_parent(
     let mut agents = Vec::new();
     for level in 0..depth {
         let safety = runtara_workflows::direct_wasm::support::analyze_workflow_agent_safety(
-            &graph, &children,
+            &graph, &children, None,
         );
         anyhow::ensure!(
             !safety.may_suspend_or_sleep,
@@ -1136,10 +1136,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             }
             let dispatcher = runtara_component_host::ComponentDispatcherService::from_dir(
                 bundle.path(),
-                runtara_component_host::DispatcherEnv {
-
-                    core_http_url: url.clone(),
-                },
             ).await?;
             let executor = runtara_component_host::WorkflowExecutor::new(
                 Arc::clone(embedded_executor().engine()),

@@ -219,6 +219,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             checkpoint_id: None,
             env: Default::default(),
             prepersisted_input: None,
+            launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
         })
         .await?;

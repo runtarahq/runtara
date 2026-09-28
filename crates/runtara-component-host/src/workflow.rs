@@ -173,6 +173,8 @@ enum InvocationEntry<'a> {
 #[derive(Default)]
 struct InvocationControl {
     trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
+    /// The audited control binding of a prepared artifact.
+    control_binding: Option<Arc<crate::control_executor::ControlBinding>>,
     deadline: Option<Instant>,
     task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
     abandoned: Option<Arc<AtomicBool>>,
@@ -262,6 +264,12 @@ impl WasiHttpHooks for WorkflowHooks {
 /// Store data for a workflow run.
 pub struct WorkflowState {
     trusted: Option<crate::trusted::TrustedCall>,
+    /// Forwarding target of `runtara:control/executor`, when configured.
+    pub(crate) control_executor: Option<crate::control_executor::ControlCall>,
+    /// The operation a suspending call site entered.
+    pub(crate) operation: crate::operation_scope_host::OperationScopeState,
+    /// Durable instance waits of WaitForInstances steps.
+    pub(crate) instance_waits: crate::instance_wait_host::RunInstanceWaits,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -365,6 +373,7 @@ struct CachedComponent {
     /// (run-shaped) artifact has been loaded through [`WorkflowExecutor::load`].
     command: Option<Arc<CommandPre<WorkflowState>>>,
     child_catalog: Option<Arc<PreparedChildCatalog>>,
+    control: Option<Arc<crate::control_executor::ControlBinding>>,
 }
 
 /// A linked workflow artifact prepared from an exact, verified child result.
@@ -379,9 +388,16 @@ pub struct PreparedWorkflow {
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
     command: Option<Arc<CommandPre<WorkflowState>>>,
     child_catalog: Option<Arc<PreparedChildCatalog>>,
+    control: Option<Arc<crate::control_executor::ControlBinding>>,
 }
 
 impl PreparedWorkflow {
+    /// The audited control binding, when the artifact forwards to
+    /// `runtara:control/executor` (decision D2).
+    pub fn control_binding(&self) -> Option<&Arc<crate::control_executor::ControlBinding>> {
+        self.control.as_ref()
+    }
+
     /// Immutable dependencies compiled from the same verified source as the root.
     pub fn child_catalog(&self) -> Option<&Arc<PreparedChildCatalog>> {
         self.child_catalog.as_ref()
@@ -429,6 +445,8 @@ pub struct WorkflowExecutor {
     database: std::sync::OnceLock<Arc<dyn crate::DatabaseHost>>,
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
+    control: std::sync::OnceLock<Arc<crate::control_executor::ControlExecutor>>,
+    instance_waits: std::sync::OnceLock<Arc<dyn crate::InstanceWaitHost>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
@@ -460,17 +478,14 @@ impl WorkflowExecutor {
         &self,
         component: &Component,
     ) -> Result<wasmtime::component::Linker<WorkflowState>> {
-        // Empty instance imports describe dependencies but Wasmtime does not
-        // require a linker definition for them. Validate them explicitly.
+        // Empty instance imports describe dependencies, and Wasmtime does not
+        // require a linker definition for them, so a pin for a trusted
+        // version this host no longer runs still links. That artifact's
+        // trusted calls are decided per call (`TrustedExecutor::admits`):
+        // TRUSTED_VERSION_REQUIRED before any credential lookup, except a
+        // wake or resume under an approved earlier pin, which runs the
+        // installed bytes; everything else in it keeps running.
         let pins = self.trusted_pins(component);
-        for pin in pins.iter() {
-            anyhow::ensure!(
-                self.trusted
-                    .get()
-                    .is_some_and(|executor| executor.has_artifact_pin(pin)),
-                "approved trusted artifact unavailable: {pin}"
-            );
-        }
         if component
             .component_type()
             .imports(&self.engine)
@@ -508,6 +523,24 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("trusted executor already configured"))
     }
 
+    /// Route `runtara:control/executor` calls of every run to `executor`.
+    /// Without one, the composed control agent's calls are `denied`.
+    pub fn set_control_executor(
+        &self,
+        executor: Arc<crate::control_executor::ControlExecutor>,
+    ) -> anyhow::Result<()> {
+        self.control
+            .set(executor)
+            .map_err(|_| anyhow::anyhow!("control executor already configured"))
+    }
+
+    /// Serve every run's durable instance waits with `host`.
+    pub fn set_instance_wait_host(&self, host: Arc<dyn crate::InstanceWaitHost>) -> Result<()> {
+        self.instance_waits
+            .set(host)
+            .map_err(|_| anyhow::anyhow!("instance wait host already configured"))
+    }
+
     /// `engine` must have epoch interruption enabled (see
     /// [`crate::engine::build_engine`]) and an epoch ticker running.
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
@@ -527,8 +560,20 @@ impl WorkflowExecutor {
         crate::outbound_http::add_to_linker(&mut linker)?;
         crate::execution_host::add_execution_to_linker(&mut linker)?;
         crate::trusted::add_to_linker(&mut linker)?;
+        // Typed agent suspension: the compiler-emitted operation scope, the
+        // continuation context of ordinary suspending agents, the control
+        // executor the composed control copy forwards to, and `denied` for a
+        // direct control API call from anything composed into the root.
+        crate::operation_scope_host::add_operation_scope_to_linker(&mut linker)?;
+        crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
+        crate::control_executor::add_control_executor_to_linker(&mut linker)?;
+        crate::control_host::add_denied_control_api_to_linker(&mut linker)?;
+        // Durable instance waits of compiled WaitForInstances steps.
+        crate::instance_wait_host::add_instance_waits_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
+            control: std::sync::OnceLock::new(),
+            instance_waits: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
@@ -623,6 +668,7 @@ impl WorkflowExecutor {
                 instance_pre: Arc::clone(&instance_pre),
                 command: None,
                 child_catalog: None,
+                control: None,
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {
@@ -646,6 +692,77 @@ impl WorkflowExecutor {
     /// allocations with the opaque prepared token; a count-only cache cannot
     /// safely bound those allocations.
     pub async fn prepare_precompiled(&self, component: Component) -> Result<PreparedWorkflow> {
+        self.prepare_audited(component, &Default::default()).await
+    }
+
+    /// Read, audit, compile and link the component at `wasm_path` in-process,
+    /// with the same control checks as a worker-prepared artifact. Compiles
+    /// on this thread's blocking pool, so production launches use the
+    /// killable precompile worker instead.
+    pub async fn prepare_path(&self, wasm_path: &Path) -> Result<PreparedWorkflow> {
+        let bytes = std::fs::read(wasm_path)
+            .with_context(|| format!("read workflow component {}", wasm_path.display()))?;
+        let audit = crate::precompile::audit_control_importers(&bytes)?;
+        let engine = Arc::clone(&self.engine);
+        let component = tokio::task::spawn_blocking(move || Component::new(&engine, &bytes))
+            .await
+            .context("workflow component compile task panicked")??;
+        self.prepare_audited(component, &audit.importers).await
+    }
+
+    /// The control binding of a root, checked at load (decision D2): a root
+    /// that imports `runtara:control/executor` must pin exactly one control
+    /// artifact, have audited importers, and both must be in the approved
+    /// history. A pin revoked since still loads; its calls are `denied`.
+    fn control_binding(
+        &self,
+        component: &Component,
+        importers: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<Arc<crate::control_executor::ControlBinding>>> {
+        let imports: Vec<String> = component
+            .component_type()
+            .imports(&self.engine)
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        if !imports
+            .iter()
+            .any(|name| name == runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME)
+        {
+            return Ok(None);
+        }
+        let pins: Vec<&String> = imports
+            .iter()
+            .filter(|name| {
+                runtara_dsl::agent_meta::parse_builtin_artifact_import(name)
+                    .is_some_and(|(agent, _)| agent == runtara_dsl::agent_meta::CONTROL_AGENT_ID)
+            })
+            .collect();
+        let [pin] = pins.as_slice() else {
+            anyhow::bail!(
+                "a workflow calling control must pin exactly one control artifact, found {}",
+                pins.len()
+            );
+        };
+        let binding = crate::control_executor::ControlBinding {
+            pin: (*pin).clone(),
+            importers: importers.clone(),
+        };
+        let executor = self
+            .control
+            .get()
+            .context("the workflow calls control but no control executor is configured")?;
+        executor
+            .check_loadable_binding(&binding)
+            .map_err(|reason| anyhow::anyhow!("control artifact refused: {reason}"))?;
+        Ok(Some(Arc::new(binding)))
+    }
+
+    async fn prepare_audited(
+        &self,
+        component: Component,
+        control_importers: &std::collections::BTreeSet<String>,
+    ) -> Result<PreparedWorkflow> {
+        let control = self.control_binding(&component, control_importers)?;
         let instance_pre = Arc::new(
             self.linker_with_trusted_pins(&component)?
                 .instantiate_pre(&component)
@@ -667,6 +784,7 @@ impl WorkflowExecutor {
             instance_pre,
             command,
             child_catalog: None,
+            control,
         })
     }
 
@@ -678,24 +796,24 @@ impl WorkflowExecutor {
         package: crate::precompile::CompiledWorkflowPackage,
     ) -> Result<PreparedWorkflow> {
         // Child bytes were verified by the precompile worker against these
-        // digests. Bare built-ins have no workflow pin import, so bind them to
-        // the approved registry AND the root's metadata-bound version here.
+        // digests. Bare built-ins have no workflow pin import, so bind each to
+        // the root's pin for exactly those bytes. When that version is no
+        // longer installed, the child still links and its trusted calls fail
+        // with TRUSTED_VERSION_REQUIRED, as they do for the root.
         let root_pins = self.trusted_pins(&package.root);
         let mut child_pins = std::collections::BTreeMap::new();
         let linker = self.linker_with_trusted_pins(&package.root)?;
         for (digest, component) in &package.artifacts {
             let mut pins = (*self.trusted_pins(component)).clone();
-            if let Some(pin) = self
-                .trusted
-                .get()
-                .and_then(|executor| executor.pin_for_wasm(digest))
-            {
-                anyhow::ensure!(
-                    root_pins.contains(pin),
-                    "isolated trusted built-in lacks matching root artifact pin"
-                );
-                pins.insert(pin.to_owned());
-            }
+            pins.extend(
+                root_pins
+                    .iter()
+                    .filter(|pin| {
+                        runtara_dsl::agent_meta::trusted_artifact_import_wasm_sha256(pin)
+                            == Some(digest.as_str())
+                    })
+                    .cloned(),
+            );
             for pin in &pins {
                 anyhow::ensure!(
                     root_pins.contains(pin),
@@ -718,7 +836,9 @@ impl WorkflowExecutor {
             PreparedChildCatalog::prepare(&linker, package.artifacts, package.bindings)?;
         catalog.trusted_pins = child_pins;
         catalog.set_invocations(package.invocations)?;
-        let mut root = self.prepare_precompiled(package.root).await?;
+        let mut root = self
+            .prepare_audited(package.root, &package.control_importers)
+            .await?;
         if catalog.binding_count() != 0 {
             root.child_catalog = Some(Arc::new(catalog));
         }
@@ -755,6 +875,7 @@ impl WorkflowExecutor {
                 instance_pre: Arc::clone(&entry.instance_pre),
                 command: entry.command.clone(),
                 child_catalog: entry.child_catalog.clone(),
+                control: entry.control.clone(),
             },
             digest,
         ))
@@ -788,6 +909,7 @@ impl WorkflowExecutor {
                 instance_pre: Arc::clone(&prepared.instance_pre),
                 command: prepared.command.clone(),
                 child_catalog: prepared.child_catalog.clone(),
+                control: prepared.control.clone(),
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {
@@ -847,7 +969,12 @@ impl WorkflowExecutor {
                     tenant: spec.trusted_tenant.clone().unwrap_or_default(),
                     deadline: tokio::time::Instant::now() + spec.timeout,
                     pins: Some(self.trusted_pins(pre.instance_pre().component())),
+                    launch: trusted_launch(spec.runtime.as_ref()),
                 }),
+            // The retired `wasi:cli/run` entry cannot suspend.
+            control_executor: None,
+            operation: Default::default(),
+            instance_waits: Default::default(),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1010,8 +1137,45 @@ impl WorkflowExecutor {
             .await
     }
 
+    /// [`Self::execute_invoke`] for a prepared artifact, whose audited
+    /// control binding lets its composed control agent reach the executor.
+    pub async fn execute_prepared_invoke(
+        &self,
+        prepared: &PreparedWorkflow,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+    ) -> InvokeRunResult {
+        self.execute_prepared_invoke_with_start_confirmation(prepared, spec, input, None)
+            .await
+    }
+
+    /// [`Self::execute_invoke_with_start_confirmation`] for a prepared
+    /// artifact, carrying its audited control binding.
+    pub async fn execute_prepared_invoke_with_start_confirmation(
+        &self,
+        prepared: &PreparedWorkflow,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+        start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
+    ) -> InvokeRunResult {
+        self.execute_entry(
+            &prepared.instance_pre,
+            spec,
+            input,
+            start_confirmation,
+            InvocationEntry::Lifecycle { interface: None },
+            InvocationControl {
+                control_binding: prepared.control.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     /// Execute one invoke-shaped workflow after an optional durable handoff
-    /// confirmation at the exact pre-instantiation boundary.
+    /// confirmation at the exact pre-instantiation boundary. Its composed
+    /// control agent, if any, is `denied`: use
+    /// [`Self::execute_prepared_invoke_with_start_confirmation`].
     pub async fn execute_invoke_with_start_confirmation(
         &self,
         pre: &wasmtime::component::InstancePre<WorkflowState>,
@@ -1150,7 +1314,22 @@ impl WorkflowExecutor {
                             .clone()
                             .unwrap_or_else(|| self.trusted_pins(pre.component())),
                     ),
+                    launch: trusted_launch(spec.runtime.as_ref()),
                 }),
+            control_executor: self.control.get().cloned().map(|executor| {
+                crate::control_executor::ControlCall {
+                    executor,
+                    tenant: spec.trusted_tenant.clone().unwrap_or_default(),
+                    caller: spec.trusted_instance.clone(),
+                    binding: control.control_binding.clone(),
+                }
+            }),
+            operation: Default::default(),
+            instance_waits: crate::instance_wait_host::RunInstanceWaits::for_run(
+                self.instance_waits.get().cloned(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1398,6 +1577,7 @@ impl WorkflowExecutor {
             exit,
             memory_peak_bytes: store.data().limiter.memory_peak_bytes,
             duration: overall_started.elapsed(),
+            instance_waits: parked_waits(store.data()),
         }
     }
 
@@ -1420,6 +1600,9 @@ impl WorkflowExecutor {
         let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
             trusted: None,
+            control_executor: None,
+            operation: Default::default(),
+            instance_waits: Default::default(),
             wasi: WasiCtxBuilder::new().build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1486,12 +1669,22 @@ pub enum InvokeExit {
     CleanupAborted,
 }
 
+/// The instance waits a suspended run parks on: those its WaitForInstances
+/// steps left pending.
+fn parked_waits(state: &WorkflowState) -> Vec<String> {
+    state.instance_waits.pending().to_vec()
+}
+
 /// Result of one invoke-shaped workflow run.
 #[derive(Debug)]
 pub struct InvokeRunResult {
     pub exit: InvokeExit,
     pub memory_peak_bytes: u64,
     pub duration: Duration,
+    /// Instance-wait ids the run's WaitForInstances steps left pending. A
+    /// suspended run is woken when any of them settles, besides its
+    /// lifecycle wakes.
+    pub instance_waits: Vec<String>,
 }
 
 fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {
@@ -1507,6 +1700,14 @@ fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {
         };
         cache.remove(&oldest);
     }
+}
+
+/// The launch kind trusted calls of this run are judged by: the host's, from
+/// the run's runtime host, and `Start` (the strictest) without one.
+fn trusted_launch(
+    runtime: Option<&Arc<dyn crate::runtime_host::RuntimeHost>>,
+) -> crate::trusted::TrustedLaunch {
+    runtime.map_or_else(Default::default, |runtime| runtime.trusted_launch())
 }
 
 impl crate::trusted::TrustedCaller for WorkflowState {
@@ -1725,3 +1926,15 @@ mod cleanup_alarm_tests;
 #[cfg(test)]
 #[path = "workflow/database_tests.rs"]
 mod database_tests;
+
+#[cfg(test)]
+#[path = "workflow/control_tests.rs"]
+mod control_tests;
+
+#[cfg(test)]
+#[path = "workflow/raw_http_tests.rs"]
+mod raw_http_tests;
+
+#[cfg(test)]
+#[path = "workflow/frozen_abi_tests.rs"]
+mod frozen_abi_tests;

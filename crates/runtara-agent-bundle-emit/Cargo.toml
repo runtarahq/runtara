@@ -19,6 +19,7 @@ runtara-agent-ai-tools = { path = "../agents/runtara-agent-ai-tools" }
 runtara-agent-azure-blob-storage = { path = "../agents/runtara-agent-azure-blob-storage" }
 runtara-agent-bedrock = { path = "../agents/runtara-agent-bedrock" }
 runtara-agent-compression = { path = "../agents/runtara-agent-compression" }
+runtara-agent-control = { path = "../agents/runtara-agent-control" }
 runtara-agent-crypto = { path = "../agents/runtara-agent-crypto" }
 runtara-agent-csv = { path = "../agents/runtara-agent-csv" }
 runtara-agent-datetime = { path = "../agents/runtara-agent-datetime" }

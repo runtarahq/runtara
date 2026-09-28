@@ -64,6 +64,10 @@ pub struct EntitlementLimits {
     pub max_concurrent_executions: Option<usize>,
 }
 
+/// Agents every tier gets whenever they are registered, whatever the
+/// allowlist says: control (decision D5).
+pub const ALWAYS_ENABLED_AGENTS: &[&str] = &[runtara_dsl::agent_meta::CONTROL_AGENT_ID];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EntitlementSnapshot {
@@ -149,10 +153,11 @@ impl EntitlementSnapshot {
         // Must be a registered dispatcher module first — `enabled_agents: None`
         // means "all registered agents", not "any string you can dream up".
         self.registered_agents.contains(&agent)
-            && self
-                .enabled_agents
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&agent))
+            && (ALWAYS_ENABLED_AGENTS.contains(&agent.as_str())
+                || self
+                    .enabled_agents
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&agent)))
     }
 
     pub fn require_agent(&self, agent: &str) -> Result<(), EntitlementError> {
@@ -173,7 +178,16 @@ impl EntitlementSnapshot {
     /// sentinel.
     pub fn materialised_agents(&self) -> BTreeSet<String> {
         match &self.enabled_agents {
-            Some(allowed) => allowed.clone(),
+            Some(allowed) => {
+                let mut agents = allowed.clone();
+                agents.extend(
+                    ALWAYS_ENABLED_AGENTS
+                        .iter()
+                        .filter(|agent| self.registered_agents.contains(**agent))
+                        .map(|agent| (*agent).to_string()),
+                );
+                agents
+            }
             None => self.registered_agents.clone(),
         }
     }
@@ -600,6 +614,37 @@ mod tests {
 
         assert!(snap.is_agent_enabled("http"));
         assert!(snap.is_agent_enabled("csv"));
+    }
+
+    #[test]
+    fn control_is_enabled_on_every_tier_whatever_the_allowlist() {
+        let registered = super::parse_agents(&["http", "csv", "control"]);
+        for tier in [None, Some("starter"), Some("premium"), Some("enterprise")] {
+            for allowlist in [
+                None,
+                Some(r#"{"agents": []}"#),
+                Some(r#"{"agents": ["http"]}"#),
+            ] {
+                let snap = EntitlementSnapshot::parse_entitlements(
+                    "tenant-123",
+                    tier,
+                    allowlist,
+                    None,
+                    &registered,
+                )
+                .unwrap();
+                assert!(snap.is_agent_enabled("control"), "{tier:?} {allowlist:?}");
+                assert!(snap.require_agent("CONTROL").is_ok());
+                assert!(
+                    snap.materialised_agents().contains("control"),
+                    "{tier:?} {allowlist:?}"
+                );
+            }
+        }
+        // Not registered (no control agent in the bundle): not listed.
+        let snap = parse(None, Some(r#"{"agents": ["http"]}"#), None).unwrap();
+        assert!(!snap.is_agent_enabled("control"));
+        assert!(!snap.materialised_agents().contains("control"));
     }
 
     #[test]

@@ -39,7 +39,8 @@ use crate::middleware::tenant_auth::Source;
 use crate::product_events::{EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
-    ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
+    CommandEffect, ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome,
+    TriggerSource,
 };
 use runtara_connections::ConnectionsFacade;
 
@@ -1408,7 +1409,13 @@ pub async fn compile_workflow_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::compilation::ServiceError::CompilationError(msg)) => {
+        Err(
+            crate::api::services::compilation::ServiceError::CompilationError(msg)
+            | crate::api::services::compilation::ServiceError::TrustedDependencyUnavailable {
+                message: msg,
+                ..
+            },
+        ) => {
             // The compile actually ran and failed (vs. NotFound/DatabaseError, which are
             // pre-compile failures) — record it as a failed compile on the synchronous path.
             events.emit(
@@ -1590,7 +1597,7 @@ pub async fn compilation_progress_handler(
     // real failure here — so we query the row directly to keep the three
     // outcomes (success / failed / unknown) distinct.
     let row: Result<Option<CompilationRow>, sqlx::Error> = sqlx::query_as(
-        "SELECT compilation_status, registered_image_id, wasm_size, error_message \
+        "SELECT compilation_status, registered_image_id, wasm_size, error_message, trusted_pins \
          FROM workflow_compilations \
          WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
     )
@@ -1661,8 +1668,10 @@ pub async fn compilation_progress_handler(
                 updated_at: None,
                 image_id: None,
                 error_message: Some(
-                    "Compilation artifact no longer matches the current workflow definition; retry compilation"
-                        .to_string(),
+                    crate::api::repositories::workflows::stale_artifact_message(
+                        row.trusted_pins.as_deref(),
+                    )
+                    .to_string(),
                 ),
             };
             (
@@ -1735,6 +1744,7 @@ struct CompilationRow {
     registered_image_id: Option<String>,
     wasm_size: Option<i32>,
     error_message: Option<String>,
+    trusted_pins: Option<Vec<String>>,
 }
 
 /// Query the compilation result from the database after the compilation worker has processed it
@@ -1745,7 +1755,7 @@ async fn query_compilation_result(
     version: i32,
 ) -> Result<CompilationQueryResult, sqlx::Error> {
     let result: Option<CompilationRow> = sqlx::query_as(
-        "SELECT compilation_status, registered_image_id, wasm_size, error_message \
+        "SELECT compilation_status, registered_image_id, wasm_size, error_message, trusted_pins \
          FROM workflow_compilations \
          WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
     )
@@ -1776,8 +1786,10 @@ async fn query_compilation_result(
                 wasm_size: if success { record.wasm_size } else { None },
                 error_message: if raw_success && !success {
                     Some(
-                        "Compilation artifact no longer matches the current workflow definition; retry compilation"
-                            .to_string(),
+                        crate::api::repositories::workflows::stale_artifact_message(
+                            record.trusted_pins.as_deref(),
+                        )
+                        .to_string(),
                     )
                 } else {
                     record.error_message
@@ -2318,7 +2330,16 @@ pub async fn replay_instance_handler(
 // Control Handlers
 // ============================================================================
 
+/// The `data` of a lifecycle response: what the command did.
+fn outcome_data(effect: CommandEffect) -> Value {
+    json!({ "outcome": effect.as_str() })
+}
+
 /// Stop a running workflow instance
+///
+/// `data.outcome` is `applied` when the run ended at once (a parked or
+/// queued run), `requested` when a running run stops cooperatively (forced
+/// after 5 s), and `already_terminal` when it had already finished.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/instances/{instance_id}/stop",
@@ -2326,7 +2347,7 @@ pub async fn replay_instance_handler(
         ("instance_id" = String, Path, description = "Instance identifier (UUID)")
     ),
     responses(
-        (status = 200, description = "Cancellation requested for the instance", body = Value),
+        (status = 200, description = "Cancellation requested for the instance; `data.outcome` says what it did", body = Value),
         (status = 400, description = "Invalid instance ID", body = ErrorResponse),
         (status = 404, description = "Instance not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -2335,28 +2356,31 @@ pub async fn replay_instance_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.stop(&instance_id).await {
+    match engine.stop(&tenant_id, &instance_id).await {
         Ok(StopOutcome::AlreadyStopped { status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
                     "Instance {} is already stopped (status: {})",
                     instance_id, status
                 ),
-                serde_json::Value::Null,
+                outcome_data(CommandEffect::AlreadyTerminal),
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(StopOutcome::Stopped { previous_status }) => {
+        Ok(StopOutcome::Stopped {
+            previous_status,
+            effect,
+        }) => {
             let response = ApiResponse::success_with_message(
                 format!(
                     "Cancellation requested for instance {} (was: {}).",
                     instance_id, previous_status
                 ),
-                serde_json::Value::Null,
+                outcome_data(effect),
             );
             (StatusCode::OK, Json(json!(response)))
         }
@@ -2364,10 +2388,12 @@ pub async fn stop_instance_handler(
     }
 }
 
-/// Pause a running workflow instance
+/// Pause a workflow instance
 ///
-/// Sends a pause signal to the instance. The instance will checkpoint its state
-/// and suspend execution until resumed.
+/// A waiting run (parked on a timer, a signal or a restart) pauses
+/// immediately: `data.outcome` is `applied` and no timer or signal resumes it
+/// until an explicit resume. A running run pauses at its next checkpoint
+/// (`requested`). An already paused run is `unchanged`.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/instances/{instance_id}/pause",
@@ -2375,7 +2401,7 @@ pub async fn stop_instance_handler(
         ("instance_id" = String, Path, description = "Instance UUID to pause")
     ),
     responses(
-        (status = 200, description = "Instance paused successfully", body = Value),
+        (status = 200, description = "Pause applied or requested; `data.outcome` says which", body = Value),
         (status = 400, description = "Invalid instance ID or instance not pausable", body = ErrorResponse),
         (status = 404, description = "Instance not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -2384,33 +2410,39 @@ pub async fn stop_instance_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.pause(&instance_id).await {
+    match engine.pause(&tenant_id, &instance_id).await {
         Ok(PauseOutcome::AlreadyPaused) => {
             let response = ApiResponse::success_with_message(
                 format!("Instance {} is already paused", instance_id),
-                serde_json::Value::Null,
+                outcome_data(CommandEffect::Unchanged),
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(PauseOutcome::Paused { previous_status }) => {
-            let response = ApiResponse::success_with_message(
-                format!(
-                    "Instance {} paused successfully (was: {})",
+        Ok(PauseOutcome::Paused {
+            previous_status,
+            effect,
+        }) => {
+            let message = match effect {
+                CommandEffect::Applied => {
+                    format!("Instance {} paused (was: {})", instance_id, previous_status)
+                }
+                _ => format!(
+                    "Pause requested for instance {} (was: {}); it pauses at its next checkpoint",
                     instance_id, previous_status
                 ),
-                serde_json::Value::Null,
-            );
+            };
+            let response = ApiResponse::success_with_message(message, outcome_data(effect));
             (StatusCode::OK, Json(json!(response)))
         }
         Ok(PauseOutcome::NotPausable { status }) => {
             let error_response = json!({
                 "success": false,
                 "error": "Instance not pausable",
-                "message": format!("Instance is in '{}' state and cannot be paused. Only running instances can be paused.", status),
+                "message": format!("Instance is in '{}' state and cannot be paused. Only running or waiting instances can be paused.", status),
                 "instanceId": instance_id,
                 "currentStatus": status
             });
@@ -2422,8 +2454,9 @@ pub async fn pause_instance_handler(
 
 /// Resume a paused workflow instance
 ///
-/// Sends a resume signal to the instance. The instance will resume execution
-/// from its last checkpoint.
+/// Relaunches a suspended instance from its last checkpoint (`data.outcome`
+/// `applied`). Failed, cancelled and completed runs are not resumable (400
+/// `Instance not resumable`); use replay to run them again.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/instances/{instance_id}/resume",
@@ -2431,8 +2464,8 @@ pub async fn pause_instance_handler(
         ("instance_id" = String, Path, description = "Instance UUID to resume")
     ),
     responses(
-        (status = 200, description = "Instance resumed successfully", body = Value),
-        (status = 400, description = "Invalid instance ID or instance not resumable", body = ErrorResponse),
+        (status = 200, description = "Instance resumed; `data.outcome` says what it did", body = Value),
+        (status = 400, description = "Invalid instance ID or instance not resumable (for example failed or cancelled)", body = ErrorResponse),
         (status = 404, description = "Instance not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
@@ -2440,15 +2473,26 @@ pub async fn pause_instance_handler(
 )]
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match engine.resume(&instance_id).await {
+    let not_resumable = |status: String| {
+        let error_response = json!({
+            "success": false,
+            "error": "Instance not resumable",
+            "code": "NotResumable",
+            "message": format!("Instance is in '{}' state and cannot be resumed. Only suspended instances can be resumed.", status),
+            "instanceId": instance_id,
+            "currentStatus": status
+        });
+        (StatusCode::BAD_REQUEST, Json(error_response))
+    };
+    match engine.resume(&tenant_id, &instance_id).await {
         Ok(ResumeOutcome::AlreadyRunning) => {
             let response = ApiResponse::success_with_message(
                 format!("Instance {} is already running", instance_id),
-                serde_json::Value::Null,
+                outcome_data(CommandEffect::Unchanged),
             );
             (StatusCode::OK, Json(json!(response)))
         }
@@ -2458,20 +2502,12 @@ pub async fn resume_instance_handler(
                     "Instance {} resumed successfully (was: {})",
                     instance_id, previous_status
                 ),
-                serde_json::Value::Null,
+                outcome_data(CommandEffect::Applied),
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(ResumeOutcome::NotResumable { status }) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Instance not resumable",
-                "message": format!("Instance is in '{}' state and cannot be resumed. Only suspended instances can be resumed.", status),
-                "instanceId": instance_id,
-                "currentStatus": status
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
+        Ok(ResumeOutcome::NotResumable { status }) => not_resumable(status),
+        Ok(ResumeOutcome::NotPaused) => not_resumable("suspended".into()),
         Err(e) => execution_error_response_with(&e, json!({ "instanceId": instance_id })),
     }
 }
@@ -2995,8 +3031,8 @@ pub async fn get_workflow_dependents_handler(
 
 /// Get schemas for a specific workflow version
 ///
-/// Returns the input schema, output schema, and variables from the execution graph
-/// of a specific workflow version.
+/// Returns the input schema, output schema, state schema, and variables from
+/// the execution graph of a specific workflow version.
 #[utoipa::path(
     get,
     path = "/api/runtime/workflows/{id}/versions/{version}/schemas",
@@ -3027,11 +3063,7 @@ pub async fn get_version_schemas_handler(
         .get_version_schemas(&tenant_id, &workflow_id, version)
         .await
     {
-        Ok((input_schema, output_schema, variables)) => Ok(Json(VersionSchemasResponse {
-            input_schema,
-            output_schema,
-            variables,
-        })),
+        Ok(schemas) => Ok(Json(schemas)),
         Err(ServiceError::NotFound(msg)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {

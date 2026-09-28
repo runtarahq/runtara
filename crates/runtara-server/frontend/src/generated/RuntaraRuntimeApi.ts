@@ -10,6 +10,9 @@
  * ---------------------------------------------------------------
  */
 
+/** When a WaitForInstances step settles. */
+export type WaitForInstancesMode = "all" | "any";
+
 /**
  * Data types for variables.
  * Matches the operator field types for consistency.
@@ -90,6 +93,14 @@ export type SwitchMatchType =
   | "IS_NOT_EMPTY"
   | "BETWEEN"
   | "RANGE";
+
+/** Why a `suspended` execution is not running. */
+export type SuspensionReason =
+  | "paused"
+  | "waiting_signal"
+  | "waiting_instances"
+  | "sleeping"
+  | "shutdown";
 
 /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
 export type SortDirection = "ASC" | "DESC";
@@ -349,6 +360,7 @@ export interface AgentStep {
    * Disable durability for this step when `Some(false)`. Skips checkpoint
    * read/write around the capability call. Ignored when the enclosing
    * workflow is already non-durable. Defaults to the workflow setting.
+   * A step whose capability suspends must stay durable (E028).
    */
   durable?: boolean | null;
   /** Unique step identifier */
@@ -375,6 +387,8 @@ export interface AgentStep {
    * this step without its own deadline. Enclosing deadlines still apply.
    * Cleanup can extend beyond the budget; uncooperative code may require
    * emergency whole-workflow abort. External effects are not rolled back.
+   * A step whose capability suspends must set it above zero (E029): it is
+   * the step's hard deadline, parked time included.
    * @format int64
    * @min 0
    */
@@ -997,6 +1011,11 @@ export interface ApiResponseWorkflowDto {
     slug?: string | null;
     started?: string | null;
     /**
+     * Typed state a run of this version exposes (`executionGraph.stateSchema`).
+     * A declaration only; `{}` when the version declares none.
+     */
+    stateSchema?: any;
+    /**
      * Whether this version can hold a conversation, i.e. whether it contains a
      * step that waits for a reply. See `graph_supports_chat`. Consumers use it
      * to decide whether to offer chat at all, rather than opening a surface
@@ -1175,6 +1194,11 @@ export interface CapabilityInfo {
    */
   output: FieldTypeInfo;
   rateLimited: boolean;
+  /**
+   * May answer with a typed suspension instead of a result. Omitted when
+   * false, so existing catalogs stay byte-identical.
+   */
+  suspends?: boolean;
   /**
    * Semantic tags for capability classification and filtering.
    * Well-known tags: "memory:read", "memory:write".
@@ -2187,6 +2211,14 @@ export interface ExecutionGraph {
    * @min 0
    */
   rateLimitBudgetMs?: number;
+  /**
+   * Schema declaring the typed state a run of this workflow exposes.
+   * Keys are state field names, values define the field type, label and
+   * display format. State starts empty and is written by steps, so
+   * `required`, `default` and `visibleWhen` have no effect here. This is a
+   * declaration only: it is not compiled into the workflow.
+   */
+  stateSchema?: Partial<Record<string, SchemaField>>;
   /** Map of step IDs to step definitions */
   steps: Partial<Record<string, Step>>;
   /**
@@ -3500,6 +3532,8 @@ export interface SchemaField {
    *
    * For `string` type: `textarea`, `date`, `datetime`, `email`, `url`,
    * `tel`, `color`, `password`, `markdown`.
+   * For `number` and `integer` types: `currency` (display as a currency
+   * amount).
    * Unknown formats fall back to the default input for the type.
    */
   format?: string | null;
@@ -3616,7 +3650,8 @@ export interface SplitConfig {
    *
    * When > 1 and the Split body is an eligible single-Agent subgraph (no
    * breakpoints, no split-level retries, not a workflow-agent
-   * child), iterations run as CONCURRENT windows: agent calls are launched
+   * child, no operation-scoped (suspending or control) step), iterations
+   * run as CONCURRENT windows: agent calls are launched
    * as component-model-async subtasks and their I/O overlaps. Ineligible
    * shapes keep the strictly sequential execution (advisory W073).
    * Results, error routing, and `dontStopOnFailed` semantics are identical
@@ -3801,6 +3836,9 @@ export type Step =
     })
   | (WaitForSignalStep & {
       stepType: "WaitForSignal";
+    })
+  | (WaitForInstancesStep & {
+      stepType: "WaitForInstances";
     })
   | (AiAgentStep & {
       stepType: "AiAgent";
@@ -4002,7 +4040,11 @@ export interface StepSummaryResponse {
    * @format date-time
    */
   startedAt: string;
-  /** Step execution status */
+  /**
+   * Step execution status: "running", "suspended" (unfinished while its
+   * instance is suspended), "completed", "failed", or the terminal status
+   * of its instance for a step that never finished
+   */
   status: string;
   /** Unique step identifier */
   stepId: string;
@@ -4381,6 +4423,11 @@ export interface VersionSchemasResponse {
   inputSchema: any;
   /** Output schema definition from the execution graph */
   outputSchema: any;
+  /**
+   * State schema definition from the execution graph: the typed state a
+   * run exposes. `{}` when the version declares none.
+   */
+  stateSchema: any;
   /** Variables defined in the execution graph */
   variables: any;
 }
@@ -4404,6 +4451,63 @@ export interface VisibleWhen {
   field: string;
   /** Show this field when the sibling does NOT equal this value. */
   notEquals?: any;
+}
+
+/**
+ * Park the run, without holding a runner, until direct child runs of this
+ * run finish.
+ *
+ * `mode: all` (the default) settles when every run in `instanceIds` has
+ * finished, `any` when the first has. The optional `timeoutMs` is a business
+ * deadline: when it passes, the step settles with resolution `deadline` and
+ * what finished so far. It never cancels a child and is not an error. The
+ * first registration's deadline stands on every replay.
+ *
+ * The output is the settled wait:
+ * `{mode, resolution: satisfied | deadline | empty, finished: [{instanceId,
+ * status, finishedAtMs, output, outputBytes, outputOmitted, error,
+ * errorOmitted}], remaining: [ids], deadlineMs}`. An empty `instanceIds`
+ * settles at once with resolution `empty`. Finished runs' outputs are inlined
+ * up to 256 KiB each (errors 16 KiB, 3 MiB per wait); larger values are
+ * omitted and flagged.
+ *
+ * The workflow must be durable. Targets must be direct children of the run
+ * (started by it with control `start`), at most 1000 distinct ones.
+ *
+ * Example:
+ * ```json
+ * {
+ *   "stepType": "WaitForInstances",
+ *   "id": "waitApprovals",
+ *   "instanceIds": { "valueType": "reference", "value": "steps.startAll.outputs" },
+ *   "mode": "all",
+ *   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
+ * }
+ * ```
+ */
+export interface WaitForInstancesStep {
+  /** When true, execution pauses before this step in debug mode */
+  breakpoint?: boolean | null;
+  /** Unique step identifier */
+  id: string;
+  /**
+   * The runs to wait for: an array of instance ids, each a direct child of
+   * this run, at most 1000 distinct ones.
+   */
+  instanceIds: MappingValue;
+  /**
+   * `all` (default): settle when every run has finished. `any`: settle when
+   * the first has.
+   */
+  mode?: WaitForInstancesMode;
+  /** Human-readable step name */
+  name?: string | null;
+  /**
+   * Optional business deadline in milliseconds from the first time the
+   * step runs. When it passes, the step settles with resolution `deadline`;
+   * children keep running.
+   */
+  timeoutMs?: null | MappingValue;
 }
 
 export interface WaitForSignalActionConfig {
@@ -4625,6 +4729,11 @@ export interface WorkflowDto {
   slug?: string | null;
   started?: string | null;
   /**
+   * Typed state a run of this version exposes (`executionGraph.stateSchema`).
+   * A declaration only; `{}` when the version declares none.
+   */
+  stateSchema?: any;
+  /**
    * Whether this version can hold a conversation, i.e. whether it contains a
    * step that waits for a reply. See `graph_supports_chat`. Consumers use it
    * to decide whether to offer chat at all, rather than opening a surface
@@ -4660,6 +4769,11 @@ export interface WorkflowInstanceDto {
   /** @format double */
   maxMemoryMb?: number | null;
   outputs?: any;
+  /**
+   * The execution whose `control:start` step started this one; absent for
+   * executions started any other way.
+   */
+  parentInstanceId?: string | null;
   /** @format double */
   processingOverheadSeconds?: number | null;
   /** @format double */
@@ -4669,6 +4783,12 @@ export interface WorkflowInstanceDto {
   /** Current execution status */
   status: ExecutionStatus;
   steps?: WorkflowStepDto[];
+  /**
+   * Why a `suspended` execution is not running; absent otherwise. Only a
+   * `paused` run needs a resume: the others wake on their own (a signal,
+   * the runs they wait on, a timer, or recovery).
+   */
+  suspensionReason?: null | SuspensionReason;
   tags?: string[];
   /** Reason for termination (set for all terminal states including successful completion) */
   terminationType?: null | TerminationType;
@@ -5743,7 +5863,7 @@ export class Api<
       workflowId: string,
       data: string,
       query?: {
-        /** Exact immutable reference: 1–250 printable ASCII bytes, not all spaces. */
+        /** Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces. */
         runLabel?: string;
       },
       params: RequestParams = {},
@@ -5770,7 +5890,7 @@ export class Api<
       action: string,
       data: string,
       query?: {
-        /** Exact immutable reference: 1–250 printable ASCII bytes, not all spaces. */
+        /** Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces. */
         runLabel?: string;
       },
       params: RequestParams = {},
@@ -5797,6 +5917,11 @@ export class Api<
         search?: string;
         /** Exact execution label (duplicates are returned). */
         runLabel?: string;
+        /**
+         * Only the children of this run: the executions its `control:start`
+         * steps started.
+         */
+        parentInstanceId?: string;
         /**
          * Page number (0-based, default: 0)
          * @format int32
@@ -7102,11 +7227,11 @@ export class Api<
       }),
 
     /**
-     * @description Sends a pause signal to the instance. The instance will checkpoint its state and suspend execution until resumed.
+     * @description A waiting run (parked on a timer, a signal or a restart) pauses immediately: `data.outcome` is `applied` and no timer or signal resumes it until an explicit resume. A running run pauses at its next checkpoint (`requested`). An already paused run is `unchanged`.
      *
      * @tags workflow-controller
      * @name PauseInstanceHandler
-     * @summary Pause a running workflow instance
+     * @summary Pause a workflow instance
      * @request POST:/api/runtime/workflows/instances/{instance_id}/pause
      */
     pauseInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
@@ -7134,7 +7259,7 @@ export class Api<
       }),
 
     /**
-     * @description Sends a resume signal to the instance. The instance will resume execution from its last checkpoint.
+     * @description Relaunches a suspended instance from its last checkpoint (`data.outcome` `applied`). Failed, cancelled and completed runs are not resumable (400 `Instance not resumable`); use replay to run them again.
      *
      * @tags workflow-controller
      * @name ResumeInstanceHandler
@@ -7169,7 +7294,7 @@ export class Api<
       }),
 
     /**
-     * No description
+     * @description `data.outcome` is `applied` when the run ended at once (a parked or queued run), `requested` when a running run stops cooperatively (forced after 5 s), and `already_terminal` when it had already finished.
      *
      * @tags workflow-controller
      * @name StopInstanceHandler
@@ -7505,7 +7630,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns the input schema, output schema, and variables from the execution graph of a specific workflow version.
+     * @description Returns the input schema, output schema, state schema, and variables from the execution graph of a specific workflow version.
      *
      * @tags workflow-controller
      * @name GetVersionSchemasHandler
@@ -7721,7 +7846,11 @@ export class Api<
         offset?: number | null;
         /** Sort order: "asc" (oldest first) or "desc" (newest first, default) */
         sortOrder?: string | null;
-        /** Filter by status: "running", "completed", or "failed" */
+        /**
+         * Filter by status: "running", "suspended", "completed", or "failed".
+         * An unfinished step reads "suspended" while its instance is suspended
+         * and takes the instance's status once the instance is terminal.
+         */
         status?: string | null;
         /** Filter by step type (e.g., "Http", "Transform", "Agent") */
         stepType?: string | null;

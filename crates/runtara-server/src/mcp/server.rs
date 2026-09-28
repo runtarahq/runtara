@@ -90,7 +90,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}. Steps is a map keyed by step ID, not an array. inputMapping is not universal: Error uses top-level code/message/category/severity and mapping-capable context, and rejects inputMapping."
+        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?, stateSchema?}. Steps is a map keyed by step ID, not an array. inputMapping is not universal: Error uses top-level code/message/category/severity and mapping-capable context, and rejects inputMapping."
     )]
     async fn update_workflow(
         &self,
@@ -269,7 +269,9 @@ impl SmoMcpServer {
         tools::executions::get_step_summaries(self, params.0).await
     }
 
-    #[tool(description = "Stop a running execution instance.")]
+    #[tool(
+        description = "Stop a running execution instance. data.outcome is applied (a waiting or queued run ended at once), requested (a running run stops at its next checkpoint, forced after 5 s) or already_terminal."
+    )]
     async fn stop_execution(
         &self,
         params: Parameters<tools::executions::StopExecutionParams>,
@@ -277,7 +279,9 @@ impl SmoMcpServer {
         tools::executions::stop_execution(self, params.0).await
     }
 
-    #[tool(description = "Pause a running execution instance. The execution can be resumed later.")]
+    #[tool(
+        description = "Pause an execution instance. data.outcome is applied (a waiting run, parked on a timer, a signal, its control children or a restart, pauses immediately and no timer, signal or child resumes it until resume_execution), requested (a running run pauses at its next checkpoint), unchanged (already paused) or already_terminal. A paused run reports suspensionReason paused."
+    )]
     async fn pause_execution(
         &self,
         params: Parameters<tools::executions::PauseExecutionParams>,
@@ -285,7 +289,9 @@ impl SmoMcpServer {
         tools::executions::pause_execution(self, params.0).await
     }
 
-    #[tool(description = "Resume a paused execution instance.")]
+    #[tool(
+        description = "Resume a paused execution instance (suspensionReason paused). data.outcome is applied (relaunched) or unchanged (already running). A run suspended for another reason (waiting_signal, waiting_instances, sleeping, shutdown) wakes on its own; resuming it only relaunches it early and it parks again. Failed, cancelled and completed runs are not resumable (400 Instance not resumable); replay them instead."
+    )]
     async fn resume_execution(
         &self,
         params: Parameters<tools::executions::ResumeExecutionParams>,
@@ -381,7 +387,9 @@ impl SmoMcpServer {
         tools::agents::get_capability(self, params.0).await
     }
 
-    #[tool(description = "Test an agent capability with sample inputs.")]
+    #[tool(
+        description = "Test an agent capability with sample inputs. A capability tagged runtime:requires-run (control start, send-signal, cancel, pause and resume) only runs as a step of a workflow run and answers CONTROL_REQUIRES_INSTANCE without running; add it with add_agent_step and execute the workflow instead."
+    )]
     async fn test_capability(
         &self,
         params: Parameters<tools::agents::TestCapabilityParams>,
@@ -658,7 +666,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Add an Agent step from a capability. Validates the agent/capability exist, creates the step with correct fields, and optionally connects it. Returns the step's expected inputs for mapping."
+        description = "Add an Agent step from a capability. Validates the agent/capability exist, creates the step with correct fields (optional timeout in ms and durable), and optionally connects it. Returns the step's expected inputs for mapping, whether the capability suspends, and a hint; a suspending capability needs a durable step with timeout > 0 (E028/E029)."
     )]
     async fn add_agent_step(
         &self,
@@ -809,6 +817,26 @@ impl SmoMcpServer {
         params: Parameters<tools::graph_mutations::SetOutputSchemaParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::graph_mutations::set_output_schema(self, params.0).await
+    }
+
+    #[tool(
+        description = "Get the state schema (DSL flat-map format) of a workflow: the typed state a run exposes, with labels, formats and enums. Declared on the root graph only."
+    )]
+    async fn get_state_schema(
+        &self,
+        params: Parameters<tools::graph_mutations::GetStateSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::get_state_schema(self, params.0).await
+    }
+
+    #[tool(
+        description = "Replace the state schema (DSL flat-map format) on the root graph; {} clears it. A declaration only: runs do not write state yet. required, default and visibleWhen have no effect on state fields (W081). Updates the latest version in-place."
+    )]
+    async fn set_state_schema(
+        &self,
+        params: Parameters<tools::graph_mutations::SetStateSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::set_state_schema(self, params.0).await
     }
 
     #[tool(description = "List all variables defined on a workflow graph.")]
@@ -1099,7 +1127,7 @@ impl ServerHandler for SmoMcpServer {
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
-                **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
+                **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, get_state_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_state_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All except the root-only state schema tools support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\
                 **Connections**: list_connections, list_integrations, get_integration, describe_connection, resolve_connection_resource. To wire a connection into an Agent step:\n\
                   1. `list_agents` — each entry carries `supportsConnections` and `integrationIds`. Skip agents where `supportsConnections=false`.\n\
@@ -1109,18 +1137,19 @@ impl ServerHandler for SmoMcpServer {
                   To discover connection-backed resources, call `describe_connection(connection_id)` and choose an advertised `resources[].name`, then call `resolve_connection_resource` with that exact name. `search` is optional free text; never invent provider arguments or credentials.\n\n\
                 ## DSL Reference Quick Guide\n\n\
                 **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for workflow inputs. Use `variables.<name>` for variables. A mistyped tail into a known-shape output (e.g. indexing an array output by a name) now fails at preflight_compile and at runtime — it no longer silently resolves to null — so bad references surface instead of producing a green-but-wrong run.\n\
-                **Step output shapes** (each step type's `outputShape` is in get_step_type_schema / list_step_types): Split `outputs` is the collected ARRAY of per-item results (index it as `steps.s.outputs.0`, NOT `.result`; with `dontStopOnFailed` also `steps.s.data.{success,error,...}`, `.stats.*`, `.hasFailures`); Filter `outputs` is `{items, count}` (NOT a bare array — the filtered array is `steps.f.outputs.items`); While `outputs` is `{iterations, outputs}`; Conditional `outputs` is `{result}`; Agent/AiAgent/GroupBy/Switch/EmbedWorkflow outputs are shaped by the capability/data (see get_capability).\n\
+                **Step output shapes** (each step type's `outputShape` is in get_step_type_schema / list_step_types): Split `outputs` is the collected ARRAY of per-item results (index it as `steps.s.outputs.0`, NOT `.result`; with `dontStopOnFailed` also `steps.s.data.{success,error,...}`, `.stats.*`, `.hasFailures`); Filter `outputs` is `{items, count}` (NOT a bare array — the filtered array is `steps.f.outputs.items`); While `outputs` is `{iterations, outputs}`; Conditional `outputs` is `{result}`; WaitForInstances `outputs` is `{mode, resolution: satisfied|deadline|empty, finished: [{instanceId, status, finishedAtMs, output, outputBytes, outputOmitted, error, errorOmitted}], remaining, deadlineMs}`; Agent/AiAgent/GroupBy/Switch/EmbedWorkflow outputs are shaped by the capability/data (see get_capability).\n\
                 **inputMapping** (SINGULAR, not inputMappings): Use it only on step types whose schema declares it: `{\"fieldName\": {\"valueType\": \"reference\", \"value\": \"steps.myStep.outputs.items\"}}` or `{\"fieldName\": {\"valueType\": \"immediate\", \"value\": \"literal\"}}`. Call get_step_type_schema for built-in step fields.\n\
-                **Execution labels**: Pass optional `run_label` to `execute_workflow` or `execute_workflow_and_wait` (HTTP `runLabel` alongside inputs). Accepts 1–250 printable ASCII bytes, including underscores and spaces, with at least one non-space character. Labels are preserved exactly and immutable through all lifecycle transitions. Invalid or oversized labels are rejected. Finish cannot assign labels. Labels need not be unique. `list_executions` and `get_execution` return `runLabel`; display it when present, otherwise `workflowName`. Exact case-sensitive `run_label` and other filters apply before pagination and counting.\n\
+                **Execution labels**: Pass optional `run_label` to `execute_workflow` or `execute_workflow_and_wait` (HTTP `runLabel` alongside inputs). Accepts 1–1024 printable ASCII bytes, including underscores and spaces, with at least one non-space character. Labels are preserved exactly and immutable through all lifecycle transitions. Invalid or oversized labels are rejected. Finish cannot assign labels. Labels need not be unique. `list_executions` and `get_execution` return `runLabel`; display it when present, otherwise `workflowName`. Exact case-sensitive `run_label` and other filters apply before pagination and counting.\n\
                 **Condition expressions**: `{\"type\": \"operation\", \"op\": \"LT\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.rng.outputs.value\"}, {\"valueType\": \"immediate\", \"value\": 0.5}]}`.\n\
                 **Edge fields**: Use `fromStep` and `toStep` (not `fromStepId`/`toStepId`) in executionPlan edges.\n\
                 **Conditional routing**: Put the predicate in the Conditional step's `condition` field, then connect outgoing edges with labels `\"true\"` and `\"false\"`. Do not put `condition` on edges from a Conditional step, and do not route those edges via `steps.<conditionalId>.outputs.result`; that boolean is for inspection/later mappings only.\n\
                 **Agent steps**: Must have `agentId` and `capabilityId` (not `agent`/`capability`). Use get_agent to discover IDs. capabilityId uses the hyphenated `id` (e.g., 'http-request'), NOT the underscored `name`.\n\
-                **Step types**: Finish, Agent, Conditional, Split, Switch, EmbedWorkflow, While, Log, Connection, Error, Filter, GroupBy, Delay, WaitForSignal (no Start type).\n\
+                **Control agent** (`agentId: \"control\"`, every tier): `get` reads one run of this tenant (output inlined up to 1 MiB, error up to 64 KiB, else `outputOmitted`/`errorOmitted` with `outputBytes`); `query` pages runs by `createdAtMs`/`finishedAtMs` (`pageSize` 1-100, pass `nextPageToken` back as `pageToken`); with `parentInstanceId` or `callerChildren` it lists that run's children, including ones still `queued` in admission, paged by admission time; `list-pending-signals` lists open WaitForSignal requests of one `instanceId`, a `workflowId`, or the calling run's `children` (`signalId` is the waiting step's id). `start` durably admits a child of the calling run and returns once it is accepted, without waiting for it: `workflowId` (an id, not a slug), optional `version` (default: the current one, fixed at admission), `inputs` (`{data, variables}`, validated against the child's input schema), optional `runLabel` (unique per parent for the parent's lifetime, else `CONTROL_LABEL_CONFLICT`) and a required `parentClosePolicy` (`cancel`, which the editor preselects, cancels the child after a 5 s grace when the parent ends in any way; `leave_running` keeps it). It returns `{instanceId, workflowId, version, runLabel, replayed}`; the child reports its parent as `parentInstanceId` in `get`, `query` and the executions API. A missing workflow is `CONTROL_NOT_FOUND`, a permanently failed compilation `CONTROL_NOT_RUNNABLE`, a workflow not compiled yet is accepted; lineage deeper than 16 is `CONTROL_INVALID`. Children count against the tenant concurrency limit (parked runs free their slot) and may hold at most `max(1, floor(0.8 x limit))` slots: past that `start` fails with retryable `CONTROL_CAPACITY_RATE_LIMITED` (retry after the 3-8 s hint); a limit of at most 1 is `CONTROL_CAPACITY_UNSATISFIABLE`. Mutations run only inside a workflow run (`test_capability` answers `CONTROL_REQUIRES_INSTANCE`) and are replay-safe per step: a retried or replayed step never applies twice (`replayed: true`), and different arguments on replay are `CONTROL_REPLAY_CONFLICT`. `send-signal` answers the one open request of a WaitForSignal step (`instanceId`, `signalId`, optional `requestId`, `payload` validated against the response schema; `CONTROL_NOT_WAITING`, `CONTROL_AMBIGUOUS`, `CONTROL_ALREADY_ANSWERED`) of a child, an ancestor, or any run whose request opted in with `action.key` when the step passes the same `actionKey` (else `CONTROL_DENIED`). `cancel` (`reason`, `graceMs` 0-3600000, default 5000), `pause` and `resume` reach direct children only (`CONTROL_NOT_CHILD`; an ancestor is `CONTROL_DENIED`); no mutation may target the calling run (`CONTROL_INVALID`). Their `outcome` is `requested`, `applied` (a waiting child pauses immediately), `unchanged` or `already_terminal`; `resume` relaunches only an explicitly paused child (`CONTROL_NOT_PAUSED`). Failures carry `CONTROL_*` codes (`CONTROL_NOT_FOUND`, `CONTROL_INVALID`, `CONTROL_REQUIRES_INSTANCE`, retryable `CONTROL_UNAVAILABLE`). `test_capability` runs reads tenant-wide; caller-relative filters (`callerChildren`, `children`) need a real run and answer `CONTROL_REQUIRES_INSTANCE` there. Control has no wait: to wait on children, start them and add a WaitForInstances step (see Step types). Control steps run at the top level, in branch arms, sequential loops and embeds (parallel windows serialize them), never as AI-agent tools or in WaitForSignal `onWait` (suspending steps not in onError either). The complete reference (authorization, capacity, statuses, limits, replay, validation codes, lifecycle) is `controlAgent` in get_workflow_authoring_schema.\n\
+                **Step types**: Finish, Agent, Conditional, Split, Switch, EmbedWorkflow, While, Log, Error, Filter, GroupBy, Delay, WaitForSignal, WaitForInstances, AiAgent (no Start type). WaitForInstances parks the run, without holding a runner or a concurrency slot, until direct children it started with control `start` finish: `{\"stepType\": \"WaitForInstances\", \"id\": \"w\", \"instanceIds\": <MappingValue resolving to 1-1000 distinct child ids>, \"mode\": \"all\"|\"any\" (default all), \"timeoutMs\": <optional MappingValue, a business deadline that never cancels children>}`. The workflow must be durable (E028); the step takes onError and condition edges but no durable, retry or timeout fields, and cannot be an AI-agent tool or sit in onError, onWait or AI-agent memory (E131). A failure is `INSTANCE_WAIT_<CODE>`. The full reference is `stepShapes.WaitForInstances` in get_workflow_authoring_schema.\n\
                 **Error step authoring**: Error does NOT accept `inputMapping`. Author static `code`, `message`, `category`, and `severity` directly on the step; `message` is a literal string with no reference/template interpolation. Put dynamic mappings in `context`, for example `{\"id\":\"fail\",\"stepType\":\"Error\",\"code\":\"PREP_FAILED\",\"message\":\"Preparation failed after cleanup\",\"category\":\"permanent\",\"context\":{\"original_error\":{\"valueType\":\"reference\",\"value\":\"steps.__error\"}}}`. This emits a new static error envelope and preserves the captured error as context/attributes; it is not a literal rethrow.\n\
                 **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. The captured error is exposed to mapping-capable fields (such as Agent/Finish `inputMapping` and Error/Log `context`) and edge conditions at `steps.__error.*` (alias `steps.error.*`); the bare `__error.*` root also resolves for back-compat but is not typo-checked. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `steps.__error.code`, `steps.__error.message`, `steps.__error.category`, `steps.__error.severity`, `steps.__error.attributes`, and `steps.__error.stepId`; referencing `steps.__error` preserves the full envelope. The envelope survives successful handler steps, but a later handled failure replaces it, so persist/snapshot the original before cleanup if it must survive cleanup failures. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
                 ## Execution Graph Shape\n\n\
-                `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}`. Note: `steps` is a map keyed by step ID (not an array), fields depend on `stepType`, and edges go in `executionPlan` (not `edges`).",
+                `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, <step-specific fields>}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?, stateSchema?}`. Note: `steps` is a map keyed by step ID (not an array), fields depend on `stepType`, and edges go in `executionPlan` (not `edges`).",
             )
     }
 }
@@ -1183,6 +1212,33 @@ mod tests {
             Some("object"),
             "advertised step schema missing `type: object`: {}",
             serde_json::to_string_pretty(step_schema).unwrap()
+        );
+    }
+
+    #[test]
+    fn state_schema_tools_are_registered_and_listed() {
+        let router = SmoMcpServer::tool_router();
+        for name in ["get_state_schema", "set_state_schema"] {
+            let tool = router
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is registered"));
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .expect("properties");
+            assert!(properties.contains_key("workflow_id"), "{name}");
+            assert!(!properties.contains_key("path"), "{name} is root-only");
+        }
+        let set = router.get("set_state_schema").unwrap();
+        assert!(set.input_schema["properties"].get("fields").is_some());
+
+        let update = router.get("update_workflow").unwrap();
+        assert!(
+            update
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("stateSchema?"))
         );
     }
 

@@ -1,0 +1,16 @@
+[package]
+name = "runtara-agent-suspension"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed agent suspension contract (runtara:agent-suspension@0.1.0) and guest types"
+keywords = ["wasm", "component-model", "wit", "agent"]
+categories = ["api-bindings"]
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+wit-parser = "0.246"

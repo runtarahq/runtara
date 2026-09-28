@@ -21,6 +21,8 @@ export interface ExecutionGraphDto {
   inputSchema?: Record<string, unknown>;
   /** JSON Schema for workflow output validation */
   outputSchema?: Record<string, unknown>;
+  /** Typed state a run exposes (declaration only; not compiled) */
+  stateSchema?: Record<string, unknown>;
   /** Execution timeout in seconds (default: 300, max: 3600) */
   executionTimeoutSeconds?: number;
   /** Rate limit wait budget in milliseconds (default: 60000, min: 1000, max: 86400000) */
@@ -91,6 +93,7 @@ export interface ExecutionGraphStepDto {
     | 'Log'
     | 'Delay'
     | 'WaitForSignal'
+    | 'WaitForInstances'
     | 'AiAgent';
   inputMapping?: Record<string, string>;
   /** Configuration for Split steps (replaces inputMapping for Split) */

@@ -325,13 +325,19 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
 /// slot is held. Those graphs publish under `parks:1` rather than
 /// `non-suspending:1`. What still refuses is what cannot be shown sound — an
 /// AiAgent model-call retry, or a child closure the compiler cannot see.
+///
+/// A suspending capability or any control-agent call anywhere in the closure
+/// refuses too (`suspending-capability`, `control-agent`): the capability ABI
+/// carries neither a typed suspension nor the caller's operation identity.
 fn require_publishable_workflow_agent(
     execution_graph: &runtara_dsl::ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
+    catalog: Option<&runtara_dsl::agent_meta::AgentCatalog>,
 ) -> Result<bool, ServiceError> {
     let workflow_agent_safety = runtara_workflows::direct_wasm::analyze_workflow_agent_safety(
         execution_graph,
         child_workflows,
+        catalog,
     );
     if let Some(violation) = workflow_agent_safety.violations.first() {
         return Err(ServiceError::CompilationError(format!(
@@ -384,6 +390,104 @@ fn compile_workflow_direct_only(
             );
             Err(err)
         }
+    }
+}
+
+/// Why a fresh artifact that pins `uninstalled` cannot run here. The compiler
+/// already refuses a published workflow-agent built against another version,
+/// so what remains is a compiler bundle whose trusted built-ins differ from
+/// the ones the server loaded at startup.
+fn trusted_dependency_unavailable_message(uninstalled: &[String]) -> String {
+    let agents: std::collections::BTreeSet<&str> = uninstalled
+        .iter()
+        .map(|pin| {
+            runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin).unwrap_or(pin.as_str())
+        })
+        .collect();
+    format!(
+        "the compiled artifact pins a version of trusted built-in {} that this server does not \
+         run: the component bundle the compiler read differs from the one the server loaded at \
+         startup. Either the bundle was replaced on disk without a restart (restart the server), \
+         or RUNTARA_DIRECT_WASM_COMPONENTS_DIR names a different bundle than \
+         RUNTARA_AGENT_COMPONENTS_DIR (point both at the same bundle and restart); then recompile",
+        agents
+            .iter()
+            .map(|agent| format!("`{agent}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Trusted built-ins the server runs (`installed_pins`) whose version in the
+/// compiler's bundle `compile_dir` differs or is missing. Every workflow that
+/// uses one fails to compile with `TrustedDependencyUnavailable` until the two
+/// bundles agree, so startup warns about it.
+pub fn trusted_builtins_differing_from<'a>(
+    compile_dir: &std::path::Path,
+    installed_pins: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    installed_pins
+        .into_iter()
+        .filter_map(|pin| {
+            let agent = runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin)?;
+            (runtara_workflows::direct_wasm::bundled_trusted_pin(compile_dir, agent).as_deref()
+                != Some(pin))
+            .then(|| agent.to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Refuse a fresh artifact that pins a trusted built-in version this server
+/// does not run. It is never ready, so recording it as a success would make
+/// every launch recompile it forever; the failure instead carries all of the
+/// artifact's pins and stays terminal until they are installed.
+pub fn reject_uninstalled_trusted_pins(trusted_pins: &[String]) -> Result<(), ServiceError> {
+    let uninstalled = crate::api::repositories::workflows::uninstalled_trusted_pins(trusted_pins);
+    if uninstalled.is_empty() {
+        return Ok(());
+    }
+    Err(ServiceError::TrustedDependencyUnavailable {
+        message: trusted_dependency_unavailable_message(&uninstalled),
+        trusted_pins: trusted_pins.to_vec(),
+    })
+}
+
+/// A failed direct compile as a service error. A parent refused because a
+/// published workflow-agent it composes pins a stale trusted version keeps
+/// those pins, so its recorded failure is released when the workflow-agent is
+/// republished instead of staying terminal until a forced recompile.
+///
+/// `still_stale` re-reads the staged workflow-agent the compile was refused
+/// for. A republish between the compile reading it and this failure being
+/// recorded would release nothing (no failure was recorded yet) and then be
+/// masked by it, so a dependency that is no longer stale supersedes the
+/// failure: nothing is recorded and the next launch recompiles.
+fn direct_compile_failure(
+    error: std::io::Error,
+    still_stale: impl FnOnce(&std::path::Path) -> bool,
+) -> ServiceError {
+    let message = format!("Compilation failed: {error}");
+    match error.get_ref().and_then(|inner| {
+        inner.downcast_ref::<runtara_workflows::direct_wasm::DirectCompileError>()
+    }) {
+        Some(runtara_workflows::direct_wasm::DirectCompileError::StaleTrustedDependency {
+            dependency,
+            wasm_path,
+            ..
+        }) if !still_stale(wasm_path) => ServiceError::Superseded(format!(
+            "published workflow-agent `{dependency}` was republished while this compile ran; \
+             the next launch recompiles against it"
+        )),
+        Some(runtara_workflows::direct_wasm::DirectCompileError::StaleTrustedDependency {
+            pins,
+            ..
+        }) => ServiceError::TrustedDependencyUnavailable {
+            message,
+            trusted_pins: pins.clone(),
+        },
+        _ => ServiceError::CompilationError(message),
     }
 }
 
@@ -802,6 +906,7 @@ impl CompilationService {
         if tenant_staging.is_dir() {
             extra_component_dirs.push(tenant_staging);
         }
+        let components_dir = direct_compilation.components_dir.clone();
         let result = tokio::task::spawn_blocking(move || {
             compile_workflow_direct_only(
                 compilation_input,
@@ -812,7 +917,14 @@ impl CompilationService {
         })
         .await
         .map_err(|e| ServiceError::CompilationError(format!("Compilation task panicked: {}", e)))?
-        .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
+        .map_err(|error| {
+            direct_compile_failure(error, |staged| {
+                // No bundle to compare against: keep the recorded refusal.
+                components_dir.as_deref().is_none_or(|dir| {
+                    runtara_workflows::direct_wasm::staged_dependency_is_stale(dir, staged)
+                })
+            })
+        })?;
         debug!(
             duration_ms = compile_start_time.elapsed().as_millis(),
             binary_size = result.binary_size,
@@ -828,6 +940,15 @@ impl CompilationService {
         drop(outer_tx);
         if let Some(handle) = drain_handle {
             let _ = handle.await;
+        }
+
+        // An artifact pinning a trusted built-in version this server does not
+        // run is never ready: fail rather than record a success.
+        if let Err(error) = reject_uninstalled_trusted_pins(&result.trusted_pins) {
+            if let Some(r) = &progress_reporter {
+                r.clear().await;
+            }
+            return Err(error);
         }
 
         // 7. Lock the source through registration. Image names are immutable
@@ -875,6 +996,7 @@ impl CompilationService {
                 source_checksum: &source_checksum,
                 compiler_mode: result.compiler_mode.as_str(),
                 track_events,
+                trusted_pins: &result.trusted_pins,
             })
             .await
             .map_err(|e| {
@@ -1000,6 +1122,7 @@ impl CompilationService {
             source_checksum: &source_checksum,
             compiler_mode: Some(result.compiler_mode.as_str()),
             track_events,
+            trusted_pins: &result.trusted_pins,
         };
         completion
             .record_registered_image_id(&registered_image)
@@ -1123,7 +1246,15 @@ impl CompilationService {
             .load_child_workflows_as_input(tenant_id, workflow_id, version, &definition)
             .await?;
 
-        let parks = require_publishable_workflow_agent(&execution_graph, &child_workflows)?;
+        let agent_catalog = self
+            .agent_catalog
+            .as_ref()
+            .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id));
+        let parks = require_publishable_workflow_agent(
+            &execution_graph,
+            &child_workflows,
+            agent_catalog.as_deref(),
+        )?;
 
         let name = execution_graph.name.clone().unwrap_or_else(|| slug.clone());
         let description = execution_graph.description.clone().unwrap_or_default();
@@ -1152,10 +1283,6 @@ impl CompilationService {
                 "direct WASM compilation requires a configured component directory".to_string(),
             ));
         };
-        let agent_catalog = self
-            .agent_catalog
-            .as_ref()
-            .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id));
         let direct_input = runtara_workflows::direct_wasm::DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
             version: version as u32,
@@ -1205,6 +1332,28 @@ impl CompilationService {
             wasm = %wasm_path.display(),
             "published workflow as agent"
         );
+
+        // A parent refused because a workflow-agent it composes pinned a
+        // trusted version this server no longer runs recorded that failure
+        // as terminal. The republish may have cleared it, so let each such
+        // failure in this tenant retry once on its next launch; one still
+        // composing a stale workflow-agent fails and is recorded again.
+        match self
+            .repository
+            .release_stale_trusted_dependency_failures(tenant_id)
+            .await
+        {
+            Ok(released) if released > 0 => info!(
+                %tenant_id, %slug, released,
+                "released compile failures on stale trusted dependencies for retry"
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(
+                %tenant_id, %slug, %error,
+                "could not release compile failures on stale trusted dependencies; \
+                 a forced recompile retries them"
+            ),
+        }
         Ok(serde_json::json!({
             "slug": slug,
             "agentId": info.id,
@@ -1375,6 +1524,16 @@ pub enum ServiceError {
     /// the problem, so this is reported to the author rather than alerted on.
     WorkflowAuthoringError(String),
     RegistrationError(String),
+    /// The compile depends on trusted built-in versions this server does not
+    /// run, so it could never become ready: either the fresh artifact pins
+    /// them (`trusted_pins` are all its pins), or a published workflow-agent
+    /// it composes was built against them (`trusted_pins` are that child's
+    /// stale pins). The failure is recorded with `trusted_pins` and retries
+    /// once they are all installed or a workflow-agent republish releases it.
+    TrustedDependencyUnavailable {
+        message: String,
+        trusted_pins: Vec<String>,
+    },
     /// The definition or instrumentation mode changed after this attempt
     /// captured its input. A newer compilation owns terminal state instead.
     Superseded(String),
@@ -1388,6 +1547,9 @@ impl std::fmt::Display for ServiceError {
             ServiceError::CompilationError(msg) => write!(f, "Compilation error: {}", msg),
             ServiceError::WorkflowAuthoringError(msg) => write!(f, "{}", msg),
             ServiceError::RegistrationError(msg) => write!(f, "Registration error: {}", msg),
+            ServiceError::TrustedDependencyUnavailable { message, .. } => {
+                write!(f, "Compilation error: {}", message)
+            }
             ServiceError::Superseded(msg) => write!(f, "Compilation superseded: {}", msg),
         }
     }
@@ -1401,6 +1563,164 @@ mod tests {
     use runtara_workflows::direct_wasm::{
         DirectArtifactFileMetadata, DirectComponentDependencyMetadata,
     };
+
+    fn s3_pin(wasm: char, meta: char) -> String {
+        runtara_dsl::agent_meta::trusted_artifact_import(
+            "s3-storage",
+            &wasm.to_string().repeat(64),
+            &meta.to_string().repeat(64),
+        )
+    }
+
+    #[test]
+    fn trusted_dependency_diagnostic_names_each_agent_once_and_both_causes() {
+        let message = trusted_dependency_unavailable_message(&[
+            s3_pin('a', 'b'),
+            s3_pin('c', 'd'),
+            "not-a-pin".to_owned(),
+        ]);
+        assert_eq!(message.matches("`s3-storage`").count(), 1, "{message}");
+        assert!(message.contains("`not-a-pin`"), "{message}");
+        assert!(message.contains("does not run"), "{message}");
+        assert!(message.contains("restart the server"), "{message}");
+        assert!(
+            message.contains("RUNTARA_DIRECT_WASM_COMPONENTS_DIR")
+                && message.contains("RUNTARA_AGENT_COMPONENTS_DIR"),
+            "a restart alone does not fix differing compile and runtime bundles: {message}"
+        );
+        let error = ServiceError::TrustedDependencyUnavailable {
+            message,
+            trusted_pins: vec![s3_pin('a', 'b')],
+        };
+        let recorded = error.to_string();
+        assert!(recorded.starts_with("Compilation error: "), "{recorded}");
+        assert!(
+            !crate::api::repositories::workflows::is_workflow_authoring_error(&recorded),
+            "an operator-side bundle mismatch is not the author's to fix: {recorded}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_artifact_pinning_an_uninstalled_version_is_refused_with_all_its_pins() {
+        let _installed = crate::api::repositories::workflows::INSTALLED_PINS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let installed = s3_pin('a', 'b');
+        let other = runtara_dsl::agent_meta::trusted_artifact_import(
+            "azure-blob-storage",
+            &"e".repeat(64),
+            &"f".repeat(64),
+        );
+        crate::api::repositories::workflows::set_installed_trusted_pins([installed.clone()]);
+        assert!(reject_uninstalled_trusted_pins(&[]).is_ok());
+        assert!(reject_uninstalled_trusted_pins(std::slice::from_ref(&installed)).is_ok());
+        let pins = vec![installed.clone(), other];
+        match reject_uninstalled_trusted_pins(&pins) {
+            Err(ServiceError::TrustedDependencyUnavailable {
+                message,
+                trusted_pins,
+            }) => {
+                assert_eq!(trusted_pins, pins, "the failure records every pin");
+                assert!(message.contains("`azure-blob-storage`"), "{message}");
+                assert!(!message.contains("`s3-storage`"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        crate::api::repositories::workflows::set_installed_trusted_pins([]);
+    }
+
+    #[test]
+    fn a_stale_published_workflow_agent_fails_with_its_pins() {
+        let stale = s3_pin('a', 'b');
+        let staged = std::path::PathBuf::from("/staging/runtara_agent_wrapper.wasm");
+        let refused = || {
+            std::io::Error::other(
+                runtara_workflows::direct_wasm::DirectCompileError::StaleTrustedDependency {
+                    dependency: "wrapper".into(),
+                    agent: "s3-storage".into(),
+                    pins: vec![stale.clone()],
+                    wasm_path: staged.clone(),
+                },
+            )
+        };
+        // Republished while the compile ran: nothing to record, retry.
+        let mut checked = None;
+        let republished = direct_compile_failure(refused(), |path| {
+            checked = Some(path.to_owned());
+            false
+        });
+        assert_eq!(
+            checked.as_ref(),
+            Some(&staged),
+            "the staged artifact is re-read"
+        );
+        match &republished {
+            ServiceError::Superseded(message) => {
+                assert!(message.contains("workflow-agent `wrapper`"), "{message}");
+                assert!(message.contains("republished"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let error = direct_compile_failure(refused(), |_| true);
+        match &error {
+            ServiceError::TrustedDependencyUnavailable {
+                message,
+                trusted_pins,
+            } => {
+                assert_eq!(trusted_pins, &vec![stale]);
+                assert!(message.starts_with("Compilation failed: "), "{message}");
+                assert!(message.contains("workflow-agent `wrapper`"), "{message}");
+                assert!(message.contains("republish"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            !crate::api::repositories::workflows::is_workflow_authoring_error(&error.to_string())
+        );
+        assert!(matches!(
+            direct_compile_failure(std::io::Error::other("emission failed"), |_| {
+                unreachable!("only a stale dependency is re-read")
+            }),
+            ServiceError::CompilationError(message) if message == "Compilation failed: emission failed"
+        ));
+    }
+
+    #[test]
+    fn startup_detects_a_compile_bundle_with_other_trusted_versions() {
+        let bundle = tempfile::tempdir().unwrap();
+        let (wasm, meta) = (b"s3 bytes".to_vec(), b"{}".to_vec());
+        std::fs::write(bundle.path().join("runtara_agent_s3_storage.wasm"), &wasm).unwrap();
+        std::fs::write(
+            bundle.path().join("runtara_agent_s3_storage.meta.json"),
+            &meta,
+        )
+        .unwrap();
+        let hex = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+        let same = runtara_dsl::agent_meta::trusted_artifact_import(
+            "s3-storage",
+            &hex(&wasm),
+            &hex(&meta),
+        );
+        assert!(trusted_builtins_differing_from(bundle.path(), [same.as_str()]).is_empty());
+        let upgraded = s3_pin('a', 'b');
+        let missing = runtara_dsl::agent_meta::trusted_artifact_import(
+            "azure-blob-storage",
+            &"e".repeat(64),
+            &"f".repeat(64),
+        );
+        assert_eq!(
+            trusted_builtins_differing_from(
+                bundle.path(),
+                [
+                    same.as_str(),
+                    upgraded.as_str(),
+                    missing.as_str(),
+                    "not-a-pin"
+                ]
+            ),
+            vec!["azure-blob-storage".to_owned(), "s3-storage".to_owned()]
+        );
+    }
 
     // =========================================================================
     // ServiceError Display tests
@@ -1469,9 +1789,30 @@ mod tests {
         // A sleep parks in a published agent, so it publishes — under `parks:1`,
         // which is what the `true` selects.
         assert!(
-            require_publishable_workflow_agent(&graph, &[])
+            require_publishable_workflow_agent(&graph, &[], None)
                 .expect("a sleeping workflow-agent parks rather than holding a runner"),
             "a Delay must be reported as parking"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_publish_preflight_refuses_a_control_call() {
+        let graph = parse_execution_graph(&serde_json::json!({
+            "steps": {
+                "get": {"stepType": "Agent", "id": "get", "agentId": "control",
+                    "capabilityId": "get", "maxRetries": 0}
+            },
+            "entryPoint": "get",
+            "executionPlan": []
+        }))
+        .expect("graph parses");
+        let error = require_publishable_workflow_agent(&graph, &[], None)
+            .expect_err("a control call cannot be published");
+        assert!(
+            error
+                .to_string()
+                .contains("root/steps/get (Agent/control-agent)"),
+            "{error}"
         );
     }
 
@@ -1497,7 +1838,7 @@ mod tests {
 
         // A child closure the compiler cannot see can hide anything, so this
         // still refuses, and names the exact step it refused on.
-        let error = require_publishable_workflow_agent(&graph, &[])
+        let error = require_publishable_workflow_agent(&graph, &[], None)
             .expect_err("an unseen child closure cannot be proven sound");
         assert!(
             error
@@ -1518,7 +1859,7 @@ mod tests {
         }))
         .expect("graph parses");
         assert!(
-            !require_publishable_workflow_agent(&graph, &[])
+            !require_publishable_workflow_agent(&graph, &[], None)
                 .expect("guest-local Agent waits publish"),
             "a non-durable Agent retry waits in the guest and never parks"
         );
@@ -1526,7 +1867,7 @@ mod tests {
         // parking agent rather than being turned away.
         graph.durable = Some(true);
         assert!(
-            require_publishable_workflow_agent(&graph, &[])
+            require_publishable_workflow_agent(&graph, &[], None)
                 .expect("durable Agent backoff parks rather than holding a runner"),
             "a durable Agent retry must be reported as parking"
         );
@@ -1545,7 +1886,7 @@ mod tests {
         .expect("graph parses");
 
         assert!(
-            !require_publishable_workflow_agent(&graph, &[])
+            !require_publishable_workflow_agent(&graph, &[], None)
                 .expect("a pure finish is safe as a workflow-agent"),
             "a pure finish never parks, so it keeps the non-suspending certificate"
         );
@@ -1742,6 +2083,7 @@ mod tests {
             child_dependencies: vec![],
             default_variables: serde_json::json!({}),
             compiler_mode: WorkflowCompilerMode::DirectWasm,
+            trusted_pins: vec![],
         };
         let metadata =
             workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", true, None);
@@ -1763,6 +2105,7 @@ mod tests {
             child_dependencies: vec![],
             default_variables: serde_json::json!({ "limit": 5 }),
             compiler_mode: WorkflowCompilerMode::DirectWasm,
+            trusted_pins: vec![],
         };
 
         let metadata =
@@ -1864,6 +2207,7 @@ mod tests {
             child_dependencies: vec![],
             default_variables: serde_json::json!({}),
             compiler_mode,
+            trusted_pins: vec![],
         }
     }
 

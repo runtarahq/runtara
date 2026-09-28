@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 import { ExtendedAgent } from '@/features/workflows/queries';
 import { CapabilityInfo, StepTypeInfo } from '@/generated/RuntaraRuntimeApi';
 import { NodeFormContext } from './NodeFormContext';
+import { SuspendsBadge } from '@/features/workflows/components/CapabilityBadges';
 import { useMultipleAgentDetails } from '@/features/workflows/hooks';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
 import { getAgentIcon } from '@/features/workflows/utils/agent-icons';
@@ -90,6 +91,7 @@ function normalizeStepType(stepType: StepTypeInfo): string {
   const knownMappings: Record<string, string> = {
     'AI Agent': 'AiAgent',
     'Wait for Signal': 'WaitForSignal',
+    'Wait for Instances': 'WaitForInstances',
   };
   return knownMappings[name] ?? name.replace(/\s+/g, '');
 }
@@ -668,6 +670,7 @@ function CapabilitySearchSection({
                 <span className="font-medium">
                   {result.capability.displayName || result.capability.name}
                 </span>
+                <SuspendsBadge capability={result.capability} />
                 {!result.isSupported && (
                   <span className="rounded bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
                     Coming Soon
@@ -728,6 +731,7 @@ function CapabilityList({
             <span className="font-medium">
               {capability.displayName || capability.name}
             </span>
+            <SuspendsBadge capability={capability} />
           </div>
           {capability.description && (
             <p

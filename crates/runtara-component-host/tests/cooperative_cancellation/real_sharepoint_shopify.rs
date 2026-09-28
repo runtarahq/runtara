@@ -410,7 +410,7 @@ async fn cancellation(cases: Vec<Case>, partial: bool) -> anyhow::Result<()> {
             });
             let result = run_cancellation_fixture(
                 bytes,
-                FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+                FixtureContext::with_upstream("fixture-tenant", upstream),
                 started,
                 cleaned,
                 server,
@@ -436,7 +436,7 @@ async fn normal(case: Case) -> anyhow::Result<Result<Vec<u8>, runtara_component_
         Duration::from_secs(20),
         invoke_named_agent(
             case.agent,
-            FixtureContext::with_upstream("fixture-tenant", upstream, ""),
+            FixtureContext::with_upstream("fixture-tenant", upstream),
             case.capability,
             serde_json::to_vec(&case.input)?,
         ),

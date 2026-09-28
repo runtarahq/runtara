@@ -46,6 +46,12 @@ use crate::workers::runtara_dto::{
 use runtara_environment::execution_timeout::ExecutionTimeoutSeconds;
 use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
+mod control_start;
+pub use control_start::{
+    ChildStart, START_FINGERPRINT_PREFIX, StartChildError, StartedChild, control_start_key,
+    lineage_depth, normalize_start,
+};
+
 /// Recover workflow identity from an artifact-qualified runtime image name.
 ///
 /// The server database retains only the currently selected image ID for a
@@ -283,30 +289,216 @@ pub struct SyncExecution {
     pub metrics: SyncExecutionMetrics,
 }
 
+/// What a lifecycle command did: the public API's `data.outcome` and
+/// control's `command-outcome`. Acceptance is not arrival: `requested` means
+/// the target applies it at its next checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEffect {
+    /// The target applies it at its next checkpoint.
+    Requested,
+    /// It took effect at once (a parked run paused, a parked or queued run
+    /// cancelled, a paused run relaunched).
+    Applied,
+    /// The target was already in the requested state.
+    Unchanged,
+    /// The target had already finished; nothing changed.
+    AlreadyTerminal,
+}
+
+impl CommandEffect {
+    /// Wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::AlreadyTerminal => "already_terminal",
+        }
+    }
+}
+
 /// Result of `ExecutionEngine::stop`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum StopOutcome {
-    AlreadyStopped { status: String },
-    Stopped { previous_status: String },
+    AlreadyStopped {
+        status: String,
+    },
+    Stopped {
+        previous_status: String,
+        effect: CommandEffect,
+    },
 }
 
 /// Result of `ExecutionEngine::pause`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum PauseOutcome {
-    Paused { previous_status: String },
+    Paused {
+        previous_status: String,
+        effect: CommandEffect,
+    },
     AlreadyPaused,
-    NotPausable { status: String },
+    NotPausable {
+        status: String,
+    },
 }
 
 /// Result of `ExecutionEngine::resume`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum ResumeOutcome {
-    Resumed { previous_status: String },
+    Resumed {
+        previous_status: String,
+    },
     AlreadyRunning,
-    NotResumable { status: String },
+    NotResumable {
+        status: String,
+    },
+    /// A `require_paused` resume of a run that is suspended without being
+    /// explicitly paused (parked on a timer or a signal).
+    NotPaused,
+}
+
+fn status_name(status: runtara_core::domain::InstanceStatus) -> String {
+    format!("{status:?}").to_lowercase()
+}
+
+async fn tenant_instance(
+    client: &RuntimeClient,
+    tenant_id: &str,
+    instance_id: &str,
+) -> Result<runtara_environment::control_reads::ControlInstance, ExecutionError> {
+    client
+        .control_instance(tenant_id, instance_id, 0, 0)
+        .await
+        .map_err(|e| ExecutionError::DatabaseError(format!("Failed to read instance: {e}")))?
+        .ok_or_else(|| ExecutionError::NotFound(format!("Instance not found: {instance_id}")))
+}
+
+/// Cancel an instance of `tenant_id`, forcing the stop after `grace_seconds`
+/// (0-3600) with `reason`. Shared by the public API and control `cancel`.
+pub async fn stop_for(
+    client: &RuntimeClient,
+    tenant_id: &str,
+    instance_id: &str,
+    grace_seconds: u32,
+    reason: &str,
+) -> Result<StopOutcome, ExecutionError> {
+    let before = tenant_instance(client, tenant_id, instance_id).await?;
+    if before.status.is_terminal() {
+        return Ok(StopOutcome::AlreadyStopped {
+            status: status_name(before.status),
+        });
+    }
+    client
+        .stop_instance_with(instance_id, grace_seconds, reason)
+        .await
+        .map_err(|e| ExecutionError::DatabaseError(format!("Failed to cancel instance: {e}")))?;
+    let after = tenant_instance(client, tenant_id, instance_id).await?;
+    info!(
+        instance_id = %instance_id,
+        previous_status = ?before.status,
+        "Requested instance cancellation via runtara-environment"
+    );
+    Ok(StopOutcome::Stopped {
+        previous_status: status_name(before.status),
+        effect: if after.status.is_terminal() {
+            CommandEffect::Applied
+        } else {
+            CommandEffect::Requested
+        },
+    })
+}
+
+/// Pause an instance of `tenant_id`. A parked (waiting) run pauses at once
+/// (decision D4); a running one at its next checkpoint. Shared by the public
+/// API and control `pause`.
+pub async fn pause_for(
+    client: &RuntimeClient,
+    tenant_id: &str,
+    instance_id: &str,
+) -> Result<PauseOutcome, ExecutionError> {
+    use runtara_environment::handlers::PauseInstanceOutcome as Env;
+    let before = tenant_instance(client, tenant_id, instance_id).await?;
+    let previous_status = status_name(before.status);
+    if before.status.is_terminal() || before.status == runtara_core::domain::InstanceStatus::Pending
+    {
+        return Ok(PauseOutcome::NotPausable {
+            status: previous_status,
+        });
+    }
+    let outcome = client
+        .pause_instance_outcome(instance_id)
+        .await
+        .map_err(|e| ExecutionError::DatabaseError(format!("Failed to pause instance: {e}")))?;
+    info!(instance_id = %instance_id, ?outcome, "Paused workflow instance");
+    Ok(match outcome {
+        Env::Applied => PauseOutcome::Paused {
+            previous_status,
+            effect: CommandEffect::Applied,
+        },
+        Env::Requested => PauseOutcome::Paused {
+            previous_status,
+            effect: CommandEffect::Requested,
+        },
+        Env::Unchanged => PauseOutcome::AlreadyPaused,
+        Env::NotPausable { status } => PauseOutcome::NotPausable { status },
+        Env::InstanceNotFound => {
+            return Err(ExecutionError::NotFound(format!(
+                "Instance not found: {instance_id}"
+            )));
+        }
+    })
+}
+
+/// Resume a suspended instance of `tenant_id`; with `require_paused` (control
+/// `resume`) only an explicitly paused one. Failed and cancelled runs are not
+/// resumable.
+pub async fn resume_for(
+    client: &RuntimeClient,
+    tenant_id: &str,
+    instance_id: &str,
+    require_paused: bool,
+) -> Result<ResumeOutcome, ExecutionError> {
+    use runtara_core::domain::InstanceStatus as Core;
+    use runtara_environment::handlers::ResumeRejection;
+    let before = tenant_instance(client, tenant_id, instance_id).await?;
+    let previous_status = status_name(before.status);
+    match before.status {
+        Core::Running => return Ok(ResumeOutcome::AlreadyRunning),
+        Core::Suspended => {}
+        _ => {
+            return Ok(ResumeOutcome::NotResumable {
+                status: previous_status,
+            });
+        }
+    }
+    let refused = client
+        .resume_instance_with(instance_id, require_paused)
+        .await
+        .map_err(|e| ExecutionError::DatabaseError(format!("Failed to resume instance: {e}")))?;
+    match refused {
+        None => {
+            info!(instance_id = %instance_id, "Resumed workflow instance");
+            Ok(ResumeOutcome::Resumed { previous_status })
+        }
+        Some((Some(ResumeRejection::NotPaused), _)) => Ok(ResumeOutcome::NotPaused),
+        Some((Some(ResumeRejection::NotSuspended { status }), _)) => {
+            Ok(ResumeOutcome::NotResumable { status })
+        }
+        Some((Some(ResumeRejection::NotFound), _)) => Err(ExecutionError::NotFound(format!(
+            "Instance not found: {instance_id}"
+        ))),
+        Some((None, message)) => Err(ExecutionError::DatabaseError(format!(
+            "Failed to resume instance: {message}"
+        ))),
+    }
+}
+
+fn validate_instance_uuid(instance_id: &str) -> Result<(), ExecutionError> {
+    Uuid::parse_str(instance_id).map(|_| ()).map_err(|_| {
+        ExecutionError::ValidationError(
+            "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
+        )
+    })
 }
 
 /// Inject `_workflow_id` into the inputs' variables to ensure cache key isolation.
@@ -1270,6 +1462,7 @@ impl ExecutionEngine {
                 &event.workflow_id,
                 Some(event.instance_id.clone()),
                 event.run_label.clone(),
+                event.parent_link(),
                 Some(workflow_input),
                 Some(execution_timeout),
                 event.debug,
@@ -1873,6 +2066,7 @@ impl ExecutionEngine {
             .with_offset((page * size) as u32);
 
         options.search = filters.search.clone();
+        options.parent_instance_id = filters.parent_instance_id.clone();
         options.run_label =
             runtara_dsl::run_label::normalize_run_label(filters.run_label.as_deref())
                 .map_err(ExecutionError::ValidationError)?;
@@ -2066,120 +2260,47 @@ impl ExecutionEngine {
     // Lifecycle control (stop / pause / resume)
     // =========================================================================
 
-    /// Stop a running instance.
-    pub async fn stop(&self, instance_id: &str) -> Result<StopOutcome, ExecutionError> {
-        let _ = Uuid::parse_str(instance_id).map_err(|_| {
-            ExecutionError::ValidationError(
-                "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
-            )
-        })?;
-
-        let client = self.require_runtime_client()?;
-
-        let runtara_status = client
-            .get_instance_status(instance_id)
-            .await
-            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
-
-        let status_str = format!("{:?}", runtara_status).to_lowercase();
-
-        if matches!(
-            runtara_status,
-            crate::runtime_client::InstanceStatus::Completed
-                | crate::runtime_client::InstanceStatus::Failed
-                | crate::runtime_client::InstanceStatus::Cancelled
-        ) {
-            return Ok(StopOutcome::AlreadyStopped { status: status_str });
-        }
-
-        client.cancel_instance(instance_id).await.map_err(|e| {
-            ExecutionError::DatabaseError(format!("Failed to cancel instance: {}", e))
-        })?;
-
-        info!(
-            instance_id = %instance_id,
-            previous_status = %status_str,
-            "Requested instance cancellation via runtara-environment"
-        );
-
-        Ok(StopOutcome::Stopped {
-            previous_status: status_str,
-        })
+    /// Stop a running instance of `tenant_id`.
+    pub async fn stop(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<StopOutcome, ExecutionError> {
+        validate_instance_uuid(instance_id)?;
+        stop_for(
+            self.require_runtime_client()?,
+            tenant_id,
+            instance_id,
+            crate::runtime_client::DEFAULT_STOP_GRACE_SECONDS,
+            "Stopped by runtara-server",
+        )
+        .await
     }
 
-    /// Pause a running workflow instance.
-    pub async fn pause(&self, instance_id: &str) -> Result<PauseOutcome, ExecutionError> {
-        let _ = Uuid::parse_str(instance_id).map_err(|_| {
-            ExecutionError::ValidationError(
-                "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
-            )
-        })?;
-
-        let client = self.require_runtime_client()?;
-
-        let runtara_status = client
-            .get_instance_status(instance_id)
-            .await
-            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
-
-        let status_str = format!("{:?}", runtara_status).to_lowercase();
-
-        match status_str.as_str() {
-            "suspended" => Ok(PauseOutcome::AlreadyPaused),
-            "running" => {
-                client.pause_instance(instance_id).await.map_err(|e| {
-                    ExecutionError::DatabaseError(format!("Failed to send pause signal: {}", e))
-                })?;
-
-                info!(
-                    instance_id = %instance_id,
-                    "Sent pause signal to instance"
-                );
-
-                Ok(PauseOutcome::Paused {
-                    previous_status: status_str,
-                })
-            }
-            _ => Ok(PauseOutcome::NotPausable { status: status_str }),
-        }
+    /// Pause a workflow instance of `tenant_id`; a waiting run pauses at once.
+    pub async fn pause(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<PauseOutcome, ExecutionError> {
+        validate_instance_uuid(instance_id)?;
+        pause_for(self.require_runtime_client()?, tenant_id, instance_id).await
     }
 
-    /// Resume a paused/suspended workflow instance.
-    pub async fn resume(&self, instance_id: &str) -> Result<ResumeOutcome, ExecutionError> {
-        let _ = Uuid::parse_str(instance_id).map_err(|_| {
-            ExecutionError::ValidationError(
-                "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
-            )
-        })?;
-
-        let client = self.require_runtime_client()?;
-
-        let runtara_status = client
-            .get_instance_status(instance_id)
-            .await
-            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
-
-        let status_str = format!("{:?}", runtara_status).to_lowercase();
-
-        match status_str.as_str() {
-            "running" => Ok(ResumeOutcome::AlreadyRunning),
-            "suspended" | "failed" | "cancelled" => {
-                client.resume_instance(instance_id).await.map_err(|e| {
-                    ExecutionError::DatabaseError(format!("Failed to send resume signal: {}", e))
-                })?;
-
-                info!(
-                    instance_id = %instance_id,
-                    previous_status = %status_str,
-                    "Sent resume signal to instance"
-                );
-
-                Ok(ResumeOutcome::Resumed {
-                    previous_status: status_str,
-                })
-            }
-            _ => Ok(ResumeOutcome::NotResumable { status: status_str }),
-        }
+    /// Resume a suspended workflow instance of `tenant_id`.
+    pub async fn resume(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<ResumeOutcome, ExecutionError> {
+        validate_instance_uuid(instance_id)?;
+        resume_for(
+            self.require_runtime_client()?,
+            tenant_id,
+            instance_id,
+            false,
+        )
+        .await
     }
 
     // =========================================================================
@@ -2557,7 +2678,18 @@ fn map_outbox_error(error: ExecutionOutboxError) -> ExecutionError {
                 maximum: limit,
             },
         ),
-        ExecutionOutboxError::RunLabelConflict => ExecutionError::RunLabelConflict,
+        ExecutionOutboxError::RunLabelConflict | ExecutionOutboxError::ParentRunLabelConflict => {
+            ExecutionError::RunLabelConflict
+        }
+        ExecutionOutboxError::StartReplayConflict => {
+            ExecutionError::ValidationError(error.to_string())
+        }
+        ExecutionOutboxError::ControlShareFull { share } => ExecutionError::EntitlementDenied(
+            crate::entitlement_error::EntitlementDenial::LimitExceeded {
+                limit: "maxConcurrentExecutions",
+                maximum: share,
+            },
+        ),
         ExecutionOutboxError::InvalidRunLabel(_)
         | ExecutionOutboxError::InvalidIdempotencyKey
         | ExecutionOutboxError::TenantMismatch => {

@@ -5,7 +5,7 @@ use runtara_component_host::outbound_http::{
     self, Destination, OutboundContext, OutboundError, OutboundHttpHost, RequestOptions, Response,
 };
 use runtara_component_host::{
-    ComponentDispatcherService, DispatcherEnv, ResolvedConnection, TestCapabilityRequest,
+    ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -100,13 +100,7 @@ async fn dispatcher(service: Option<Arc<Service>>) -> anyhow::Result<ComponentDi
             std::fs::copy(common::bundle_dir().join(&name), bundle.path().join(name))?;
         }
     }
-    let dispatcher = ComponentDispatcherService::from_dir(
-        bundle.path(),
-        DispatcherEnv {
-            core_http_url: String::new(),
-        },
-    )
-    .await?;
+    let dispatcher = ComponentDispatcherService::from_dir(bundle.path()).await?;
     dispatcher.set_connection_resolver(Arc::new(Resolver))?;
     if let Some(service) = service {
         dispatcher.set_outbound_http(service)?;

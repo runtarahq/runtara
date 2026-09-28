@@ -27,29 +27,7 @@ pub fn build_runner(
         std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
     >,
 ) -> Result<std::sync::Arc<dyn Runner>> {
-    build_runner_with_core_http_url(persistence, event_observer, None)
-}
-
-/// Build the workflow runner, optionally giving legacy HTTP-composed guests
-/// the address of runtara-core.
-///
-/// Newer HostImport-composed artifacts do not consume this address; their
-/// runtime calls are satisfied in-process. Older composed artifacts use the
-/// core HTTP API, so the embedded server supplies its client address here.
-pub fn build_runner_with_core_http_url(
-    persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
-    event_observer: Option<
-        std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
-    >,
-    core_http_url: Option<String>,
-) -> Result<std::sync::Arc<dyn Runner>> {
-    build_runner_configured(
-        persistence,
-        event_observer,
-        core_http_url,
-        None,
-        HostServices::default(),
-    )
+    build_runner_configured(persistence, event_observer, None, HostServices::default())
 }
 
 /// Native services shared across runs; each invocation supplies its own identity.
@@ -63,6 +41,12 @@ pub struct HostServices {
     pub database: Option<std::sync::Arc<dyn runtara_component_host::DatabaseHost>>,
     /// Credential-aware outbound HTTP.
     pub outbound_http: Option<std::sync::Arc<dyn runtara_component_host::OutboundHttpHost>>,
+    /// Host executor of the approved control agent. Its approved history
+    /// must be installed ([`crate::approved_builtins::ApprovedBuiltins`])
+    /// before the environment starts waking or recovering runs.
+    pub control: Option<std::sync::Arc<runtara_component_host::control_executor::ControlExecutor>>,
+    /// Durable instance waits of every run.
+    pub instance_waits: Option<std::sync::Arc<dyn runtara_component_host::InstanceWaitHost>>,
 }
 
 /// Build the runner with an explicit shared operator isolation policy.
@@ -72,7 +56,6 @@ pub fn build_runner_configured(
     event_observer: Option<
         std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
     >,
-    core_http_url: Option<String>,
     scoped_agents: Option<ScopedAgentRunnerConfig>,
     services: HostServices,
 ) -> Result<std::sync::Arc<dyn Runner>> {
@@ -97,11 +80,14 @@ pub fn build_runner_configured(
     if let Some(connections) = services.connections {
         runner = runner.with_connection_resolver(connections)?;
     }
+    if let Some(control) = services.control {
+        runner = runner.with_control_executor(control)?;
+    }
+    if let Some(waits) = services.instance_waits {
+        runner = runner.with_instance_wait_host(waits)?;
+    }
     if let Some(trusted) = services.trusted {
         runner = runner.with_trusted_executor(trusted)?;
-    }
-    if let Some(core_http_url) = core_http_url {
-        runner = runner.with_core_http_url(core_http_url);
     }
     if let Some(observer) = event_observer {
         runner = runner.with_event_observer(observer);

@@ -449,6 +449,36 @@ describe('AdvancedSchemaFieldDialog integration', () => {
     ]);
   });
 
+  it('offers currency for number fields and hides visibility in state mode', async () => {
+    vi.mocked(validateSchemaFieldsWithRust).mockResolvedValue(
+      validValidationResult
+    );
+
+    render(
+      <SchemaFieldsEditor
+        label="State schema"
+        mode="state"
+        fields={[
+          baseField({ type: 'number', required: false, format: 'currency' }),
+        ]}
+        onChange={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByText('Required')).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('currency')).toHaveValue('currency');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Edit advanced schema for amount' })
+    );
+
+    expect(await screen.findByLabelText('Label')).toBeInTheDocument();
+    expect(screen.getAllByText('currency').length).toBeGreaterThan(0);
+    expect(
+      screen.queryByText('Conditional visibility')
+    ).not.toBeInTheDocument();
+  });
+
   it('shows a live warning for invalid regex patterns', async () => {
     vi.mocked(validateSchemaFieldsWithRust).mockResolvedValue(
       validValidationResult

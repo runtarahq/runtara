@@ -848,13 +848,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
         let cfg = config::get();
         if let Some(ref dir) = cfg.agent_components_dir {
-            use runtara_component_host::{ComponentDispatcherService, DispatcherEnv};
+            use runtara_component_host::ComponentDispatcherService;
             // Agent components reach the host through imports, not HTTP, so
             // no core URL is exported into their environment.
-            let env = DispatcherEnv {
-                core_http_url: String::new(),
-            };
-            match ComponentDispatcherService::from_dir(dir, env).await {
+            match ComponentDispatcherService::from_dir(dir).await {
                 Ok(dispatcher) => {
                     let loaded: Vec<&str> = dispatcher.agent_ids().collect();
                     if loaded.is_empty() {
@@ -1011,6 +1008,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             Ok(filled) => println!("   \u{2713} Backfilled slugs for {filled} workflow(s)"),
             Err(e) => eprintln!("   \u{26a0} Workflow slug backfill failed (continuing): {e}"),
         }
+        match slug_service.warn_reserved_slug_collisions().await {
+            Ok(0) => {}
+            Ok(found) => eprintln!(
+                "   \u{26a0} {found} workflow slug(s) collide with a reserved agent id (`control`); their workflow-agents are excluded"
+            ),
+            Err(e) => eprintln!("   \u{26a0} Reserved slug check failed (continuing): {e}"),
+        }
     }
 
     // Spawn background task to warn when pool usage is high
@@ -1054,6 +1058,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .connect(&object_model_database_url)
         .await
         .expect("Failed to connect to object model database");
+
+    // Raw SQL runs as the object-model role: warn when that role is a
+    // superuser or the object-model database is the server's own.
+    crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
 
     // Run server migrations (workflows, api_keys, etc.) against the main pool
     run_server_migrations(&pool).await?;
@@ -1172,14 +1180,74 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     let trusted_executor = component_dispatcher.as_ref().map(|d| d.trusted_executor());
     if let Some(executor) = &trusted_executor {
+        // Compilation readiness needs every pin an artifact records to be one
+        // this server can run; a trusted-agent upgrade then recompiles.
+        api::repositories::workflows::set_installed_trusted_pins(
+            executor.artifact_pins().map(str::to_owned),
+        );
+        if let Some(compile_dir) = config::direct_wasm_components_dir() {
+            let differing = api::services::compilation::trusted_builtins_differing_from(
+                &compile_dir,
+                executor.artifact_pins(),
+            );
+            if !differing.is_empty() {
+                tracing::warn!(
+                    compile_dir = %compile_dir.display(),
+                    trusted_builtins = ?differing,
+                    "the direct-compile component bundle ships different versions of trusted \
+                     built-ins than the bundle loaded for execution; workflows using them fail \
+                     to compile until RUNTARA_DIRECT_WASM_COMPONENTS_DIR and \
+                     RUNTARA_AGENT_COMPONENTS_DIR name the same bundle"
+                );
+            }
+        }
         executor.set_credentials(Arc::new(api::services::trusted::BuiltinTrustedCredentials(
             connections_facade.clone(),
         )))?;
     }
 
+    let installed_trusted_pins: Vec<String> = trusted_executor
+        .as_ref()
+        .map(|executor| executor.artifact_pins().map(str::to_owned).collect())
+        .unwrap_or_default();
+
+    // Control runs only the dispatcher bundle's control bytes, on every tier
+    // (decision D5). Boot approves those and the compile bundle's, which may
+    // differ; the service binds to the runtime once it exists.
+    let native_control = Arc::new(
+        api::services::control::NativeControl::new(Some(tenant_id.clone()))
+            .with_audit(pool.clone()),
+    );
+    let control_boot = match component_dispatcher
+        .as_ref()
+        .and_then(|dispatcher| dispatcher.control_executor())
+    {
+        Some(executor) => {
+            executor.set_host(native_control.clone())?;
+            let mut approve = vec![executor.pin().to_owned()];
+            if let Some(pin) = config::direct_wasm_components_dir().and_then(|dir| {
+                runtara_workflows::direct_wasm::bundled_builtin_pin(
+                    &dir,
+                    runtara_dsl::agent_meta::CONTROL_AGENT_ID,
+                )
+            }) && !approve.contains(&pin)
+            {
+                approve.push(pin);
+            }
+            Some(embedded_runtara::ControlBoot { executor, approve })
+        }
+        None => None,
+    };
+
     // Start embedded Runtara servers (using dedicated database)
+    // Every run's durable instance waits; bound to the runtime and the
+    // engine with the control service.
+    let instance_waits: Arc<dyn runtara_component_host::InstanceWaitHost> =
+        native_control.instance_waits();
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
         trusted_executor,
+        control_boot,
+        Some(instance_waits),
         connection_resolver,
         database,
         outbound_http,
@@ -1194,6 +1262,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         Ok(Some(runtara)) => {
             println!("✓ Embedded runtara-core started on {}", runtara.core_addr());
             println!("✓ Embedded runtara-environment started (in-process)");
+            // An artifact pinning a control version outside the approved
+            // history is not ready, exactly like an uninstalled trusted pin.
+            api::repositories::workflows::set_installed_trusted_pins(
+                installed_trusted_pins
+                    .iter()
+                    .cloned()
+                    .chain(runtara.approved_builtins().pins().map(str::to_owned)),
+            );
             Some(runtara)
         }
         Ok(None) => {
@@ -1228,6 +1304,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     println!("✓ Runtime client initialized");
+    if let Some(runtime_client) = &runtime_client {
+        native_control.install(runtime_client.clone());
+    }
 
     // Install before any Valkey worker is started. Environment commits its
     // launch lifecycle transitions in a separate database, so the adapter
@@ -1262,6 +1341,21 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let reconcile_shutdown = shutdown_signal.clone();
         shutdown_coordinator.spawn_intake(async move { reconciler.run(reconcile_shutdown).await });
         println!("✓ Execution admission reconciler started");
+    }
+
+    // Children admitted by control:start that never launched get one fenced
+    // outcome, cancels stored mid-launch are applied once the launch is
+    // accepted, and `cancel` children still in admission follow their ended
+    // parent (decision D3). Environment's wake scheduler cascades to the
+    // children that did launch.
+    if let Some(runtime_client) = runtime_client.clone() {
+        let publisher = workers::control_children::ControlChildrenPublisher::new(
+            workers::execution_outbox::ExecutionOutbox::new(pool.clone()),
+            runtime_client,
+        );
+        let publisher_shutdown = shutdown_signal.clone();
+        shutdown_coordinator.spawn_intake(async move { publisher.run(publisher_shutdown).await });
+        println!("✓ Control children publisher started");
     }
 
     // Invocation cleanup worker (server DB retention).
@@ -1536,6 +1630,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
+    native_control.install_engine(execution_engine.clone());
+    {
+        let limit = crate::middleware::entitlement::effective_limit(
+            config::raw_max_concurrent_executions(),
+            config::entitlements().limits.max_concurrent_executions,
+        );
+        if !runtara_control_contract::capacity_satisfiable(u32::try_from(limit).unwrap_or(u32::MAX))
+        {
+            tracing::warn!(
+                max_concurrent_executions = limit,
+                "the concurrency limit is at most 1, so control:start can never admit a child \
+                 (the calling run holds the only slot); starts fail with \
+                 CONTROL_CAPACITY_UNSATISFIABLE"
+            );
+        }
+    }
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
         let shutdown = shutdown_signal.clone();
         shutdown_coordinator.spawn_intake(async move {
@@ -2539,11 +2649,6 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-/// Run server-specific database migrations (workflows, api_keys, triggers, connections).
-///
-/// These run against the main server pool (OBJECT_MODEL_DATABASE_URL) which holds
-/// all server-managed tables. Uses ignore_missing since this pool may share the
-/// _sqlx_migrations table with other migrators.
 /// Whether `SKIP_MIGRATIONS` asks this process to start without migrating.
 ///
 /// Anything that is not a parseable `true` means "migrate", so a typo cannot
@@ -2555,6 +2660,12 @@ pub fn skip_migrations() -> bool {
         .unwrap_or(false)
 }
 
+/// Run server-specific database migrations (workflows, api_keys, triggers, connections).
+///
+/// These run against the main server pool (`RUNTARA_SERVER_DATABASE_URL`, opened
+/// in `main`), which holds all server-managed tables — never the object-model
+/// pool. Uses ignore_missing since this pool may share the _sqlx_migrations
+/// table with other migrators.
 async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug)]
     struct Migrations(Vec<sqlx::migrate::Migration>);

@@ -113,6 +113,73 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.4.0",
+                "date": "2026-09-28",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "execution-graph",
+                        "description": "stateSchema on the execution graph: a map of SchemaField rows declaring the typed state a run exposes, with labels, formats and enums, next to inputSchema and outputSchema. It is a declaration only and is not compiled; state starts empty and is written by steps."
+                    },
+                    {
+                        "type": "added",
+                        "component": "schema-field",
+                        "description": "The currency format hint for number and integer schema fields (display as a currency amount). Format values stay unvalidated; unknown formats fall back to the default input."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "W081: a stateSchema field that sets required, default or visibleWhen, which have no effect for state."
+                    }
+                ]
+            },
+            {
+                "version": "3.3.0",
+                "date": "2026-09-28",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "step-type",
+                        "description": "WaitForInstances step: parks the run without a runner until direct child runs finish (mode all or any) or the optional timeoutMs deadline passes. Fields: instanceIds (1-1000 distinct direct children), mode (all by default), timeoutMs, breakpoint. Its output is the settled wait {mode, resolution, finished, remaining, deadlineMs}."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "A WaitForInstances step must be durable (E028), may not sit in onError, WaitForSignal onWait or AiAgent tools/memory (E131), runs serialized in parallel regions (W075), warns under a retrying Split or EmbedWorkflow (W076), and cannot be published as a workflow-agent. A literal instanceIds must be a non-empty array of at most 1000 distinct ids, and a literal timeoutMs a positive integer (E133)."
+                    }
+                ]
+            },
+            {
+                "version": "3.2.0",
+                "date": "2026-09-27",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "agent",
+                        "description": "Built-in control agent (agentId 'control', every tier): start, get, query, list-pending-signals, send-signal, cancel, pause, resume and wait on other runs. start requires parentClosePolicy (cancel or leave_running) and records the child's parentInstanceId; runLabel is unique per parent. The full reference is controlAgent in the workflow authoring schema."
+                    },
+                    {
+                        "type": "added",
+                        "component": "capability-metadata",
+                        "description": "Capabilities may declare suspends (they park the run without a runner, like a WaitForInstances step) and the runtime:requires-run tag (they only run as steps of a workflow run)."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "A suspending Agent step must be durable (E028) and set timeout > 0 (E029), and may not sit in onError, WaitForSignal onWait or AiAgent tools/memory (E131); a control step may not sit in onWait or AiAgent tools/memory (E132). Warnings W074 (literal runLabel on start in a loop), W075 (serialized in a parallel region), W076 (under a retrying Split or EmbedWorkflow), W077 (non-literal start workflowId) and W078 (suspending timeout within the 1 s margin); W073 now also covers operation-scoped steps in a parallel Split.",
+                        "migration": "Make suspending steps durable with a timeout, and move control or suspending steps out of the rejected contexts. Workflows without such steps are unaffected."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-field",
+                        "description": "Agent step timeout is the hard deadline of a suspending step, parked time included; runLabel accepts up to 1024 bytes."
+                    }
+                ]
+            },
+            {
                 "version": "3.1.0",
                 "date": "2026-07-26",
                 "breaking": true,
@@ -169,6 +236,38 @@ mod tests {
             schema.get("x-dsl-version").and_then(|v| v.as_str()),
             Some(DSL_VERSION)
         );
+    }
+
+    #[test]
+    fn test_generated_schema_declares_state_schema() {
+        let schema = generate_dsl_schema();
+        let defs = schema
+            .get("$defs")
+            .or_else(|| schema.get("definitions"))
+            .expect("schema has definitions");
+        let graph = defs
+            .get("ExecutionGraph")
+            .expect("ExecutionGraph definition");
+        let state_schema = graph
+            .pointer("/properties/stateSchema")
+            .expect("ExecutionGraph declares stateSchema");
+        assert!(
+            state_schema.to_string().contains("SchemaField"),
+            "stateSchema values are SchemaField rows: {state_schema}"
+        );
+        let required = graph
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(!required.contains(&json!("stateSchema")));
+    }
+
+    #[test]
+    fn test_changelog_leads_with_current_version() {
+        let changelog = get_dsl_changelog();
+        assert_eq!(changelog["version"], DSL_VERSION);
+        assert_eq!(changelog["changes"][0]["version"], DSL_VERSION);
     }
 
     #[test]

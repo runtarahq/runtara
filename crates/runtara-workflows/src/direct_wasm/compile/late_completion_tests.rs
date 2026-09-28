@@ -104,21 +104,53 @@ fn compiled_mode(
     );
     let components = dir.join("components");
     fs::create_dir(&components)?;
-    for entry in fs::read_dir(std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)? {
+    let bundle = std::path::PathBuf::from(std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?);
+    for entry in fs::read_dir(&bundle)? {
         let entry = entry?;
-        if entry.file_type()?.is_file() && entry.file_name() != "runtara_agent_http.wasm" {
+        if entry.file_type()?.is_file()
+            && !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("runtara_agent_http.")
+        {
             fs::hard_link(entry.path(), components.join(entry.file_name()))?;
         }
     }
+    // The fixture observes itself through the workflow runtime's custom events,
+    // an import the agent allowlist admits only for staged workflow-agents, so
+    // it is staged as one: tagged, and in an extra (staging) dir rather than the
+    // primary components dir. Its own sidecar copy: the bundle's stays untouched.
+    let staging = dir.join("staging");
+    fs::create_dir(&staging)?;
+    let mut meta: Value =
+        serde_json::from_slice(&fs::read(bundle.join("runtara_agent_http.meta.json"))?)?;
+    for capability in meta["capabilities"]
+        .as_array_mut()
+        .expect("http sidecar lists capabilities")
+    {
+        capability["tags"] = json!([
+            runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT,
+            runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
+            runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT_NON_SUSPENDING,
+        ]);
+    }
     fs::write(
-        components.join("runtara_agent_http.wasm"),
+        staging.join("runtara_agent_http.meta.json"),
+        serde_json::to_vec(&meta)?,
+    )?;
+    fs::write(
+        staging.join("runtara_agent_http.wasm"),
         wat::parse_str(if complete {
             include_str!("late-return-agent.wat").replace("i64.const 300000", "i64.const 0")
         } else {
             include_str!("late-return-agent.wat").to_owned()
         })?,
     )?;
-    compose_direct_workflow(&mut compiled, components)?;
+    crate::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut compiled,
+        components,
+        &[staging],
+    )?;
     assert!(compiled.scoped_agents.is_empty() && compiled.invocation_manifest.is_none());
     Ok(compiled)
 }

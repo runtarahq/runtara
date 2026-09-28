@@ -7,6 +7,7 @@ pub mod compilation;
 pub mod csv_import_export;
 pub mod endpoint_ref;
 pub mod input_validation;
+pub mod instance_waits;
 pub mod object_model;
 pub mod operators;
 pub mod pending_inputs;
@@ -21,6 +22,7 @@ pub mod workflows;
 pub mod trusted;
 
 pub mod connection_resolver;
+pub mod control;
 pub mod database;
 
 pub mod outbound_http;

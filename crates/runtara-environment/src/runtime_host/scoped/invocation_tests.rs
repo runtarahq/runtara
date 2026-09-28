@@ -176,6 +176,7 @@ async fn catalog(
     };
     let package = CompiledWorkflowPackage {
         invocations,
+        control_importers: Default::default(),
         root,
         artifacts: BTreeMap::from([("fixture-child".into(), child)]),
         bindings: serde_json::from_value(

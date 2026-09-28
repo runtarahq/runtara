@@ -218,6 +218,39 @@ pub trait RuntimeHost: Send + Sync {
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String>;
+    /// The continuation an operation-scoped call site saved for `attempt`, if
+    /// any. `op_hash` is the sha256 of the site's canonical checkpoint key; the
+    /// host scopes it to this instance. Hosts without typed agent suspension
+    /// refuse, so a suspending step fails loudly instead of losing state.
+    async fn operation_continuation_load(
+        &self,
+        _op_hash: String,
+        _attempt: u32,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
+    /// Persist the continuation of a suspended operation (at most
+    /// `runtara_agent_suspension::MAX_CONTINUATION_BYTES`), replacing any
+    /// earlier one for the same `(op_hash, attempt)`.
+    async fn operation_continuation_store(
+        &self,
+        _op_hash: String,
+        _attempt: u32,
+        _state: Vec<u8>,
+    ) -> Result<(), String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
+    /// Close the operation's instance wait, if it registered one, so a retry
+    /// of the operation registers afresh. Idempotent: an operation without a
+    /// wait, or with a closed one, is fine.
+    async fn operation_wait_close(&self, _op_hash: String) -> Result<(), String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
+    /// Drop everything kept for an operation: its continuation and its
+    /// settled or closed instance wait. Idempotent.
+    async fn operation_release(&self, _op_hash: String) -> Result<(), String> {
+        Err("runtime does not support typed agent suspension".into())
+    }
     /// Milliseconds since the UNIX epoch, as the guest sees them.
     ///
     /// Defaults to the wall clock, which is what every production host uses. It
@@ -228,6 +261,15 @@ pub trait RuntimeHost: Send + Sync {
     /// a movable clock a park can only ever be observed re-parking.
     fn now_ms(&self) -> Result<u64, String> {
         wall_clock_now_ms()
+    }
+
+    /// How the host launched this run, which decides whether a trusted call
+    /// under an earlier approved pin may run (`TrustedExecutor::admits`).
+    /// Host authority, never read from the guest. The default is the
+    /// strictest, `Start`; a host that relaunches parked runs overrides it,
+    /// and a wrapper must delegate.
+    fn trusted_launch(&self) -> crate::trusted::TrustedLaunch {
+        crate::trusted::TrustedLaunch::Start
     }
 }
 
