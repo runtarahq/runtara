@@ -444,6 +444,7 @@ pub struct WorkflowExecutor {
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
     control: std::sync::OnceLock<Arc<crate::control_executor::ControlExecutor>>,
+    instance_waits: std::sync::OnceLock<Arc<dyn crate::InstanceWaitHost>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
@@ -531,6 +532,13 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("control executor already configured"))
     }
 
+    /// Serve every run's durable instance waits with `host`.
+    pub fn set_instance_wait_host(&self, host: Arc<dyn crate::InstanceWaitHost>) -> Result<()> {
+        self.instance_waits
+            .set(host)
+            .map_err(|_| anyhow::anyhow!("instance wait host already configured"))
+    }
+
     /// `engine` must have epoch interruption enabled (see
     /// [`crate::engine::build_engine`]) and an epoch ticker running.
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
@@ -561,6 +569,7 @@ impl WorkflowExecutor {
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
             control: std::sync::OnceLock::new(),
+            instance_waits: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
