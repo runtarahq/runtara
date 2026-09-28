@@ -5,8 +5,7 @@
   "ignore": [
     "e2e/utils/seed.ts",
     "e2e/utils/test-helpers.ts",
-    "src/generated/**",
-    "src/wasm/**"
+    "src/generated/**"
   ],
   "ignoreDependencies": ["@vitest/coverage-v8", "wait-on"],
   "ignoreExportsUsedInFile": true

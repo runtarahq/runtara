@@ -402,44 +402,6 @@ impl RuntimeClient {
             .await
     }
 
-    /// Replay a trusted adapter's original caller intent after current authorization.
-    pub(crate) async fn replay_contextual_input_response(
-        &self,
-        tenant: &str,
-        instance: &str,
-        request: &str,
-        operation: &str,
-        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
-    ) -> runtara_core::persistence::inputs::InputResult<
-        Option<runtara_core::persistence::inputs::InputReceipt>,
-    > {
-        refuse_reserved_operation(operation)?;
-        self.client
-            .replay_contextual_input_response(tenant, instance, request, operation, context)
-            .await
-    }
-
-    /// Commit trusted retry context with the validated effective response.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn submit_contextual_input_response(
-        &self,
-        tenant: &str,
-        instance: &str,
-        request: &str,
-        operation: &str,
-        payload: &serde_json::Value,
-        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
-    ) -> runtara_core::persistence::inputs::InputResult<
-        runtara_core::persistence::inputs::InputReceipt,
-    > {
-        refuse_reserved_operation(operation)?;
-        self.client
-            .submit_contextual_input_response(
-                tenant, instance, request, operation, payload, context,
-            )
-            .await
-    }
-
     /// Control's `send-signal`: replay of its own `control:` operation.
     pub(crate) async fn replay_control_input_response(
         &self,

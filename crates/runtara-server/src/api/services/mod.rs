@@ -11,7 +11,6 @@ pub mod instance_waits;
 pub mod object_model;
 pub mod operators;
 pub mod pending_inputs;
-pub mod reports;
 pub mod schema_validator;
 pub mod session_queue;
 pub mod triggers;

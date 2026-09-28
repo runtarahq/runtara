@@ -68,30 +68,10 @@ pub struct SubmitActionResponseParams {
     )]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub payload: serde_json::Value,
-    #[schemars(
-        description = "Workflow ID for direct workflow action submission. Provide with instance_id, or omit when using report_id + block_id."
-    )]
-    pub workflow_id: Option<String>,
-    #[schemars(
-        description = "Execution instance UUID from the action row. Required for both direct and report-scoped submissions."
-    )]
-    pub instance_id: Option<String>,
-    #[schemars(
-        description = "Report id or slug for report-scoped action submission. Provide with block_id to re-fetch the filtered action row and apply report implicitPayload."
-    )]
-    pub report_id: Option<String>,
-    #[schemars(
-        description = "Report actions block id for report-scoped action submission. Provide with report_id."
-    )]
-    pub block_id: Option<String>,
-    #[schemars(
-        description = "Global report filter values keyed by filter id. Report context only."
-    )]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
-    pub filters: Option<serde_json::Value>,
-    #[schemars(description = "Per-block filter values keyed by filter id. Report context only.")]
-    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
-    pub block_filters: Option<serde_json::Value>,
+    #[schemars(description = "Workflow ID of the instance that asked for input.")]
+    pub workflow_id: String,
+    #[schemars(description = "Execution instance UUID from the action row.")]
+    pub instance_id: String,
 }
 
 // ===== Tool Implementations =====
@@ -193,75 +173,20 @@ pub async fn submit_action_response(
     // Recover a client-stringified payload object before it reaches the action.
     let payload = normalize_json_arg(params.payload, "payload")?;
 
-    match (
-        params.workflow_id,
-        params.instance_id,
-        params.report_id,
-        params.block_id,
-    ) {
-        (Some(workflow_id), Some(instance_id), None, None) => {
-            validate_path_param("workflow_id", &workflow_id)?;
-            validate_path_param("instance_id", &instance_id)?;
-            if params.filters.is_some() || params.block_filters.is_some() {
-                return Err(rmcp::ErrorData::invalid_params(
-                    "filters and block_filters are only supported with report_id + block_id.",
-                    None,
-                ));
-            }
-
-            let result = api_post(
-                server,
-                &format!(
-                    "/api/runtime/workflows/{}/instances/{}/actions/{}/submit",
-                    workflow_id,
-                    instance_id,
-                    encode_path_param(&params.action_id)
-                ),
-                Some(serde_json::json!({ "requestId": params.action_id, "operationId": params.operation_id, "payload": payload })),
-            )
-            .await?;
-            json_result(result)
-        }
-        (None, Some(instance_id), Some(report_id), Some(block_id)) => {
-            validate_path_param("instance_id", &instance_id)?;
-            validate_path_param("report_id", &report_id)?;
-            validate_path_param("block_id", &block_id)?;
-
-            // Recover client-stringified filter objects (keyed-by-id maps).
-            let filters = match params.filters {
-                Some(filters) => normalize_json_arg(filters, "filters")?,
-                None => serde_json::json!({}),
-            };
-            let block_filters = match params.block_filters {
-                Some(block_filters) => normalize_json_arg(block_filters, "block_filters")?,
-                None => serde_json::json!({}),
-            };
-
-            let result = api_post(
-                server,
-                &format!(
-                    "/api/runtime/reports/{}/blocks/{}/actions/{}/submit",
-                    report_id,
-                    block_id,
-                    encode_path_param(&params.action_id)
-                ),
-                Some(serde_json::json!({
-                    "instanceId": instance_id,
-                    "requestId": params.action_id,
-                    "operationId": params.operation_id,
-                    "payload": payload,
-                    "filters": filters,
-                    "blockFilters": block_filters,
-                })),
-            )
-            .await?;
-            json_result(result)
-        }
-        _ => Err(rmcp::ErrorData::invalid_params(
-            "Provide instance_id and exactly one action context: workflow_id, or report_id + block_id.",
-            None,
-        )),
-    }
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    validate_path_param("instance_id", &params.instance_id)?;
+    let result = api_post(
+        server,
+        &format!(
+            "/api/runtime/workflows/{}/instances/{}/actions/{}/submit",
+            params.workflow_id,
+            params.instance_id,
+            encode_path_param(&params.action_id)
+        ),
+        Some(serde_json::json!({ "requestId": params.action_id, "operationId": params.operation_id, "payload": payload })),
+    )
+    .await?;
+    json_result(result)
 }
 
 #[cfg(test)]

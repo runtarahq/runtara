@@ -33,6 +33,10 @@ fn schema_field_to_json_schema(field: &SchemaField) -> Value {
         prop.insert("description".to_string(), Value::String(desc.clone()));
     }
 
+    if let Some(ref label) = field.label {
+        prop.insert("title".to_string(), Value::String(label.clone()));
+    }
+
     if let Some(ref default) = field.default {
         prop.insert("default".to_string(), default.clone());
     }

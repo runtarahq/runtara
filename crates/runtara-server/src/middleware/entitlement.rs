@@ -1,6 +1,6 @@
 //! REST entitlement gates.
 //!
-//! - **Feature gates (`require_reports` etc.)**: per-feature middleware
+//! - **Feature gates (`require_database` etc.)**: per-feature middleware
 //!   that short-circuits with a 403 + stable `code` when the feature is off.
 //!   Mounted on the smallest sub-router that exactly contains the routes
 //!   surfacing the feature, so the gate is visible at the mount point and
@@ -49,10 +49,6 @@ async fn require_feature(feature: FeatureKey, req: Request, next: Next) -> Respo
         Ok(()) => next.run(req).await,
         Err(denial) => denial.into_response(),
     }
-}
-
-pub async fn require_reports(req: Request, next: Next) -> Response {
-    require_feature(FeatureKey::Reports, req, next).await
 }
 
 pub async fn require_database(req: Request, next: Next) -> Response {
@@ -354,15 +350,6 @@ mod tests {
     // ── disabled features → denial carries correct code + feature name ──
 
     #[test]
-    fn disabled_reports_yields_entitlement_required_denial() {
-        let snap = snapshot_with(None, Some(r#"{"features":{"reports":false}}"#));
-        let denial = gate_decision(&snap, FeatureKey::Reports).expect_err("should deny");
-        assert_eq!(denial.code(), codes::ENTITLEMENT_REQUIRED);
-        let body = denial.json_body();
-        assert_eq!(body["feature"], "reports");
-    }
-
-    #[test]
     fn disabled_database_yields_entitlement_required_denial() {
         let snap = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
         let denial = gate_decision(&snap, FeatureKey::Database).expect_err("should deny");
@@ -390,10 +377,9 @@ mod tests {
 
     #[test]
     fn disabling_one_feature_leaves_others_passing() {
-        // `reports` off but `database`, `api`, `mcp` remain default-on.
-        let snap = snapshot_with(None, Some(r#"{"features":{"reports":false}}"#));
-        assert!(gate_decision(&snap, FeatureKey::Reports).is_err());
-        assert!(gate_decision(&snap, FeatureKey::Database).is_ok());
+        // `database` off but `api` and `mcp` remain default-on.
+        let snap = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
+        assert!(gate_decision(&snap, FeatureKey::Database).is_err());
         assert!(gate_decision(&snap, FeatureKey::Api).is_ok());
         assert!(gate_decision(&snap, FeatureKey::Mcp).is_ok());
     }
@@ -403,9 +389,8 @@ mod tests {
     #[test]
     fn starter_tier_denies_database_api_mcp_via_gate() {
         // Starter (per the placeholder tier catalog in entitlements.rs)
-        // has reports on; database/api/mcp off.
+        // has database/api/mcp off.
         let snap = snapshot_with(Some("starter"), None);
-        assert!(gate_decision(&snap, FeatureKey::Reports).is_ok());
         assert!(gate_decision(&snap, FeatureKey::Database).is_err());
         assert!(gate_decision(&snap, FeatureKey::Api).is_err());
         assert!(gate_decision(&snap, FeatureKey::Mcp).is_err());
@@ -415,8 +400,8 @@ mod tests {
 
     #[tokio::test]
     async fn denial_renders_as_403_with_stable_code() {
-        let snap = snapshot_with(None, Some(r#"{"features":{"reports":false}}"#));
-        let denial = gate_decision(&snap, FeatureKey::Reports).expect_err("should deny");
+        let snap = snapshot_with(None, Some(r#"{"features":{"database":false}}"#));
+        let denial = gate_decision(&snap, FeatureKey::Database).expect_err("should deny");
         let response = denial.into_response();
 
         assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
@@ -425,7 +410,7 @@ mod tests {
             .expect("body bytes");
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
         assert_eq!(body["code"], codes::ENTITLEMENT_REQUIRED);
-        assert_eq!(body["feature"], "reports");
+        assert_eq!(body["feature"], "database");
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -490,10 +475,7 @@ mod tests {
         // If another feature is off but `api` is on, ApiKey auth still passes.
         // Confirms the guard is exactly one boolean check, not a confused fold
         // over the whole snapshot.
-        let snap = snapshot_with(
-            None,
-            Some(r#"{"features":{"reports":false,"database":false,"mcp":false}}"#),
-        );
+        let snap = snapshot_with(None, Some(r#"{"features":{"database":false,"mcp":false}}"#));
         assert!(api_key_decision(&snap, &AuthMethod::ApiKey).is_ok());
     }
 

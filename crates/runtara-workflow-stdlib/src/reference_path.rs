@@ -67,6 +67,37 @@ pub fn reference_segments(path: &str) -> Vec<String> {
     segments
 }
 
+/// True when a reference path has an empty dot-separated segment — two dots
+/// in a row outside any `[..]` body, e.g. `steps..outputs`.
+///
+/// [`reference_segments`] silently drops such segments, so a caller that wants
+/// to reject them must look at the raw text; but a bracket body is one opaque
+/// key, so `data["a..b"]` names the literal key `a..b` and is not flagged.
+/// Only a *closed* body is skipped: an unterminated `[` is a malformed path,
+/// not a key, so `outputs[0..name` (missing `]`) is still flagged even though
+/// [`reference_segments`] would read the rest of it as one key.
+pub fn has_consecutive_dots(path: &str) -> bool {
+    let mut previous_dot = false;
+    let mut chars = path.chars();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' if previous_dot => return true,
+            '.' => previous_dot = true,
+            '[' => {
+                let Some(close) = chars.as_str().find(']') else {
+                    return chars.as_str().contains("..");
+                };
+                chars = chars.as_str()[close + 1..].chars();
+                previous_dot = false;
+            }
+            _ => previous_dot = false,
+        }
+    }
+
+    false
+}
+
 /// Render a reference path as an RFC 6901 JSON pointer, escaping `~` and `/`
 /// inside segment text. Tokenization is [`reference_segments`], so bracket
 /// bodies stay opaque here too.
@@ -218,6 +249,35 @@ mod tests {
         assert_eq!(segments("data."), ["data"]);
         assert_eq!(segments("data[]"), ["data"]);
         assert_eq!(segments(r#"data[""]"#), ["data"]);
+    }
+
+    #[test]
+    fn consecutive_dots_count_only_outside_brackets() {
+        assert!(has_consecutive_dots("steps..outputs"));
+        assert!(has_consecutive_dots("data.a..b"));
+        assert!(has_consecutive_dots(r#"data["a"]..b"#));
+        assert!(has_consecutive_dots(r#"data["a..b"].c..d"#));
+
+        // Inside a bracket body the dots are part of one opaque key, which
+        // the tokenizer keeps whole.
+        for path in [
+            r#"data["a..b"]"#,
+            "data['a..b']",
+            "data[a..b]",
+            r#"steps["fetch"].outputs["x...y"].z"#,
+        ] {
+            assert!(!has_consecutive_dots(path), "{path}");
+        }
+        assert_eq!(segments(r#"data["a..b"]"#), ["data", "a..b"]);
+
+        // A single dot around a bracket is not an empty segment.
+        assert!(!has_consecutive_dots("data.order.id"));
+        assert!(!has_consecutive_dots(r#"data.["a"].b"#));
+        assert!(!has_consecutive_dots(""));
+        // An unterminated bracket is a malformed path, not an opaque key.
+        assert!(has_consecutive_dots("data[a..b"));
+        assert!(has_consecutive_dots("steps.fetch.outputs[0..name"));
+        assert!(!has_consecutive_dots("data[a.b"));
     }
 
     #[test]

@@ -13,6 +13,8 @@ import { TagInput } from '@/shared/components/ui/tag-input';
 import { Textarea } from '@/shared/components/ui/textarea';
 
 import { inferControlKind, optionKey, optionsFor } from './control-registry';
+import { fromLocalInput, rangeFormat, toLocalInput } from './date-values';
+import { RangeControl } from './RangeControl';
 import type { FormField, FormOption } from './types';
 
 interface FieldControlProps {
@@ -49,11 +51,15 @@ export function FieldControl({
 
   if (kind === 'toggle') {
     return (
-      <Checkbox
-        {...common}
-        checked={Boolean(value)}
-        onCheckedChange={(checked) => onChange(checked === true)}
-      />
+      // Below its label at an input's height, so a toggle lines up with
+      // the fields next to it.
+      <div className="flex h-8 items-center">
+        <Checkbox
+          {...common}
+          checked={Boolean(value)}
+          onCheckedChange={(checked) => onChange(checked === true)}
+        />
+      </div>
     );
   }
 
@@ -249,6 +255,21 @@ export function FieldControl({
     );
   }
 
+  const periodFormat = kind === 'date_range' ? rangeFormat(field) : undefined;
+  if (periodFormat) {
+    return (
+      <RangeControl
+        id={id}
+        labelledBy={labelledBy}
+        format={periodFormat}
+        value={value}
+        disabled={disabled}
+        invalid={invalid}
+        onChange={onChange}
+      />
+    );
+  }
+
   if (kind === 'date_range' || kind === 'number_range') {
     const range = Array.isArray(value) ? value : ['', ''];
     const inputType = kind === 'date_range' ? 'date' : 'number';
@@ -281,6 +302,8 @@ export function FieldControl({
   }
 
   const isNumber = kind === 'number';
+  // A date-time is stored in UTC and picked in local time.
+  const utc = kind === 'datetime';
   return (
     <Input
       {...common}
@@ -300,7 +323,11 @@ export function FieldControl({
                   : 'text'
       }
       value={
-        typeof value === 'string' || typeof value === 'number' ? value : ''
+        utc
+          ? toLocalInput(value)
+          : typeof value === 'string' || typeof value === 'number'
+            ? value
+            : ''
       }
       placeholder={field.placeholder}
       min={field.min}
@@ -308,9 +335,11 @@ export function FieldControl({
       step={field.type === 'integer' ? 1 : undefined}
       onChange={(event) =>
         onChange(
-          isNumber && event.target.value !== ''
-            ? Number(event.target.value)
-            : event.target.value
+          utc
+            ? fromLocalInput(event.target.value)
+            : isNumber && event.target.value !== ''
+              ? Number(event.target.value)
+              : event.target.value
         )
       }
     />

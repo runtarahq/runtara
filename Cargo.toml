@@ -29,8 +29,6 @@ members = [
     "crates/runtara-object-store",
     "crates/runtara-object-model-core",
     "crates/runtara-database-contract",
-    # Reports DSL: schema + minijinja + condition evaluator (server-side, also compiled to WASM)
-    "crates/runtara-report-dsl",
     # WASM Component Model migration
     "crates/runtara-agent-wit",
     "crates/runtara-agent-trusted",
@@ -106,14 +104,6 @@ hmac = "0.12"
 # an `encoding_rs::Encoding`, so the two share one vocabulary.
 encoding_rs = "0.8"
 chardetng = "1.0"
-
-# Size-tuned profile for `wasm-pack build --release` outputs (Phase 2 of the
-# reports refactor). `runtara-report-dsl`
-# compiles to WASM and ships to the frontend; size matters more than build
-# speed.
-[profile.release.package.runtara-report-dsl]
-opt-level = "z"
-codegen-units = 1
 
 # Build dependency crates at opt-level=2 in the dev/test profile. The WASM test
 # suites (e.g. direct_wasm_execute) drive wasmtime's Cranelift JIT and wac-graph

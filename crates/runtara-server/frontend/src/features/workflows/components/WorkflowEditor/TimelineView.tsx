@@ -43,6 +43,7 @@ import {
 
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
+import { stepBadgeVariant, stepDescription } from './step-summary';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { FieldError } from '@/shared/components/ui/form';
@@ -257,22 +258,7 @@ export function isTimelineContainerNode(node: Node): boolean {
 }
 
 function getStepDescription(node: Node): string {
-  const data = getStepData(node);
-
-  if (data.description) return data.description;
-  if (data.stepType === 'Agent') {
-    const agent = data.agentId || 'agent';
-    const capability = data.capabilityId || 'capability';
-    return `${agent} / ${capability}`;
-  }
-  if (data.stepType === 'Conditional') return 'Routes execution by condition.';
-  if (data.stepType === 'Split') return 'Runs a subgraph for each item.';
-  if (data.stepType === 'While')
-    return 'Repeats its subgraph while the condition is true.';
-  if (data.stepType === 'EmbedWorkflow') return 'Calls another workflow.';
-  if (data.stepType === 'Finish') return 'Completes this path.';
-
-  return node.id;
+  return stepDescription(getStepData(node)) ?? node.id;
 }
 
 function getStepIcon(stepType: string) {
@@ -306,23 +292,7 @@ function getStepIcon(stepType: string) {
   }
 }
 
-function getStepBadgeVariant(stepType: string) {
-  switch (stepType) {
-    case 'Conditional':
-    case 'Switch':
-      return 'warning' as const;
-    case 'Split':
-    case 'While':
-    case 'RepeatUntil':
-      return 'default' as const;
-    case 'EmbedWorkflow':
-      return 'secondary' as const;
-    case 'Finish':
-      return 'success' as const;
-    default:
-      return 'muted' as const;
-  }
-}
+const getStepBadgeVariant = stepBadgeVariant;
 
 function formatExecutionTime(ms?: number) {
   if (ms === undefined || ms === null) return '';

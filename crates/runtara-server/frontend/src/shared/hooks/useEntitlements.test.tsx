@@ -29,7 +29,7 @@ function makeSnapshot(
   return {
     tenantId: 'tenant-test',
     pricingTier: 'default',
-    features: { reports: true, database: true, api: true, mcp: true },
+    features: { database: true, api: true, mcp: true },
     agents: ['http', 'csv'],
     limits: {},
     ...overrides,
@@ -66,7 +66,7 @@ describe('useEntitlements', () => {
   it('returns the inlined snapshot synchronously and never fetches', async () => {
     const inlined = makeSnapshot({
       tenantId: 'tenant-inlined',
-      features: { reports: false, database: true, api: true, mcp: true },
+      features: { database: false, api: true, mcp: true },
     });
     window.__RUNTARA_CONFIG__ = { entitlements: inlined };
 
@@ -83,7 +83,7 @@ describe('useEntitlements', () => {
   it('falls back to GET /api/runtime/entitlements when nothing is inlined', async () => {
     const fetched = makeSnapshot({
       tenantId: 'tenant-fetched',
-      features: { reports: true, database: false, api: true, mcp: false },
+      features: { database: false, api: true, mcp: false },
     });
     mockFetch.mockResolvedValueOnce(fetched);
 

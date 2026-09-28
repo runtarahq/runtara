@@ -737,7 +737,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let sink = ProductEventSink::new(tx);
         let denial = crate::entitlement_error::EntitlementDenial::FeatureRequired(
-            crate::entitlements::FeatureKey::Reports,
+            crate::entitlements::FeatureKey::Database,
         );
         emit_quota_exceeded(&sink, sample_event(), &denial);
         assert!(

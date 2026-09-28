@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn feature_required_code_is_stable() {
-        let d = EntitlementDenial::FeatureRequired(FeatureKey::Reports);
+        let d = EntitlementDenial::FeatureRequired(FeatureKey::Database);
         assert_eq!(d.code(), "ENTITLEMENT_REQUIRED");
     }
 
@@ -281,15 +281,15 @@ mod tests {
 
     #[test]
     fn feature_required_body_matches_doc_shape() {
-        let body = EntitlementDenial::FeatureRequired(FeatureKey::Reports).json_body();
+        let body = EntitlementDenial::FeatureRequired(FeatureKey::Database).json_body();
         let obj = body_of(&body);
 
         assert_eq!(obj["error"], json!("Entitlement required"));
         assert_eq!(obj["code"], json!("ENTITLEMENT_REQUIRED"));
-        assert_eq!(obj["feature"], json!("reports"));
+        assert_eq!(obj["feature"], json!("database"));
         assert_eq!(
             obj["message"],
-            json!("Reports is not enabled for this tenant.")
+            json!("Database is not enabled for this tenant.")
         );
         assert!(!obj.contains_key("agent"));
         assert!(!obj.contains_key("limit"));
@@ -457,11 +457,11 @@ mod tests {
 
     #[test]
     fn audit_fields_feature_required() {
-        let d = EntitlementDenial::FeatureRequired(FeatureKey::Reports);
+        let d = EntitlementDenial::FeatureRequired(FeatureKey::Database);
         let f = d.audit_fields("tenant-xyz");
         assert_eq!(f.code, "ENTITLEMENT_REQUIRED");
         assert_eq!(f.tenant_id, "tenant-xyz");
-        assert_eq!(f.feature, Some("reports"));
+        assert_eq!(f.feature, Some("database"));
         // Variant-specific fields for the other denial kinds stay None so
         // operators don't grep through stale data.
         assert_eq!(f.agent, None);

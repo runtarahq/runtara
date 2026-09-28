@@ -3,6 +3,7 @@ import { Handle, Node, NodeProps, Position } from '@xyflow/react';
 import { Plus, CheckCircle2, XCircle, Pause } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { BaseNode } from '../BaseNode.tsx';
+import { stepIdLabel } from '../step-label';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
 import {
@@ -459,13 +460,18 @@ function AiAgentNodeComponent({
             )}
             <span
               className="flex-1 truncate text-2xs font-medium text-foreground"
-              title={data.name || undefined}
+              title={data.name || stepIdLabel(id)}
             >
-              {data.name || (
-                <span className="italic text-muted-foreground">
-                  Unnamed step
-                </span>
-              )}
+              {data.name ||
+                (stepIdLabel(id) ? (
+                  <span className="font-mono text-muted-foreground">
+                    {stepIdLabel(id)}
+                  </span>
+                ) : (
+                  <span className="italic text-muted-foreground">
+                    Unnamed step
+                  </span>
+                ))}
             </span>
             {modelName && (
               <span className="flex-shrink-0 whitespace-nowrap rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">

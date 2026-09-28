@@ -297,8 +297,6 @@ pub fn require(
 ///   `read`: they touch no state.
 /// - **`object-model/sql/execute`** → `database:delete`: it runs arbitrary SQL, so it is gated
 ///   at the most destructive write.
-/// - **Report-driven workflow-action submit** → `report:read`: it is a report-consumption
-///   interaction; the report surface, not the workflow surface, gates it.
 /// - **OAuth authorize** (a `GET`) → `connection:update`: it begins a credential change, so it
 ///   must be closed to read-only Viewers despite the verb.
 /// - **Agent execute / test** → `workflow:execute`: host-mediated capability I/O (possibly with
@@ -314,9 +312,8 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
     use Permission::{
         AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
         DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
-        ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
-        TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete, WorkflowExecute,
-        WorkflowFolderRename, WorkflowRead, WorkflowUpdate,
+        TriggerCreate, TriggerDelete, TriggerRead, TriggerUpdate, WorkflowCreate, WorkflowDelete,
+        WorkflowExecute, WorkflowFolderRename, WorkflowRead, WorkflowUpdate,
     };
 
     let m = method.as_str();
@@ -417,32 +414,6 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("GET", "/api/runtime/triggers/{id}") => TriggerRead,
         ("PUT", "/api/runtime/triggers/{id}") => TriggerUpdate,
         ("DELETE", "/api/runtime/triggers/{id}") => TriggerDelete,
-        // ── Reports ──────────────────────────────────────────────────────
-        ("GET", "/api/runtime/reports") => ReportRead,
-        ("POST", "/api/runtime/reports") => ReportCreate,
-        ("POST", "/api/runtime/reports/validate") => ReportRead,
-        ("POST", "/api/runtime/reports/preview") => ReportRead,
-        ("GET", "/api/runtime/reports/schema") => ReportRead,
-        ("GET", "/api/runtime/reports/{report_id}") => ReportRead,
-        ("PUT", "/api/runtime/reports/{report_id}") => ReportUpdate,
-        ("DELETE", "/api/runtime/reports/{report_id}") => ReportDelete,
-        ("POST", "/api/runtime/reports/{report_id}/render") => ReportRead,
-        ("POST", "/api/runtime/reports/{report_id}/blocks/{block_id}/data") => ReportRead,
-        (
-            "POST",
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
-        ) => WorkflowExecute,
-        (
-            "POST",
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
-        ) => ReportRead,
-        ("POST", "/api/runtime/reports/{report_id}/filters/{filter_id}/options") => ReportRead,
-        (
-            "POST",
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/fields/{field}/lookup-options",
-        ) => ReportRead,
-        ("POST", "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query") => ReportRead,
-        ("POST", "/api/runtime/reports/{report_id}/edit") => ReportUpdate,
         // ── Object model (database) ──────────────────────────────────────
         ("POST", "/api/runtime/object-model/schemas") => DatabaseCreate,
         ("GET", "/api/runtime/object-model/schemas") => DatabaseRead,
@@ -1190,21 +1161,6 @@ mod tests {
             ),
             (
                 Method::POST,
-                "/api/runtime/reports",
-                Permission::ReportCreate,
-            ),
-            (
-                Method::DELETE,
-                "/api/runtime/reports/{report_id}",
-                Permission::ReportDelete,
-            ),
-            (
-                Method::POST,
-                "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
-                Permission::WorkflowExecute,
-            ),
-            (
-                Method::POST,
                 "/api/runtime/object-model/schemas",
                 Permission::DatabaseCreate,
             ),
@@ -1238,14 +1194,6 @@ mod tests {
     fn permission_for_is_method_sensitive_on_shared_paths() {
         // Same path, different verb → different permission. This is the property that lets one
         // table gate combined-method routes that a per-route layer could not.
-        assert_eq!(
-            permission_for(&Method::GET, "/api/runtime/reports"),
-            Some(Permission::ReportRead)
-        );
-        assert_eq!(
-            permission_for(&Method::POST, "/api/runtime/reports"),
-            Some(Permission::ReportCreate)
-        );
         let schema = "/api/runtime/object-model/schemas/{id}";
         assert_eq!(
             permission_for(&Method::GET, schema),
@@ -1457,7 +1405,7 @@ mod tests {
             )
             .is_ok()
         );
-        // A POST-shaped read (the SQL query tools, report render) still passes: the decision is
+        // A POST-shaped read (the SQL query tools) still passes: the decision is
         // keyed on the permission, not the verb.
         assert!(
             scope_decision_for(
@@ -2224,9 +2172,6 @@ mod tests {
             (Method::POST, "/api/runtime/triggers"),
             (Method::PUT, "/api/runtime/triggers/{id}"),
             (Method::DELETE, "/api/runtime/triggers/{id}"),
-            (Method::POST, "/api/runtime/reports"),
-            (Method::PUT, "/api/runtime/reports/{report_id}"),
-            (Method::DELETE, "/api/runtime/reports/{report_id}"),
             (Method::POST, "/api/runtime/object-model/schemas"),
             (Method::DELETE, "/api/runtime/object-model/schemas/{id}"),
             (Method::POST, "/api/runtime/object-model/sql/execute"),

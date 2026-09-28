@@ -6,7 +6,6 @@ import type { EntitlementsSnapshot, FeatureKey } from './types';
  * `FeatureKey::display_name` in `crates/runtara-server/src/entitlements.rs`.
  */
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
-  reports: 'Reports',
   database: 'Database',
   api: 'API access',
   mcp: 'MCP',
@@ -44,7 +43,6 @@ export const PERMISSIVE_FALLBACK: EntitlementsSnapshot = Object.freeze({
   tenantId: 'unknown',
   pricingTier: 'default',
   features: {
-    reports: true,
     database: true,
     api: true,
     mcp: true,

@@ -1,6 +1,6 @@
 # Entitlements
 
-RUNTARA ships a per-process entitlement system that gates product features (Reports, Database, API access, MCP), the agent allowlist, and a handful of numeric tier limits. Entitlements are env-driven, resolved once at startup, and enforced on every authenticated entry point — REST and MCP tools.
+RUNTARA ships a per-process entitlement system that gates product features (Database, API access, MCP), the agent allowlist, and a handful of numeric tier limits. Entitlements are env-driven, resolved once at startup, and enforced on every authenticated entry point — REST and MCP tools.
 
 This document is the operator-facing reference. For engineering details — the data model, enforcement points, and error codes — see the `entitlements`, `entitlement_error`, and `middleware::entitlement` modules in `crates/runtara-server`.
 
@@ -13,7 +13,7 @@ To confirm the resolved snapshot at any time, check the server's startup log. Th
 ```
 INFO  entitlement snapshot resolved
   tenant_id=org_p0IkAFnrVqVOvQw9 pricing_tier=Default
-  features_enabled=reports,database,api,mcp features_disabled=
+  features_enabled=database,api,mcp features_disabled=
   agents_explicit=false agents_allowlist_size=23
   max_workflows=None max_object_schemas=None max_api_keys=None
   object_model_bulk_request_limit=None max_concurrent_executions=None
@@ -55,7 +55,6 @@ All three of `features`, `agents`, and `limits` are optional inside a JSON layer
 ```json
 {
   "features": {
-    "reports": true,
     "database": true,
     "api": true,
     "mcp": true
@@ -70,6 +69,10 @@ All three of `features`, `agents`, and `limits` are optional inside a JSON layer
   }
 }
 ```
+
+`reports` is a retired feature key: it is still accepted, so a management
+service that sends it does not break startup, but it is ignored and logged as a
+`WARN ignoring retired entitlement feature`.
 
 `agents` semantics:
 
@@ -89,7 +92,7 @@ The startup log's `agents_allowlist_size` is a **count**, not a list — useful 
 
 ### The control agent on every tier
 
-The built-in `control` agent (start, read, signal, pause, resume, cancel and wait on other runs; see [control-agent.md](../control-agent.md#as-built)) is enabled on **every** pricing tier, whatever `agents` says: an allowlist cannot remove it, and `starter`'s hard-coded list still gets it (decision D5). It is listed only when the bundle ships `runtara_agent_control.wasm`.
+The built-in `control` agent (start, read, signal, pause, resume and cancel other runs; see [control-agent.md](../control-agent.md#as-built)) is enabled on **every** pricing tier, whatever `agents` says: an allowlist cannot remove it, and `starter`'s hard-coded list still gets it (decision D5). It is listed only when the bundle ships `runtara_agent_control.wasm`.
 
 Its children share `maxConcurrentExecutions` with every other trigger:
 
@@ -99,15 +102,15 @@ Its children share `maxConcurrentExecutions` with every other trigger:
 - A limit of at most 1 can never admit a child: the calling run holds the only slot. `start` then fails permanently with `CONTROL_CAPACITY_UNSATISFIABLE`, and the server logs a `WARN` at boot naming `max_concurrent_executions`. Raise the limit to 2 or more for tenants that use control.
 - A limit above what the runner can execute leaves admitted children queued; they, and parents woken from a wait, can hit the launch-queue timeout (`launch_queue_timeout`) like any other run. Keep the limit near runner capacity for tenants that fan out.
 
-## Worked example: disable Reports for this tenant
+## Worked example: disable Database for this tenant
 
-Goal: ship a server where the Reports UI is hidden, the report REST routes return 403, and the report MCP tools refuse.
+Goal: ship a server where the Database UI is hidden, the object-model REST routes return 403, and the object-model MCP tools refuse.
 
 Start the server with:
 
 ```bash
 AUTH_PROVIDER=local SERVER_HOST=127.0.0.1 \
-  RUNTARA_ENTITLEMENTS_JSON='{"features":{"reports":false}}' \
+  RUNTARA_ENTITLEMENTS_JSON='{"features":{"database":false}}' \
   cargo run -p runtara-server --features embed-ui
 ```
 
@@ -119,17 +122,17 @@ The startup log should show:
 
 ```
 INFO  entitlement snapshot resolved
-  ... features_enabled=database,api,mcp features_disabled=reports ...
+  ... features_enabled=api,mcp features_disabled=database ...
 ```
 
-If `features_disabled` doesn't contain `reports`, your env didn't make it to the process — fix that before testing further.
+If `features_disabled` doesn't contain `database`, your env didn't make it to the process — fix that before testing further.
 
 ### Verify the REST gate
 
 Public API on `:7001`:
 
 ```bash
-curl -i -X GET http://localhost:7001/api/runtime/reports
+curl -i -X GET http://localhost:7001/api/runtime/object-model/schemas
 ```
 
 Expected (in `local` mode — auth is mounted *outside* the entitlement gate, so an unauthenticated caller in any other mode gets a `401` before the gate is ever reached):
@@ -138,19 +141,19 @@ Expected (in `local` mode — auth is mounted *outside* the entitlement gate, so
 HTTP/1.1 403 Forbidden
 content-type: application/json
 
-{"error":"Entitlement required","code":"ENTITLEMENT_REQUIRED","feature":"reports","message":"Reports is not enabled for this tenant."}
+{"error":"Entitlement required","code":"ENTITLEMENT_REQUIRED","feature":"database","message":"Database is not enabled for this tenant."}
 ```
 
 And in the server log:
 
 ```
 WARN  entitlement denial
-  code=ENTITLEMENT_REQUIRED tenant_id=<your tenant> feature=Some("reports") ...
+  code=ENTITLEMENT_REQUIRED tenant_id=<your tenant> feature=Some("database") ...
 ```
 
 ### Verify the SPA
 
-Open the UI. The Reports menu item is hidden. Direct navigation to `/ui/reports` shows the "Feature not enabled" page rather than the report list.
+Open the UI. The Database menu item is hidden. Direct navigation to `/ui/objects/types` shows the "Feature not enabled" page rather than the object types list.
 
 ## Listening port
 
@@ -168,9 +171,9 @@ Most likely `ConfigError::InvalidValue` from a malformed env. Expected output lo
 
 Common shapes:
 
-- **Unknown feature key.** `{"features": {"workflows": false}}` — `workflows` isn't a feature key. Use one of `reports`, `database`, `api`, `mcp`.
+- **Unknown feature key.** `{"features": {"workflows": false}}` — `workflows` isn't a feature key. Use one of `database`, `api`, `mcp` (`reports` is accepted but ignored).
 - **Unknown agent module.** `{"agents": ["does-not-exist"]}` — the value is validated against the dispatcher's registered modules at startup. Get the full list from `GET /api/runtime/entitlements` (the `agents` array).
-- **Non-boolean feature value.** `{"features": {"reports": "yes"}}` — features are strict booleans.
+- **Non-boolean feature value.** `{"features": {"database": "yes"}}` — features are strict booleans.
 - **Negative limit.** `{"limits": {"maxApiKeys": -1}}` — caps must be non-negative.
 - **Plain bad JSON.** Missing commas, unquoted keys, etc. Run your value through `jq` first.
 
@@ -186,12 +189,12 @@ Inspect the execution error and the current agent catalog. Entitlements cannot
 restore a removed agent. SFTP and the native-capability bridge have been removed;
 see [the removal upgrade guide](sftp-removal.md) for affected workflows and instances.
 
-### "Reports is hidden in the SPA but the env says it should be enabled"
+### "Database is hidden in the SPA but the env says it should be enabled"
 
 Two checks:
 
 1. **Hard-reload the browser.** The entitlement snapshot is inlined into `index.html` at serve time; a stale tab from before the restart will still have the previous snapshot.
-2. **Confirm the env actually reached the process.** The startup log line is authoritative — if it says `features_disabled=reports`, the SPA is correct and the env was wrong.
+2. **Confirm the env actually reached the process.** The startup log line is authoritative — if it says `features_disabled=database`, the SPA is correct and the env was wrong.
 
 ## Audit logging
 

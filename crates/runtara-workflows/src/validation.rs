@@ -86,7 +86,7 @@ use runtara_dsl::{
 // exactly the segments a lookup will walk — in particular treating a
 // bracket-quoted body like `data["a.b"]` as one opaque key, not a nested path.
 use runtara_workflow_stdlib::reference_path::{
-    array_index, is_array_index_token, reference_segments,
+    array_index, has_consecutive_dots, is_array_index_token, reference_segments,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -1858,6 +1858,7 @@ pub fn validate_workflow_with_children(
         .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
     {
         validate_embed_workflow_inputs(graph, child_workflows, &mut result);
+        validate_embed_workflow_outputs(graph, child_workflows, &mut result);
     }
 
     result
@@ -2012,6 +2013,7 @@ pub fn validate_workflow_closure(
         .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
     {
         validate_embed_workflow_inputs(root, &children_map, &mut root_result);
+        validate_embed_workflow_outputs(root, &children_map, &mut root_result);
     }
 
     let mut seen: HashSet<(String, i32)> = HashSet::new();
@@ -2030,6 +2032,7 @@ pub fn validate_workflow_closure(
             &mut result,
         );
         validate_embed_workflow_inputs(&child.execution_graph, &children_map, &mut result);
+        validate_embed_workflow_outputs(&child.execution_graph, &children_map, &mut result);
         unique_child_graphs.push(&child.execution_graph);
         child_reports.push(ChildValidationReport {
             workflow_id: child.workflow_id.clone(),
@@ -2238,6 +2241,111 @@ fn build_dependency_graph(
 // ============================================================================
 
 /// Validate EmbedWorkflow input mappings against child workflow inputSchemas.
+/// Checks `steps.<embed>.outputs.<field>` references against the embedded
+/// child's declared output schema (E058). Children without an output schema
+/// are not checked: their outputs are whatever their Finish returns.
+fn validate_embed_workflow_outputs(
+    graph: &ExecutionGraph,
+    child_workflows: &HashMap<String, ExecutionGraph>,
+    result: &mut ValidationResult,
+) {
+    fn embeds<'a>(
+        graph: &'a ExecutionGraph,
+        children: &'a HashMap<String, ExecutionGraph>,
+        out: &mut HashMap<String, &'a ExecutionGraph>,
+    ) {
+        for (id, step) in &graph.steps {
+            match step {
+                Step::EmbedWorkflow(embed) => {
+                    if let Some(child) = children
+                        .get(&embed.child_workflow_id)
+                        .filter(|c| !c.output_schema.is_empty())
+                    {
+                        out.insert(id.clone(), child);
+                    }
+                }
+                Step::Split(split) => embeds(&split.subgraph, children, out),
+                Step::While(w) => embeds(&w.subgraph, children, out),
+                _ => {}
+            }
+        }
+    }
+    fn references(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                match (
+                    map.get("valueType").and_then(|v| v.as_str()),
+                    map.get("value").and_then(|v| v.as_str()),
+                ) {
+                    (Some("reference"), Some(path)) => out.push(path.to_string()),
+                    (Some("template"), Some(text)) => {
+                        // Template paths: `steps.<id>.outputs.<field>`.
+                        let mut rest = text;
+                        while let Some(i) = rest.find("steps.") {
+                            let tail = &rest[i..];
+                            let end = tail
+                                .find(|c: char| !(c.is_alphanumeric() || "._-".contains(c)))
+                                .unwrap_or(tail.len());
+                            out.push(tail[..end].to_string());
+                            rest = &tail[end..];
+                        }
+                    }
+                    _ => {}
+                }
+                map.values().for_each(|v| references(v, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| references(v, out)),
+            _ => {}
+        }
+    }
+    let mut checked = HashMap::new();
+    embeds(graph, child_workflows, &mut checked);
+    if checked.is_empty() {
+        return;
+    }
+    let mut steps: Vec<_> = graph.steps.iter().collect();
+    steps.sort_by_key(|(id, _)| *id);
+    let mut seen = HashSet::new();
+    for (step_id, step) in steps {
+        let Ok(value) = serde_json::to_value(step) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        references(&value, &mut found);
+        for reference in found {
+            let segments: Vec<&str> = reference.split('.').collect();
+            let (Some("steps"), Some(embed), Some("outputs"), Some(field)) = (
+                segments.first().copied(),
+                segments.get(1).copied(),
+                segments.get(2).copied(),
+                segments.get(3).copied(),
+            ) else {
+                continue;
+            };
+            let field = field.split('[').next().unwrap_or(field);
+            let Some(child) = checked.get(embed) else {
+                continue;
+            };
+            if child.output_schema.contains_key(field)
+                || !seen.insert((step_id.clone(), reference.clone()))
+            {
+                continue;
+            }
+            let mut available: Vec<String> = child.output_schema.keys().cloned().collect();
+            available.sort();
+            result
+                .errors
+                .push(ValidationError::UndefinedReferenceField {
+                    step_id: step_id.clone(),
+                    reference: reference.clone(),
+                    known_prefix: format!("steps.{embed}.outputs"),
+                    missing_field: field.to_string(),
+                    available_fields: available,
+                });
+        }
+    }
+}
+
 fn validate_embed_workflow_inputs(
     graph: &ExecutionGraph,
     child_workflows: &HashMap<String, ExecutionGraph>,
@@ -2845,8 +2953,10 @@ fn validate_reference(
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
-    // Check for empty path segments
-    if ref_path.contains("..") {
+    // Reject consecutive dots outside a closed `[..]` body. Dots inside one
+    // belong to the key (`data["a..b"]`). Leading/trailing dots and empty
+    // bracket keys are not caught here.
+    if has_consecutive_dots(ref_path) {
         result.errors.push(ValidationError::InvalidReferencePath {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
@@ -3444,7 +3554,7 @@ fn validate_template_static_reference(
     context: &TemplateStaticReferenceContext<'_>,
     result: &mut ValidationResult,
 ) {
-    if reference.contains("..") {
+    if has_consecutive_dots(reference) {
         push_template_reference_issue(
             result,
             step_id,
@@ -7561,6 +7671,135 @@ mod tests {
         );
     }
 
+    fn validate_data_reference_with_schema_key(reference: &str, key: &str) -> ValidationResult {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value(reference));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert(key.to_string(), schema_field(SchemaFieldType::String));
+
+        validate_workflow(&graph, &test_catalog())
+    }
+
+    /// A bracket body is one opaque key, so `data["a..b"]` names the literal
+    /// key `a..b` — the runtime resolves it, and the validator must not reject
+    /// it for the dots in its spelling.
+    #[test]
+    fn test_consecutive_dots_inside_bracket_key_are_part_of_the_key() {
+        let declared = validate_data_reference_with_schema_key(r#"data["a..b"]"#, "a..b");
+        assert!(
+            !declared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidReferencePath { .. }
+                    | ValidationError::UndefinedDataReference { .. }
+            )),
+            "declared key `a..b` must validate: {:?}",
+            declared.errors
+        );
+
+        // No longer short-circuited: an undeclared dotted key now reaches the
+        // schema walk and is rejected there, by name.
+        let undeclared = validate_data_reference_with_schema_key(r#"data["x..y"]"#, "a..b");
+        assert!(
+            !undeclared
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidReferencePath { .. })),
+            "`x..y` is a well-formed key: {:?}",
+            undeclared.errors
+        );
+        assert!(
+            undeclared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "x..y"
+            )),
+            "undeclared key `x..y` must be rejected by the schema walk: {:?}",
+            undeclared.errors
+        );
+    }
+
+    #[test]
+    fn test_consecutive_dots_outside_bracket_key_stay_rejected() {
+        for reference in [
+            r#"data["a..b"]..c"#,
+            "data..a",
+            r#"data.a..b["c"]"#,
+            "data[a..b",
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a..b");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference && reason.contains("consecutive dots")
+                )),
+                "`{reference}` must stay rejected: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// Same rule on the template path. Templates only surface dotted attribute
+    /// access today, so the guard is exercised directly.
+    #[test]
+    fn test_template_consecutive_dots_guard_ignores_bracket_keys() {
+        let mut graph = create_basic_graph(HashMap::new(), "agent");
+        graph
+            .input_schema
+            .insert("a..b".to_string(), schema_field(SchemaFieldType::String));
+        let step_ids = HashSet::new();
+        let variable_names = HashSet::new();
+        let adjacency = HashMap::new();
+        let context = TemplateStaticReferenceContext {
+            graph: &graph,
+            step_ids: &step_ids,
+            variable_names: &variable_names,
+            available_variables: &[],
+            data_scope: DataScope::RequireSchema,
+            adjacency: &adjacency,
+        };
+        let check = |reference: &str| {
+            let mut result = ValidationResult::default();
+            validate_template_static_reference("agent", reference, true, &context, &mut result);
+            result
+                .warnings
+                .into_iter()
+                .filter_map(|warning| match warning {
+                    ValidationWarning::TemplateReferenceIssue { reason, .. } => Some(reason),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(check(r#"data["a..b"]"#), Vec::<String>::new());
+
+        let undeclared = check(r#"data["x..y"]"#);
+        assert!(
+            !undeclared.is_empty()
+                && undeclared
+                    .iter()
+                    .all(|reason| !reason.contains("consecutive dots")),
+            "`x..y` must reach the schema check: {undeclared:?}"
+        );
+
+        let dotted = check("data..a");
+        assert!(
+            dotted
+                .iter()
+                .any(|reason| reason.contains("consecutive dots")),
+            "{dotted:?}"
+        );
+    }
+
     /// A `connection_ref` referencing a nonexistent step must fail at save
     /// time like any input-mapping reference — previously it was excluded
     /// from reference validation and only failed opaquely at runtime.
@@ -9358,7 +9597,7 @@ mod tests {
 
     /// `correlation`/`context` are `InputMapping`s in all but name, and no
     /// collector walked them — a wrong step id silently emitted `null` and
-    /// report filtering stopped matching.
+    /// action filtering stopped matching.
     #[test]
     fn test_wait_action_maps_reject_dangling_step_references() {
         let subject = wait_with_action(
@@ -14083,6 +14322,74 @@ mod tests {
             ValidationError::MissingChildRequiredInputs { missing_fields, .. }
                 if missing_fields.iter().any(|f| f.name == "required_field")
         )));
+    }
+
+    #[test]
+    fn test_validate_with_children_checks_embed_output_references() {
+        let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "data": { "stepType": "EmbedWorkflow", "id": "data", "childWorkflowId": "child-1",
+                    "childVersion": "latest" },
+                "plain": { "stepType": "EmbedWorkflow", "id": "plain", "childWorkflowId": "child-2",
+                    "childVersion": "latest" },
+                "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+                    "rows": { "valueType": "reference", "value": "steps.data.outputs.rows" },
+                    "first": { "valueType": "reference", "value": "steps.data.outputs.rows[0]" },
+                    "typo": { "valueType": "reference", "value": "steps.data.outputs.rowz" },
+                    "note": { "valueType": "template", "value": "{{ steps.data.outputs.totl }} total" },
+                    "free": { "valueType": "reference", "value": "steps.plain.outputs.anything" }
+                } }
+            },
+            "entryPoint": "data",
+            "executionPlan": [
+                { "fromStep": "data", "toStep": "plain" },
+                { "fromStep": "plain", "toStep": "finish" }
+            ]
+        }))
+        .unwrap();
+        let declared: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish",
+            "outputSchema": {
+                "rows": { "type": "array" },
+                "total": { "type": "number" }
+            }
+        }))
+        .unwrap();
+        // A child without an output schema is not checked.
+        let undeclared: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish"
+        }))
+        .unwrap();
+        let children = HashMap::from([
+            ("child-1".to_string(), declared),
+            ("child-2".to_string(), undeclared),
+        ]);
+        let result = validate_workflow_with_children(&parent, &test_catalog(), &children);
+        let missing: Vec<(&str, &str)> = result
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                ValidationError::UndefinedReferenceField {
+                    missing_field,
+                    reference,
+                    available_fields,
+                    ..
+                } => {
+                    assert_eq!(available_fields, &["rows", "total"]);
+                    Some((missing_field.as_str(), reference.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            missing,
+            [
+                ("totl", "steps.data.outputs.totl"),
+                ("rowz", "steps.data.outputs.rowz")
+            ]
+        );
     }
 
     #[test]

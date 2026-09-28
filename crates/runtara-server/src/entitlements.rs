@@ -15,7 +15,6 @@ pub enum EntitlementError {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureKey {
-    Reports,
     Database,
     Api,
     Mcp,
@@ -23,18 +22,12 @@ pub enum FeatureKey {
 
 impl FeatureKey {
     /// Every feature key. The resolved snapshot carries a value for each.
-    pub const ALL: [FeatureKey; 4] = [
-        FeatureKey::Reports,
-        FeatureKey::Database,
-        FeatureKey::Api,
-        FeatureKey::Mcp,
-    ];
+    pub const ALL: [FeatureKey; 3] = [FeatureKey::Database, FeatureKey::Api, FeatureKey::Mcp];
 
     /// Wire identifier — the snake_case string used in error bodies and the
     /// `features` map keys. Mirrors the serde rename so the two never drift.
     pub const fn name(self) -> &'static str {
         match self {
-            FeatureKey::Reports => "reports",
             FeatureKey::Database => "database",
             FeatureKey::Api => "api",
             FeatureKey::Mcp => "mcp",
@@ -44,13 +37,22 @@ impl FeatureKey {
     /// Human-readable label used in default error messages.
     pub const fn display_name(self) -> &'static str {
         match self {
-            FeatureKey::Reports => "Reports",
             FeatureKey::Database => "Database",
             FeatureKey::Api => "API access",
             FeatureKey::Mcp => "MCP",
         }
     }
+
+    /// The feature with this wire identifier, if any.
+    pub fn from_name(name: &str) -> Option<FeatureKey> {
+        FeatureKey::ALL.into_iter().find(|key| key.name() == name)
+    }
 }
+
+/// Feature keys that no longer exist but may still be sent by the management
+/// service. They are accepted and ignored with a warning instead of failing
+/// startup.
+const RETIRED_FEATURES: &[&str] = &["reports"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -321,7 +323,9 @@ pub struct EntitlementSummary {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EntitlementLayer {
-    features: Option<BTreeMap<FeatureKey, bool>>,
+    /// Keyed by wire name so retired features can be skipped; unknown names
+    /// are rejected in [`apply_layer`].
+    features: Option<BTreeMap<String, bool>>,
     agents: Option<BTreeSet<String>>,
     limits: Option<EntitlementLimits>,
 }
@@ -344,7 +348,26 @@ fn apply_layer(
     layer: EntitlementLayer,
 ) -> Result<(), ConfigError> {
     if let Some(features) = layer.features {
-        snapshot.features.extend(features);
+        for (name, enabled) in features {
+            match FeatureKey::from_name(&name) {
+                Some(key) => {
+                    snapshot.features.insert(key, enabled);
+                }
+                None if RETIRED_FEATURES.contains(&name.as_str()) => {
+                    tracing::warn!(
+                        source = env_name,
+                        feature = %name,
+                        "ignoring retired entitlement feature"
+                    );
+                }
+                None => {
+                    return Err(ConfigError::InvalidValue(
+                        env_name,
+                        format!("unknown feature '{name}'"),
+                    ));
+                }
+            }
+        }
     }
 
     if let Some(agents) = layer.agents {
@@ -433,10 +456,9 @@ impl Tier {
         }
     }
 }
-/// The four feature flags a pricing tier must set. No `Option` — the compiler
+/// The feature flags a pricing tier must set. No `Option` — the compiler
 /// guarantees a tier definition is complete; a tier cannot leave a feature unset.
 struct TierFeatures {
-    reports: bool,
     database: bool,
     api: bool,
     mcp: bool,
@@ -445,7 +467,6 @@ struct TierFeatures {
 impl TierFeatures {
     fn into_map(self) -> BTreeMap<FeatureKey, bool> {
         BTreeMap::from([
-            (FeatureKey::Reports, self.reports),
             (FeatureKey::Database, self.database),
             (FeatureKey::Api, self.api),
             (FeatureKey::Mcp, self.mcp),
@@ -466,7 +487,6 @@ impl TierBase {
     fn all_enabled() -> Self {
         TierBase {
             features: TierFeatures {
-                reports: true,
                 database: true,
                 api: true,
                 mcp: true,
@@ -479,7 +499,6 @@ impl TierBase {
     fn starter() -> Self {
         TierBase {
             features: TierFeatures {
-                reports: true,
                 database: false,
                 api: false,
                 mcp: false,
@@ -498,7 +517,6 @@ impl TierBase {
     fn premium() -> Self {
         TierBase {
             features: TierFeatures {
-                reports: true,
                 database: true,
                 api: true,
                 mcp: false,
@@ -517,7 +535,6 @@ impl TierBase {
     fn enterprise() -> Self {
         TierBase {
             features: TierFeatures {
-                reports: true,
                 database: true,
                 api: true,
                 mcp: true,
@@ -552,7 +569,7 @@ pub fn parse_agents(agents: &[&str]) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use crate::config::ConfigError;
-    use crate::entitlements::FeatureKey::{Api, Database, Mcp, Reports};
+    use crate::entitlements::FeatureKey::{Api, Database, Mcp};
     use crate::entitlements::{EntitlementError, EntitlementSnapshot, FeatureKey, Tier};
     use std::collections::BTreeSet;
 
@@ -649,16 +666,16 @@ mod tests {
     #[test]
     fn require_feature_ok_when_enabled() {
         let snap = parse(None, None, None).unwrap();
-        assert_eq!(snap.require_feature(Reports), Ok(()));
+        assert_eq!(snap.require_feature(Database), Ok(()));
     }
 
     #[test]
     fn require_feature_errors_when_disabled() {
         let mut snap = parse(None, None, None).unwrap();
-        snap.features.insert(Reports, false);
+        snap.features.insert(Database, false);
         assert_eq!(
-            snap.require_feature(Reports),
-            Err(EntitlementError::FeatureDisabled(Reports)),
+            snap.require_feature(Database),
+            Err(EntitlementError::FeatureDisabled(Database)),
         );
     }
 
@@ -777,9 +794,9 @@ mod tests {
 
     #[test]
     fn valid_json_parses_and_applies() {
-        let json = r#"{"features":{"reports":false},"agents":["http"],"limits":{"maxApiKeys":5}}"#;
+        let json = r#"{"features":{"mcp":false},"agents":["http"],"limits":{"maxApiKeys":5}}"#;
         let snap = parse(None, Some(json), None).unwrap();
-        assert!(!snap.is_feature_enabled(Reports));
+        assert!(!snap.is_feature_enabled(Mcp));
         assert!(snap.is_feature_enabled(Database)); // untouched → tier default
         assert_eq!(snap.enabled_agents, Some(super::parse_agents(&["http"])));
         assert_eq!(snap.limits.max_api_keys, Some(5));
@@ -791,7 +808,24 @@ mod tests {
     }
 
     #[test]
+    fn retired_feature_key_is_ignored() {
+        // The management service may still send `reports`; it no longer
+        // exists and must neither fail startup nor change any feature.
+        let snap = parse(
+            None,
+            Some(r#"{"features":{"reports":false}}"#),
+            Some(r#"{"features":{"reports":true,"mcp":false}}"#),
+        )
+        .unwrap();
+        assert!(snap.is_feature_enabled(Database));
+        assert!(snap.is_feature_enabled(Api));
+        assert!(!snap.is_feature_enabled(Mcp));
+        assert_eq!(snap.summarize().features_enabled, "database,api");
+    }
+
+    #[test]
     fn non_boolean_feature_value_is_rejected() {
+        assert!(parse(None, Some(r#"{"features":{"database":"yes"}}"#), None).is_err());
         assert!(parse(None, Some(r#"{"features":{"reports":"yes"}}"#), None).is_err());
     }
 
@@ -835,14 +869,12 @@ mod tests {
 
     #[test]
     fn overrides_take_precedence_per_field() {
-        let entitlements =
-            r#"{"features":{"reports":false,"api":false},"limits":{"maxApiKeys":5}}"#;
-        let overrides = r#"{"features":{"reports":true},"limits":{"maxApiKeys":20}}"#;
+        let entitlements = r#"{"features":{"mcp":false,"api":false},"limits":{"maxApiKeys":5}}"#;
+        let overrides = r#"{"features":{"mcp":true},"limits":{"maxApiKeys":20}}"#;
         let snap = parse(Some("enterprise"), Some(entitlements), Some(overrides)).unwrap();
-        assert!(snap.is_feature_enabled(Reports));
+        assert!(snap.is_feature_enabled(Mcp)); // override wins
         assert!(snap.is_feature_enabled(Database));
         assert!(!snap.is_feature_enabled(Api));
-        assert!(snap.is_feature_enabled(Mcp));
         assert_eq!(snap.limits.max_api_keys, Some(20)); // override wins
     }
 
@@ -867,7 +899,6 @@ mod tests {
     #[test]
     fn starter_tier_baseline() {
         let snap = parse(Some("starter"), None, None).unwrap();
-        assert!(snap.is_feature_enabled(Reports));
         assert!(!snap.is_feature_enabled(Database));
         assert!(!snap.is_feature_enabled(Api));
         assert!(!snap.is_feature_enabled(Mcp));
@@ -882,7 +913,6 @@ mod tests {
     #[test]
     fn premium_tier_baseline() {
         let snap = parse(Some("premium"), None, None).unwrap();
-        assert!(snap.is_feature_enabled(Reports));
         assert!(snap.is_feature_enabled(Database));
         assert!(snap.is_feature_enabled(Api));
         assert!(!snap.is_feature_enabled(Mcp));
@@ -901,7 +931,6 @@ mod tests {
     #[test]
     fn enterprise_tier_has_no_limits() {
         let snap = parse(Some("enterprise"), None, None).unwrap();
-        assert!(snap.is_feature_enabled(Reports));
         assert!(snap.is_feature_enabled(Database));
         assert!(snap.is_feature_enabled(Api));
         assert!(snap.is_feature_enabled(Mcp));
@@ -932,7 +961,6 @@ mod tests {
         )
         .unwrap();
         assert!(snap.is_feature_enabled(Database));
-        assert!(snap.is_feature_enabled(Reports));
         assert!(!snap.is_feature_enabled(Api));
         assert!(!snap.is_feature_enabled(Mcp));
         assert_eq!(snap.limits.max_api_keys, Some(50));
@@ -949,7 +977,6 @@ mod tests {
         )
         .unwrap();
         assert!(!snap.is_feature_enabled(Database));
-        assert!(snap.is_feature_enabled(Reports));
         assert!(!snap.is_feature_enabled(Api));
         assert!(!snap.is_feature_enabled(Mcp));
     }
@@ -962,7 +989,7 @@ mod tests {
         assert_eq!(s.tenant_id, "tenant-123");
         assert_eq!(s.pricing_tier, Tier::Default);
         // BTreeMap iteration is sorted, so the CSV order is stable.
-        assert_eq!(s.features_enabled, "reports,database,api,mcp");
+        assert_eq!(s.features_enabled, "database,api,mcp");
         assert_eq!(s.features_disabled, "");
         // Default snapshot has `enabled_agents = None` → implicit-all.
         assert!(!s.agents_explicit);
@@ -976,20 +1003,18 @@ mod tests {
 
     #[test]
     fn summarize_reports_restrictive_snapshot() {
-        // Reports off, database on, explicit two-agent allowlist, a tier
+        // MCP off, database on, explicit two-agent allowlist, a tier
         // cap on api keys.
         let snap = parse(
             None,
-            Some(
-                r#"{"features":{"reports":false},"agents":["http","csv"],"limits":{"maxApiKeys":5}}"#,
-            ),
+            Some(r#"{"features":{"mcp":false},"agents":["http","csv"],"limits":{"maxApiKeys":5}}"#),
             None,
         )
         .unwrap();
         let s = snap.summarize();
 
-        assert_eq!(s.features_enabled, "database,api,mcp");
-        assert_eq!(s.features_disabled, "reports");
+        assert_eq!(s.features_enabled, "database,api");
+        assert_eq!(s.features_disabled, "mcp");
         assert!(s.agents_explicit);
         assert_eq!(s.agents_allowlist_size, 2);
         assert_eq!(s.max_api_keys, Some(5));

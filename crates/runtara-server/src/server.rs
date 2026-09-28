@@ -36,9 +36,6 @@ use runtime_client::RuntimeClient;
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        // Reports endpoints
-        api::handlers::reports::edit_report,
-        api::handlers::reports::execute_report_workflow_action,
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
         // Workflow endpoints (refactored)
@@ -86,7 +83,6 @@ use runtime_client::RuntimeClient;
         api::handlers::step_events::list_workflow_open_actions,
         api::handlers::step_events::list_workflow_instance_open_actions,
         api::handlers::step_events::submit_workflow_action,
-        api::handlers::reports::submit_report_workflow_action,
         api::handlers::step_summaries::get_step_summaries,
         // Agent endpoints
         api::handlers::operators::list_agents_handler,
@@ -378,132 +374,6 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::RateLimitTimelineBucket,
             runtara_connections::types::RateLimitTimelineData,
             runtara_connections::types::RateLimitTimelineResponse,
-            // Reports DTOs (sourced from runtara-report-dsl crate, Phase 1 of
-            // the reports refactor).
-            // Registering these here makes them available to
-            // `swagger-typescript-api` so the FE can drop its hand-maintained
-            // types.ts in Phase 2.
-            runtara_report_dsl::Condition,
-            runtara_report_dsl::ReportStatus,
-            runtara_report_dsl::ReportDefinition,
-            runtara_report_dsl::ReportViewDefinition,
-            runtara_report_dsl::ReportViewGroupDefinition,
-            runtara_report_dsl::ReportViewNavigationMode,
-            runtara_report_dsl::ReportViewGroupAccess,
-            runtara_report_dsl::ReportViewStageDefinition,
-            runtara_report_dsl::ReportViewStageSource,
-            runtara_report_dsl::ReportTitleFromBlock,
-            runtara_report_dsl::ReportViewBreadcrumb,
-            runtara_report_dsl::ReportLayoutNode,
-            runtara_report_dsl::ReportBlockLayoutNode,
-            runtara_report_dsl::ReportGridLayoutNode,
-            runtara_report_dsl::ReportGridLayoutItem,
-            runtara_report_dsl::ReportDatasetDefinition,
-            runtara_report_dsl::ReportDatasetSource,
-            runtara_report_dsl::ReportDatasetDimension,
-            runtara_report_dsl::ReportDatasetMeasure,
-            runtara_report_dsl::ReportDatasetFieldType,
-            runtara_report_dsl::ReportDatasetValueFormat,
-            runtara_report_dsl::ReportSourceKind,
-            runtara_report_dsl::ReportWorkflowRuntimeEntity,
-            runtara_report_dsl::ReportFilterDefinition,
-            runtara_report_dsl::ReportFilterType,
-            runtara_report_dsl::ReportFilterTarget,
-            runtara_report_dsl::ReportBlockDefinition,
-            runtara_report_dsl::ReportMarkdownConfig,
-            runtara_report_dsl::ReportActionsConfig,
-            runtara_report_dsl::ReportActionSubmitConfig,
-            runtara_report_dsl::ReportFileUploadConfig,
-            runtara_report_dsl::ReportFileUploadTrigger,
-            runtara_report_dsl::ReportWorkflowActionConfig,
-            runtara_report_dsl::ReportWorkflowActionContext,
-            runtara_report_dsl::ReportWorkflowActionContextMode,
-            runtara_report_dsl::ReportBlockDatasetQuery,
-            runtara_report_dsl::ReportBlockType,
-            runtara_report_dsl::ReportCardConfig,
-            runtara_report_dsl::ReportCardGroup,
-            runtara_report_dsl::ReportCardField,
-            runtara_report_dsl::ReportCardFieldKind,
-            runtara_report_dsl::ReportSubtableConfig,
-            runtara_report_dsl::ReportSubtableColumn,
-            runtara_report_dsl::ReportSource,
-            runtara_report_dsl::ReportSourceJoin,
-            runtara_report_dsl::ReportJoinKind,
-            runtara_report_dsl::ReportSourceMode,
-            runtara_report_dsl::ReportAggregateSpec,
-            runtara_report_dsl::ReportAggregateFn,
-            runtara_report_dsl::ReportOrderBy,
-            runtara_report_dsl::ReportTableConfig,
-            runtara_report_dsl::ReportTableActionConfig,
-            runtara_report_dsl::ReportTableColumn,
-            runtara_report_dsl::ReportTableInteractionButtonConfig,
-            runtara_report_dsl::ReportEditorConfig,
-            runtara_report_dsl::ReportEditorOption,
-            runtara_report_dsl::ReportLookupConfig,
-            runtara_report_dsl::ReportEditorKind,
-            runtara_report_dsl::ReportTableColumnType,
-            runtara_report_dsl::ReportTableColumnSource,
-            runtara_report_dsl::ReportTableColumnJoin,
-            runtara_report_dsl::ReportPaginationConfig,
-            runtara_report_dsl::ReportChartConfig,
-            runtara_report_dsl::ReportChartKind,
-            runtara_report_dsl::ReportChartSeries,
-            runtara_report_dsl::ReportMetricConfig,
-            runtara_report_dsl::ReportInteractionDefinition,
-            runtara_report_dsl::ReportInteractionTrigger,
-            runtara_report_dsl::ReportInteractionAction,
-            runtara_report_dsl::ReportSummary,
-            runtara_report_dsl::ReportDto,
-            runtara_report_dsl::ListReportsResponse,
-            runtara_report_dsl::GetReportResponse,
-            runtara_report_dsl::CreateReportRequest,
-            runtara_report_dsl::UpdateReportRequest,
-            runtara_report_dsl::ValidateReportRequest,
-            runtara_report_dsl::ValidateReportResponse,
-            runtara_report_dsl::ReportValidationIssue,
-            runtara_report_dsl::ReportRenderRequest,
-            runtara_report_dsl::ExecuteReportWorkflowActionTrigger,
-            runtara_report_dsl::ExecuteReportWorkflowActionRequest,
-            runtara_report_dsl::ReportPreviewRequest,
-            runtara_report_dsl::ReportFilterOptionsRequest,
-            runtara_report_dsl::ReportLookupOptionsRequest,
-            runtara_report_dsl::ReportFilterOptionsResponse,
-            runtara_report_dsl::ReportLookupOptionsResponse,
-            runtara_report_dsl::ReportLookupBlockMetadata,
-            runtara_report_dsl::ReportDatasetQueryRequest,
-            runtara_report_dsl::ReportDatasetFilter,
-            runtara_report_dsl::ReportDatasetQueryResponse,
-            runtara_report_dsl::ReportDatasetQueryMetadata,
-            runtara_report_dsl::ReportDatasetQueryColumn,
-            runtara_report_dsl::ReportDatasetQueryPage,
-            runtara_report_dsl::ReportFilterOptionsMetadata,
-            runtara_report_dsl::ReportFilterOption,
-            runtara_report_dsl::ReportFilterOptionsPage,
-            runtara_report_dsl::ReportBlockOnlyDataRequest,
-            runtara_report_dsl::SubmitReportWorkflowActionRequest,
-            runtara_report_dsl::ReportBlockDataRequest,
-            runtara_report_dsl::ReportTableSearchRequest,
-            runtara_report_dsl::ReportPageRequest,
-            runtara_report_dsl::ReportRenderResponse,
-            runtara_report_dsl::ReportWorkflowActionExecution,
-            runtara_report_dsl::ExecuteReportWorkflowActionResponse,
-            runtara_report_dsl::ReportRenderMetadata,
-            runtara_report_dsl::ReportViewNavigationState,
-            runtara_report_dsl::ReportViewGroupState,
-            runtara_report_dsl::ReportBlockRenderResult,
-            runtara_report_dsl::ReportBlockStatus,
-            runtara_report_dsl::ReportBlockError,
-            runtara_report_dsl::DeleteReportResponse,
-            runtara_report_dsl::ReportSummary,
-            // Canonical edit endpoint (Phase 6/8) — exposes the
-            // ReportEditOp batch + request/response shells so the FE
-            // codegen client can call `/edit` directly instead of full
-            // PUT round-trips.
-            runtara_report_dsl::edit_ops::ReportEditOp,
-            runtara_report_dsl::edit_ops::BlockPosition,
-            runtara_report_dsl::edit_ops::LayoutTarget,
-            api::handlers::reports::EditReportRequest,
-            api::handlers::reports::EditReportResponse,
         )
     ),
     tags(
@@ -1808,63 +1678,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // feature is disabled for the running tenant. Built separately so the gate
     // is colocated with the routes it protects; merged into tenant_routes
     // below so they pick up the same JWT auth layer and AppState.
-    let reports_router: Router<AppState> = Router::new()
-        .route(
-            "/api/runtime/reports",
-            get(api::handlers::reports::list_reports).post(api::handlers::reports::create_report),
-        )
-        .route(
-            "/api/runtime/reports/validate",
-            post(api::handlers::reports::validate_report),
-        )
-        .route(
-            "/api/runtime/reports/preview",
-            post(api::handlers::reports::preview_report),
-        )
-        .route(
-            "/api/runtime/reports/schema",
-            get(api::handlers::reports::get_report_definition_schema),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}",
-            get(api::handlers::reports::get_report)
-                .put(api::handlers::reports::update_report)
-                .delete(api::handlers::reports::delete_report),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/render",
-            post(api::handlers::reports::render_report),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/data",
-            post(api::handlers::reports::get_report_block_data),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/workflow-actions/{action_id}/execute",
-            post(api::handlers::reports::execute_report_workflow_action),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/actions/{action_id}/submit",
-            post(api::handlers::reports::submit_report_workflow_action),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/filters/{filter_id}/options",
-            post(api::handlers::reports::get_report_filter_options),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/blocks/{block_id}/fields/{field}/lookup-options",
-            post(api::handlers::reports::get_report_lookup_options),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/datasets/{dataset_id}/query",
-            post(api::handlers::reports::query_report_dataset),
-        )
-        .route(
-            "/api/runtime/reports/{report_id}/edit",
-            post(api::handlers::reports::edit_report),
-        )
-        .route_layer(from_fn(middleware::entitlement::require_reports));
-
     let api_keys_router: Router<AppState> = Router::new()
         .route(
             "/api/runtime/api-keys",
@@ -2206,10 +2019,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/specs/dsl/{version}",
             get(api::handlers::specs::get_dsl_spec_version),
         )
-        // Entitlement-gated sub-routers: each carries its own ENTITLEMENT_REQUIRED
-        // layer (see `reports_router` / `api_keys_router` above) so disabling
-        // `reports` or `api` short-circuits before the inner handlers run.
-        .merge(reports_router)
+        // Entitlement-gated sub-router: carries its own ENTITLEMENT_REQUIRED
+        // layer (see `api_keys_router` above) so disabling `api`
+        // short-circuits before the inner handlers run.
         .merge(api_keys_router)
         .with_state(AppState {
             pool: pool.clone(),

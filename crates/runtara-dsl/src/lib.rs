@@ -76,8 +76,8 @@ pub mod form;
 
 // Step type metadata registry. Gated behind `json-schema` because it
 // generates `schemars::RootSchema` for each step type. WASM consumers
-// of `runtara-dsl` (e.g. `runtara-report-dsl`) opt out of this feature
-// to keep `schemars` out of their tree.
+// of `runtara-dsl` opt out of this feature to keep `schemars` out of their
+// tree.
 #[cfg(feature = "json-schema")]
 mod step_registration;
 

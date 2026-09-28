@@ -8,15 +8,12 @@ import {
 } from 'react';
 import { useAuth } from 'react-oidc-context';
 import { useQueryClient } from '@tanstack/react-query';
-import { isAxiosError } from 'axios';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
 import { useAuthStore } from '@/shared/stores/authStore';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Button } from '@/shared/components/ui/button';
 import { deliverSignal } from '../queries';
-import { submitReportWorkflowAction } from '@/features/reports/queries';
-import { InputSubmissionError } from '../utils/input-submission';
 import {
   RetainedInputs,
   type InputIntentRequest,
@@ -71,30 +68,12 @@ function InputOwner({
     if (!input) return false;
     const confirmed = await store.send(
       operationId,
-      async ({ request, operationId }) => {
-        if (request.kind === 'execution') {
-          return deliverSignal(token, request.instanceId, {
-            requestId: request.requestId,
-            operationId,
-            payload: request.payload,
-          });
-        }
-        try {
-          return await submitReportWorkflowAction(token, {
-            ...request,
-            actionId: request.requestId,
-            operationId,
-          });
-        } catch (error) {
-          if (isAxiosError(error))
-            throw new InputSubmissionError(
-              error.response?.data?.message ?? error.message,
-              error.response?.data?.code,
-              error.response?.status
-            );
-          throw error;
-        }
-      }
+      async ({ request, operationId }) =>
+        deliverSignal(token, request.instanceId, {
+          requestId: request.requestId,
+          operationId,
+          payload: request.payload,
+        })
     );
     if (active.current && useAuthStore.getState().orgId === tenant) {
       if (confirmed) toast.success('Response accepted');
@@ -102,13 +81,10 @@ function InputOwner({
       // Refresh is advisory; a refresh failure cannot undo a confirmed receipt.
       void Promise.resolve(
         queryClient.invalidateQueries({
-          queryKey:
-            request.kind === 'execution'
-              ? queryKeys.workflows.pendingInput(
-                  request.workflowId,
-                  request.instanceId
-                )
-              : queryKeys.reports.all,
+          queryKey: queryKeys.workflows.pendingInput(
+            request.workflowId,
+            request.instanceId
+          ),
         })
       ).catch(() => {});
     }
@@ -161,21 +137,6 @@ export function InputRetryPanel({
             <pre className="overflow-auto whitespace-pre-wrap">
               {JSON.stringify(input.request.payload, null, 2)}
             </pre>
-            {input.request.kind === 'report' && (
-              <>
-                <p className="text-muted-foreground">Filters at submission</p>
-                <pre className="overflow-auto whitespace-pre-wrap">
-                  {JSON.stringify(
-                    {
-                      report: input.request.filters,
-                      block: input.request.blockFilters,
-                    },
-                    null,
-                    2
-                  )}
-                </pre>
-              </>
-            )}
           </details>
           <Button
             size="sm"

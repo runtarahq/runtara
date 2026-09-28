@@ -3,14 +3,11 @@ import { InputSubmissionError } from './input-submission';
 import { RetainedInputs, type InputIntentRequest } from './retained-inputs';
 
 const request = (): InputIntentRequest => ({
-  kind: 'report',
-  reportId: 'report',
-  blockId: 'approve',
+  kind: 'execution',
+  workflowId: 'workflow',
   instanceId: 'instance',
   requestId: 'wait',
-  payload: { answer: true },
-  filters: { region: 'one' },
-  blockFilters: {},
+  payload: { answer: true, region: 'one' },
 });
 const receipt = {
   receiptId: 'receipt',
@@ -27,7 +24,7 @@ describe('retained input intents', () => {
       throw new Error('Acknowledgement lost');
     });
     original.payload.answer = false;
-    if (original.kind === 'report') original.filters.region = 'two';
+    original.payload.region = 'two';
     const second = store.prepare(original, 'Approval');
     expect(second.operationId).not.toBe(first.operationId);
     expect(store.prepare(request(), 'renamed label').operationId).toBe(
