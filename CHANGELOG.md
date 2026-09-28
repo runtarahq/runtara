@@ -247,6 +247,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Raw SQL read routes are read-only and bounded.** `sql/query`,
+  `sql/query-one`, `sql/query-raw` and the MCP `query_sql*` tools run in a
+  `READ ONLY` transaction under the raw SQL statement timeout and row/byte caps,
+  so a write or DDL sent through them (including a data-modifying CTE) now fails
+  with 400 instead of running with a read-scoped key. `sql/execute` gets the
+  statement timeout too, and a timeout is a 400.
+- **The object-model database gets its own non-superuser role.** Raw SQL runs as
+  the role in `OBJECT_MODEL_DATABASE_URL`; the Compose files and
+  `bootstrap-install.sh` now create `runtara_objects`, which owns only
+  `runtara_objects` and cannot connect to the server or runtime databases. The
+  server warns at boot when that role is a superuser or shares the server's
+  database. Existing installs keep their role until migrated; the SQL is in
+  [docs/install.md](docs/install.md#object-model-database-role).
+- **OAuth token, code-exchange and revocation endpoints are re-checked for https
+  just before credentials are sent**, with the same allow-list as when a
+  connection is saved. An `http` or private-address endpoint that is not
+  allow-listed is now refused without sending anything.
 - **Pausing a waiting run pauses it immediately** (public API, MCP and
   control). A run parked on a timer, a WaitForSignal, a restart or (with
   WaitForInstances) its children used to report `already paused` and resume on its own
