@@ -20,6 +20,7 @@ import {
 } from './rust-workflow-validation';
 import { analyzeFormWithRust } from '@/shared/forms';
 import { NODE_TYPES, STEP_TYPES } from '@/features/workflows/config/workflow';
+import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
 
 const wasmBytes = readFileSync(
   path.resolve(process.cwd(), 'src/wasm/validation/runtara_validation_bg.wasm')
@@ -359,5 +360,21 @@ describe('rust workflow validation WASM', () => {
     // The editor looks nodes up by either spelling.
     expect(STEP_TYPES[waitInstances!.id]).toBe(NODE_TYPES.BasicNode);
     expect(STEP_TYPES[waitInstances!.name]).toBe(NODE_TYPES.BasicNode);
+  });
+
+  it('registers the WaitForSignal step under the id and display name the WASM serves', async () => {
+    const stepTypes = await getStaticStepTypesWithRust();
+    const waitSignal = stepTypes.step_types.find(
+      (stepType: { id?: string }) => stepType.id === 'WaitForSignal'
+    ) as { id: string; name: string } | undefined;
+
+    expect(waitSignal).toEqual(
+      expect.objectContaining({ id: 'WaitForSignal', name: 'Wait for Signal' })
+    );
+    // The editor looks nodes and error routes up by either spelling.
+    expect(STEP_TYPES[waitSignal!.id]).toBe(NODE_TYPES.BasicNode);
+    expect(STEP_TYPES[waitSignal!.name]).toBe(NODE_TYPES.BasicNode);
+    expect(canStepHaveErrorHandler(waitSignal!.id)).toBe(true);
+    expect(canStepHaveErrorHandler(waitSignal!.name)).toBe(true);
   });
 });

@@ -178,7 +178,7 @@ const stepTypeConfig: Record<
     bg: 'bg-amber-500/10',
     border: 'border-amber-500',
     dot: 'bg-amber-500',
-    label: 'Wait For Signal',
+    label: 'Wait for Signal',
     icon: Hand,
   },
   WaitForInstances: {

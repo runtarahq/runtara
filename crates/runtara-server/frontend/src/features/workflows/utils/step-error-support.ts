@@ -16,7 +16,7 @@ const STEP_TYPES_WITH_ERROR_ROUTING = new Set([
   'Split',
   'While',
   'WaitForSignal',
-  'Wait For Signal',
+  'Wait for Signal',
   'WaitForInstances',
   'Wait for Instances',
 ]);

@@ -32,7 +32,7 @@ export const STEP_TYPES: Record<string, string> = {
   AiAgent: NODE_TYPES.AiAgentNode,
   'AI Agent': NODE_TYPES.AiAgentNode, // Backend format (with space)
   WaitForSignal: NODE_TYPES.BasicNode,
-  'Wait For Signal': NODE_TYPES.BasicNode, // Backend format (with space)
+  'Wait for Signal': NODE_TYPES.BasicNode, // Backend format (with space)
   WaitForInstances: NODE_TYPES.BasicNode,
   'Wait for Instances': NODE_TYPES.BasicNode, // Backend display name
   Delay: NODE_TYPES.BasicNode,

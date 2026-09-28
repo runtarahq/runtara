@@ -47,7 +47,7 @@ export function StepTypeIcon(props: Props) {
     case 'AI Agent':
       return <Icons.sparkles className={iconClassName} />;
     case 'WaitForSignal':
-    case 'Wait For Signal':
+    case 'Wait for Signal':
       return <Icons.wait className={iconClassName} />;
     case 'WaitForInstances':
     case 'Wait for Instances':
