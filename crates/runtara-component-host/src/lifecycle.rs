@@ -194,7 +194,7 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
 /// intentionally separate from [`inspect_workflow_entrypoint_file`]: launch
 /// paths use the classifier to report a useful legacy-artifact error, whereas
 /// registration must reject everything that is not invoke-shaped.
-pub fn require_lifecycle_invoke_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
+pub fn require_workflow_entry_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
     match inspect_workflow_entrypoint_file(path)? {
         WorkflowEntrypoint::LifecycleInvoke => Ok(()),
         WorkflowEntrypoint::LegacyCliRun => Err(anyhow::anyhow!(
@@ -210,7 +210,7 @@ pub fn require_lifecycle_invoke_file(path: impl AsRef<Path>) -> anyhow::Result<(
 /// is an invoke-shaped artifact that must run through
 /// [`crate::workflow::WorkflowExecutor::execute_invoke`] rather than the
 /// legacy `wasi:cli/run` path. The runner's dual-ABI dispatch keys off this.
-pub fn exports_lifecycle_invoke(
+pub fn exports_workflow_entry(
     pre: &wasmtime::component::InstancePre<crate::workflow::WorkflowState>,
     engine: &wasmtime::Engine,
 ) -> bool {
@@ -247,14 +247,14 @@ mod tests {
     "#;
 
     #[test]
-    fn recognizes_lifecycle_invoke_from_actual_component_exports() {
+    fn recognizes_the_workflow_entry_from_actual_component_exports() {
         let wasm = wat::parse_str(INVOKE_COMPONENT).expect("valid component fixture");
         assert_eq!(
             inspect_workflow_entrypoint(&wasm).expect("inspect component"),
             WorkflowEntrypoint::LifecycleInvoke
         );
         let fixture = write_fixture(&wasm);
-        require_lifecycle_invoke_file(fixture.path()).expect("invoke component accepted");
+        require_workflow_entry_file(fixture.path()).expect("invoke component accepted");
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
             WorkflowEntrypoint::LegacyCliRun
         );
         let fixture = write_fixture(&wasm);
-        let error = require_lifecycle_invoke_file(fixture.path())
+        let error = require_workflow_entry_file(fixture.path())
             .expect_err("legacy component must be rejected");
         assert!(error.to_string().contains("unsupported_legacy_abi"));
     }

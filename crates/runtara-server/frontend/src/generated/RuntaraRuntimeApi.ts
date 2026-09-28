@@ -7469,7 +7469,7 @@ export class Api<
      *
      * @tags workflow-controller
      * @name PublishWorkflowAgentHandler
-     * @summary Publish a workflow AS an agent: compile the current (or latest) version with the AgentCapabilities ABI, synthesize catalog metadata from its input/output schemas, and stage both into the tenant's workflow-agent dir. Any parent workflow can then target it as `agentId: <slug>, capabilityId: "run"`.
+     * @summary Publish a workflow AS an agent: compile the current (or latest) version with the PublishedAgent ABI, synthesize catalog metadata from its input/output schemas, and stage both into the tenant's workflow-agent dir. Any parent workflow can then target it as `agentId: <slug>, capabilityId: "run"`.
      * @request POST:/api/runtime/workflows/{id}/publish-agent
      */
     publishWorkflowAgentHandler: (id: string, params: RequestParams = {}) =>

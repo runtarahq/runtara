@@ -4582,7 +4582,7 @@ fn direct_wasm_execute_durable_delay_parks_and_completes() {
     assert_eq!(result.output_json, serde_json::json!({ "waited": 0 }));
     assert!(
         result.sleeps.is_empty(),
-        "lifecycle invoke must park a durable delay instead of blocking: {:?}",
+        "the workflow entry must park a durable delay instead of blocking: {:?}",
         result.sleeps
     );
     let parked_deadlines: Vec<_> = result
@@ -4631,7 +4631,7 @@ fn direct_wasm_execute_sync_parallel_branches_diamond_runs_both_branches() {
 
     assert!(
         result.sleeps.is_empty(),
-        "lifecycle invoke must not block any branch delay: {:?}",
+        "the workflow entry must not block any branch delay: {:?}",
         result.sleeps
     );
     // Every branch's durable Delay persisted a deadline — both branches executed,
@@ -7737,7 +7737,7 @@ fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() 
     proxy.join().expect("retry proxy joins");
 }
 
-/// Whole-Split retries park in the lifecycle ABI as well. This exercises the
+/// Whole-Split retries park through the workflow entry as well. This exercises the
 /// sequential Split path specifically; a Split that requests concurrency but
 /// carries retrying items degrades onto this same path (see
 /// `direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially`).

@@ -542,8 +542,8 @@ pub struct DirectCompilationResult {
     /// Composition must bind every selected dependency to a reviewed adapter.
     pub scoped_agents: std::collections::BTreeSet<String>,
     /// Agents the emitted code treats as workflow-agents: their invokes
-    /// re-raise the reserved park and suspend codes. Composition refuses any
-    /// of them that does not resolve as a staged workflow-agent.
+    /// forward a `suspended` outcome. Composition refuses any of them that
+    /// does not resolve as a staged workflow-agent.
     pub workflow_agents: std::collections::BTreeSet<String>,
     /// Every capability each agent is called with, and whether the compile
     /// treated it as suspending. Composition refuses an agent whose
@@ -1108,9 +1108,9 @@ fn ensure_supported_production_workflow_abi_raw(
 
 /// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowRole`].
 ///
-/// Production callers use [`compile_direct_workflow`], which always emits the
-/// lifecycle invoke ABI. This lower-level entry selects between the invoke
-/// and agent-capabilities shapes.
+/// Production callers use [`compile_direct_workflow`], which compiles a root.
+/// This lower-level entry also compiles a published workflow-agent, which
+/// exports its slug instead of the workflow entry.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
     abi: super::component::WorkflowRole,

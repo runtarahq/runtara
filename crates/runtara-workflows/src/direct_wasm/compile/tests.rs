@@ -1233,7 +1233,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
 }
 
 #[test]
-fn direct_compile_exports_lifecycle_invoke_and_imports_components() {
+fn direct_compile_exports_the_workflow_entry_and_imports_components() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "simple".to_string(),
@@ -1278,10 +1278,7 @@ fn direct_compile_exports_lifecycle_invoke_and_imports_components() {
 
     assert!(saw_stdlib_import, "stdlib interface import should exist");
     assert!(saw_runtime_import, "runtime interface import should exist");
-    assert!(
-        saw_run_export,
-        "lifecycle invoke export should exist (the Phase-5 default)"
-    );
+    assert!(saw_run_export, "the workflow entry export should exist");
 }
 
 #[test]

@@ -275,10 +275,9 @@ pub(super) fn emit_delay_plan(
         // While body all park already, because the emitter lowers them into the
         // root artifact and they inherit its ABI.
         //
-        // A published agent is the one place that crosses a component boundary,
-        // and it no longer lacks a way back: the suspend sentinel carries an
-        // absolute deadline in the error's numeric `retry-after` field, and each
-        // caller re-raises it until the chain reaches the real instance owner.
+        // A published agent is the one place that crosses a component boundary:
+        // it returns the `suspended` outcome with its `at` wake, and each caller
+        // forwards it until the chain reaches the real instance owner.
         // The checkpoint discipline in `emit_park_until_deadline` is what makes
         // that safe to reuse — the deadline is durable before the first park, so
         // a relaunch resumes the ORIGINAL wait instead of starting a fresh one —

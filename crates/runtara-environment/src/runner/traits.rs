@@ -421,11 +421,11 @@ pub struct LaunchOptions {
     pub wasm_path: std::path::PathBuf,
     /// Whether this image was classified as a generated direct workflow.
     ///
-    /// Such images must export the current lifecycle entrypoint. Generic
+    /// Such images must export the workflow entry. Generic
     /// agent components keep their established ABI and therefore leave this
     /// false; classifying by metadata rather than by `wasi:cli/run` preserves
     /// that compatibility while rejecting retired generated workflows.
-    pub requires_lifecycle_invoke: bool,
+    pub requires_workflow_entry: bool,
     /// Immutable source checksum for a generated direct workflow image.
     ///
     /// The killable precompiler calculates a digest of the bytes it read and
@@ -829,7 +829,7 @@ mod prepared_launch_tests {
             instance_id: "instance-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             wasm_path: std::path::PathBuf::from("/nonexistent.wasm"),
-            requires_lifecycle_invoke: false,
+            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

@@ -674,6 +674,7 @@ pub async fn update_workflow_slug_handler(
         (status = 200, description = "Workflow published as agent", body = Value),
         (status = 404, description = "Workflow not found", body = Value),
         (status = 409, description = "Workflow has no slug", body = Value),
+        (status = 422, description = "The workflow cannot be published as an agent as authored (code WORKFLOW_AGENT_NOT_PUBLISHABLE)", body = Value),
         (status = 500, description = "Compilation or staging failed", body = Value)
     ),
     tag = "workflow-controller"
@@ -770,14 +771,25 @@ pub async fn publish_workflow_agent_handler(
         ),
         Err(e) => {
             use crate::api::services::compilation::ServiceError as CompilationServiceError;
-            let status = match &e {
-                CompilationServiceError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(json!({"success": false, "message": e.to_string()})),
-            )
+            match &e {
+                CompilationServiceError::NotFound(_) => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"success": false, "message": e.to_string()})),
+                ),
+                // The graph or slug is the problem, not the server.
+                CompilationServiceError::WorkflowAuthoringError(_) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "success": false,
+                        "code": "WORKFLOW_AGENT_NOT_PUBLISHABLE",
+                        "message": e.to_string()
+                    })),
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"success": false, "message": e.to_string()})),
+                ),
+            }
         }
     }
 }

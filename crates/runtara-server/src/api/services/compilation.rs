@@ -334,7 +334,7 @@ fn require_publishable_workflow_agent(
         catalog,
     );
     if let Some(violation) = workflow_agent_safety.violations.first() {
-        return Err(ServiceError::CompilationError(format!(
+        return Err(ServiceError::WorkflowAuthoringError(format!(
             "workflow cannot be published as an agent at {} ({}/{}): {}; run it as a top-level workflow or remove that path",
             violation.path, violation.step_type, violation.feature, violation.reason,
         )));
@@ -1309,8 +1309,15 @@ impl CompilationService {
 
         // 3. Stage the composed artifact + synthesized meta.
         let (wasm_path, meta_path) =
-            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info)
-                .map_err(|e| ServiceError::CompilationError(format!("Staging failed: {e}")))?;
+            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info).map_err(
+                |e| match e.kind() {
+                    // A reserved slug or metadata only built-ins may claim.
+                    std::io::ErrorKind::InvalidInput => {
+                        ServiceError::WorkflowAuthoringError(e.to_string())
+                    }
+                    _ => ServiceError::CompilationError(format!("Staging failed: {e}")),
+                },
+            )?;
 
         info!(
             %tenant_id, %workflow_id, version, %slug,
@@ -1430,7 +1437,7 @@ impl CompilationService {
         let direct_artifact = direct_artifact_metadata_for_image(compilation_result).await;
         let artifact_path = binary_path.clone();
         tokio::task::spawn_blocking(move || {
-            runtara_component_host::lifecycle::require_lifecycle_invoke_file(&artifact_path)
+            runtara_component_host::lifecycle::require_workflow_entry_file(&artifact_path)
         })
         .await
         .map_err(|error| {
@@ -1814,6 +1821,11 @@ mod tests {
         // still refuses, and names the exact step it refused on.
         let error = require_publishable_workflow_agent(&graph, &[], None)
             .expect_err("an unseen child closure cannot be proven sound");
+        // The author fixes it, so the publish handler answers 422, not 500.
+        assert!(
+            matches!(error, ServiceError::WorkflowAuthoringError(_)),
+            "{error:?}"
+        );
         assert!(
             error
                 .to_string()

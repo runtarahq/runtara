@@ -925,12 +925,9 @@ impl EmbeddedWasmRunner {
     async fn prepare_embedded_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
         let preparation_slot = self.try_take_preparation_slot()?;
         let workflow = self.precompiler.prepare(&self.executor, options).await?;
-        if options.requires_lifecycle_invoke
-            && !workflow.is_lifecycle_invoke(self.executor.engine())
-        {
+        if options.requires_workflow_entry && !workflow.is_workflow_entry(self.executor.engine()) {
             return Err(RunnerError::StartFailed(
-                "generated workflow image does not export the current lifecycle invoke entrypoint"
-                    .to_string(),
+                "generated workflow image does not export the workflow entry".to_string(),
             ));
         }
 
@@ -1666,7 +1663,7 @@ impl Runner for EmbeddedWasmRunner {
                 );
                 return;
             }
-            if workflow.is_lifecycle_invoke(executor.engine()) {
+            if workflow.is_workflow_entry(executor.engine()) {
                 // The verified component and persisted input were both prepared
                 // before the run permit. Only guest invocation remains after
                 // the durable gate confirmation.
@@ -2241,7 +2238,7 @@ mod tests {
             instance_id: "instance-env".into(),
             tenant_id: "tenant-env".into(),
             wasm_path: std::path::PathBuf::from("/unused/workflow.wasm"),
-            requires_lifecycle_invoke: true,
+            requires_workflow_entry: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

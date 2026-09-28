@@ -30,8 +30,9 @@ pub const AGENT_INVALID_SUSPENSION: &str = "AGENT_INVALID_SUSPENSION";
 /// discards the continuation, so a retry starts the operation afresh.
 pub const AGENT_CONTINUATION_REJECTED: &str = "AGENT_CONTINUATION_REJECTED";
 
-/// A capability returned a suspension through a path that cannot park: a
-/// non-suspending capability, or the plain `capabilities.invoke` export.
+/// A capability returned the `suspended` outcome where nothing can park: from
+/// a capability that does not declare `suspends`, or on a direct call outside
+/// a workflow.
 pub const AGENT_UNEXPECTED_SUSPEND: &str = "AGENT_UNEXPECTED_SUSPEND";
 
 /// Canonical-ABI layout (wasm32) of the `types` interface: what the direct

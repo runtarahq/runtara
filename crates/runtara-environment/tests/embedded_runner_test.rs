@@ -334,7 +334,7 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
         wasm_path: wasm_path.to_path_buf(),
-        requires_lifecycle_invoke: false,
+        requires_workflow_entry: false,
         expected_workflow_checksum: None,
         preparation_attempt: None,
         preparation_deadline: None,

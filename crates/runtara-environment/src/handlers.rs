@@ -317,7 +317,7 @@ pub enum StartRejection {
     },
 
     /// The image row exists but cannot be launched: its artifact is missing
-    /// from disk, or it does not export the current lifecycle entrypoint.
+    /// from disk, or it does not export the workflow entry.
     ///
     /// Grouped with [`Self::ImageNotFound`] by callers on purpose — both are
     /// repaired by registering the image again, and neither is retryable as-is.
@@ -616,7 +616,7 @@ pub async fn handle_start_instance(
         ));
     }
 
-    // A compiled workflow must prove its current lifecycle ABI before we
+    // A compiled workflow must export the workflow entry before we
     // create a pending instance. This keeps a retired `wasi:cli/run` artifact
     // from ever taking a runner permit or consuming admission while it waits.
     if let Err(error) = require_current_workflow_entrypoint(&image).await {

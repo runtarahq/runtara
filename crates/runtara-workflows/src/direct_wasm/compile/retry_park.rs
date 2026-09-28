@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Store-freeing retry/backoff parking.
 //!
-//! A published workflow-agent parks here too: the suspend sentinel carries the
-//! absolute deadline out to its caller, which re-raises it until the chain
+//! A published workflow-agent parks here too: its `suspended` outcome carries
+//! the absolute deadline to its caller, which forwards it until the chain
 //! reaches the real instance owner.
 //!
 //! A retry cannot keep a running component Store alive while it waits.  The

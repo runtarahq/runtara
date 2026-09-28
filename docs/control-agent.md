@@ -616,10 +616,10 @@ external batch job, or a long-running provider operation instead of holding a
 worker); no built-in agent uses it since control `wait` became the
 WaitForInstances step, and an agent may now only wake on a timer (`at`).
 
-Today only a composed workflow-agent can suspend its caller, through the
-reserved `__rt_suspended__` error code; any other agent or user error carrying
-it is remapped so it fails (`runtara-workflow-stdlib/src/direct_json.rs`).
-Replace that sentinel with a typed contract:
+This contract is in place: every agent's `invoke` returns
+`result<outcome, error-info>`, where `outcome` is `completed(output)` or
+`suspended({wakes, state})` (`runtara-wit`, `runtara:agent/types`). A
+composed workflow-agent parks its caller the same way. What it provides:
 
 - **Typed result.** The agent WIT gains a suspend result alongside success and
   error: a wake set plus an opaque continuation state blob. Suspension is
@@ -728,10 +728,8 @@ Missing:
   persisted deadlines, and the check-then-park self-wake exist for signals.
   Missing: a wake source for another instance becoming terminal, a durable
   wait/subscription row, a hook on the terminal path that re-evaluates waits
-  (the existing `on_terminal` hook is metrics-only and drops errors), typed
-  agent suspension with continuation state (only compiler-emitted steps and
-  composed workflow-agents can suspend today, via an error sentinel),
-  `suspends` capability metadata and its validation, retention pinning, and
+  (the existing `on_terminal` hook is metrics-only and drops errors),
+  retention pinning, and
   artifact retention for suspended instances.
 
 Related: the component host exports `RUNTARA_HTTP_URL`, `RUNTARA_TENANT_ID`,

@@ -68,9 +68,9 @@ impl DirectWorkflowManifest {
     }
 
     /// Agent ids the emitted code treats as workflow-agents anywhere in the
-    /// root graph, its nested graphs and its embedded children. Those invokes
-    /// re-raise the reserved park and suspend codes, so composition requires
-    /// each of these agents to resolve as a staged workflow-agent.
+    /// root graph, its nested graphs and its embedded children. Their invokes
+    /// forward a `suspended` outcome, so composition requires each of these
+    /// agents to resolve as a staged workflow-agent.
     pub fn workflow_agent_ids(&self) -> std::collections::BTreeSet<String> {
         fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
             for agent in &graph.agents {

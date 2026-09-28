@@ -888,12 +888,10 @@ impl DirectCoreFunctionIndices {
     /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
     ///
     /// Suppressed when the runtime is omitted (nothing to call) and under the
-    /// `PublishedAgent` export. Production workflow-agents omit the runtime
-    /// after static non-suspending certification; the retained lower-level
-    /// runtime-importing test/migration shape shares the parent's instance, so
-    /// its terminal `complete` would finish the parent mid-flight. An agent
-    /// capability's terminal result is the return value; instance lifecycle
-    /// belongs to the caller.
+    /// `PublishedAgent` export: a workflow-agent shares its caller's instance,
+    /// so its terminal `complete` would finish the caller mid-flight. Its
+    /// terminal result is the return value; the instance belongs to the
+    /// caller.
     pub(super) fn report_terminal_status(&self) -> bool {
         !self.omit_runtime
             && !matches!(

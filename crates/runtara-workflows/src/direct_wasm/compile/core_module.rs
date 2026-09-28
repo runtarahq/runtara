@@ -865,11 +865,11 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     // 186-187: resolved terminal run label JSON, separate from workflow output.
     (2, ValType::I32),
-    // 188: absolute deadline a nested workflow-agent child asked to park until,
-    // carried out of its capability call by the suspend sentinel.
+    // 188: absolute deadline a composed workflow-agent's forwarded `at` wake
+    // parks until.
     (1, ValType::I64),
-    // 189-190: the signal route that child is parked on, so the caller re-raises
-    // an on-signal wake rather than a bare resume the waker would ignore.
+    // 189-190: the wakes a composed workflow-agent returned, then the signal
+    // route of its forwarded `on-signal` wake.
     (2, ValType::I32),
 ];
 
@@ -978,13 +978,11 @@ fn direct_run_function(
         None,
     );
 
-    // The additive `runtime.complete` records terminal status/output host-side
-    // during the migration. Suppressed when the runtime is omitted (nothing to
-    // call) and under PublishedAgent. Production workflow-agents are
-    // statically certified non-suspending and omit runtime; the retained
-    // lower-level runtime-importing test/migration shape shares the parent's
-    // instance, so completing it here would finish the parent mid-flight. The
-    // capability return value is the sole terminal result.
+    // `runtime.complete` records terminal status/output host-side until
+    // Phase 6 moves that to the runner. Suppressed when the runtime is omitted
+    // (nothing to call) and under PublishedAgent: a workflow-agent shares its
+    // caller's instance, so completing it here would finish the caller
+    // mid-flight. Its return value is its sole terminal result.
     if !config.omit_runtime && !matches!(config.abi, WorkflowRole::PublishedAgent) {
         emit_complete(&mut body, indices, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
     }
@@ -997,10 +995,10 @@ fn direct_run_function(
 }
 
 /// Locals live in the invocation frame; child/loop scratch cannot overwrite them.
-/// Where a re-raised child suspend stashes the deadline it wants to park until.
+/// Where a forwarded workflow-agent `at` wake stashes its deadline.
 /// The parent needs its own slot: the child's is inside the callee.
 pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
-/// The nested child's signal route, re-raised so the park is `on-signal`.
+/// The forwarded wakes, then the signal route of a forwarded `on-signal`.
 pub(super) const NESTED_SUSPEND_SIGNAL_PTR_LOCAL: u32 = 189;
 pub(super) const NESTED_SUSPEND_SIGNAL_LEN_LOCAL: u32 = 190;
 

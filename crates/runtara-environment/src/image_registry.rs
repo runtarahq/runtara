@@ -42,7 +42,7 @@ impl Image {
     /// written by the server, not on a filename or on `wasi:cli/run`: generic
     /// agent components retain their own ABI and must not be rejected merely
     /// because they are not lifecycle-invokable.
-    pub fn requires_lifecycle_invoke(&self) -> bool {
+    pub fn requires_workflow_entry(&self) -> bool {
         self.metadata
             .as_ref()
             .and_then(|metadata| metadata.get("workflow"))
@@ -63,19 +63,20 @@ impl Image {
     }
 }
 
-/// Reject a compiled workflow image that does not export the current lifecycle
-/// entrypoint. This is called before the launch, so an old direct
+/// Reject a compiled workflow image that does not export the workflow entry
+/// (`runtara:agent-workflow-agent/capabilities`). This is called before the
+/// launch, so an old direct
 /// `wasi:cli/run` workflow cannot take a runner permit or receive a container
 /// registry entry. Images not identified as compiled workflows are intentionally
 /// left alone for generic component compatibility.
 pub async fn require_current_workflow_entrypoint(image: &Image) -> Result<()> {
-    if !image.requires_lifecycle_invoke() {
+    if !image.requires_workflow_entry() {
         return Ok(());
     }
 
     let binary_path = image.binary_path.clone();
     tokio::task::spawn_blocking(move || {
-        runtara_component_host::lifecycle::require_lifecycle_invoke_file(&binary_path)
+        runtara_component_host::lifecycle::require_workflow_entry_file(&binary_path)
     })
     .await
     .map_err(|error| {
@@ -554,7 +555,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_compiled_workflow_images_require_lifecycle_invoke() {
+    fn only_compiled_workflow_images_require_the_workflow_entry() {
         let workflow = ImageBuilder::new("tenant", "workflow", "/tmp/workflow.wasm")
             .metadata(serde_json::json!({
                 "workflow": {
@@ -563,15 +564,15 @@ mod tests {
                 }
             }))
             .build();
-        assert!(workflow.requires_lifecycle_invoke());
+        assert!(workflow.requires_workflow_entry());
 
         let generic_agent = ImageBuilder::new("tenant", "agent", "/tmp/agent.wasm")
             .metadata(serde_json::json!({ "agent": { "id": "custom" } }))
             .build();
-        assert!(!generic_agent.requires_lifecycle_invoke());
+        assert!(!generic_agent.requires_workflow_entry());
 
         let legacy_without_workflow_metadata =
             ImageBuilder::new("tenant", "old-agent", "/tmp/agent.wasm").build();
-        assert!(!legacy_without_workflow_metadata.requires_lifecycle_invoke());
+        assert!(!legacy_without_workflow_metadata.requires_workflow_entry());
     }
 }

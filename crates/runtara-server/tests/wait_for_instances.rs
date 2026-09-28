@@ -129,7 +129,7 @@ impl Harness {
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
             wasm_path: wasm_path.to_owned(),
-            requires_lifecycle_invoke: true,
+            requires_workflow_entry: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

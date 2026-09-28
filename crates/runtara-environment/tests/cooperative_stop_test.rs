@@ -208,7 +208,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             instance_id: id.clone(),
             tenant_id: "stop-test".into(),
             wasm_path: compiled.wasm_path.clone(),
-            requires_lifecycle_invoke: true,
+            requires_workflow_entry: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

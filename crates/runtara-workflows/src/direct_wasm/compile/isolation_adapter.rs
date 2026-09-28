@@ -86,7 +86,7 @@ pub(super) fn emit_adapter_configured(
             continue;
         };
         // `use` brings shared type interfaces into Resolve too. Import only
-        // execution functions, never the lifecycle invoke used by wake types.
+        // the execution functions.
         if resolve.interfaces[*id].name.as_deref() != Some("tasks") {
             continue;
         }

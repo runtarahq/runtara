@@ -408,10 +408,10 @@ impl PreparedWorkflow {
         self.child_catalog.as_ref()
     }
 
-    /// Whether this artifact uses the lifecycle `invoke` export rather than
-    /// the retired `wasi:cli/run` entrypoint.
-    pub fn is_lifecycle_invoke(&self, engine: &Arc<Engine>) -> bool {
-        crate::lifecycle::exports_lifecycle_invoke(&self.instance_pre, engine)
+    /// Whether this artifact exports the workflow entry rather than the
+    /// retired `wasi:cli/run` entrypoint.
+    pub fn is_workflow_entry(&self, engine: &Arc<Engine>) -> bool {
+        crate::lifecycle::exports_workflow_entry(&self.instance_pre, engine)
     }
 
     /// Whether lifecycle persistence can be supervised through the native host.
@@ -422,12 +422,12 @@ impl PreparedWorkflow {
         }
         let ty = self.instance_pre.component().component_type();
         let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
-        self.is_lifecycle_invoke(engine)
+        self.is_workflow_entry(engine)
             && imports.contains(&runtara_wit::workflow::RUNTIME)
             && !imports.iter().any(|name| name.starts_with("wasi:http/"))
     }
 
-    /// The linked invoke-shaped component, when [`Self::is_lifecycle_invoke`]
+    /// The linked invoke-shaped component, when [`Self::is_workflow_entry`]
     /// is true.
     pub fn instance_pre(&self) -> &Arc<wasmtime::component::InstancePre<WorkflowState>> {
         &self.instance_pre
@@ -770,7 +770,7 @@ impl WorkflowExecutor {
                     anyhow::anyhow!("link precompiled workflow component: {error:#}")
                 })?,
         );
-        let command = if crate::lifecycle::exports_lifecycle_invoke(&instance_pre, &self.engine) {
+        let command = if crate::lifecycle::exports_workflow_entry(&instance_pre, &self.engine) {
             None
         } else {
             Some(Arc::new(
