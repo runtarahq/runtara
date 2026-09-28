@@ -701,7 +701,7 @@ jobs:
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE outbound_server_test;'
           cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test outbound_http real_http_component_uses_stored_credentials_without_internal_listener -- --exact
 
-      - name: Run a composed control agent against the native control service
+      - name: Run a composed control agent and WaitForInstances against the native services
         env:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres@localhost:5432/control_component_test
           TEST_RUNTARA_SERVER_DATABASE_URL: postgres://postgres@localhost:5432/control_component_server_test
@@ -715,7 +715,7 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_test;'
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_server_test;'
-          cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test control_component
+          cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test control_component --test wait_for_instances
 
       - name: Qualify emitted Agent deadlines before relaxing E128
         env:
@@ -746,7 +746,7 @@ jobs:
             --features direct-wasm-integration-tests \
             --test direct_wasm_execute
 
-      - name: Run composed runner DSL, cancellation, persistence and control-wait integration tests
+      - name: Run composed runner DSL, cancellation, persistence, control-wait and WaitForInstances integration tests
         env:
           TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
@@ -758,7 +758,7 @@ jobs:
         # thirty seconds into the future and race them for its own. The suite is
         # thirteen tests of a few seconds each, so serializing costs almost
         # nothing and removes the whole class.
-        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs --test control_wait_runner_test -- --test-threads=1
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs --test control_wait_runner_test --test wait_for_instances_runner_test -- --test-threads=1
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

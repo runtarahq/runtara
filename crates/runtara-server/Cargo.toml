@@ -75,6 +75,11 @@ path = "tests/control_component.rs"
 required-features = ["db-integration-tests", "component-integration-tests"]
 
 [[test]]
+name = "wait_for_instances"
+path = "tests/wait_for_instances.rs"
+required-features = ["db-integration-tests", "component-integration-tests"]
+
+[[test]]
 name = "report_input_retries"
 path = "tests/report_input_retries.rs"
 required-features = ["db-integration-tests"]

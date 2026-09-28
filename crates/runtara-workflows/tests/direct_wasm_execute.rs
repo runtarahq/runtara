@@ -39,6 +39,7 @@ mod direct_managed_inputs;
 mod isolated_agent_execution;
 #[path = "../../runtara-component-host/tests/support/object_model.rs"]
 mod sql_fixture;
+mod wait_for_instances;
 mod wasm_performance_baseline;
 
 // Independent description of the persisted v2 key contract (not a production

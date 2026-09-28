@@ -155,3 +155,7 @@ required-features = ["scoped-workflow-integration-tests"]
 [[test]]
 name = "control_wait_runner_test"
 required-features = ["scoped-workflow-integration-tests"]
+
+[[test]]
+name = "wait_for_instances_runner_test"
+required-features = ["scoped-workflow-integration-tests"]
