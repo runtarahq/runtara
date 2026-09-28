@@ -1059,6 +1059,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to connect to object model database");
 
+    // Raw SQL runs as the object-model role: warn when that role is a
+    // superuser or the object-model database is the server's own.
+    crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
+
     // Run server migrations (workflows, api_keys, etc.) against the main pool
     run_server_migrations(&pool).await?;
 

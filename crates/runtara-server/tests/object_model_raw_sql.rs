@@ -409,3 +409,20 @@ async fn read_only_api_key_reads_but_cannot_write_or_execute() {
     assert_eq!(fixture.row_count().await, 2, "nothing was deleted");
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn boot_privilege_check_detects_a_shared_database() {
+    let fixture = Fixture::start().await;
+    let facts =
+        runtara_server::object_model_privileges::collect_facts(&fixture.pool, &fixture.pool)
+            .await
+            .unwrap();
+    assert!(facts.shares_server_database);
+    let superuser: bool =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(facts.superuser, superuser);
+    fixture.cleanup().await;
+}
