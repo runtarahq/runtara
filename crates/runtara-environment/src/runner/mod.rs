@@ -45,6 +45,8 @@ pub struct HostServices {
     /// must be installed ([`crate::approved_builtins::ApprovedBuiltins`])
     /// before the environment starts waking or recovering runs.
     pub control: Option<std::sync::Arc<runtara_component_host::control_executor::ControlExecutor>>,
+    /// Durable instance waits of every run.
+    pub instance_waits: Option<std::sync::Arc<dyn runtara_component_host::InstanceWaitHost>>,
 }
 
 /// Build the runner with an explicit shared operator isolation policy.
@@ -80,6 +82,9 @@ pub fn build_runner_configured(
     }
     if let Some(control) = services.control {
         runner = runner.with_control_executor(control)?;
+    }
+    if let Some(waits) = services.instance_waits {
+        runner = runner.with_instance_wait_host(waits)?;
     }
     if let Some(trusted) = services.trusted {
         runner = runner.with_trusted_executor(trusted)?;

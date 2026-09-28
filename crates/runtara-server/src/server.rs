@@ -1366,9 +1366,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Start embedded Runtara servers (using dedicated database)
+    // Every run's durable instance waits; bound to the runtime and the
+    // engine with the control service.
+    let instance_waits: Arc<dyn runtara_component_host::InstanceWaitHost> =
+        native_control.instance_waits();
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
         trusted_executor,
         control_boot,
+        Some(instance_waits),
         connection_resolver,
         database,
         outbound_http,

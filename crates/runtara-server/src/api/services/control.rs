@@ -26,12 +26,8 @@
 //! - `wait` registers a durable instance wait of the caller's operation on
 //!   direct children (the wait id is the operation's `op_hash`) and
 //!   `poll-wait` reads it; both need a calling instance, then an operation.
-//!   Targets are authorized before anything registers: over 1000 is
-//!   `too-large`, an unknown id `not-found`, an ancestor `denied`, any other
-//!   non-child `not-child`. Children whose admission ended without a launch
-//!   get their fenced outcome first (`unavailable` if that fails), so they
-//!   read `not-started` or `cancelled`. A registered target whose rows are
-//!   gone is an explicit `not-found`, never a silent outcome.
+//!   Both are adapters over the [`InstanceWaits`] service, which authorizes
+//!   the targets and applies the wait caps.
 //!
 //! The service is late-bound: the executor exists before the embedded
 //! runtime and the execution engine do, so a call waits up to
@@ -49,11 +45,16 @@ use runtara_component_host::control_host::{
     SignalScope, SortField, SortOrder, StartRequest, StartResult, SuspensionReason, TargetOutcome,
     TerminalResult, WaitMode, WaitPoll, WaitProgress, WaitRequest, WaitResolution, WaitSettled,
 };
+use runtara_component_host::instance_wait_host::{
+    InstanceWaitAuthority, InstanceWaitError, InstanceWaitErrorCode, InstanceWaitMode,
+    InstanceWaitPoll, InstanceWaitRequest, InstanceWaitResolution, InstanceWaitStatus,
+};
 use runtara_control_contract as contract;
 use runtara_environment::control_reads::ControlInstance;
 use runtara_environment::instance_repository::ListInstancesOptions;
 use serde_json::{Value, json};
 
+use super::instance_waits::{InstanceWaits, Registration};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
     self, CommandEffect, ExecutionEngine, ExecutionError, PauseOutcome, ResumeOutcome,
@@ -65,7 +66,6 @@ use runtara_core::persistence::control_receipts::{
     BeginReceipt, ControlIntent, ControlReceipt, ControlReceiptState, ControlReceipts,
 };
 use runtara_core::persistence::inputs::{InputError, InputRequest, InputState};
-use runtara_core::persistence::waits::{TargetState, WaitError, WaitSpec, WaitView};
 use runtara_environment::control_reads::{AdmittedChild, ChildOrder, ChildOutcomes, ControlChild};
 use sha2::{Digest, Sha256};
 
@@ -213,6 +213,9 @@ pub struct NativeControl {
     relations: Option<Arc<dyn RelationResolver>>,
     /// The server database `audit_events` lives in, when auditing.
     audit: Option<sqlx::PgPool>,
+    /// The instance waits `wait` and `poll-wait` delegate to; installs
+    /// reach it too.
+    waits: Arc<InstanceWaits>,
 }
 
 impl NativeControl {
@@ -225,6 +228,10 @@ impl NativeControl {
     pub fn with_install_wait(tenant: Option<String>, install_wait: Duration) -> Self {
         Self {
             runtime: tokio::sync::watch::channel(None).0,
+            waits: Arc::new(InstanceWaits::with_install_wait(
+                tenant.clone(),
+                install_wait,
+            )),
             tenant,
             install_wait,
             engine: tokio::sync::watch::channel(None).0,
@@ -239,20 +246,38 @@ impl NativeControl {
         self
     }
 
-    /// Resolve relations with `relations` instead of the parent links.
+    /// Resolve relations with `relations` instead of the parent links, for
+    /// the waits too.
     pub fn with_relations(mut self, relations: Arc<dyn RelationResolver>) -> Self {
+        let waits = InstanceWaits::with_install_wait(self.tenant.clone(), self.install_wait)
+            .with_relations(relations.clone());
+        if let Some(runtime) = self.runtime.borrow().clone() {
+            waits.install(runtime);
+        }
+        if let Some(engine) = self.engine.borrow().clone() {
+            waits.install_engine(engine);
+        }
+        self.waits = Arc::new(waits);
         self.relations = Some(relations);
         self
     }
 
     /// Bind the embedded runtime; calls waiting for it proceed.
     pub fn install(&self, runtime: Arc<RuntimeClient>) {
+        self.waits.install(runtime.clone());
         self.runtime.send_replace(Some(runtime));
     }
 
     /// Bind the execution engine; `start` calls waiting for it proceed.
     pub fn install_engine(&self, engine: Arc<ExecutionEngine>) {
+        self.waits.install_engine(engine.clone());
         self.engine.send_replace(Some(engine));
+    }
+
+    /// The instance wait service this control service delegates to, bound
+    /// by [`Self::install`] and [`Self::install_engine`].
+    pub fn instance_waits(&self) -> Arc<InstanceWaits> {
+        self.waits.clone()
     }
 
     /// The engine, waiting for it like [`Self::runtime`].
@@ -1444,7 +1469,7 @@ fn terminal(row: &ControlInstance) -> TerminalResult {
 }
 
 /// [`terminal`] for a row read with an error cap of `error_cap` bytes.
-fn terminal_capped(row: &ControlInstance, error_cap: usize) -> TerminalResult {
+pub(crate) fn terminal_capped(row: &ControlInstance, error_cap: usize) -> TerminalResult {
     if !row.status.is_terminal() {
         return TerminalResult {
             output: None,
@@ -1988,7 +2013,21 @@ impl ControlHost for NativeControl {
     ) -> Result<String, ControlError> {
         let tenant = self.tenant(authority)?;
         let (caller, operation) = mutation_identity(authority, "wait")?;
-        let result = self.run_wait(tenant, caller, operation, request).await;
+        let request = InstanceWaitRequest {
+            instance_ids: request.instance_ids,
+            mode: match request.mode {
+                WaitMode::All => InstanceWaitMode::All,
+                WaitMode::Any => InstanceWaitMode::Any,
+            },
+            deadline_ms: request.deadline_ms,
+        };
+        // The wait id is the operation's `op_hash`.
+        let result = self
+            .waits
+            .register_wait(&wait_authority(tenant, caller), operation, request)
+            .await
+            .map(|registration| (operation.to_owned(), registration == Registration::Replayed))
+            .map_err(wait_error);
         self.audit(
             tenant,
             caller,
@@ -2018,339 +2057,85 @@ impl ControlHost for NativeControl {
                 "the wait belongs to another operation",
             ));
         }
-        let runtime = self.runtime().await?;
-        let view = self
-            .current_wait(&runtime, tenant, caller, &wait_id)
-            .await?;
-        wait_poll(&runtime, tenant, view).await
+        self.waits
+            .poll_wait(&wait_authority(tenant, caller), &wait_id)
+            .await
+            .map(wait_poll)
+            .map_err(wait_error)
     }
 }
 
-impl NativeControl {
-    /// `wait`: validate, answer a replay from the operation's registered
-    /// wait, authorize every target, then register.
-    async fn run_wait(
-        &self,
-        tenant: &str,
-        caller: &str,
-        operation: &str,
-        request: WaitRequest,
-    ) -> Result<(String, bool), ControlError> {
-        let mut ids = request.instance_ids;
-        ids.sort();
-        ids.dedup();
-        if ids.len() > contract::MAX_WAIT_TARGETS {
-            return Err(ControlError::new(
-                ControlErrorCode::TooLarge,
-                format!(
-                    "a wait names at most {} distinct children",
-                    contract::MAX_WAIT_TARGETS
-                ),
-            ));
-        }
-        for id in &ids {
-            check_id("instanceIds", id)?;
-        }
-        let deadline = time("deadlineMs", request.deadline_ms)?;
-        let mode = match request.mode {
-            WaitMode::All => runtara_core::persistence::waits::WaitMode::All,
-            WaitMode::Any => runtara_core::persistence::waits::WaitMode::Any,
-        };
-        let spec = WaitSpec::new(ids, mode, deadline);
-        let runtime = self.runtime().await?;
-        // A replay of the operation: its wait is registered already.
-        match runtime.poll_instance_wait(tenant, caller, operation).await {
-            Ok(view) if view.record.fingerprint == spec.fingerprint() => {
-                return Ok((operation.to_owned(), true));
-            }
-            Ok(_) => return Err(wait_error(WaitError::Conflict)),
-            Err(WaitError::NotFound | WaitError::Closed | WaitError::TargetGone(_)) => {}
-            Err(error) => return Err(wait_error(error)),
-        }
-        self.authorize_wait_targets(&runtime, tenant, caller, spec.targets())
-            .await?;
-        runtime
-            .register_instance_wait(tenant, caller, operation, &spec)
-            .await
-            .map_err(wait_error)?;
-        Ok((operation.to_owned(), false))
-    }
-
-    /// Every target must exist in the tenant and be a direct child of the
-    /// caller. Children whose admission ended without a launch get their
-    /// fenced outcome first, so the wait reads them as finished.
-    async fn authorize_wait_targets(
-        &self,
-        runtime: &RuntimeClient,
-        tenant: &str,
-        caller: &str,
-        targets: &[String],
-    ) -> Result<(), ControlError> {
-        if targets.iter().any(|target| target == caller) {
-            return Err(refused(ControlErrorCode::Invalid, Mutation::Wait));
-        }
-        let read = |_| unavailable("the wait's targets could not be read");
-        let mut parents: std::collections::HashMap<String, Option<String>> = runtime
-            .wait_target_statuses(tenant, targets)
-            .await
-            .map_err(read)?
-            .into_iter()
-            .map(|target| (target.instance_id, target.parent_instance_id))
-            .collect();
-        let unknown: Vec<&String> = targets
-            .iter()
-            .filter(|target| !parents.contains_key(*target))
-            .collect();
-        if !unknown.is_empty() {
-            self.settle_admission_outcomes(runtime, tenant, caller)
-                .await?;
-            for target in unknown {
-                // Still in admission, or ended with an outcome published now.
-                let parent = match self.admitted_child(tenant, target).await? {
-                    Some(request) => request.parent_instance_id,
-                    None => return Err(not_found()),
-                };
-                parents.insert(target.clone(), parent);
-            }
-        }
-        let mut lineage: Option<Vec<(String, Option<String>)>> = None;
-        for target in targets {
-            let parent = parents.get(target).cloned().flatten();
-            let relation = if parent.as_deref() == Some(caller) {
-                Relation::Child
-            } else if let Some(relations) = &self.relations {
-                relations.relation(tenant, caller, target).await?
-            } else {
-                if lineage.is_none() {
-                    lineage = Some(
-                        runtime
-                            .control_lineage(tenant, caller)
-                            .await
-                            .map_err(|_| unavailable("the run's lineage could not be read"))?,
-                    );
-                }
-                relate(
-                    caller,
-                    target,
-                    parent.as_deref(),
-                    lineage.as_deref().unwrap_or_default(),
-                )
-            };
-            decide(Mutation::Wait, relation, false)
-                .map_err(|code| refused(code, Mutation::Wait))?;
-        }
-        Ok(())
-    }
-
-    /// Publish, under the launch fence, the outcomes of the caller's children
-    /// whose admission ended without a launch. A failure is `unavailable`.
-    async fn settle_admission_outcomes(
-        &self,
-        runtime: &RuntimeClient,
-        tenant: &str,
-        caller: &str,
-    ) -> Result<(), ControlError> {
-        let Some(engine) = self.installed_engine() else {
-            return Ok(());
-        };
-        let failed = |_| unavailable("the children's outcomes could not be published");
-        for pending in engine
-            .outbox()
-            .unpublished_outcomes_of(tenant, caller)
-            .await
-            .map_err(failed)?
-        {
-            crate::workers::control_children::settle_outcome(engine.outbox(), runtime, &pending)
-                .await
-                .map_err(|_| unavailable("the children's outcomes could not be published"))?;
-        }
-        Ok(())
-    }
-
-    /// The caller's wait, evaluated now. A target the runtime has no rows
-    /// for is a child still in admission, one whose ended admission gets its
-    /// outcome published here, or one whose rows are gone: an explicit
-    /// `not-found`, never a silent outcome.
-    async fn current_wait(
-        &self,
-        runtime: &RuntimeClient,
-        tenant: &str,
-        caller: &str,
-        wait_id: &str,
-    ) -> Result<WaitView, ControlError> {
-        let mut settled = false;
-        loop {
-            let view = runtime
-                .poll_instance_wait(tenant, caller, wait_id)
-                .await
-                .map_err(wait_error)?;
-            let unknown: Vec<&str> = view
-                .remaining
-                .iter()
-                .filter(|target| target.state == TargetState::Unknown)
-                .map(|target| target.instance_id.as_str())
-                .collect();
-            if unknown.is_empty() {
-                return Ok(view);
-            }
-            let mut ended = false;
-            for target in unknown {
-                match self.admitted_child(tenant, target).await? {
-                    Some(request) if request.in_admission() => {}
-                    Some(request) if !settled && request.outcome.is_some() => ended = true,
-                    _ => {
-                        return Err(ControlError::new(
-                            ControlErrorCode::NotFound,
-                            format!("target {target} of this wait is no longer retained"),
-                        ));
-                    }
-                }
-            }
-            if !ended {
-                return Ok(view);
-            }
-            self.settle_admission_outcomes(runtime, tenant, caller)
-                .await?;
-            settled = true;
-        }
+fn wait_authority(tenant: &str, caller: &str) -> InstanceWaitAuthority {
+    InstanceWaitAuthority {
+        tenant: tenant.to_owned(),
+        caller: caller.to_owned(),
     }
 }
 
-fn wait_error(error: WaitError) -> ControlError {
-    match error {
-        WaitError::NotFound => ControlError::new(
-            ControlErrorCode::NotFound,
-            "no wait is registered for this operation",
-        ),
-        WaitError::Closed => ControlError::new(
-            ControlErrorCode::WaitClosed,
-            "the wait was closed or released",
-        ),
-        WaitError::Conflict => ControlError::new(
-            ControlErrorCode::ReplayConflict,
-            "this operation already waits on other children or in another mode",
-        ),
-        WaitError::TooLarge => ControlError::new(
-            ControlErrorCode::TooLarge,
-            format!(
-                "a wait names at most {} distinct children",
-                contract::MAX_WAIT_TARGETS
-            ),
-        ),
-        WaitError::Invalid(message) => invalid(message),
-        WaitError::Inactive => invalid("the calling run has finished"),
-        WaitError::TargetGone(target) => ControlError::new(
-            ControlErrorCode::NotFound,
-            format!("target {target} of this wait is no longer retained"),
-        ),
-        WaitError::Storage(_) => unavailable("instance waits are unavailable"),
-    }
-}
-
-/// The WIT read of a wait: finished targets in finish order with their
-/// results under the wait caps (256 KiB output and 16 KiB error per target,
-/// 3 MiB across the wait, in that order, so a replayed poll inlines the
-/// same values), the remaining ids, and the persisted deadline.
-async fn wait_poll(
-    runtime: &RuntimeClient,
-    tenant: &str,
-    view: WaitView,
-) -> Result<WaitPoll, ControlError> {
-    let launched: Vec<String> = view
-        .finished
-        .iter()
-        .filter(|target| matches!(target.state, TargetState::Instance { .. }))
-        .map(|target| target.instance_id.clone())
-        .collect();
-    let mut rows: std::collections::HashMap<String, ControlInstance> = runtime
-        .control_instances_by_id(
-            tenant,
-            &launched,
-            contract::WAIT_OUTPUT_INLINE_BYTES,
-            contract::WAIT_ERROR_INLINE_BYTES,
-        )
-        .await
-        .map_err(|_| unavailable("the wait's results could not be read"))?
-        .into_iter()
-        .map(|row| (row.instance_id.clone(), row))
-        .collect();
-    let mut budget = contract::WAIT_TOTAL_INLINE_BYTES;
-    let mut finished = Vec::with_capacity(view.finished.len());
-    for target in &view.finished {
-        finished.push(match &target.state {
-            TargetState::Outcome {
-                outcome,
-                published_at,
-            } => TargetOutcome {
-                instance_id: target.instance_id.clone(),
-                status: outcome_status(*outcome),
-                finished_at_ms: Some(millis(*published_at)),
-                terminal: no_terminal(),
-            },
-            _ => {
-                let row = rows.remove(&target.instance_id).ok_or_else(|| {
-                    ControlError::new(
-                        ControlErrorCode::NotFound,
-                        format!(
-                            "target {} of this wait is no longer retained",
-                            target.instance_id
-                        ),
-                    )
-                })?;
-                let mut result = terminal_capped(&row, contract::WAIT_ERROR_INLINE_BYTES);
-                if let Some(output) = &result.output {
-                    if output.len() > budget {
-                        result.output = None;
-                        result.output_omitted = true;
-                    } else {
-                        budget -= output.len();
-                    }
-                }
-                if let Some(error) = &result.error {
-                    if error.len() > budget {
-                        result.error = None;
-                        result.error_omitted = true;
-                    } else {
-                        budget -= error.len();
-                    }
-                }
-                TargetOutcome {
-                    instance_id: row.instance_id.clone(),
-                    status: status(row.status),
-                    finished_at_ms: row.finished_at.map(millis),
-                    terminal: result,
-                }
-            }
-        });
-    }
-    let progress = WaitProgress {
-        mode: match view.record.mode {
-            runtara_core::persistence::waits::WaitMode::All => WaitMode::All,
-            runtara_core::persistence::waits::WaitMode::Any => WaitMode::Any,
+/// A wait failure under its control code.
+fn wait_error(error: InstanceWaitError) -> ControlError {
+    use InstanceWaitErrorCode as W;
+    ControlError {
+        code: match error.code {
+            W::Invalid => ControlErrorCode::Invalid,
+            W::Denied => ControlErrorCode::Denied,
+            W::NotChild => ControlErrorCode::NotChild,
+            W::NotFound => ControlErrorCode::NotFound,
+            W::TooLarge => ControlErrorCode::TooLarge,
+            W::ReplayConflict => ControlErrorCode::ReplayConflict,
+            W::Closed => ControlErrorCode::WaitClosed,
+            W::Unavailable => ControlErrorCode::Unavailable,
         },
-        finished,
-        remaining: view
-            .remaining
-            .iter()
-            .map(|target| target.instance_id.clone())
+        message: error.message,
+        retry_after_ms: error.retry_after_ms,
+    }
+}
+
+/// A wait read as `poll-wait` returns it.
+fn wait_poll(poll: InstanceWaitPoll) -> WaitPoll {
+    let progress = WaitProgress {
+        mode: match poll.mode {
+            InstanceWaitMode::All => WaitMode::All,
+            InstanceWaitMode::Any => WaitMode::Any,
+        },
+        finished: poll
+            .finished
+            .into_iter()
+            .map(|target| TargetOutcome {
+                instance_id: target.instance_id,
+                status: match target.status {
+                    InstanceWaitStatus::Pending => InstanceStatus::Pending,
+                    InstanceWaitStatus::Running => InstanceStatus::Running,
+                    InstanceWaitStatus::Suspended => InstanceStatus::Suspended,
+                    InstanceWaitStatus::Completed => InstanceStatus::Completed,
+                    InstanceWaitStatus::Failed => InstanceStatus::Failed,
+                    InstanceWaitStatus::Cancelled => InstanceStatus::Cancelled,
+                    InstanceWaitStatus::NotStarted => InstanceStatus::NotStarted,
+                },
+                finished_at_ms: target.finished_at_ms,
+                terminal: TerminalResult {
+                    output: target.output,
+                    output_bytes: target.output_bytes,
+                    output_omitted: target.output_omitted,
+                    error: target.error,
+                    error_omitted: target.error_omitted,
+                },
+            })
             .collect(),
-        deadline_ms: view.record.deadline.map(millis),
+        remaining: poll.remaining,
+        deadline_ms: poll.deadline_ms,
     };
-    Ok(match view.resolution() {
+    match poll.resolution {
         None => WaitPoll::Pending(progress),
         Some(resolution) => WaitPoll::Settled(WaitSettled {
             resolution: match resolution {
-                runtara_core::persistence::waits::WaitResolution::Satisfied => {
-                    WaitResolution::Satisfied
-                }
-                runtara_core::persistence::waits::WaitResolution::Deadline => {
-                    WaitResolution::Deadline
-                }
-                runtara_core::persistence::waits::WaitResolution::Empty => WaitResolution::Empty,
+                InstanceWaitResolution::Satisfied => WaitResolution::Satisfied,
+                InstanceWaitResolution::Deadline => WaitResolution::Deadline,
+                InstanceWaitResolution::Empty => WaitResolution::Empty,
             },
             progress,
         }),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -2591,25 +2376,143 @@ mod tests {
         );
     }
 
+    /// Every wait failure keeps its code under control's spelling.
     #[test]
     fn wait_errors_map_to_control_codes() {
-        use runtara_core::persistence::waits::WaitError as E;
-        for (error, code) in [
-            (E::NotFound, ControlErrorCode::NotFound),
-            (E::Closed, ControlErrorCode::WaitClosed),
-            (E::Conflict, ControlErrorCode::ReplayConflict),
-            (E::TooLarge, ControlErrorCode::TooLarge),
-            (E::Invalid("x".into()), ControlErrorCode::Invalid),
-            (E::Inactive, ControlErrorCode::Invalid),
-            (E::TargetGone("t".into()), ControlErrorCode::NotFound),
-            (E::Storage("down".into()), ControlErrorCode::Unavailable),
+        use InstanceWaitErrorCode as W;
+        for (code, control) in [
+            (W::Invalid, ControlErrorCode::Invalid),
+            (W::Denied, ControlErrorCode::Denied),
+            (W::NotChild, ControlErrorCode::NotChild),
+            (W::NotFound, ControlErrorCode::NotFound),
+            (W::TooLarge, ControlErrorCode::TooLarge),
+            (W::ReplayConflict, ControlErrorCode::ReplayConflict),
+            (W::Closed, ControlErrorCode::WaitClosed),
+            (W::Unavailable, ControlErrorCode::Unavailable),
         ] {
-            assert_eq!(wait_error(error).code, code);
+            let error = wait_error(InstanceWaitError {
+                code,
+                message: "m".into(),
+                retry_after_ms: Some(5),
+            });
+            assert_eq!(
+                (error.code, error.message.as_str(), error.retry_after_ms),
+                (control, "m", Some(5))
+            );
         }
+    }
+
+    /// A wait read keeps every value, pending or settled.
+    #[test]
+    fn wait_reads_map_to_the_poll_wait_shape() {
+        let read = InstanceWaitPoll {
+            mode: InstanceWaitMode::Any,
+            resolution: None,
+            finished: vec![
+                runtara_component_host::instance_wait_host::InstanceWaitOutcome {
+                    instance_id: "kid".into(),
+                    status: InstanceWaitStatus::NotStarted,
+                    finished_at_ms: Some(3),
+                    output: Some(b"1".to_vec()),
+                    output_bytes: Some(1),
+                    output_omitted: false,
+                    error: None,
+                    error_omitted: true,
+                },
+            ],
+            remaining: vec!["other".into()],
+            deadline_ms: Some(9),
+        };
+        let progress = WaitProgress {
+            mode: WaitMode::Any,
+            finished: vec![TargetOutcome {
+                instance_id: "kid".into(),
+                status: InstanceStatus::NotStarted,
+                finished_at_ms: Some(3),
+                terminal: TerminalResult {
+                    output: Some(b"1".to_vec()),
+                    output_bytes: Some(1),
+                    output_omitted: false,
+                    error: None,
+                    error_omitted: true,
+                },
+            }],
+            remaining: vec!["other".into()],
+            deadline_ms: Some(9),
+        };
+        assert_eq!(wait_poll(read.clone()), WaitPoll::Pending(progress.clone()));
+        for (resolution, expected) in [
+            (InstanceWaitResolution::Satisfied, WaitResolution::Satisfied),
+            (InstanceWaitResolution::Deadline, WaitResolution::Deadline),
+            (InstanceWaitResolution::Empty, WaitResolution::Empty),
+        ] {
+            let settled = InstanceWaitPoll {
+                resolution: Some(resolution),
+                ..read.clone()
+            };
+            assert_eq!(
+                wait_poll(settled),
+                WaitPoll::Settled(WaitSettled {
+                    resolution: expected,
+                    progress: progress.clone(),
+                })
+            );
+        }
+    }
+
+    /// `wait` and `poll-wait` check a calling run, then an operation, then
+    /// reach the (here uninstalled) wait service; another operation's wait
+    /// id is `denied` before any read.
+    #[tokio::test]
+    async fn control_waits_delegate_after_the_identity_checks() {
+        let control = NativeControl::with_install_wait(Some("tenant".into()), Duration::ZERO);
+        let request = WaitRequest {
+            instance_ids: vec!["kid".into()],
+            mode: WaitMode::All,
+            deadline_ms: None,
+        };
+        for (authority, code) in [
+            (scoped(None, Some("op")), ControlErrorCode::RequiresInstance),
+            (
+                scoped(Some("me"), None),
+                ControlErrorCode::RequiresOperation,
+            ),
+            (
+                scoped(Some("me"), Some("op")),
+                ControlErrorCode::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                control
+                    .wait(&authority, request.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                code
+            );
+            assert_eq!(
+                control
+                    .poll_wait(&authority, "op".into())
+                    .await
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+        let me = scoped(Some("me"), Some("op"));
         assert_eq!(
-            runtara_core::persistence::waits::MAX_WAIT_TARGETS,
-            contract::MAX_WAIT_TARGETS,
-            "the store and the contract agree on the target cap"
+            control
+                .poll_wait(&me, "other".into())
+                .await
+                .unwrap_err()
+                .code,
+            ControlErrorCode::Denied
+        );
+        let mut foreign = me.clone();
+        foreign.tenant = "other".into();
+        assert_eq!(
+            control.wait(&foreign, request).await.unwrap_err().code,
+            ControlErrorCode::Denied
         );
     }
 

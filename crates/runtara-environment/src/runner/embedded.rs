@@ -739,6 +739,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach the durable instance wait service shared by all runs.
+    pub fn with_instance_wait_host(
+        self,
+        host: Arc<dyn runtara_component_host::InstanceWaitHost>,
+    ) -> Result<Self> {
+        self.executor
+            .set_instance_wait_host(host)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach the approved built-in trusted capability executor.
     pub fn with_trusted_executor(
         self,

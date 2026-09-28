@@ -2577,3 +2577,116 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
     assert!(gone.message.contains(&failed), "{}", gone.message);
     cx.cleanup().await;
 }
+
+/// The `InstanceWaitHost` boundary the workflow host calls: `register`
+/// authorizes and registers, then returns the evaluated wait; a replay finds
+/// the same wait and keeps its first deadline; the wait id is scoped to the
+/// caller; and the control adapter reads the very same wait.
+#[tokio::test]
+async fn instance_waits_register_and_evaluate_through_the_host_trait() {
+    use runtara_component_host::instance_wait_host::{
+        InstanceWaitAuthority, InstanceWaitErrorCode, InstanceWaitHost, InstanceWaitMode,
+        InstanceWaitRequest, InstanceWaitResolution, InstanceWaitStatus,
+    };
+    let cx = Children::new().await;
+    let tenant = cx.fx.tenant.clone();
+    let grandparent = cx.fx.run("grandparent", &tenant).await;
+    let parent = cx.launched_child(&grandparent, "parent").await;
+    let first = cx.launched_child(&parent, "first").await;
+    let second = cx.launched_child(&parent, "second").await;
+    let waits = cx.control.instance_waits();
+    let me = InstanceWaitAuthority {
+        tenant: tenant.clone(),
+        caller: parent.clone(),
+    };
+    let wait_id = format!("{:0>64}", "step");
+    let request = |ids: &[&String], deadline_ms| InstanceWaitRequest {
+        instance_ids: ids.iter().map(|id| (*id).clone()).collect(),
+        mode: InstanceWaitMode::Any,
+        deadline_ms,
+    };
+
+    // D1 before anything registers.
+    let refused = waits
+        .register(&me, &wait_id, request(&[&first, &grandparent], None))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, InstanceWaitErrorCode::Denied);
+    assert_eq!(
+        waits.poll(&me, &wait_id).await.unwrap_err().code,
+        InstanceWaitErrorCode::NotFound,
+        "a refused wait registers nothing"
+    );
+
+    let deadline = 4_102_444_800_000;
+    let pending = waits
+        .register(&me, &wait_id, request(&[&second, &first], Some(deadline)))
+        .await
+        .unwrap();
+    assert!(!pending.is_settled());
+    assert_eq!(pending.mode, InstanceWaitMode::Any);
+    assert!(pending.finished.is_empty());
+    assert_eq!(pending.deadline_ms, Some(deadline));
+    let mut sorted = vec![first.clone(), second.clone()];
+    sorted.sort();
+    assert_eq!(pending.remaining, sorted);
+    // Another caller's wait under the same id is another wait.
+    let stranger = InstanceWaitAuthority {
+        tenant: tenant.clone(),
+        caller: grandparent.clone(),
+    };
+    assert_eq!(
+        waits.poll(&stranger, &wait_id).await.unwrap_err().code,
+        InstanceWaitErrorCode::NotFound
+    );
+
+    cx.fx
+        .complete(&first, Core::Completed, Some(br#"{"approved":true}"#), None)
+        .await;
+    // A replay (later deadline, reordered ids) finds the settled wait.
+    let settled = waits
+        .register(&me, &wait_id, request(&[&first, &second], None))
+        .await
+        .unwrap();
+    assert_eq!(settled.resolution, Some(InstanceWaitResolution::Satisfied));
+    assert_eq!(
+        settled.deadline_ms,
+        Some(deadline),
+        "the first deadline stands"
+    );
+    assert_eq!(settled.finished.len(), 1);
+    assert_eq!(settled.finished[0].instance_id, first);
+    assert_eq!(settled.finished[0].status, InstanceWaitStatus::Completed);
+    assert_eq!(
+        serde_json::to_value(&settled).unwrap()["finished"][0]["output"],
+        json!({"approved": true})
+    );
+    assert_eq!(settled.remaining, vec![second.clone()]);
+    assert_eq!(waits.poll(&me, &wait_id).await.unwrap(), settled);
+    let conflict = waits
+        .register(
+            &me,
+            &wait_id,
+            InstanceWaitRequest {
+                mode: InstanceWaitMode::All,
+                ..request(&[&first, &second], None)
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, InstanceWaitErrorCode::ReplayConflict);
+
+    // Control's `poll-wait` is an adapter over the same wait.
+    let via_control = cx
+        .control
+        .poll_wait(&scoped(&tenant, &parent, "step"), wait_id.clone())
+        .await
+        .unwrap();
+    let WaitPoll::Settled(control_settled) = via_control else {
+        panic!("{via_control:?}")
+    };
+    assert_eq!(control_settled.resolution, WaitResolution::Satisfied);
+    assert_eq!(control_settled.progress.finished[0].instance_id, first);
+    assert_eq!(control_settled.progress.remaining, vec![second]);
+    cx.cleanup().await;
+}

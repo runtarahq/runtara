@@ -73,10 +73,12 @@ impl EmbeddedRuntara {
     /// - runtara-environment (management protocol for images, instances)
     ///
     /// Note: Migrations should be run before calling this via `run_migrations()`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         config: EmbeddedRuntaraConfig,
         trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
         control: Option<ControlBoot>,
+        instance_waits: Option<Arc<dyn runtara_component_host::InstanceWaitHost>>,
         connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
         database: Arc<dyn runtara_component_host::DatabaseHost>,
         outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
@@ -147,6 +149,7 @@ impl EmbeddedRuntara {
                 runtara_environment::runner::HostServices {
                     trusted,
                     control: control.map(|boot| boot.executor),
+                    instance_waits,
                     connections: Some(connections),
                     database: Some(database),
                     outbound_http: Some(outbound_http),
@@ -331,9 +334,11 @@ pub async fn create_runtara_pool(
 /// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS`,
 /// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
 /// already parsed at startup. It applies only to the pool this process opens.
+#[allow(clippy::too_many_arguments)]
 pub async fn maybe_start_embedded(
     trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
     control: Option<ControlBoot>,
+    instance_waits: Option<Arc<dyn runtara_component_host::InstanceWaitHost>>,
     connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     database: Arc<dyn runtara_component_host::DatabaseHost>,
     outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
@@ -410,6 +415,7 @@ pub async fn maybe_start_embedded(
         config,
         trusted,
         control,
+        instance_waits,
         connections,
         database,
         outbound_http,
