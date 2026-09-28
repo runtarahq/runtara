@@ -634,6 +634,11 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                     }
                 },
                 "executionPlan": [{"fromStep": "stepId", "toStep": "nextStepId"}],
+                "inputSchema": "optional; map of field name to SchemaField",
+                "outputSchema": "optional; map of field name to SchemaField",
+                "stateSchema": {
+                    "fieldName": {"type": "string | number | integer | boolean | array | object", "label": "Display label", "format": "optional display hint", "enum": ["optional allowed values"]}
+                },
                 "conditionalBranches": [
                     {"fromStep": "conditionalStepId", "toStep": "whenTrueStepId", "label": "true"},
                     {"fromStep": "conditionalStepId", "toStep": "whenFalseStepId", "label": "false"}
@@ -644,7 +649,8 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "For step types that declare it, use inputMapping, not inputMappings",
                 "Error steps do not accept inputMapping; put static error fields directly on the step and dynamic mappings in context",
                 "executionPlan edges use fromStep/toStep",
-                "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges"
+                "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges",
+                "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. It is a declaration only: runs do not write state yet. State starts empty and is written by steps, so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
             ]
         },
         "stepShapes": {
@@ -1832,9 +1838,15 @@ pub async fn diff_workflow_versions(
         }
     }
 
-    // Check for top-level graph changes (inputSchema, outputSchema, name, etc.)
+    // Check for top-level graph changes (inputSchema, outputSchema, stateSchema, name, etc.)
     let mut graph_changes = Vec::new();
-    for key in ["name", "description", "inputSchema", "outputSchema"] {
+    for key in [
+        "name",
+        "description",
+        "inputSchema",
+        "outputSchema",
+        "stateSchema",
+    ] {
         let val_a = graph_a.get(key);
         let val_b = graph_b.get(key);
         if val_a != val_b {
@@ -2148,6 +2160,23 @@ mod tests {
                 properties.contains(field),
                 "{field} missing from the schema"
             );
+        }
+    }
+
+    #[test]
+    fn authoring_schema_describes_state_schema() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let graph_shape = &schema["graphShape"];
+        assert!(graph_shape["shape"].get("stateSchema").is_some());
+        assert!(
+            !graph_shape["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("stateSchema"))
+        );
+        let notes = graph_shape["notes"].to_string();
+        for needle in ["stateSchema", "currency", "W081", "set_state_schema"] {
+            assert!(notes.contains(needle), "{needle} missing from {notes}");
         }
     }
 
