@@ -5,6 +5,9 @@ import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { stopInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { refreshRunViews } from '../refreshRunViews';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 
 type Props = {
   instanceId: string;
@@ -21,14 +24,20 @@ export function StopButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
 
   const handleClick = async () => {
-    if (!token) return;
+    // Local and trusted-header auth modes send no bearer token; only OIDC needs one.
+    if (isOidcAuth && !token) {
+      toast.error('Your session has expired. Sign in again to stop this run.');
+      return;
+    }
 
     setIsLoading(true);
     try {
       await stopInstance(token, instanceId);
+      await refreshRunViews(queryClient);
       toast.success('Workflow instance has been stopped');
     } catch (error) {
       console.error('Error stopping instance:', error);

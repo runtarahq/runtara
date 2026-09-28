@@ -5,6 +5,9 @@ import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { pauseInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { refreshRunViews } from '../refreshRunViews';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import { Spinner } from '@/shared/components/ui/spinner';
 import {
@@ -35,16 +38,22 @@ export function PauseButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const handleConfirm = async () => {
-    if (!token) return;
+    // Local and trusted-header auth modes send no bearer token; only OIDC needs one.
+    if (isOidcAuth && !token) {
+      toast.error('Your session has expired. Sign in again to pause this run.');
+      return;
+    }
 
     setConfirmOpen(false);
     setIsLoading(true);
     try {
       await pauseInstance(token, instanceId);
+      await refreshRunViews(queryClient);
       toast.success('Workflow instance has been paused');
     } catch (error) {
       console.error('Error pausing instance:', error);
