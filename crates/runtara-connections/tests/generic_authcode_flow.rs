@@ -103,9 +103,20 @@ fn extract_query_param(url: &str, key: &str) -> Option<String> {
         .find_map(|(k, v)| if k == key { Some(v.into_owned()) } else { None })
 }
 
+/// Allow the loopback wiremock endpoints through both dev allow-lists. Each
+/// list is read once per process, so every test sets both before any
+/// connection code runs: whichever test goes first fixes the cached value.
+fn allow_loopback_endpoints() {
+    // SAFETY: every test in this binary sets the same values.
+    unsafe {
+        std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost");
+        std::env::set_var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS", "127.0.0.1,localhost");
+    }
+}
+
 #[tokio::test]
 async fn generic_authcode_full_flow_from_params() {
-    unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
+    allow_loopback_endpoints();
     let fixture = PgFixture::start().await;
     let provider = MockServer::start().await;
 
@@ -244,7 +255,7 @@ async fn generic_authcode_full_flow_from_params() {
 
 #[tokio::test]
 async fn generic_authcode_pkce_can_be_disabled() {
-    unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
+    allow_loopback_endpoints();
     let fixture = PgFixture::start().await;
     sqlx::query(
         "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \
@@ -282,9 +293,7 @@ async fn generic_authcode_pkce_can_be_disabled() {
 
 #[tokio::test]
 async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
-    unsafe { std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1,localhost") };
-    // Save-time https gate: allow the loopback wiremock endpoints for this PATCH.
-    unsafe { std::env::set_var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS", "127.0.0.1,localhost") };
+    allow_loopback_endpoints();
     let fixture = PgFixture::start().await;
     let provider = MockServer::start().await;
     // Refresh endpoint: each mint hits it once — expect exactly 2 (warm + post-evict).
