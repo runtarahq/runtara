@@ -36,17 +36,18 @@ fn emitted_helper(context: Context, scope_alarm: bool) -> Vec<u8> {
         "executionPlan":[{"fromStep":"agent","toStep":"finish"}]}))
     .unwrap();
     let manifest = crate::direct_wasm::manifest::build_direct_workflow_manifest(&graph).unwrap();
+    let abi = if matches!(context, Context::Callable) {
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+    } else {
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+    };
     let config = DirectCoreConfig::new(&manifest, &manifest.to_canonical_json().unwrap(), false)
         .unwrap()
-        .with_abi(if matches!(context, Context::Callable) {
-            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
-        } else {
-            crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
-        })
+        .with_abi(abi)
         .with_omit_runtime(matches!(context, Context::Callable));
     let (resolve, world) = build_direct_component_resolve_scoped(
         &manifest.feature_summary.agent_ids,
-        crate::direct_wasm::component::WorkflowAbi::CliRunHttp,
+        abi,
         false,
         None,
         &Default::default(),

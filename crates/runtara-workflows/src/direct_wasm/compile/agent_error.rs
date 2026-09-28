@@ -590,10 +590,6 @@ fn emit_terminal_run_plan_mapping(
         }
         super::deadline_scope::close_alarm(body, indices);
         match indices.abi {
-            crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-                load_retptr_tag(body);
-                body.instruction(&Instruction::Return);
-            }
             crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
                 super::core_module::emit_invoke_ok_completed_return(
                     body,

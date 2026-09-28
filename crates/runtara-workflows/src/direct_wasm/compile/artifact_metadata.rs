@@ -42,9 +42,9 @@ pub struct DirectArtifactMetadata {
     pub source_checksum: Option<String>,
     /// Direct artifact ABI version.
     pub direct_abi_version: u32,
-    /// Top-level execution export ABI (`invoke`, `agent`, or the retired
-    /// `cli-run` test/migration shape). Image registration records this for
-    /// operator inventory, but execution always verifies the actual export.
+    /// Top-level execution export ABI (`invoke` or `agent`). Image
+    /// registration records this for operator inventory, but execution always
+    /// verifies the actual export.
     pub entry_abi: String,
     /// Static proof describing whether this graph can safely be published as a
     /// synchronous workflow-agent. Kept on every artifact so a staged agent's

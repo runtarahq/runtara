@@ -161,12 +161,6 @@ fn flatten_declared_variables(variables: &serde_json::Value) -> serde_json::Valu
 
 #[derive(Debug, Clone)]
 pub(super) struct DirectCoreStaticData {
-    /// Whether parallel Split windows may be emitted at all. Set from the
-    /// export ABI (`DirectCoreConfig::with_abi`): the invoke shapes are
-    /// async-TYPED tasks that may block in `waitable-set.wait`; the legacy
-    /// `wasi:cli/run` root task is sync-typed and would trap — its compiles
-    /// always take the sequential lowering.
-    pub(super) parallel_enabled: bool,
     pub(super) manifest: DirectDataSegment,
     pub(super) variables: DirectDataSegment,
     pub(super) steps: DirectDataSegment,
@@ -445,7 +439,6 @@ impl DirectCoreStaticData {
                 graph,
                 child_workflows,
             )?,
-            parallel_enabled: false,
             manifest,
             variables,
             steps,

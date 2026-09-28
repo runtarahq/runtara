@@ -193,31 +193,16 @@ pub(super) fn emit_ai_wait_tool_arm(
     );
 
     // A human-in-the-loop AI tool wait has no timeout, so it parks on-signal with
-    // NO deadline — the custom-signal waker is the sole wake path.
-    // `wasi:cli/run` has no wake channel and must keep polling; every other ABI
+    // NO deadline — the custom-signal waker is the sole wake path. Every ABI
     // parks, a published agent included — an untimed human-in-the-loop wait is
     // the last thing that should hold a runner slot.
-    if indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp {
-        super::abi::emit_suspend_on_signal_return(
-            body,
-            indices,
-            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
-            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-            None,
-        );
-    } else {
-        body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-        emit_abandon_input_on_error(
-            body,
-            indices,
-            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
-            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-        );
-
-        body.instruction(&Instruction::Br(0));
-    }
+    super::abi::emit_suspend_on_signal_return(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        None,
+    );
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
 
@@ -542,43 +527,40 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
     emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
 
-    // Store-freeing Wait, invoke export only: after one poll MISS and the
-    // timeout check, EXIT with `suspended(on-signal{signal-id, deadline})`
-    // instead of blocking the Store for the poll interval. The host parks the
-    // instance (sleep_until = timeout deadline, or NULL when there is none) and
-    // the custom-signal waker relaunches it when the signal arrives; the replay
-    // re-polls the now-present signal and continues. No duration threshold
-    // applies here, unlike a Delay: a Wait is open-ended by construction — what
-    // would be blocked for is the poll interval, not a known wait — so parking
-    // is right however short that interval is. The ABI condition is a
-    // capability check (see the AI-tool wait above).
-    let store_freeing =
-        indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
-    if store_freeing {
-        emit_entry_suspend_on_signal(
-            body,
-            indices,
-            DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
-            DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-            Some((
-                DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
-                DIRECT_WAIT_DEADLINE_MS_LOCAL,
-            )),
-        );
-    } else {
-        // A workflow-agent child cannot emit the suspended arm — its result type
-        // has none — but it can still stop holding the parent's runner. Raise
-        // the suspend sentinel instead: the parent re-raises it through its own
-        // ABI and the chain unwinds to the real instance owner, which parks. The
-        // custom-signal waker relaunches that instance when the signal lands,
-        // and replay rebuilds this same nested route and re-polls. A timed wait
-        // carries its absolute deadline out through the sentinel so the owner
-        // parks until it; an untimed one is open-ended by construction and parks
-        // with no deadline at all.
-        if matches!(
-            indices.abi,
-            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
-        ) {
+    // Store-freeing Wait: after one poll MISS and the timeout check, EXIT
+    // instead of blocking the Store for the poll interval. No duration
+    // threshold applies here, unlike a Delay: a Wait is open-ended by
+    // construction — what would be blocked for is the poll interval, not a
+    // known wait — so parking is right however short that interval is.
+    match indices.abi {
+        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            // `suspended(on-signal{signal-id, deadline})`: the host parks the
+            // instance (sleep_until = timeout deadline, or NULL when there is
+            // none) and the custom-signal waker relaunches it when the signal
+            // arrives; the replay re-polls the now-present signal and continues.
+            emit_entry_suspend_on_signal(
+                body,
+                indices,
+                DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+                DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+                Some((
+                    DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+                    DIRECT_WAIT_DEADLINE_MS_LOCAL,
+                )),
+            );
+        }
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            // A workflow-agent child cannot emit the suspended arm — its result
+            // type has none — but it can still stop holding the parent's
+            // runner. Raise the suspend sentinel instead: the parent re-raises
+            // it through its own ABI and the chain unwinds to the real instance
+            // owner, which parks. The custom-signal waker relaunches that
+            // instance when the signal lands, and replay rebuilds this same
+            // nested route and re-polls. A timed wait carries its absolute
+            // deadline out through the sentinel so the owner parks until it; an
+            // untimed one is open-ended by construction and parks with no
+            // deadline at all.
+            //
             // Park ON THE SIGNAL, carrying the route and any timeout deadline.
             // A bare resume would be dropped by `park_invoke_suspend` before it
             // stamped `waiting_signal`, and the custom-signal waker would then
@@ -593,13 +575,15 @@ pub(super) fn emit_wait_for_signal_plan(
                     DIRECT_WAIT_DEADLINE_MS_LOCAL,
                 )),
             );
+            // Unreachable after the return above. Retained only so
+            // workflow-agent artifacts stay byte-identical; drop it with the
+            // next lowering-tag bump.
+            body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
+            emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
+            body.instruction(&Instruction::Br(0));
         }
-        body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-        emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
-
-        body.instruction(&Instruction::Br(0));
     }
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);

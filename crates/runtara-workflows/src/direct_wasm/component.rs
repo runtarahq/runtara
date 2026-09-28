@@ -5,7 +5,7 @@
 //! Generates the composition scaffolding that lets independently-built components
 //! link together: `emit_world_wit` prints the `runtara:workflow` world the core
 //! module is encoded against (imports stdlib/runtime + one interface per agent,
-//! exports `wasi:cli/run`), and `emit_wac` prints the `wac` script that
+//! exports the workflow's entry interface), and `emit_wac` prints the `wac` script that
 //! instantiates and wires them. `DIRECT_SHARED_COMPONENT_REQUIREMENTS` and the
 //! per-agent requirement records pin, in one typed place, the several names each
 //! component is known by (wac package, WIT package, build-output filename,
@@ -27,9 +27,6 @@ pub const DIRECT_AGENT_WIT_VERSION: &str = runtara_wit::VERSION;
 /// The workflow's top-level export shape (Phase 3 of the agent/workflow
 /// unification).
 ///
-/// - [`CliRunHttp`](Self::CliRunHttp): the legacy shape — export
-///   `wasi:cli/run`, input pulled via `runtime.load-input`, terminal status
-///   pushed via `runtime.complete`/`runtime.fail`.
 /// - [`InvokeHostImports`](Self::InvokeHostImports): the unified agent shape —
 ///   export `runtara:workflow/lifecycle.invoke(input) ->
 ///   result<outcome, error-info>`: input is the call argument, the terminal
@@ -39,12 +36,6 @@ pub const DIRECT_AGENT_WIT_VERSION: &str = runtara_wit::VERSION;
 ///   later phase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkflowAbi {
-    /// Legacy: export `wasi:cli/run`, lifecycle over the runtime interface.
-    /// Retained only for compiler differential tests and artifact migration
-    /// tooling. Production direct compilation and generated-workflow image
-    /// registration reject this shape because it cannot return a durable
-    /// suspension outcome.
-    CliRunHttp,
     /// Unified: export `lifecycle.invoke`, input/result at the call boundary.
     /// The production default since Phase 5 of the agent/workflow
     /// unification.
@@ -63,17 +54,6 @@ pub enum WorkflowAbi {
     /// runtime-importing shape only for differential tests and migration
     /// tooling; it is never authorized by the production publisher.
     AgentCapabilities,
-}
-
-impl WorkflowAbi {
-    /// Both invoke-shaped ABIs carry the terminal result in-band (return value)
-    /// with a structured `error-info` error arm at the same result-area offset,
-    /// and neither uses the `wasi:cli/run` exit-tag convention. The two differ
-    /// only in the export declaration, the success-arm layout, and (for
-    /// `AgentCapabilities`) the extra ignored params — handled at those sites.
-    pub fn is_invoke_export(self) -> bool {
-        matches!(self, Self::InvokeHostImports | Self::AgentCapabilities)
-    }
 }
 
 /// One prebuilt shared component needed by direct workflow composition.
@@ -376,7 +356,6 @@ fn emit_world_wit(
         }
     }
     match abi {
-        WorkflowAbi::CliRunHttp => out.push_str("    export wasi:cli/run@0.2.3;\n"),
         WorkflowAbi::InvokeHostImports => {
             out.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
         }
@@ -458,7 +437,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_world_imports_stdlib_runtime_and_exports_wasi_run() {
+    fn direct_world_imports_stdlib_runtime_and_exports_lifecycle() {
         let artifacts = emit_direct_component_artifacts(&[]);
 
         assert!(
@@ -476,16 +455,13 @@ mod tests {
                 .world_wit
                 .contains("import runtara:workflow/runtime@1.0.0;")
         );
-        // The Phase-5 default exports the invoke lifecycle; the legacy run
-        // export remains reachable via the explicit CliRunHttp ABI.
+        // The Phase-5 default exports the invoke lifecycle.
         assert!(
             artifacts
                 .world_wit
                 .contains("export runtara:workflow/lifecycle@1.0.0;")
         );
-        let legacy =
-            emit_direct_component_artifacts_configured(&[], WorkflowAbi::CliRunHttp, false, None);
-        assert!(legacy.world_wit.contains("export wasi:cli/run@0.2.3;"));
+        assert!(!artifacts.world_wit.contains("wasi:cli/run"));
     }
 
     #[test]

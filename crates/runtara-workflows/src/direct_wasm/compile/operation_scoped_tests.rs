@@ -117,8 +117,6 @@ fn the_backstops_refuse_what_validation_reports() {
         text.contains("cannot be published as a workflow-agent"),
         "{text}"
     );
-    let text = refusal(compile(control(), WorkflowAbi::CliRunHttp));
-    assert!(text.contains("CliRunHttp"), "{text}");
 
     let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_abi(

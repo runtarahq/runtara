@@ -112,38 +112,19 @@ pub(super) fn emit_call_wide_result(function: &mut WasmFunction, index: u32) {
     function.instruction(&Instruction::End);
 }
 
-fn return_if_retptr_error_tag(function: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    load_retptr_tag(function);
-    function.instruction(&Instruction::If(BlockType::Empty));
-    super::deadline_scope::close_alarm(function, indices);
-    function.instruction(&Instruction::I32Const(1));
-    function.instruction(&Instruction::Return);
-    function.instruction(&Instruction::End);
-}
-
-/// "Check the retptr tag; on error, exit the entry function" — ABI-aware:
-/// under `wasi:cli/run` the classic bare `Err` tag; under the invoke export a
-/// bare tag would be lifted as a result-area POINTER, so the retptr error
-/// bytes are wrapped as `Err(error-info)` instead. No locals needed — the
+/// "Check the retptr tag; on error, exit the entry function". A bare tag
+/// would be lifted as a result-area POINTER, so the retptr error bytes are
+/// wrapped as `Err(error-info)`. No locals needed — the
 /// message ptr/len are copied out of the retptr region before it is
 /// clobbered.
 pub(super) fn return_if_retptr_error(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
-    if indices.abi.is_invoke_export() {
-        load_retptr_tag(function);
-        function.instruction(&Instruction::If(BlockType::Empty));
-        emit_invoke_err_return_from_retptr(
-            function,
-            indices,
-            None,
-            indices.stdlib_invoke_error_fields,
-        );
-        function.instruction(&Instruction::End);
-    } else {
-        return_if_retptr_error_tag(function, indices);
-    }
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    emit_invoke_err_return_from_retptr(function, indices, None, indices.stdlib_invoke_error_fields);
+    function.instruction(&Instruction::End);
 }
 
 /// Write `Err(error-info)` into the fixed invoke result area at offset 0 and
@@ -362,8 +343,6 @@ fn suspend_sentinel_halves() -> (i64, i64) {
 /// lifecycle signal (pause/shutdown/breakpoint) was handled and the instance
 /// will be re-invoked on relaunch.
 ///
-/// - `wasi:cli/run`: the classic clean-exit `Ok` tag; the suspended status
-///   was already recorded host-side by the signal ack / suspended event.
 /// - invoke export: `Ok(outcome::suspended([wake::on-resume]))` — the first
 ///   real emission of the suspended arm. The single-element wake list lives
 ///   at offset 88 (past the 80-byte result area, inside the reserved
@@ -381,10 +360,6 @@ pub(super) fn emit_entry_suspend_return(
 ) {
     super::deadline_scope::close_alarm(function, indices);
     match indices.abi {
-        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::Return);
-        }
         crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
             emit_agent_control_return(
                 function,
@@ -582,8 +557,7 @@ fn emit_agent_control_return(
 ///
 /// The invoke export emits the suspended arm directly; a composed agent
 /// re-raises the sentinel carrying the same deadline so the chain keeps
-/// unwinding to the real instance owner; `wasi:cli/run` has no wake channel and
-/// keeps its clean exit.
+/// unwinding to the real instance owner.
 pub(super) fn emit_suspend_at_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -605,11 +579,6 @@ pub(super) fn emit_suspend_at_return(
                 None,
                 None,
             );
-        }
-        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-            super::deadline_scope::close_alarm(function, indices);
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::Return);
         }
     }
 }
@@ -648,11 +617,6 @@ pub(super) fn emit_suspend_on_signal_return(
                 deadline.map(|(present, _)| present),
                 Some((signal_ptr_local, signal_len_local)),
             );
-        }
-        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-            super::deadline_scope::close_alarm(function, indices);
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::Return);
         }
     }
 }
@@ -793,9 +757,8 @@ pub(super) fn emit_agent_suspend_sentinel_check(
 ///
 /// The host tears down the Store and schedules a relaunch at `deadline_local`
 /// (ms since epoch) via `sleep_until`; on relaunch the replay re-reaches the
-/// delay, whose sleep checkpoint now HITS and skips. This is a NO-OP under
-/// `wasi:cli/run` — that ABI keeps the blocking `durable-sleep-checkpoint`
-/// (the caller only invokes this on the InvokeHostImports arm).
+/// delay, whose sleep checkpoint now HITS and skips. The caller only invokes
+/// this on the InvokeHostImports arm.
 ///
 /// wake element layout (8-aligned, past the 80-byte result area): disc u8 @88
 /// = 0 (at), payload u64 @96 = deadline.
@@ -853,8 +816,8 @@ pub(super) fn emit_entry_suspend_at(
 /// The host parks the instance `suspended` with `sleep_until` = the timeout
 /// deadline (or NULL when `deadline_local` is `None`); the custom-signal waker
 /// relaunches it when the signal arrives, and the replay re-polls the
-/// (non-destructively read) signal and proceeds. NO-OP under `wasi:cli/run`
-/// (caller only invokes this on the InvokeHostImports arm).
+/// (non-destructively read) signal and proceeds. The caller only invokes this
+/// on the InvokeHostImports arm.
 ///
 /// `signal_id_ptr_local`/`len` must reference the deterministic wait signal id
 /// — a heap-allocated string well above the 0..120 result scratch, so the
@@ -974,50 +937,23 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
-    match indices.abi {
-        crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-            load_retptr_tag(function);
-            function.instruction(&Instruction::If(BlockType::Empty));
-            function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-            function.instruction(&Instruction::I32Load(MemArg {
-                offset: 4,
-                align: 2,
-                memory_index: 0,
-            }));
-            function.instruction(&Instruction::I32Const(DIRECT_RUN_RETPTR_OFFSET));
-            function.instruction(&Instruction::I32Load(MemArg {
-                offset: 8,
-                align: 2,
-                memory_index: 0,
-            }));
-            push_retptr_arg(function);
-            function.instruction(&Instruction::Call(indices.runtime_fail));
-            super::deadline_scope::close_alarm(function, indices);
-            function.instruction(&Instruction::I32Const(1));
-            function.instruction(&Instruction::Return);
-            function.instruction(&Instruction::End);
-        }
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
-        | crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
-            load_retptr_tag(function);
-            function.instruction(&Instruction::If(BlockType::Empty));
-            // Additive host-side `runtime.fail` unless terminal status is
-            // suppressed (omit-runtime, or an AgentCapabilities child whose
-            // caller owns the instance) — the Err return value is authoritative.
-            let fail_index = if indices.report_terminal_status() {
-                Some(indices.runtime_fail)
-            } else {
-                None
-            };
-            emit_invoke_err_return_from_retptr(
-                function,
-                indices,
-                fail_index,
-                indices.stdlib_invoke_error_fields,
-            );
-            function.instruction(&Instruction::End);
-        }
-    }
+    load_retptr_tag(function);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    // Additive host-side `runtime.fail` unless terminal status is
+    // suppressed (omit-runtime, or an AgentCapabilities child whose
+    // caller owns the instance) — the Err return value is authoritative.
+    let fail_index = if indices.report_terminal_status() {
+        Some(indices.runtime_fail)
+    } else {
+        None
+    };
+    emit_invoke_err_return_from_retptr(
+        function,
+        indices,
+        fail_index,
+        indices.stdlib_invoke_error_fields,
+    );
+    function.instruction(&Instruction::End);
 }
 
 /// Like `return_if_retptr_error`, but reports the error via `runtime.fail`

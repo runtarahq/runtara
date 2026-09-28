@@ -15,7 +15,7 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg, Val
 
 use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
-    push_retptr_u8_load, push_segment_args, return_if_retptr_error,
+    push_retptr_u8_load, return_if_retptr_error,
 };
 use super::retry_park::emit_retry_park_until_deadline;
 use super::{
@@ -34,7 +34,7 @@ use super::{
     DIRECT_AGENT_RETRY_INFO_PAYLOAD_PTR_OFFSET, DIRECT_AGENT_RETRY_INFO_RATE_LIMITED_OFFSET,
     DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET, DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
     DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL, DIRECT_AGENT_RETRYABLE_LOCAL, DIRECT_RET_U64_OK_OFFSET,
-    DirectCoreFunctionIndices, DirectCoreStaticData,
+    DirectCoreFunctionIndices,
 };
 
 pub(super) fn emit_agent_retry_condition(
@@ -122,48 +122,13 @@ pub(super) fn emit_agent_retry_delay(
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_agent_retry_sleep(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    durable_checkpoint: bool,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-    sleep_key_ptr_local: u32,
-    sleep_key_len_local: u32,
-) {
-    if !durable_checkpoint {
-        // Keep the invocation's stack alive while waiting. Root lifecycle
-        // signals and parent cancellation use the same standard wait/cleanup
-        // as an outbound Agent call.
-        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-        super::cooperative_wait::emit_timer_wait(body, indices);
-        return;
-    }
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(cache_key_len_local));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
-    return_if_retptr_error(body, indices);
-    load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
-
-    body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(sleep_key_len_local));
-    push_segment_args(body, &static_data.agent_rate_limit_wait);
+/// Non-durable retry backoff: keep the invocation's stack alive while
+/// waiting. Root lifecycle signals and parent cancellation use the same
+/// standard wait/cleanup as an outbound Agent call. Durable retries park
+/// instead (see [`emit_agent_retry_park`]).
+pub(super) fn emit_agent_retry_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-    return_if_retptr_error(body, indices);
-    body.instruction(&Instruction::Else);
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep));
-    return_if_retptr_error(body, indices);
-    body.instruction(&Instruction::End);
+    super::cooperative_wait::emit_timer_wait(body, indices);
 }
 
 /// Convert a lifecycle-ABI durable Agent retry into a store-freeing timed

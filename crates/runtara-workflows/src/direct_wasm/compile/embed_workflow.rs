@@ -616,9 +616,7 @@ fn emit_embed_workflow_child_with_retry(
 
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
-    let lifecycle_retry_park =
-        durable && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp;
-    if lifecycle_retry_park {
+    if durable {
         // Each failed child attempt is durable on its own. That lets a wake
         // replay the failure/classification and consume the scheduled next
         // attempt without re-running the child that already failed.
@@ -685,20 +683,8 @@ fn emit_embed_workflow_child_with_retry(
         body.instruction(&Instruction::End);
     } else {
         // Non-durable invocations keep their stack through a cooperative
-        // timer wait. Legacy durable export shapes retain their existing
-        // in-run sleep because they cannot return a lifecycle wake.
-        emit_embed_retry_before_attempt(
-            body,
-            indices,
-            static_data,
-            durable,
-            route_ptr_local,
-            route_len_local,
-            output_ptr_local,
-            output_len_local,
-            max_retries,
-            retry_delay_ms,
-        );
+        // timer wait.
+        emit_embed_retry_before_attempt(body, indices, max_retries, retry_delay_ms);
         super::loop_deadline::check(
             body,
             indices,
@@ -744,7 +730,7 @@ fn emit_embed_workflow_child_with_retry(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
-    if lifecycle_retry_park {
+    if durable {
         emit_embed_retry_park(
             body,
             indices,

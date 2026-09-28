@@ -14,7 +14,7 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, ValType};
 
 use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
-    push_segment_args, return_if_retptr_error,
+    return_if_retptr_error,
 };
 use super::retry_park::emit_retry_park_until_deadline;
 use super::{
@@ -24,7 +24,7 @@ use super::{
     DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL, DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL,
     DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
     DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL,
-    DIRECT_SPLIT_RETRYABLE_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
+    DIRECT_SPLIT_RETRYABLE_LOCAL, DirectCoreFunctionIndices,
 };
 
 const SPLIT_RETRY_MAX_DELAY_MS: u64 = 60_000;
@@ -115,14 +115,12 @@ pub(super) fn emit_split_advance_retry_attempt(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL));
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Non-durable retry backoff before the next attempt: a cooperative timer
+/// wait that keeps the invocation's stack. Durable Splits park instead (see
+/// [`emit_split_retry_park`]).
 pub(super) fn emit_split_retry_before_attempt(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    durable: bool,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
     max_retries: u32,
     retry_delay_ms: u64,
 ) {
@@ -131,17 +129,8 @@ pub(super) fn emit_split_retry_before_attempt(
     body.instruction(&Instruction::I32GtU);
     body.instruction(&Instruction::If(BlockType::Empty));
     emit_split_retry_delay(body, indices, max_retries, retry_delay_ms);
-    emit_split_retry_sleep(
-        body,
-        indices,
-        static_data,
-        durable,
-        cache_key_ptr_local,
-        cache_key_len_local,
-    );
-    if durable {
-        emit_split_record_retry_attempt(body, indices, cache_key_ptr_local, cache_key_len_local);
-    }
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL));
+    super::cooperative_wait::emit_timer_wait(body, indices);
     body.instruction(&Instruction::End);
 }
 
@@ -202,56 +191,6 @@ fn emit_split_retry_delay(
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL));
-}
-
-fn emit_split_retry_sleep(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    durable: bool,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-) {
-    if durable {
-        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_AFTER_TAG_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-        body.instruction(&Instruction::LocalGet(cache_key_len_local));
-        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_retry_sleep_key));
-        return_if_retptr_error(body, indices);
-        load_retptr_list(
-            body,
-            DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
-            DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
-        );
-
-        body.instruction(&Instruction::LocalGet(
-            DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
-        ));
-        body.instruction(&Instruction::LocalGet(
-            DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
-        ));
-        push_segment_args(body, &static_data.agent_rate_limit_wait);
-        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-        return_if_retptr_error(body, indices);
-        body.instruction(&Instruction::Else);
-        emit_blocking_sleep(body, indices);
-        body.instruction(&Instruction::End);
-    } else {
-        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL));
-        super::cooperative_wait::emit_timer_wait(body, indices);
-    }
-}
-
-fn emit_blocking_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body, indices);
 }
 
 fn emit_split_record_retry_attempt(

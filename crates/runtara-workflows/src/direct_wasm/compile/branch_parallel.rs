@@ -28,9 +28,8 @@
 //! and the invoke is memoized regardless. Blocking in `waitable-set.wait` is legal
 //! because the invoke export's task is async-TYPED (ABI v2).
 //!
-//! A sync-ABI build (`!parallel_enabled`) or a workflow-agent branch (which shares
-//! the parent runtime host and checkpoint scope) degrades to emitting the branches
-//! sequentially — no window, no memo — which is the same instruction stream the
+//! A workflow-agent branch (which shares the parent runtime host and checkpoint
+//! scope) degrades to emitting the branches sequentially — no window, no memo — which is the same instruction stream the
 //! linearised path would have produced.
 //!
 //! **T2.1 (docs §4.3.1):** when every branch is a chain of async Agents and/or SYNC
@@ -486,18 +485,14 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
     }
 }
 
-/// `Some(pool_sizes)` when the whole fan-out may run concurrently — async ABI
-/// (`parallel_enabled`) and no chain step targets a workflow-agent (shared runtime
-/// host / checkpoint scope, a Phase-4c question) — else `None` (sequential
-/// fallback). Returned pool sizes drive BOTH the emitter's member assignment and
+/// `Some(pool_sizes)` when the whole fan-out may run concurrently — no chain
+/// step targets a workflow-agent (shared runtime host / checkpoint scope, a
+/// Phase-4c question) — else `None` (sequential fallback). Returned pool sizes drive BOTH the emitter's member assignment and
 /// the `[async-lower]invoke` imports the composer emits, so they cannot disagree.
 pub(super) fn concurrent_branch_pools(
     static_data: &DirectCoreStaticData,
     branches: &[DirectRunPlan],
 ) -> Option<BTreeMap<String, u32>> {
-    if !static_data.parallel_enabled {
-        return None;
-    }
     // An operation-scoped (suspending or control) call anywhere in a branch,
     // composites included, never shares a concurrent window: the whole group
     // serializes (advisory W075).
@@ -528,9 +523,8 @@ pub(super) fn concurrent_branch_pools(
 /// AND carries at least one agent to overlap — i.e. `concurrent_branch_pools` yields a
 /// NON-EMPTY pool map. That is exactly the condition under which `parallel_agent_pools`
 /// imports the CM-async waitable builtins, so gating the emit paths on it keeps the two
-/// in lockstep. A pure-SYNC group (Log/Filter/Delay/…, no agent), a workflow-agent
-/// branch, or a sync-ABI build has nothing to overlap and imports no builtins → it
-/// linearises. Without this a zero-agent fan-out reached the concurrent path and
+/// in lockstep. A pure-SYNC group (Log/Filter/Delay/…, no agent) or a workflow-agent
+/// branch has nothing to overlap and imports no builtins → it linearises. Without this a zero-agent fan-out reached the concurrent path and
 /// panicked asking for builtins the compile never imported.
 pub(super) fn branch_group_runs_concurrently(
     static_data: &DirectCoreStaticData,
@@ -676,12 +670,11 @@ fn emit_branch_agent(
 /// the shapes the intra-invocation scheduler handles. Composites (which may open a
 /// NESTED parallel window that would clobber the scheduler's live SLOTS/PENDING/WS
 /// locals) and suspending nodes stay on the depth-wavefront; T2.1c/T2.2 widen to
-/// them. Requires the async ABI and non-workflow-agent targets.
+/// them. Requires non-workflow-agent targets.
 fn schedulable_branches(static_data: &DirectCoreStaticData, branches: &[DirectRunPlan]) -> bool {
-    static_data.parallel_enabled
-        && branches
-            .iter()
-            .all(|b| is_schedulable_branch(static_data, b))
+    branches
+        .iter()
+        .all(|b| is_schedulable_branch(static_data, b))
 }
 
 /// Whether a SINGLE branch is a schedulable chain — async Agents (which interleave)
@@ -1139,7 +1132,7 @@ pub(super) fn emit_parallel_branches(
     // async agent invokes and needs the CM-async waitable builtins, imported ONLY when
     // a concurrent branch pool has ≥1 agent (`parallel_agent_pools`). A group whose
     // branches carry no agent to overlap — pure sync (Log/Filter/Delay/…), a
-    // workflow-agent branch, or a sync-ABI build — linearises instead: the exact
+    // workflow-agent branch — linearises instead: the exact
     // instruction stream, no window, no builtins. Gating every concurrent emit on
     // `branch_group_runs_concurrently` keeps the emit path in lockstep with the import
     // gate (a mismatch made a pure-sync diamond ask for builtins never imported).

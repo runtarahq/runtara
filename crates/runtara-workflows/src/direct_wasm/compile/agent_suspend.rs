@@ -105,9 +105,8 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 /// shapes only the compiler can see:
 ///
 /// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
-///   AiAgent call, a workflow embedded as an AiAgent tool, the `CliRunHttp`
-///   ABI (it blocks instead of parking), the `AgentCapabilities` ABI (a
-///   published workflow-agent), an omitted runtime, scoped isolation, and a
+///   AiAgent call, a workflow embedded as an AiAgent tool, the
+///   `AgentCapabilities` ABI (a published workflow-agent), an omitted runtime, scoped isolation, and a
 ///   control call compiled without the agent catalog (it could not be
 ///   classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
@@ -297,13 +296,6 @@ fn check_graph(
         }
         match target.abi {
             WorkflowAbi::InvokeHostImports => {}
-            WorkflowAbi::CliRunHttp => {
-                return refuse(
-                    step,
-                    kind,
-                    "needs the lifecycle invoke ABI; the CliRunHttp ABI blocks instead of parking",
-                );
-            }
             WorkflowAbi::AgentCapabilities => {
                 return refuse(step, kind, "cannot be published as a workflow-agent");
             }
@@ -373,12 +365,6 @@ fn check_wait_for_instances(
     }
     match target.abi {
         WorkflowAbi::InvokeHostImports => {}
-        WorkflowAbi::CliRunHttp => {
-            return refuse_wait(
-                step,
-                "needs the lifecycle invoke ABI; the CliRunHttp ABI blocks instead of parking",
-            );
-        }
         WorkflowAbi::AgentCapabilities => {
             return refuse_wait(step, "cannot be published as a workflow-agent");
         }

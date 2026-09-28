@@ -17,7 +17,6 @@ const ORIGINAL_ERROR: &[u8] = b"wait interval failed";
 #[test]
 fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
     for abi in [
-        WorkflowAbi::CliRunHttp,
         WorkflowAbi::InvokeHostImports,
         WorkflowAbi::AgentCapabilities,
     ] {
@@ -53,15 +52,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
             .to_owned();
         let entry_name = module
             .exports()
-            .find(|export| {
-                export
-                    .name()
-                    .ends_with(if matches!(abi, WorkflowAbi::CliRunHttp) {
-                        "|run"
-                    } else {
-                        "|invoke"
-                    })
-            })
+            .find(|export| export.name().ends_with("|invoke"))
             .unwrap()
             .name()
             .to_owned();
@@ -92,7 +83,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                             assert!(results.is_empty(), "unexpected direct result from {name}");
                             let mut response = [0u8; 48];
                             match name.as_str() {
-                                "init-manifest" | "load-input" | "build-source" | "instance-id"
+                                "init-manifest" | "build-source" | "instance-id"
                                 | "wait-signal-id" | "wait-timeout-ms" | "wait-event"
                                 | "register-input" | "custom-event" => {}
                                 "wait-poll-interval-ms-scoped" => {
@@ -164,9 +155,6 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                     store.data().failed,
                     usize::from(!matches!(abi, WorkflowAbi::AgentCapabilities))
                 );
-                if matches!(abi, WorkflowAbi::CliRunHttp) {
-                    assert_eq!(result[0].i32(), Some(1));
-                }
             }
         }
     }

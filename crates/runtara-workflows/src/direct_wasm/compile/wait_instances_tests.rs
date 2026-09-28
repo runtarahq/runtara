@@ -90,8 +90,6 @@ fn the_backstops_refuse_what_validation_reports() {
         text.contains("cannot be published as a workflow-agent"),
         "{text}"
     );
-    let text = refusal(single(wait("wait")), WorkflowAbi::CliRunHttp);
-    assert!(text.contains("CliRunHttp"), "{text}");
 
     let mut graph = single(wait("wait"));
     graph["durable"] = json!(false);

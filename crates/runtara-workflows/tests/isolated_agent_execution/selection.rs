@@ -397,42 +397,41 @@ fn policy_rejects_grants_overlapping_inline_embed_checkpoints_without_agent_call
 }
 
 #[test]
-fn policy_falls_back_for_unsupported_root_abis_without_changing_legacy_bytes() {
+fn policy_falls_back_for_an_unsupported_root_abi_without_changing_legacy_bytes() {
     let components = direct_e2e_components_dir();
     let dir = tempfile::tempdir().unwrap();
-    for abi in [WorkflowAbi::CliRunHttp, WorkflowAbi::AgentCapabilities] {
-        let graph = super::super::wasm_performance_baseline::random_chain(1, false);
-        let mut compilation_input = input(graph, &dir.path().join(format!("{abi:?}-legacy")));
-        compilation_input.agent_slug = Some("fallback-test".into());
-        let mut legacy = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-            compilation_input.clone(),
-            abi,
-            false,
-        )
-        .unwrap();
-        compose_direct_workflow(&mut legacy, &components).unwrap();
-        compilation_input.output_dir = dir.path().join(format!("{abi:?}-policy"));
-        let fallback = compile_direct_workflow_composed_with_isolation_policy(
-            compilation_input,
-            abi,
-            false,
-            &components,
-            &[],
-            approved(&components),
-            limits(),
-        )
-        .unwrap();
-        assert_eq!(
-            decisions(&fallback)["utils"],
-            Reason::UnsupportedRootRuntime
-        );
-        assert!(fallback.scoped_agents.is_empty());
-        assert!(fallback.invocation_manifest.is_none());
-        assert_eq!(
-            fs::read(fallback.wasm_path).unwrap(),
-            fs::read(legacy.wasm_path).unwrap()
-        );
-    }
+    let abi = WorkflowAbi::AgentCapabilities;
+    let graph = super::super::wasm_performance_baseline::random_chain(1, false);
+    let mut compilation_input = input(graph, &dir.path().join(format!("{abi:?}-legacy")));
+    compilation_input.agent_slug = Some("fallback-test".into());
+    let mut legacy = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        compilation_input.clone(),
+        abi,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut legacy, &components).unwrap();
+    compilation_input.output_dir = dir.path().join(format!("{abi:?}-policy"));
+    let fallback = compile_direct_workflow_composed_with_isolation_policy(
+        compilation_input,
+        abi,
+        false,
+        &components,
+        &[],
+        approved(&components),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        decisions(&fallback)["utils"],
+        Reason::UnsupportedRootRuntime
+    );
+    assert!(fallback.scoped_agents.is_empty());
+    assert!(fallback.invocation_manifest.is_none());
+    assert_eq!(
+        fs::read(fallback.wasm_path).unwrap(),
+        fs::read(legacy.wasm_path).unwrap()
+    );
 }
 
 #[test]

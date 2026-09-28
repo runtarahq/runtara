@@ -137,8 +137,6 @@ use super::support::{
     analyze_workflow_agent_safety, workflow_agent_requires_runtime,
 };
 
-/// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
-pub const DIRECT_WORKFLOW_ABI_VERSION: u32 = 1;
 /// Direct workflow artifact ABI version for the unified invoke export
 /// (`runtara:workflow/lifecycle.invoke`).
 pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 2;
@@ -153,17 +151,6 @@ pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 4;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
-const WASI_CLI_RUN_WIT: &str = r#"
-package wasi:cli@0.2.3;
-
-interface run {
-    run: func() -> result;
-}
-
-world command {
-    export run;
-}
-"#;
 const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
@@ -1050,9 +1037,9 @@ pub fn compile_direct_workflow(
 /// Older images have no tag at all, which reads as a miss and rebuilds once.
 pub fn direct_lowering_tag() -> String {
     // The ABI belongs here as much as any lowering flag — more, in fact. It
-    // decides whether the artifact exports `wasi:cli/run` or `lifecycle.invoke`,
-    // so an artifact built under one and run under the other is not merely
-    // differently optimised, it is the wrong shape. Leaving it out meant a
+    // decides which entry interface the artifact exports, so an artifact
+    // built under one and run under the other is not merely differently
+    // optimised, it is the wrong shape. Leaving it out meant a
     // release that changed the default ABI did not disturb this tag, the
     // definition checksum was unchanged too, and every existing workflow kept
     // its stale artifact: launches then hung with no steps and no error, held
@@ -1072,7 +1059,6 @@ pub fn direct_lowering_tag() -> String {
 /// silently invalidate every image in a deployment.
 fn workflow_abi_tag(abi: super::component::WorkflowAbi) -> &'static str {
     match abi {
-        super::component::WorkflowAbi::CliRunHttp => "cli-run",
         super::component::WorkflowAbi::InvokeHostImports => "invoke",
         super::component::WorkflowAbi::AgentCapabilities => "agent",
     }
@@ -1097,12 +1083,10 @@ fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
 
 /// Reject the removed direct-workflow ABI switch.
 ///
-/// `wasi:cli/run` cannot return a durable suspend outcome, so a workflow
-/// waiting for a human signal retained its runner slot. It is not a safe
-/// rollback mode: production direct workflows are always emitted with
-/// `lifecycle.invoke`. Explicit ABI construction remains available for compiler
-/// differential tests and artifact migration tooling, but an environment must
-/// never silently select the legacy shape for a production compile.
+/// Production direct workflows are always emitted with `lifecycle.invoke`;
+/// the legacy `wasi:cli/run` shape no longer exists. A stale environment that
+/// still sets `RUNTARA_DIRECT_WORKFLOW_ABI` to anything else fails loudly
+/// instead of being silently ignored.
 fn ensure_supported_production_workflow_abi() -> Result<(), DirectCompileError> {
     match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI") {
         Err(std::env::VarError::NotPresent) => ensure_supported_production_workflow_abi_raw(None),
@@ -1127,9 +1111,8 @@ fn ensure_supported_production_workflow_abi_raw(
 /// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`].
 ///
 /// Production callers use [`compile_direct_workflow`], which always emits the
-/// lifecycle invoke ABI. This lower-level entry remains for compiler
-/// differential tests and artifact migration tooling, including the retired
-/// `wasi:cli/run` reference shape.
+/// lifecycle invoke ABI. This lower-level entry selects between the invoke
+/// and agent-capabilities shapes.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
@@ -1228,8 +1211,7 @@ fn compile_direct_workflow_inner(
 
     // Callable workflows use cancellable guest-local waits for non-durable
     // Agent I/O/backoff. They must not import the parent's lifecycle runtime.
-    // Keep the lower-level legacy compile path for differential/replay tooling;
-    // production publishing additionally requires the static safety report.
+    // Production publishing additionally requires the static safety report.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
         super::component::WorkflowAbi::AgentCapabilities => {
@@ -1244,7 +1226,6 @@ fn compile_direct_workflow_inner(
         super::component::WorkflowAbi::InvokeHostImports => {
             omit_runtime_requested && !needs_runtime
         }
-        super::component::WorkflowAbi::CliRunHttp => false,
     };
 
     // The export id an AgentCapabilities compile publishes under. A supplied
@@ -1403,7 +1384,6 @@ fn compile_direct_workflow_inner(
 
 fn workflow_abi_version(abi: super::component::WorkflowAbi) -> u32 {
     match abi {
-        super::component::WorkflowAbi::CliRunHttp => DIRECT_WORKFLOW_ABI_VERSION,
         super::component::WorkflowAbi::InvokeHostImports
         | super::component::WorkflowAbi::AgentCapabilities => DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
     }
@@ -1422,17 +1402,6 @@ fn emit_direct_artifact(
     scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let abi_json = match abi {
-        super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
-            "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
-            "artifactKind": "direct-run-component",
-            "componentRunExport": "wasi:cli/run@0.2.3",
-            "entryPointExecutable": true,
-            "runtimeExecutable": true,
-            "outputMode": "stdlib-apply-mapping",
-            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-            "stepCount": manifest.feature_summary.total_steps,
-            "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
-        }))?,
         super::component::WorkflowAbi::InvokeHostImports => {
             serde_json::to_vec(&serde_json::json!({
                 "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
@@ -1539,11 +1508,10 @@ fn emit_direct_component(
 
 #[cfg(test)]
 fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileError> {
-    // Pinned to the legacy world to match DirectCoreConfig::new (the
-    // structural tests describe the wasi:cli/run lowering).
+    // Pinned to the default (invoke) world to match DirectCoreConfig::new.
     build_direct_component_resolve_configured(
         &[],
-        super::component::WorkflowAbi::CliRunHttp,
+        super::component::WorkflowAbi::InvokeHostImports,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -1555,10 +1523,10 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
 fn build_direct_component_resolve_with_agents(
     agents: &[String],
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
-    // See build_direct_component_resolve: pinned to the legacy world.
+    // See build_direct_component_resolve: pinned to the default world.
     build_direct_component_resolve_configured(
         agents,
-        super::component::WorkflowAbi::CliRunHttp,
+        super::component::WorkflowAbi::InvokeHostImports,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -1645,11 +1613,6 @@ fn build_direct_component_resolve_with_waits(
     // Every runtara package, once; the world below imports only what it names.
     let mut resolve = runtara_wit::resolve().map_err(component_error)?;
     match abi {
-        super::component::WorkflowAbi::CliRunHttp => {
-            resolve
-                .push_str("wasi-cli-run.wit", WASI_CLI_RUN_WIT)
-                .map_err(component_error)?;
-        }
         super::component::WorkflowAbi::InvokeHostImports => {}
         super::component::WorkflowAbi::AgentCapabilities => {
             // Export the agent capability interface under the workflow's own
@@ -1751,9 +1714,6 @@ fn build_direct_component_resolve_with_waits(
         }
     }
     match abi {
-        super::component::WorkflowAbi::CliRunHttp => {
-            workflow_wit.push_str("    export wasi:cli/run@0.2.3;\n")
-        }
         super::component::WorkflowAbi::InvokeHostImports => {
             workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
         }
@@ -1779,18 +1739,16 @@ fn build_direct_component_resolve_with_waits(
 /// Every fail site in every lowerer funnels here (directly or via the
 /// `abi.rs` retptr-error wrappers).
 ///
-/// Both ABIs still record the failure host-side via `runtime.fail` (additive
-/// during the migration). The return differs:
-/// - `wasi:cli/run`: the classic non-zero result tag.
-/// - invoke export: `Err(error-info)` written into the fixed result area at
-///   offset 0 (the low retptr scratch — dead here by construction: no host
-///   call runs between this write and the canonical lift, and it is
-///   8-aligned as the payload requires). Layout (payload @8, align 8):
-///   code@8/12, message@16/20, category@24/28, severity@32/36, retryable@40,
-///   retry-after-ms tag@48 val@56, attributes tag@64 str@68/72 — total 80.
-///   v1 wraps the raw error bytes as `message` and leaves code/category/
-///   severity as empty strings (zeroed ptr/len is a valid empty string);
-///   structured mapping arrives with the suspend wiring phase.
+/// The failure is still recorded host-side via `runtime.fail` (additive
+/// during the migration). The return is `Err(error-info)` written into the
+/// fixed result area at offset 0 (the low retptr scratch — dead here by
+/// construction: no host call runs between this write and the canonical lift,
+/// and it is 8-aligned as the payload requires). Layout (payload @8, align 8):
+/// code@8/12, message@16/20, category@24/28, severity@32/36, retryable@40,
+/// retry-after-ms tag@48 val@56, attributes tag@64 str@68/72 — total 80.
+/// v1 wraps the raw error bytes as `message` and leaves code/category/
+/// severity as empty strings (zeroed ptr/len is a valid empty string);
+/// structured mapping arrives with the suspend wiring phase.
 fn emit_runtime_fail_return(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -1807,22 +1765,16 @@ fn emit_runtime_fail_return(
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_fail));
     }
-    if indices.abi.is_invoke_export() {
-        // Structured Err(error-info): stdlib decomposes the payload directly
-        // into the result area; abi.rs owns the writer. Both invoke shapes have
-        // `result<_, error-info>` with error-info at the same offset.
-        abi::emit_invoke_err_return_from_locals(
-            body,
-            indices,
-            indices.stdlib_invoke_error_fields,
-            error_ptr_local,
-            error_len_local,
-        );
-    } else {
-        deadline_scope::close_alarm(body, indices);
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::Return);
-    }
+    // Structured Err(error-info): stdlib decomposes the payload directly
+    // into the result area; abi.rs owns the writer. Both invoke shapes have
+    // `result<_, error-info>` with error-info at the same offset.
+    abi::emit_invoke_err_return_from_locals(
+        body,
+        indices,
+        indices.stdlib_invoke_error_fields,
+        error_ptr_local,
+        error_len_local,
+    );
 }
 
 fn append_component_custom_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {

@@ -3,9 +3,9 @@
 //! Direct core Wasm module assembly and export wiring.
 //!
 //! Plays the role `rustc` + the linker would in the generated path. `emit_direct_core_module`
-//! emits the complete module: types, imports, the single real `wasi:cli/run` body
-//! (`direct_run_function` — init manifest, load input, build the initial source,
-//! lower the whole run plan, complete), zero-return stubs for the other exports,
+//! emits the complete module: types, imports, the single real entry-export body
+//! (`direct_run_function` — init manifest, take the input argument, build the
+//! initial source, lower the whole run plan, return the result), zero-return stubs for the other exports,
 //! the Canonical-ABI-mandated realloc/initialize/post-return intrinsics, one linear
 //! memory sized to the static-data layout, the seeded heap-base global, and the
 //! data segments. The shape must match exactly what `wac compose` expects, while
@@ -23,12 +23,11 @@ use wit_parser::{
 };
 
 use super::abi::{
-    emit_fail_if_retptr_error, load_retptr_list, load_retptr_tag, push_core_type, push_retptr_arg,
-    push_segment_args, zero_return_function,
+    emit_fail_if_retptr_error, push_core_type, push_retptr_arg, push_segment_args,
+    zero_return_function,
 };
 use super::core_imports::{
     DirectCoreFunctionIndices, DirectCoreImportIndices, agent_import_for, import_core_function,
-    is_wasi_cli_run_export,
 };
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -43,8 +42,8 @@ pub(super) struct DirectCoreConfig {
     pub(super) run_plan: DirectRunPlan,
     pub(super) static_data: DirectCoreStaticData,
     pub(super) track_events: bool,
-    /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
-    /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
+    /// Top-level export shape (see `component::WorkflowAbi`). Defaults to
+    /// `lifecycle.invoke`; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
     /// When true, the component imports no `runtara:workflow/runtime`,
     /// so the emitter must NOT lower any `runtime.*` call — the terminal
@@ -55,10 +54,7 @@ pub(super) struct DirectCoreConfig {
 }
 
 impl DirectCoreConfig {
-    /// Test constructor pinned to the LEGACY `wasi:cli/run` body shape — the
-    /// structural lowering tests describe that sequence (load-input included).
-    /// Invoke-shape structure is asserted by explicit `.with_abi` tests and
-    /// the execution battery.
+    /// Test constructor with the default (`lifecycle.invoke`) export shape.
     #[cfg(test)]
     pub(super) fn new(
         manifest: &DirectWorkflowManifest,
@@ -66,7 +62,7 @@ impl DirectCoreConfig {
         track_events: bool,
     ) -> Result<Self, DirectCompileError> {
         Self::new_inner(manifest, manifest_json, track_events, None)
-            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowAbi::CliRunHttp))
+            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowAbi::default()))
     }
 
     pub(super) fn new_with_workflow_id(
@@ -81,11 +77,6 @@ impl DirectCoreConfig {
     /// Override the export shape.
     pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowAbi) -> Self {
         self.abi = abi;
-        // Parallel Split windows require an async-TYPED root task (the invoke
-        // shapes); the legacy sync-typed `wasi:cli/run` root always compiles
-        // sequentially.
-        self.static_data.parallel_enabled =
-            !matches!(abi, crate::direct_wasm::component::WorkflowAbi::CliRunHttp);
         self
     }
 
@@ -675,13 +666,12 @@ fn export_core_function(
     );
     exports.export(&export_name, ExportKind::Func, function_index);
 
-    let body = if is_wasi_cli_run_export(resolve, interface, function)
-        || super::core_imports::is_lifecycle_invoke_export(resolve, interface, function)
+    let body = if super::core_imports::is_lifecycle_invoke_export(resolve, interface, function)
         || super::core_imports::is_capabilities_invoke_export(resolve, interface, function)
     {
         // The entry export of the current ABI (the world declares exactly one):
-        // `wasi:cli/run` under CliRunHttp, `lifecycle.invoke` under
-        // InvokeHostImports, `capabilities.invoke` under AgentCapabilities.
+        // `lifecycle.invoke` under InvokeHostImports, `capabilities.invoke`
+        // under AgentCapabilities.
         // `direct_run_function` shapes its prologue, param fold, and return
         // convention from `config.abi` and the export's param count.
         direct_run_function(import_indices, config, signature.params.len())
@@ -812,12 +802,11 @@ fn export_initialize(
     code.function(&body);
 }
 
-/// Canonical declared-local groups for the run function under ZERO export
-/// params (the `wasi:cli/run` shape). Every other ABI derives its declared
-/// locals by dropping its export params off the FRONT of this list
-/// ([`drop_leading_locals`]): `wasi:cli/run` takes 0 params (uses this list
-/// verbatim), `lifecycle.invoke(input)` takes 2 (its `input` folds onto locals
-/// 0/1), and `capabilities.invoke(capability-id, input)` takes 4. Because
+/// Canonical declared-local groups for the run function as if it took ZERO
+/// export params. Each ABI derives its declared locals by dropping its export
+/// params off the FRONT of this list ([`drop_leading_locals`]):
+/// `lifecycle.invoke(input)` takes 2 (its `input` folds onto locals 0/1), and
+/// `capabilities.invoke(capability-id, input)` takes 4. Because
 /// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
 /// off the front keeps each surviving declared local at its original absolute
 /// index with its original type — the invariant the lowerers depend on.
@@ -962,12 +951,6 @@ fn direct_run_function(
     emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
 
     match config.abi {
-        WorkflowAbi::CliRunHttp => {
-            push_retptr_arg(&mut body);
-            body.instruction(&Instruction::Call(indices.runtime_load_input));
-            emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
-            load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
-        }
         WorkflowAbi::InvokeHostImports => {
             // The input envelope arrived as the call argument — params 0/1 ARE
             // (DATA_PTR, DATA_LEN); no load-input round-trip.
@@ -1031,9 +1014,6 @@ fn direct_run_function(
     }
     super::deadline_scope::close_alarm(&mut body, indices);
     match config.abi {
-        WorkflowAbi::CliRunHttp => {
-            load_retptr_tag(&mut body);
-        }
         WorkflowAbi::InvokeHostImports => {
             // The terminal result travels as the return value:
             // Ok(outcome::completed(output)).

@@ -1236,7 +1236,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
 }
 
 #[test]
-fn direct_compile_exports_wasi_cli_run_and_imports_components() {
+fn direct_compile_exports_lifecycle_invoke_and_imports_components() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "simple".to_string(),
@@ -2163,7 +2163,7 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let (resolve, world) = build_direct_component_resolve_scoped(
             &[],
-            super::super::component::WorkflowAbi::CliRunHttp,
+            super::super::component::WorkflowAbi::InvokeHostImports,
             false,
             None,
             &Default::default(),
@@ -2221,7 +2221,7 @@ fn direct_core_emits_value_store_retain_for_loops() {
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let (resolve, world) = build_direct_component_resolve_scoped(
             &[],
-            super::super::component::WorkflowAbi::CliRunHttp,
+            super::super::component::WorkflowAbi::InvokeHostImports,
             false,
             None,
             &Default::default(),
@@ -4799,7 +4799,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
 
     let mut next_function_index = 0;
     let mut init_manifest_index = None;
-    let mut load_input_index = None;
+    let mut invoke_error_fields_index = None;
     let mut build_source_index = None;
     let mut apply_mapping_index = None;
     let mut eval_condition_index = None;
@@ -4829,8 +4829,8 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                             ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "load-input") => {
-                                load_input_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                                invoke_error_fields_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
@@ -4909,17 +4909,21 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     }
 
     // Each setup/stdlib call is followed by a fail-on-error guard (`runtime.fail`
-    // inside an `if error` block) so an unhandled error surfaces as a `failed`
-    // SDK event instead of a silent non-zero exit.
+    // then the structured `Err(error-info)` return, inside an `if error` block)
+    // so an unhandled error surfaces as a `failed` SDK event. The input is the
+    // invoke argument, so there is no load-input call.
+    let fail = fail_index.expect("fail import");
+    let error_fields = invoke_error_fields_index.expect("invoke-error-fields import");
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
-        fail_index.expect("fail import"),
-        load_input_index.expect("load-input import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         build_source_index.expect("build-source import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         apply_mapping_index.expect("apply-mapping import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         complete_index.expect("complete import"),
     ];
     assert!(
@@ -4964,7 +4968,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     assert!(saw_mapping_id, "run body should pass manifest mapping id");
     assert!(
         saw_run_retptr_tag_load,
-        "run body should return runtime.complete result tag"
+        "run body should check host-call result tags"
     );
 }
 
@@ -6368,16 +6372,12 @@ fn direct_core_lowers_durable_agent_retry_loop() {
     let mut get_checkpoint_index = None;
     let mut checkpoint_index = None;
     let mut handle_checkpoint_signal_index = None;
-    let mut durable_sleep_index = None;
-    let mut durable_sleep_checkpoint_index = None;
     let mut agent_retry_sleep_key_index = None;
     let mut agent_retry_delay_index = None;
     let mut agent_retry_error_info_index = None;
     let mut agent_error_from_info_index = None;
     let mut record_retry_attempt_index = None;
     let mut agent_invoke_index = None;
-    let mut saw_durable_sleep_import = false;
-    let mut saw_durable_sleep_checkpoint_import = false;
     let mut saw_handle_checkpoint_signal_import = false;
     let mut saw_agent_retry_sleep_key_import = false;
     let mut saw_agent_retry_delay_import = false;
@@ -6400,10 +6400,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
     let mut saw_retry_info_after_invoke = false;
     let mut saw_retry_delay_after_retry_info = false;
     let mut saw_sleep_key_after_retry_info = false;
-    let mut saw_generic_sleep_after_retry_delay = false;
-    let mut saw_durable_sleep_after_sleep_key = false;
-    let mut saw_record_after_durable_sleep = false;
-    let mut saw_record_after_generic_sleep = false;
     let mut saw_record_after_invoke = false;
     let mut saw_error_from_info_after_retry_info = false;
     let mut saw_checkpoint_after_invoke = false;
@@ -6433,18 +6429,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                             {
                                 saw_handle_checkpoint_signal_import = true;
                                 handle_checkpoint_signal_index = Some(next_function_index);
-                            }
-                            (module, "durable-sleep")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_durable_sleep_import = true;
-                                durable_sleep_index = Some(next_function_index);
-                            }
-                            (module, "durable-sleep-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_durable_sleep_checkpoint_import = true;
-                                durable_sleep_checkpoint_index = Some(next_function_index);
                             }
                             (module, "agent-retry-sleep-key")
                                 if module.contains("runtara:workflow-stdlib/json") =>
@@ -6492,10 +6476,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                     let mut saw_lookup_call = false;
                     let mut saw_invoke_call = false;
                     let mut saw_retry_info_call = false;
-                    let mut saw_retry_delay_call = false;
-                    let mut saw_sleep_key_call = false;
-                    let mut saw_durable_sleep_call = false;
-                    let mut saw_generic_sleep_call = false;
                     let mut saw_checkpoint_call = false;
                     for operator in entry_operators_with_helpers(&core) {
                         match operator {
@@ -6520,32 +6500,16 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                                 if Some(function_index) == agent_retry_delay_index =>
                             {
                                 saw_retry_delay_after_retry_info = saw_retry_info_call;
-                                saw_retry_delay_call = true;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_retry_sleep_key_index =>
                             {
                                 saw_sleep_key_after_retry_info = saw_retry_info_call;
-                                saw_sleep_key_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == durable_sleep_checkpoint_index =>
-                            {
-                                saw_durable_sleep_after_sleep_key = saw_sleep_key_call;
-                                saw_durable_sleep_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == durable_sleep_index =>
-                            {
-                                saw_generic_sleep_after_retry_delay = saw_retry_delay_call;
-                                saw_generic_sleep_call = true;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == record_retry_attempt_index =>
                             {
                                 saw_record_after_invoke = saw_invoke_call;
-                                saw_record_after_durable_sleep = saw_durable_sleep_call;
-                                saw_record_after_generic_sleep = saw_generic_sleep_call;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_error_from_info_index =>
@@ -6626,14 +6590,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
         "core should import runtime.record-retry-attempt"
     );
     assert!(
-        saw_durable_sleep_import,
-        "core should import runtime.durable-sleep"
-    );
-    assert!(
-        saw_durable_sleep_checkpoint_import,
-        "core should import runtime.durable-sleep-checkpoint"
-    );
-    assert!(
         saw_handle_checkpoint_signal_import,
         "core should import runtime.handle-checkpoint-signal"
     );
@@ -6705,22 +6661,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
     assert!(
         saw_sleep_key_after_retry_info,
         "retry sleep key should be built after preserving the error payload"
-    );
-    assert!(
-        saw_durable_sleep_after_sleep_key,
-        "typed retryAfterMs should lower to runtime.durable-sleep-checkpoint"
-    );
-    assert!(
-        saw_record_after_durable_sleep,
-        "retry attempt recording should run after the typed durable sleep"
-    );
-    assert!(
-        saw_generic_sleep_after_retry_delay,
-        "normal retries should lower to runtime.durable-sleep"
-    );
-    assert!(
-        saw_record_after_generic_sleep,
-        "retry attempt recording should run after generic backoff sleep"
     );
     assert!(
         saw_error_from_info_after_retry_info,
@@ -7127,7 +7067,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
 
     let mut next_function_index = 0;
     let mut init_manifest_index = None;
-    let mut load_input_index = None;
+    let mut invoke_error_fields_index = None;
     let mut build_source_index = None;
     let mut apply_mapping_index = None;
     let mut complete_index = None;
@@ -7152,8 +7092,8 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "load-input") => {
-                                load_input_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                                invoke_error_fields_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
@@ -7209,33 +7149,42 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
 
     // Each setup/stdlib call (including the step-debug-start/end and their
     // custom-event emits) is followed by a fail-on-error guard (`runtime.fail`
-    // inside an `if error` block) so an unhandled error surfaces as a `failed`
-    // SDK event instead of a silent non-zero exit.
+    // then the structured `Err(error-info)` return, inside an `if error` block)
+    // so an unhandled error surfaces as a `failed` SDK event.
+    let fail = fail_index.expect("fail import");
+    let error_fields = invoke_error_fields_index.expect("invoke-error-fields import");
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
-        fail_index.expect("fail import"),
-        load_input_index.expect("load-input import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         build_source_index.expect("build-source import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         step_debug_start_index.expect("step-debug-start import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         custom_event_index.expect("custom-event import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         apply_mapping_index.expect("apply-mapping import"),
         // Unhandled-failure attribution: on a mapping error this Finish emits an
         // error step-debug-end (step-debug-error builder + custom-event) and then
         // runtime.fail. These execute only on the error branch; the success path
         // falls through to the end event below.
         step_debug_error_index.expect("step-debug-error import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         custom_event_index.expect("custom-event import"),
-        fail_index.expect("fail import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
+        fail,
+        error_fields,
         step_debug_end_index.expect("step-debug-end import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         custom_event_index.expect("custom-event import"),
-        fail_index.expect("fail import"),
+        fail,
+        error_fields,
         complete_index.expect("complete import"),
     ];
     assert_eq!(
@@ -7846,16 +7795,6 @@ fn direct_core_run_lowers_split_retry_helpers() {
         "cm32p2|runtara:workflow-stdlib/json@1",
         "workflow-error-retry-after-ms",
     );
-    let blocking_sleep_index = direct_core_import(
-        &imports,
-        "cm32p2|runtara:workflow/runtime@1",
-        "blocking-sleep",
-    );
-    let durable_sleep_checkpoint_index = direct_core_import(
-        &imports,
-        "cm32p2|runtara:workflow/runtime@1",
-        "durable-sleep-checkpoint",
-    );
     let record_retry_index = direct_core_import(
         &imports,
         "cm32p2|runtara:workflow/runtime@1",
@@ -7868,8 +7807,6 @@ fn direct_core_run_lowers_split_retry_helpers() {
         ("workflow-error-retryable", workflow_retryable_index),
         ("workflow-error-rate-limited", workflow_rate_limited_index),
         ("workflow-error-retry-after-ms", workflow_retry_after_index),
-        ("blocking-sleep", blocking_sleep_index),
-        ("durable-sleep-checkpoint", durable_sleep_checkpoint_index),
         ("record-retry-attempt", record_retry_index),
     ] {
         assert!(
@@ -8600,7 +8537,7 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
     let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut delay_duration_index = None;
-    let mut durable_sleep_checkpoint_index = None;
+    let mut delay_sleep_key_index = None;
     let mut delay_index = None;
     let mut apply_mapping_index = None;
     let mut saw_delay_id = false;
@@ -8621,8 +8558,8 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
                                 delay_duration_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "durable-sleep-checkpoint") => {
-                                durable_sleep_checkpoint_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-sleep-key") => {
+                                delay_sleep_key_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => {
                                 delay_index = Some(next_function_index)
@@ -8661,18 +8598,17 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
 
     let build_source_index = build_source_index.expect("build-source import");
     let delay_duration_index = delay_duration_index.expect("delay-duration-ms import");
-    let durable_sleep_checkpoint_index =
-        durable_sleep_checkpoint_index.expect("durable-sleep-checkpoint import");
+    let delay_sleep_key_index = delay_sleep_key_index.expect("delay-sleep-key import");
     let delay_index = delay_index.expect("delay import");
     let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
     let delay_duration_position = run_calls
         .iter()
         .position(|&index| index == delay_duration_index)
         .expect("Delay duration call");
-    let durable_sleep_position = run_calls
+    let sleep_key_position = run_calls
         .iter()
-        .position(|&index| index == durable_sleep_checkpoint_index)
-        .expect("durable sleep checkpoint call");
+        .position(|&index| index == delay_sleep_key_index)
+        .expect("delay sleep key call");
     let delay_position = run_calls
         .iter()
         .position(|&index| index == delay_index)
@@ -8691,12 +8627,12 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
         "Delay run should rebuild source after updating steps context"
     );
     assert!(
-        delay_duration_position < durable_sleep_position,
-        "Delay duration must be resolved before durable sleep"
+        delay_duration_position < sleep_key_position,
+        "Delay duration must be resolved before the park deadline key"
     );
     assert!(
-        durable_sleep_position < delay_position,
-        "Delay output should be stored after durable sleep"
+        sleep_key_position < delay_position,
+        "Delay output should be stored after the park"
     );
     assert!(
         delay_position < finish_position,
@@ -8747,7 +8683,7 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
     let mut runtime_custom_event_index = None;
     let mut runtime_breakpoint_pause_index = None;
     let mut stdlib_delay_duration_index = None;
-    let mut runtime_durable_sleep_checkpoint_index = None;
+    let mut runtime_delay_sleep_key_index = None;
     let mut run_calls = Vec::new();
     let mut code_body_index = 0;
 
@@ -8782,8 +8718,8 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
                             ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
                                 stdlib_delay_duration_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "durable-sleep-checkpoint") => {
-                                runtime_durable_sleep_checkpoint_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-sleep-key") => {
+                                runtime_delay_sleep_key_index = Some(next_function_index)
                             }
                             _ => {}
                         }
@@ -8817,8 +8753,8 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
         runtime_breakpoint_pause_index.expect("breakpoint-pause import");
     let stdlib_delay_duration_index =
         stdlib_delay_duration_index.expect("delay-duration-ms import");
-    let runtime_durable_sleep_checkpoint_index =
-        runtime_durable_sleep_checkpoint_index.expect("durable-sleep-checkpoint import");
+    let runtime_delay_sleep_key_index =
+        runtime_delay_sleep_key_index.expect("delay-sleep-key import");
 
     let position = |index| {
         run_calls
@@ -8835,7 +8771,7 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
     let custom_event_position = position(runtime_custom_event_index);
     let breakpoint_pause_position = position(runtime_breakpoint_pause_index);
     let delay_duration_position = position(stdlib_delay_duration_index);
-    let durable_sleep_position = position(runtime_durable_sleep_checkpoint_index);
+    let sleep_key_position = position(runtime_delay_sleep_key_index);
 
     assert!(
         build_source_position < debug_mode_position
@@ -8845,7 +8781,7 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
             && breakpoint_event_position < custom_event_position
             && custom_event_position < breakpoint_pause_position
             && breakpoint_pause_position < delay_duration_position
-            && delay_duration_position < durable_sleep_position,
+            && delay_duration_position < sleep_key_position,
         "Delay breakpoint should pause before duration resolution and sleep: {run_calls:?}"
     );
 }
@@ -9038,7 +8974,6 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
     let mut runtime_poll_input_index = None;
     let mut runtime_register_input_index = None;
     let mut runtime_heartbeat_index = None;
-    let mut runtime_blocking_sleep_index = None;
     let mut run_calls = Vec::new();
     let mut saw_loop = false;
     let mut code_body_index = 0;
@@ -9099,9 +9034,6 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             ("cm32p2|runtara:workflow/runtime@1", "heartbeat") => {
                                 runtime_heartbeat_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "blocking-sleep") => {
-                                runtime_blocking_sleep_index = Some(next_function_index)
-                            }
                             _ => {}
                         }
                         next_function_index += 1;
@@ -9137,7 +9069,6 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
         runtime_check_signals_index.expect("check-signals import"),
         runtime_poll_input_index.expect("poll-input import"),
         runtime_heartbeat_index.expect("heartbeat import"),
-        runtime_blocking_sleep_index.expect("blocking-sleep import"),
         wait_output_index.expect("wait-output import"),
         apply_mapping_index.expect("apply-mapping import"),
     ];
@@ -10224,7 +10155,7 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
     let mut complete_index = None;
     let mut saw_error_id = false;
     let mut saw_workflow_error_kind = false;
-    let mut saw_failed_run_return = false;
+    let mut invoke_error_fields_index = None;
     let mut run_calls = Vec::new();
     let mut code_body_index = 0;
 
@@ -10253,6 +10184,9 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow/runtime@1", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                                invoke_error_fields_index = Some(next_function_index)
+                            }
                             _ => {}
                         }
                         next_function_index += 1;
@@ -10261,24 +10195,15 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
             }
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
-                    let mut previous_was_failure_const = false;
                     for operator in body.get_operators_reader().expect("operators") {
                         match operator.expect("operator") {
                             Operator::Call { function_index } => {
                                 run_calls.push(function_index);
-                                previous_was_failure_const = false;
                             }
-                            Operator::I32Const { value } => {
-                                if value == *error_id as i32 {
-                                    saw_error_id = true;
-                                }
-                                previous_was_failure_const = value == 1;
+                            Operator::I32Const { value } if value == *error_id as i32 => {
+                                saw_error_id = true;
                             }
-                            Operator::Return if previous_was_failure_const => {
-                                saw_failed_run_return = true;
-                                previous_was_failure_const = false;
-                            }
-                            _ => previous_was_failure_const = false,
+                            _ => {}
                         }
                     }
                 }
@@ -10337,10 +10262,10 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
             .iter()
             .filter(|&&index| index == fail_index)
             .count(),
-        4,
-        "Error run should emit runtime.fail four times: one terminal fail for the \
-         Error step plus the three fail-on-error guards after init-manifest, \
-         load-input, and build-source (each guarded by an `if error` block)"
+        3,
+        "Error run should emit runtime.fail three times: one terminal fail for the \
+         Error step plus the two fail-on-error guards after init-manifest and \
+         build-source (each guarded by an `if error` block)"
     );
     assert!(
         run_calls
@@ -10358,9 +10283,12 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
         saw_workflow_error_kind,
         "workflow_error custom-event kind should be static data"
     );
+    let invoke_error_fields_index = invoke_error_fields_index.expect("invoke-error-fields import");
     assert!(
-        saw_failed_run_return,
-        "Error lowering should return a failed wasi:cli/run result after runtime.fail"
+        run_calls
+            .windows(2)
+            .all(|pair| pair[0] != fail_index || pair[1] == invoke_error_fields_index),
+        "every runtime.fail should be followed by the Err(error-info) return: {run_calls:?}"
     );
 }
 
@@ -11044,8 +10972,7 @@ fn direct_compile_sequential_split_uses_standard_cancellable_calls() {
 
 /// The ABI must be part of image cache identity.
 ///
-/// It decides whether an artifact exports `wasi:cli/run` or
-/// `lifecycle.invoke`. A release that changed the default ABI once left
+/// It decides which entry interface an artifact exports. A release that changed the default ABI once left
 /// this tag untouched, so every already-compiled workflow kept an artifact
 /// of the wrong shape: launches hung with no steps and no error, held their
 /// run permits until the execution timeout, and asking the server to
@@ -11053,15 +10980,12 @@ fn direct_compile_sequential_split_uses_standard_cancellable_calls() {
 #[test]
 fn abi_is_part_of_the_lowering_tag() {
     use super::super::component::WorkflowAbi;
-    let cli = super::workflow_abi_tag(WorkflowAbi::CliRunHttp);
     let invoke = super::workflow_abi_tag(WorkflowAbi::InvokeHostImports);
     let agent = super::workflow_abi_tag(WorkflowAbi::AgentCapabilities);
     assert_ne!(
-        cli, invoke,
-        "cli-run and invoke artifacts are not interchangeable"
+        invoke, agent,
+        "invoke and agent artifacts are not interchangeable"
     );
-    assert_ne!(invoke, agent);
-    assert_ne!(cli, agent);
 
     let tag = super::direct_lowering_tag();
     assert!(
@@ -11153,7 +11077,6 @@ fn cooperative_helpers_bound_per_step_code_growth() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
     for (abi, omit_runtime) in [
-        (WorkflowAbi::CliRunHttp, false),
         (WorkflowAbi::InvokeHostImports, false),
         (WorkflowAbi::AgentCapabilities, false),
         (WorkflowAbi::AgentCapabilities, true),

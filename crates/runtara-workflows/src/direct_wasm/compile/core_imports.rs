@@ -3,7 +3,7 @@
 //! Direct core WIT import indexing and import/export classifiers.
 //!
 //! Core Wasm calls functions by numeric index in declaration order, but the
-//! emitter wants to call them by meaning ("apply-mapping", "load-input"). This is
+//! emitter wants to call them by meaning ("apply-mapping", "complete"). This is
 //! the name-to-index binding layer: as the world's imports are walked,
 //! `import_core_function` declares each host/stdlib/per-agent WIT function and
 //! records its assigned index into `DirectCoreImportIndices`; `require_all` then
@@ -22,7 +22,6 @@ use super::abi::push_core_type;
 
 #[derive(Debug, Default)]
 pub(super) struct DirectCoreImportIndices {
-    runtime_load_input: Option<u32>,
     runtime_complete: Option<u32>,
     runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
@@ -42,9 +41,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_checkpoint: Option<u32>,
     runtime_handle_checkpoint_signal: Option<u32>,
     runtime_record_retry_attempt: Option<u32>,
-    runtime_durable_sleep: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
-    runtime_durable_sleep_checkpoint: Option<u32>,
     pub(super) connection_resolver_describe_async: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
@@ -195,11 +192,6 @@ impl DirectCoreImportIndices {
                 self.connection_resolver_describe_async,
                 has_connections,
             )?,
-            runtime_load_input: require_runtime(
-                self.runtime_load_input,
-                "runtime.load-input",
-                omit_runtime,
-            )?,
             runtime_complete: require_runtime(
                 self.runtime_complete,
                 "runtime.complete",
@@ -286,19 +278,9 @@ impl DirectCoreImportIndices {
                 "runtime.record-retry-attempt",
                 omit_runtime,
             )?,
-            runtime_durable_sleep: require_runtime(
-                self.runtime_durable_sleep,
-                "runtime.durable-sleep",
-                omit_runtime,
-            )?,
             runtime_blocking_sleep: require_runtime(
                 self.runtime_blocking_sleep,
                 "runtime.blocking-sleep",
-                omit_runtime,
-            )?,
-            runtime_durable_sleep_checkpoint: require_runtime(
-                self.runtime_durable_sleep_checkpoint,
-                "runtime.durable-sleep-checkpoint",
                 omit_runtime,
             )?,
             stdlib_init_manifest: require_import(
@@ -714,8 +696,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) cooperative_helper_body: bool,
     /// The top-level export shape the module is emitted against. Threaded
     /// through the indices because every lowerer already receives them, and
-    /// the return convention at fail sites depends on it (tag under
-    /// `wasi:cli/run`; result-area pointer under the invoke export).
+    /// the return convention at fail and suspend sites depends on it.
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
     /// When true, the component imports no runtime; the terminal `complete`/
     /// `fail` are NOT lowered and the result travels solely via the invoke
@@ -723,7 +704,6 @@ pub(super) struct DirectCoreFunctionIndices {
     /// be called (see [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) connection_resolver_describe_async: u32,
-    pub(super) runtime_load_input: u32,
     // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
     pub(super) runtime_fail: u32,
@@ -744,9 +724,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_checkpoint: u32,
     pub(super) runtime_handle_checkpoint_signal: u32,
     pub(super) runtime_record_retry_attempt: u32,
-    pub(super) runtime_durable_sleep: u32,
     pub(super) runtime_blocking_sleep: u32,
-    pub(super) runtime_durable_sleep_checkpoint: u32,
     pub(super) stdlib_init_manifest: u32,
     pub(super) stdlib_value_store_retain_scoped: u32,
     pub(super) stdlib_value_store_scope: u32,
@@ -1121,17 +1099,6 @@ fn is_wait_instances_import(
             .is_some_and(|name| name == runtara_wit::workflow::WAITS)
 }
 
-pub(super) fn is_wasi_cli_run_export(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-) -> bool {
-    function.name == "run"
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("wasi:cli/run"))
-}
-
 /// True for `runtara:workflow/lifecycle.invoke` — the entry export
 /// under [`WorkflowAbi::InvokeHostImports`].
 pub(super) fn is_lifecycle_invoke_export(
@@ -1189,8 +1156,6 @@ pub(super) fn import_core_function(
             .is_some_and(|key| resolve.name_world_key(key) == runtara_wit::wasi::MONOTONIC_CLOCK)
     {
         import_indices.monotonic_now = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "load-input") {
-        import_indices.runtime_load_input = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "complete") {
         import_indices.runtime_complete = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "fail") {
@@ -1229,12 +1194,8 @@ pub(super) fn import_core_function(
         import_indices.runtime_handle_checkpoint_signal = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
         import_indices.runtime_record_retry_attempt = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "durable-sleep") {
-        import_indices.runtime_durable_sleep = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "blocking-sleep") {
         import_indices.runtime_blocking_sleep = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "durable-sleep-checkpoint") {
-        import_indices.runtime_durable_sleep_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-store-scope") {

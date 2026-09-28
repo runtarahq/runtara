@@ -1778,7 +1778,7 @@ fn region_single_entry(
 /// Any other shape returns `None` so the caller linearizes it (transitional; the
 /// eligible set widens in 4b/4c). The plan is structural — whether the branches
 /// actually run concurrently (vs. a sequential fallback) is decided at emission
-/// time by `static_data.parallel_enabled` and the workflow-agent exclusion.
+/// time by the workflow-agent exclusion.
 #[allow(clippy::too_many_arguments)]
 fn try_parallel_branches(
     graph: &DirectGraphManifest,
