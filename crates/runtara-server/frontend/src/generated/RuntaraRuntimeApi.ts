@@ -10,6 +10,9 @@
  * ---------------------------------------------------------------
  */
 
+/** When a WaitForInstances step settles. */
+export type WaitForInstancesMode = "all" | "any";
+
 /**
  * Data types for variables.
  * Matches the operator field types for consistency.
@@ -5301,6 +5304,9 @@ export type Step =
   | (WaitForSignalStep & {
       stepType: "WaitForSignal";
     })
+  | (WaitForInstancesStep & {
+      stepType: "WaitForInstances";
+    })
   | (AiAgentStep & {
       stepType: "AiAgent";
     });
@@ -5935,6 +5941,63 @@ export interface VisibleWhen {
   field: string;
   /** Show this field when the sibling does NOT equal this value. */
   notEquals?: any;
+}
+
+/**
+ * Park the run, without holding a runner, until direct child runs of this
+ * run finish.
+ *
+ * `mode: all` (the default) settles when every run in `instanceIds` has
+ * finished, `any` when the first has. The optional `timeoutMs` is a business
+ * deadline: when it passes, the step settles with resolution `deadline` and
+ * what finished so far. It never cancels a child and is not an error. The
+ * first registration's deadline stands on every replay.
+ *
+ * The output is the settled wait:
+ * `{mode, resolution: satisfied | deadline | empty, finished: [{instanceId,
+ * status, finishedAtMs, output, outputBytes, outputOmitted, error,
+ * errorOmitted}], remaining: [ids], deadlineMs}`. An empty `instanceIds`
+ * settles at once with resolution `empty`. Finished runs' outputs are inlined
+ * up to 256 KiB each (errors 16 KiB, 3 MiB per wait); larger values are
+ * omitted and flagged.
+ *
+ * The workflow must be durable. Targets must be direct children of the run
+ * (started by it with control `start`), at most 1000 distinct ones.
+ *
+ * Example:
+ * ```json
+ * {
+ *   "stepType": "WaitForInstances",
+ *   "id": "waitApprovals",
+ *   "instanceIds": { "valueType": "reference", "value": "steps.startAll.outputs" },
+ *   "mode": "all",
+ *   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
+ * }
+ * ```
+ */
+export interface WaitForInstancesStep {
+  /** When true, execution pauses before this step in debug mode */
+  breakpoint?: boolean | null;
+  /** Unique step identifier */
+  id: string;
+  /**
+   * The runs to wait for: an array of instance ids, each a direct child of
+   * this run, at most 1000 distinct ones.
+   */
+  instanceIds: MappingValue;
+  /**
+   * `all` (default): settle when every run has finished. `any`: settle when
+   * the first has.
+   */
+  mode?: WaitForInstancesMode;
+  /** Human-readable step name */
+  name?: string | null;
+  /**
+   * Optional business deadline in milliseconds from the first time the
+   * step runs. When it passes, the step settles with resolution `deadline`;
+   * children keep running.
+   */
+  timeoutMs?: null | MappingValue;
 }
 
 export interface WaitForSignalActionConfig {
