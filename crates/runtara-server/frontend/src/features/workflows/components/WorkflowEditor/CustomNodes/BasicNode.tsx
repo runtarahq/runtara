@@ -402,6 +402,8 @@ function BasicNodeComponent({
         stepType={data.stepType}
         agentId={data.agentId}
         agentName={agentName}
+        capabilityId={data.capabilityId}
+        description={(data as { description?: string }).description}
         inputMapping={data.inputMapping}
         selected={selected}
         executionStatus={executionStatus}

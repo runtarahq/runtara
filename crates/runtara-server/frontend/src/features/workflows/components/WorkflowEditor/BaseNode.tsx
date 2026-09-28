@@ -1,4 +1,7 @@
 import { forwardRef, HTMLAttributes, MouseEvent } from 'react';
+import { Badge } from '@/shared/components/ui/badge';
+import { stepBadgeVariant, stepDescription } from './step-summary';
+import { stepIdLabel } from './step-label';
 import { useNavigate } from 'react-router';
 import { cn } from '@/lib/utils.ts';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
@@ -50,6 +53,10 @@ export const BaseNode = forwardRef<
     stepType?: string;
     agentId?: string;
     agentName?: string;
+    /** Agent capability, shown with the agent as the step summary. */
+    capabilityId?: string;
+    /** The step's own description, shown instead of the type summary. */
+    description?: string;
     inputMapping?: Array<{
       type: string;
       value?: string | number | boolean | null | any[] | object;
@@ -81,13 +88,13 @@ export const BaseNode = forwardRef<
       className,
       children,
       selected,
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      id: _id,
+      id,
       name,
       stepType,
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      agentId: _agentId,
+      agentId,
       agentName,
+      capabilityId,
+      description,
       inputMapping,
       executionStatus,
       hasUnsavedChanges,
@@ -214,13 +221,17 @@ export const BaseNode = forwardRef<
         const msg = structured?.message || executionStatus.error;
         return { text: msg, className: 'text-destructive' };
       }
-      if (agentName) {
-        return { text: agentName, className: 'text-muted-foreground' };
-      }
       if (subtitle) {
         return { text: subtitle, className: 'text-muted-foreground' };
       }
-      return null;
+      // Same summary as the timeline card: description, or what the step does.
+      const summary = stepDescription(
+        { stepType, agentId, capabilityId, description },
+        agentName
+      );
+      return summary
+        ? { text: summary, className: 'text-muted-foreground' }
+        : null;
     };
 
     const subtitleContent = getSubtitleContent();
@@ -407,18 +418,30 @@ export const BaseNode = forwardRef<
             {/* Center: Step name, subtitle, and inline status pill */}
             <div
               className="flex min-w-0 flex-1 flex-col justify-center"
-              title={name}
+              title={name || stepIdLabel(id)}
             >
               {/* Row 1: Name + status pill */}
               <div className="flex min-w-0 items-center gap-0.5">
                 {name ? (
-                  <span className="flex-1 truncate text-2xs font-normal leading-tight text-foreground">
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium leading-tight text-foreground">
                     {name}
                   </span>
+                ) : stepIdLabel(id) ? (
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs leading-tight text-muted-foreground">
+                    {stepIdLabel(id)}
+                  </span>
                 ) : (
-                  <span className="flex-1 text-2xs font-normal italic leading-tight text-muted-foreground">
+                  <span className="min-w-0 flex-1 text-xs italic leading-tight text-muted-foreground">
                     Unnamed step
                   </span>
+                )}
+                {stepType && (
+                  <Badge
+                    variant={stepBadgeVariant(stepType)}
+                    className="shrink-0 px-1 py-0 text-[9px] font-medium leading-tight"
+                  >
+                    {stepType}
+                  </Badge>
                 )}
                 {/* Stale-agent badge — entitlement allowlist excludes this
                     step's agent. Workflow can't be saved/run until either the
@@ -455,7 +478,7 @@ export const BaseNode = forwardRef<
               {subtitleContent && (
                 <span
                   className={cn(
-                    'block truncate text-[9px] leading-tight',
+                    'mt-0.5 block truncate text-[10px] leading-tight',
                     subtitleContent.className
                   )}
                   title={subtitleContent.text}
