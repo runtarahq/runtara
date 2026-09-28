@@ -379,7 +379,8 @@ pub(super) fn resolve_agent_component_dependencies(
             }
             let grants = AgentImportGrants::for_agent(
                 &component.agent_id,
-                sidecar_declares_suspends(&meta_path),
+                sidecar_declares(&meta_path, "suspends"),
+                sidecar_declares(&meta_path, "trusted"),
                 !from_staging_dir,
             );
             check_agent_component_imports(
@@ -420,7 +421,6 @@ const AGENT_TYPES_INTERFACE_PREFIX: &str = "runtara:agent/types@";
 pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
     runtara_wit::host::TIMERS,
     runtara_wit::host::HTTP,
-    runtara_wit::trusted::EXECUTOR,
     runtara_wit::host::CONNECTIONS,
     runtara_wit::host::SQL,
 ];
@@ -458,14 +458,26 @@ pub struct AgentImportGrants {
     /// The canonical `control` agent resolved from the primary components
     /// dir: [`CONTROL_AGENT_IMPORTS`].
     pub control: bool,
+    /// A trusted built-in resolved from the primary components dir whose
+    /// sidecar declares a trusted capability: `runtara:trusted/executor`, the
+    /// path its ordinary copy forwards through. No other agent may drive the
+    /// credential-bearing executor.
+    pub trusted: bool,
 }
 
 impl AgentImportGrants {
-    /// Grants for `agent_id`, whose sidecar declares `suspends` and which was
-    /// (`from_primary_dir`) or was not found in the primary components dir.
-    pub fn for_agent(agent_id: &str, suspends: bool, from_primary_dir: bool) -> Self {
+    /// Grants for `agent_id`, whose sidecar declares `suspends` and `trusted`
+    /// capabilities and which was (`from_primary_dir`) or was not found in the
+    /// primary components dir.
+    pub fn for_agent(
+        agent_id: &str,
+        suspends: bool,
+        trusted: bool,
+        from_primary_dir: bool,
+    ) -> Self {
         Self {
             suspends,
+            trusted: from_primary_dir && trusted,
             control: from_primary_dir
                 && runtara_dsl::agent_meta::canonical_agent_id(agent_id)
                     == runtara_dsl::agent_meta::CONTROL_AGENT_ID,
@@ -482,6 +494,8 @@ fn agent_import_allowed(import: &str) -> bool {
 fn agent_import_granted(import: &str, grants: AgentImportGrants) -> bool {
     if import == runtara_wit::agent::SUSPENSION || import == runtara_wit::agent::CONTINUATION {
         grants.suspends
+    } else if import == runtara_wit::trusted::EXECUTOR {
+        grants.trusted
     } else {
         grants.control && CONTROL_AGENT_IMPORTS.contains(&import)
     }
@@ -527,7 +541,8 @@ fn check_sidecar_suspends(
 
 /// True when a sidecar declares any capability `suspends`. A missing or
 /// unreadable sidecar declares nothing.
-fn sidecar_declares_suspends(meta: &Path) -> bool {
+/// Whether any capability in the sidecar at `meta` sets the boolean `flag`.
+fn sidecar_declares(meta: &Path, flag: &str) -> bool {
     fs::read(meta)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -536,7 +551,7 @@ fn sidecar_declares_suspends(meta: &Path) -> bool {
         .is_some_and(|capabilities| {
             capabilities.iter().any(|capability| {
                 capability
-                    .get("suspends")
+                    .get(flag)
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
             })
@@ -558,6 +573,16 @@ pub fn check_agent_component_imports(
     // Control is granted only to the component the host executor can run:
     // one that exports `runtara:control/execution`.
     let mut grants = grants;
+    // Likewise the trusted executor: only a component whose `execution` the
+    // host executor can run may forward to it.
+    if grants.trusted {
+        grants.trusted = component_root_exports(wasm)
+            .map_err(|error| {
+                DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
+            })?
+            .iter()
+            .any(|export| export == runtara_wit::trusted::EXECUTION);
+    }
     if grants.control {
         grants.control = component_root_exports(wasm)
             .map_err(|error| {
@@ -1244,6 +1269,17 @@ mod tests {
         exports: &[&str],
         suspends: bool,
     ) -> Result<(), DirectCompileError> {
+        resolve_declared_agent_with(agent_id, location, imports, exports, suspends, false)
+    }
+
+    fn resolve_declared_agent_with(
+        agent_id: &str,
+        location: FixtureDir,
+        imports: &[&str],
+        exports: &[&str],
+        suspends: bool,
+        trusted: bool,
+    ) -> Result<(), DirectCompileError> {
         let primary = tempfile::tempdir().expect("primary tempdir");
         let staging = tempfile::tempdir().expect("staging tempdir");
         let target = match location {
@@ -1259,7 +1295,7 @@ mod tests {
         fs::write(
             target.join(&component.bundle_meta_filename),
             serde_json::to_vec(&serde_json::json!({
-                "capabilities": [{ "tags": [], "suspends": suspends }]
+                "capabilities": [{ "tags": [], "suspends": suspends, "trusted": trusted }]
             }))
             .expect("serialize sidecar"),
         )
@@ -1272,6 +1308,52 @@ mod tests {
             &Default::default(),
         )
         .map(|_| ())
+    }
+
+    /// Only a trusted built-in from the primary components dir that the host
+    /// executor can run (it exports `execution`) may import the executor.
+    #[test]
+    fn the_trusted_executor_is_granted_only_to_trusted_built_ins() {
+        let executor = &[runtara_wit::trusted::EXECUTOR][..];
+        let execution = &[runtara_wit::trusted::EXECUTION][..];
+        resolve_declared_agent_with(
+            "s3-storage",
+            FixtureDir::Primary,
+            executor,
+            execution,
+            false,
+            true,
+        )
+        .expect("a trusted built-in forwards through the executor");
+        for (label, location, exports, trusted) in [
+            ("an ordinary agent", FixtureDir::Primary, execution, false),
+            (
+                "a trusted agent without execution",
+                FixtureDir::Primary,
+                &[][..],
+                true,
+            ),
+            (
+                "a staged copy of a trusted agent",
+                FixtureDir::Staging,
+                execution,
+                true,
+            ),
+        ] {
+            let error = resolve_declared_agent_with(
+                "s3-storage",
+                location,
+                executor,
+                exports,
+                false,
+                trusted,
+            )
+            .expect_err(label);
+            assert!(
+                error.to_string().contains(runtara_wit::trusted::EXECUTOR),
+                "{label}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1644,6 +1726,7 @@ mod tests {
         for entry in CONTROL_AGENT_IMPORTS.iter().chain(&[
             runtara_wit::agent::SUSPENSION,
             runtara_wit::agent::CONTINUATION,
+            runtara_wit::trusted::EXECUTOR,
         ]) {
             if let Err(error) = links(entry) {
                 panic!("granted `{entry}` does not link against build_linker: {error:#}");

@@ -601,10 +601,13 @@ fn bundled_agents_satisfy_import_allowlist() {
                 .unwrap_or_else(|error| panic!("read the sidecar of {path:?}: {error}")),
         )
         .expect("bundled sidecar parses");
-        let suspends = meta["capabilities"]
-            .as_array()
-            .is_some_and(|capabilities| capabilities.iter().any(|c| c["suspends"] == true));
-        let grants = AgentImportGrants::for_agent(agent, suspends, true);
+        let declares = |flag: &str| {
+            meta["capabilities"]
+                .as_array()
+                .is_some_and(|capabilities| capabilities.iter().any(|c| c[flag] == true))
+        };
+        let grants =
+            AgentImportGrants::for_agent(agent, declares("suspends"), declares("trusted"), true);
         check_agent_component_imports(agent, &wasm, AgentImportKind::Agent, grants).unwrap_or_else(
             |error| panic!("bundled agent `{agent}` breaks the allowlist: {error}"),
         );
