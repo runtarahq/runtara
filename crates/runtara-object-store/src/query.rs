@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, Executor, Row, TypeInfo};
+use sqlx::{Column, Row, TypeInfo};
 use std::str::FromStr;
 
 use crate::error::{ObjectStoreError, Result};
@@ -43,9 +43,11 @@ pub struct SqlExecuteResult {
     pub rows_affected: u64,
 }
 
-/// Guard rails for workflow-facing raw SQL. The unguarded `query`/`query_raw`/
-/// `execute` helpers stay as-is for the runtime/MCP surface; workflow steps
-/// must go through the guarded variants.
+/// Guard rails for caller-supplied raw SQL. Every raw SQL surface — the
+/// runtime `object-model/sql/*` routes and the MCP SQL tools built on them —
+/// goes through [`ObjectStore::query_guarded`], [`ObjectStore::query_one_guarded`]
+/// or [`ObjectStore::execute_guarded`]; there is deliberately no unguarded
+/// variant, so a read route can never write and no statement runs unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SqlGuardrails {
     /// Applied as `SET LOCAL statement_timeout` inside the transaction.
@@ -63,85 +65,6 @@ fn default_nullable() -> bool {
 }
 
 impl ObjectStore {
-    /// Execute a SQL query and validate/project rows to the supplied result
-    /// schema. SQL must use native Postgres placeholders (`$1`, `$2`, ...).
-    pub async fn query(
-        &self,
-        sql: &str,
-        params: &[SqlParam],
-        result_schema: &[SqlResultColumn],
-    ) -> Result<SqlRows> {
-        validate_sql(sql)?;
-        validate_result_schema(result_schema)?;
-
-        let mut query = sqlx::query(sql);
-        for (index, param) in params.iter().enumerate() {
-            query = bind_param(query, param, index)?;
-        }
-
-        let rows = query.fetch_all(self.pool()).await?;
-        let rows = rows
-            .iter()
-            .map(|row| row_to_typed_json(row, result_schema))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(SqlRows { rows })
-    }
-
-    /// Execute a typed query that must return exactly one row.
-    pub async fn query_one(
-        &self,
-        sql: &str,
-        params: &[SqlParam],
-        result_schema: &[SqlResultColumn],
-    ) -> Result<serde_json::Map<String, serde_json::Value>> {
-        let rows = self.query(sql, params, result_schema).await?.rows;
-        match rows.len() {
-            1 => Ok(rows.into_iter().next().expect("len checked")),
-            0 => Err(ObjectStoreError::validation(
-                "query_one expected exactly one row, got 0",
-            )),
-            n => Err(ObjectStoreError::validation(format!(
-                "query_one expected exactly one row, got {}",
-                n
-            ))),
-        }
-    }
-
-    /// Execute a SQL query and return raw JSON rows. SQL must use native
-    /// Postgres placeholders (`$1`, `$2`, ...).
-    pub async fn query_raw(&self, sql: &str, params: &[SqlParam]) -> Result<SqlRows> {
-        validate_sql(sql)?;
-
-        let mut query = sqlx::query(sql);
-        for (index, param) in params.iter().enumerate() {
-            query = bind_param(query, param, index)?;
-        }
-
-        let rows = query.fetch_all(self.pool()).await?;
-        let rows = rows
-            .iter()
-            .map(row_to_raw_json)
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(SqlRows { rows })
-    }
-
-    /// Execute a SQL command and return the number of affected rows.
-    pub async fn execute(&self, sql: &str, params: &[SqlParam]) -> Result<SqlExecuteResult> {
-        validate_sql(sql)?;
-
-        let mut query = sqlx::query(sql);
-        for (index, param) in params.iter().enumerate() {
-            query = bind_param(query, param, index)?;
-        }
-
-        let result = self.pool().execute(query).await?;
-        Ok(SqlExecuteResult {
-            rows_affected: result.rows_affected(),
-        })
-    }
-
     /// Run one read statement inside a `READ ONLY` transaction with a local
     /// statement timeout, streaming rows and aborting past the row/byte caps.
     ///
@@ -149,8 +72,8 @@ impl ObjectStore {
     /// spelled as a query with SQLSTATE 25006, which is strictly stronger than
     /// SQL keyword parsing. Rows are decoded and size-checked as they stream,
     /// so an oversized result is never fully materialized. `result_schema =
-    /// None` decodes raw (like `query_raw`); `Some` decodes typed (like
-    /// `query`).
+    /// None` decodes each column to raw JSON by its Postgres type; `Some`
+    /// validates and projects rows to the declared columns.
     pub async fn query_guarded(
         &self,
         sql: &str,
@@ -210,6 +133,27 @@ impl ObjectStore {
         tx.rollback().await?;
 
         Ok(SqlRows { rows })
+    }
+
+    /// [`Self::query_guarded`] with a result schema, requiring exactly one row.
+    pub async fn query_one_guarded(
+        &self,
+        sql: &str,
+        params: &[SqlParam],
+        result_schema: &[SqlResultColumn],
+        guardrails: SqlGuardrails,
+    ) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let rows = self
+            .query_guarded(sql, params, Some(result_schema), guardrails)
+            .await?
+            .rows;
+        match rows.len() {
+            1 => Ok(rows.into_iter().next().expect("len checked")),
+            n => Err(ObjectStoreError::validation(format!(
+                "query_one expected exactly one row, got {}",
+                n
+            ))),
+        }
     }
 
     /// Run one write statement inside a transaction with a local statement

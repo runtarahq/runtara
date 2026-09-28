@@ -317,6 +317,17 @@ where
     Ok(access_token)
 }
 
+/// Re-check a token endpoint immediately before credentials are sent to it
+/// (see [`crate::net::validate_credentialed_endpoint`]). A rejected URL is a
+/// connection misconfiguration, so the error is permanent: retrying cannot help.
+pub(crate) fn check_token_endpoint(token_url: &str) -> Result<(), AuthResolutionError> {
+    crate::net::validate_credentialed_endpoint(token_url).map_err(|reason| {
+        AuthResolutionError::permanent(format!(
+            "Refusing to send credentials to the token endpoint: {reason}"
+        ))
+    })
+}
+
 async fn exchange_client_credentials_token(
     client: &Client,
     token_url: &str,
@@ -324,6 +335,7 @@ async fn exchange_client_credentials_token(
     basic_auth: Option<(String, String)>,
     default_ttl_seconds: i64,
 ) -> Result<CachedAccessToken, AuthResolutionError> {
+    check_token_endpoint(token_url)?;
     let mut request = match request_body {
         TokenRequestBody::Json(body) => client
             .post(token_url)
@@ -364,6 +376,7 @@ async fn refresh_oauth_access_token(
     refresh_token: &str,
     token_endpoint_auth: TokenEndpointAuth,
 ) -> Result<TokenResponse, AuthResolutionError> {
+    check_token_endpoint(token_url)?;
     let (basic_auth, body) = token_request_parts(
         token_endpoint_auth,
         vec![
@@ -803,6 +816,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_endpoint_401_is_a_permanent_auth_failure() {
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
         // The live-observed case: wrong client secret → invalid_client. Retrying
         // cannot succeed; the error must carry permanent=true so the proxy maps
         // it to 401 and agents stop durable-retrying.
@@ -828,6 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_endpoint_5xx_and_429_are_transient() {
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
         let url =
             mock_token_endpoint("503 Service Unavailable", r#"{"error":"server_error"}"#).await;
         let err = resolve_deferred_auth(
@@ -860,6 +875,97 @@ mod tests {
             panic!("429 mint must fail")
         };
         assert!(!err.permanent, "429 is transient: {err}");
+    }
+
+    fn refresh_auth(cache_key: TokenCacheKey, token_url: String) -> DeferredAuth {
+        DeferredAuth::OAuth2RefreshToken {
+            cache_key,
+            token_url,
+            header_name: "Authorization".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            refresh_token: "refresh".to_string(),
+            token_endpoint_auth: TokenEndpointAuth::FormBody,
+            fallback_access_token: None,
+            fallback_expires_at: None,
+        }
+    }
+
+    async fn token_server(expected_calls: u64) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"access_token": "fresh-token", "expires_in": 3600}),
+            ))
+            .expect(expected_calls)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_plain_http_token_endpoint_before_sending() {
+        let server = token_server(0).await;
+        for (tag, token_url) in [
+            ("public", "http://auth.example.com/token".to_string()),
+            ("loopback", format!("{}/token", server.uri())),
+        ] {
+            let Err(err) = resolve_deferred_auth(
+                &Client::new(),
+                refresh_auth(key("conn-http-refresh", tag), token_url),
+                &None,
+                "conn-http-refresh",
+                "http_oauth2_authorization_code",
+            )
+            .await
+            else {
+                panic!("{tag}: an http token endpoint must be refused")
+            };
+            assert!(err.permanent, "{tag}: refusal is permanent: {err}");
+            assert!(err.message.contains("https"), "{tag}: {err}");
+        }
+        // Dropping the server verifies it saw zero requests.
+    }
+
+    #[tokio::test]
+    async fn refresh_sends_to_an_allowlisted_http_token_endpoint() {
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
+        let server = token_server(1).await;
+        let resolved = resolve_deferred_auth(
+            &Client::new(),
+            refresh_auth(
+                key("conn-http-refresh-ok", "allowed"),
+                format!("{}/token", server.uri()),
+            ),
+            &None,
+            "conn-http-refresh-ok",
+            "http_oauth2_authorization_code",
+        )
+        .await
+        .unwrap_or_else(|err| panic!("allowlisted endpoint must be used: {err}"));
+        assert_eq!(resolved.header_value, "Bearer fresh-token");
+    }
+
+    #[tokio::test]
+    async fn client_credentials_refuses_plain_http_token_endpoint_before_sending() {
+        let server = token_server(0).await;
+        let Err(err) = resolve_deferred_auth(
+            &Client::new(),
+            client_credentials_auth(
+                key("conn-http-mint", "loopback"),
+                format!("{}/token", server.uri()),
+            ),
+            &None,
+            "conn-http-mint",
+            "http_oauth2_client_credentials",
+        )
+        .await
+        else {
+            panic!("an http token endpoint must be refused")
+        };
+        assert!(err.permanent, "refusal is permanent: {err}");
     }
 
     #[test]
