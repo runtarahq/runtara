@@ -1033,7 +1033,7 @@ fn value_matches_format(value: &str, format: &str) -> bool {
             .expect("static URL regex")
             .is_match(value),
         "date" => valid_date(value),
-        "datetime" | "date-time" => valid_datetime(value),
+        "datetime" => valid_datetime(value),
         // Presentation-only formats do not add value constraints.
         "text" | "textarea" | "markdown" | "password" | "tel" | "color" => true,
         // SchemaField documents unknown formats as renderer hints with a text

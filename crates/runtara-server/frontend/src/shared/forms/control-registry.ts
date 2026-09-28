@@ -10,8 +10,7 @@ export function inferControlKind(field: FormField): FormControlKind {
   if (field.format === 'textarea' || field.format === 'markdown')
     return 'textarea';
   if (field.format === 'date') return 'date';
-  if (field.format === 'datetime' || field.format === 'date-time')
-    return 'datetime';
+  if (field.format === 'datetime') return 'datetime';
   if (field.type === 'boolean') return 'toggle';
   if (field.type === 'integer' || field.type === 'number') return 'number';
   if (field.type === 'array') return 'tags';

@@ -2,11 +2,10 @@ import type { FormField } from './types';
 
 /**
  * Date and date-time values as forms store them: `date` fields hold
- * `YYYY-MM-DD`, date-time fields (`format` `date-time` or the DSL's
- * `datetime`) hold an RFC 3339 UTC timestamp. Pickers show and edit them in
- * the viewer's local time.
+ * `YYYY-MM-DD`, `datetime` fields hold an RFC 3339 UTC timestamp. Pickers
+ * show and edit them in the viewer's local time.
  */
-export type DateFormat = 'date' | 'date-time';
+export type DateFormat = 'date' | 'datetime';
 
 export interface DateRange {
   from?: string;
@@ -36,10 +35,9 @@ export function fromLocalInput(value: string): string {
 
 function dateFormat(field: FormField | undefined): DateFormat | undefined {
   if (field?.type !== 'string') return undefined;
-  if (field.format === 'date') return 'date';
-  if (field.format === 'date-time' || field.format === 'datetime')
-    return 'date-time';
-  return undefined;
+  return field.format === 'date' || field.format === 'datetime'
+    ? field.format
+    : undefined;
 }
 
 /**
